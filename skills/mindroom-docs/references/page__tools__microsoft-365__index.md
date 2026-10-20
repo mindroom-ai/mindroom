@@ -48,7 +48,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -111,6 +111,7 @@ They take a worksheet name and an address such as `B2` or `A1:C10` without a wor
 A written string that starts with `=` becomes a formula.
 
 Search uses Microsoft Search, which covers work and school accounts.
+Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
 
 ## Mail
 
@@ -122,12 +123,14 @@ Search uses Microsoft Search, which covers work and school accounts.
 | `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
 | `outlook_mail_send_draft` | yes, sends mail | Send an existing draft. |
 | `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
-| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original. |
+| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
 | `outlook_mail_move` | yes | Move a message to a folder. |
 
-Search takes Outlook search syntax, such as `from:sam@example.com subject:invoice hasAttachments:true`.
-Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID.
+Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
+Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
+A search with `query` stops after its first 1,000 matches, so a narrower query finds the rest.
+Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
 Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook.
@@ -151,8 +154,11 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 
 Event times in results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
+Calendar and event listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
 Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
+Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
+Changing or deleting the series master changes or deletes every occurrence.
 Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
@@ -168,7 +174,9 @@ The description of an online meeting cannot be replaced, because that would remo
 | `microsoft_todo_delete_task` | yes | Delete a task. |
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
-Due dates are calendar dates without a time of day.
+New and changed due dates take a calendar date and become midnight in the `time_zone` the agent passes, which should be the requester's zone and defaults to UTC.
+Listed tasks return the due date, time, and zone Graph reports; a due date is midnight in the zone of whoever set it, which Graph usually reports in UTC, so the agent converts it to the requester's zone before naming the day.
+List and task listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Updating a task's notes replaces them completely.
 
 ## Approvals For Writes
@@ -221,10 +229,11 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
-| `not_found` | The item does not exist, a task was looked up in another list, or the connected account cannot see it. |
+| `not_found` | The item does not exist or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
+| `online_meeting_unavailable` | The calendar has no default online meeting provider, such as Teams, so the event cannot get a join link; create it without an online meeting. |
 | `online_meeting_body` | The update tried to replace an online meeting's description; change the other fields, or edit the description in Outlook. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |

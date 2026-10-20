@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -16,7 +17,11 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_error_payload,
     graph_session,
     graph_tool_result,
+    html_to_text,
+    next_page_token,
+    page_path,
     path_segment,
+    time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
 
@@ -32,6 +37,7 @@ _WRITE_FUNCTIONS = frozenset(
 # A listing returns up to 50 tasks, so each task's notes stay short.
 _MAX_NOTES_CHARACTERS = 2_000
 _MAX_TASKS = 50
+_MAX_LISTS = 100
 _TOOL_NAME = "microsoft_todo"
 _OPEN_TASKS_FILTER = "status ne 'completed'"
 _IMPORTANCE = frozenset({"low", "normal", "high"})
@@ -56,6 +62,17 @@ def _task_path(list_id: object, task_id: object) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
 
 
+def _todo_page_path(page_token: object, collection_suffix: str) -> str:
+    """Return the Graph path a To Do page token continues; Tasks.ReadWrite also reaches Planner, so stay in To Do."""
+    token = page_path(page_token, collection_suffix)
+    if "/todo/lists/" not in f"{token.partition('?')[0]}/":
+        raise MicrosoftGraphError(
+            code="invalid_page_token",
+            message="page_token must be the next_page_token this function returned.",
+        )
+    return token
+
+
 def _limit(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_TASKS:
         raise MicrosoftGraphError(code="invalid_argument", message=f"limit must be an integer from 1 to {_MAX_TASKS}.")
@@ -74,8 +91,8 @@ def _title(value: object) -> str:
     return value
 
 
-def _due(value: object) -> dict[str, str]:
-    """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight UTC."""
+def _due(value: object, zone: object) -> dict[str, str]:
+    """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight in the given zone."""
     try:
         day = date.fromisoformat(value) if isinstance(value, str) and _DATE.fullmatch(value) else None
     except ValueError:
@@ -85,13 +102,14 @@ def _due(value: object) -> dict[str, str]:
             code="invalid_argument",
             message="due_date must be a calendar date in YYYY-MM-DD format.",
         )
-    return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": "UTC"}
+    return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": time_zone_name(zone)}
 
 
 def _notes(value: object) -> dict[str, str]:
+    """Return plain-text notes as the HTML body To Do shows, keeping their text and line breaks."""
     if not isinstance(value, str):
         raise MicrosoftGraphError(code="invalid_argument", message="notes must be text.")
-    return {"content": value, "contentType": "text"}
+    return {"content": html.escape("\n".join(value.splitlines())).replace("\n", "<br>"), "contentType": "html"}
 
 
 def _importance(value: object) -> str:
@@ -113,8 +131,11 @@ def _date_time(value: object) -> dict[str, object] | None:
 
 def _task(task: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, read, and change one task."""
-    content = _fields(task.get("body")).get("content")
+    body = _fields(task.get("body"))
+    content = body.get("content")
     notes = content if isinstance(content, str) else ""
+    if body.get("contentType") == "html":
+        notes = html_to_text(notes)
     summary = {
         "id": task.get("id"),
         "title": task.get("title"),
@@ -201,33 +222,54 @@ class MicrosoftTodoTools(Toolkit):
 
         return graph_tool_result(_TOOL_NAME, run)
 
-    def microsoft_todo_list_lists(self) -> str:
+    def microsoft_todo_list_lists(self, page_token: str | None = None) -> str:
         """List the requester's Microsoft To Do task lists.
 
         The list whose wellknown_list_name is defaultList is the requester's default Tasks list, and flaggedEmails
         holds flagged Outlook messages.
+
+        Args:
+            page_token: The next_page_token of the previous call, to continue the same listing.
+
         """
+
+        def build() -> _Request:
+            if page_token is not None:
+                return _Request("GET", _todo_page_path(page_token, "/lists"))
+            return _Request("GET", "/me/todo/lists", params={"$top": str(_MAX_LISTS)})
+
         return self._send(
-            lambda: _Request("GET", "/me/todo/lists"),
+            build,
             lambda payload: {
                 "lists": [_list(task_list) for task_list in _records(payload)],
-                "more_available": "@odata.nextLink" in payload,
+                "next_page_token": next_page_token(payload),
             },
         )
 
-    def microsoft_todo_list_tasks(self, list_id: str, include_completed: bool = False, limit: int = 50) -> str:
+    def microsoft_todo_list_tasks(
+        self,
+        list_id: str,
+        include_completed: bool = False,
+        limit: int = 50,
+        page_token: str | None = None,
+    ) -> str:
         """List the tasks in one Microsoft To Do list; completed tasks are left out unless include_completed is true.
 
         Each task's notes are cut at 2,000 characters, and notes_truncated is true when they were cut.
+        A task's due is the date, time, and zone Graph reports; a due date is midnight in the zone of whoever set
+        it, usually reported in UTC, so convert it to the requester's zone before naming the day.
 
         Args:
             list_id: The list's id from microsoft_todo_list_lists.
             include_completed: Also return completed tasks.
             limit: Maximum number of tasks to return, from 1 to 50.
+            page_token: The next_page_token of the previous call, to continue the same listing.
 
         """
 
         def build() -> _Request:
+            if page_token is not None:
+                return _Request("GET", _todo_page_path(page_token, "/tasks"))
             params = {"$top": str(_limit(limit))}
             if not _flag(include_completed, "include_completed"):
                 params["$filter"] = _OPEN_TASKS_FILTER
@@ -237,7 +279,7 @@ class MicrosoftTodoTools(Toolkit):
             build,
             lambda payload: {
                 "tasks": [_task(task) for task in _records(payload)],
-                "more_available": "@odata.nextLink" in payload,
+                "next_page_token": next_page_token(payload),
             },
         )
 
@@ -248,6 +290,7 @@ class MicrosoftTodoTools(Toolkit):
         due_date: str | None = None,
         notes: str | None = None,
         importance: Literal["low", "normal", "high"] = "normal",
+        time_zone: str = "UTC",
     ) -> str:
         """Create a task in one Microsoft To Do list.
 
@@ -260,13 +303,15 @@ class MicrosoftTodoTools(Toolkit):
             due_date: The due date as YYYY-MM-DD.
             notes: Notes for the task, as plain text.
             importance: low, normal, or high.
+            time_zone: The requester's time zone, so the due date is their midnight: a Windows name such as
+                "Pacific Standard Time" or an IANA name such as "America/Los_Angeles". Defaults to UTC.
 
         """
 
         def build() -> _Request:
             body: dict[str, object] = {"title": _title(title), "importance": _importance(importance)}
             if due_date is not None:
-                body["dueDateTime"] = _due(due_date)
+                body["dueDateTime"] = _due(due_date, time_zone)
             if notes is not None:
                 body["body"] = _notes(notes)
             return _Request("POST", f"{_list_path(list_id)}/tasks", body=body)
@@ -282,6 +327,7 @@ class MicrosoftTodoTools(Toolkit):
         notes: str | None = None,
         importance: Literal["low", "normal", "high"] | None = None,
         completed: bool | None = None,
+        time_zone: str = "UTC",
     ) -> str:
         """Change a Microsoft To Do task's title, due date, notes, importance, or completion; omitted fields stay unchanged.
 
@@ -296,6 +342,7 @@ class MicrosoftTodoTools(Toolkit):
             notes: The complete new notes, which replace the current notes; an empty string removes them.
             importance: low, normal, or high.
             completed: True marks the task completed; False reopens it as not started.
+            time_zone: The requester's time zone for due_date, as for microsoft_todo_create_task.
 
         """
 
@@ -305,7 +352,7 @@ class MicrosoftTodoTools(Toolkit):
             if title is not None:
                 body["title"] = _title(title)
             if due_date is not None:
-                body["dueDateTime"] = _due(due_date) if due_date != "" else None
+                body["dueDateTime"] = _due(due_date, time_zone) if due_date != "" else None
             if notes is not None:
                 body["body"] = _notes(notes)
             if importance is not None:

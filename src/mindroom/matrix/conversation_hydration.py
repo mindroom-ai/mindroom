@@ -14,9 +14,10 @@ The third caller is why hydration runs at all for a conversation that already
 has a marker. A skipped gap makes the projection wrong rather than merely
 short, and the store answers "not hydrated" for every conversation in a room
 with a repairable obligation precisely so the next read comes back here. Repair
-happens on that read and nowhere else, for the same reason nothing else here is a
-background pass: an unreachable homeserver should degrade a read that someone
-is waiting for, not accumulate retry state nobody is watching.
+happens on that read, or on a lookup of the room's redactions, and nowhere else,
+for the same reason nothing else here is a background pass: an unreachable
+homeserver should degrade a read that someone is waiting for, not accumulate
+retry state nobody is watching.
 
 "Once per membership" is a statement about what a marker discharges, and a
 marker only discharges the question its walk answered. A bounded walk answers

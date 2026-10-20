@@ -2311,9 +2311,23 @@
         },
         "watch": {
           "default": true,
-          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
           "title": "Watch",
           "type": "boolean"
+        },
+        "poll_interval_seconds": {
+          "anyOf": [
+            {
+              "minimum": 5,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How often to schedule a background refresh for a local knowledge folder that another host writes to, such as an NFS share, where filesystem watching never sees the writes; unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead",
+          "title": "Poll Interval Seconds"
         },
         "require_content_before_publish": {
           "default": false,

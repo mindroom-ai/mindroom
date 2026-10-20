@@ -104,6 +104,7 @@ from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
     EventJournalStore,
     EventKind,
+    HistoryRecoveryState,
     PrincipalStore,
     SemanticConsumer,
 )
@@ -539,7 +540,14 @@ class AgentBot:
         return self._journal_store.principal(self._journal_principal_id)
 
     async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-        """Return which of a room's events this bot saw redacted, for readers of its stored conversations."""
+        """Return which of a room's events this bot saw redacted, for readers of its stored conversations.
+
+        Redactions inside a gap its sync skipped reach the journal only when the room is repaired, so the lookup runs
+        that repair first, as a strict read of the room would.
+        """
+        recovery = await self.journal_principal().room_history_recovery(room_id)
+        if recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE:
+            await self._conversation_reader.hydrator.ensure_hydrated(room_id=room_id, thread_id=None)
         return await self._turn_store.redacted_event_ids(room_id, event_ids)
 
     def _open_own_journal(self) -> OpenEventJournal:

@@ -336,6 +336,7 @@ def _config(
     bases: dict[str, Path],
     agent_bases: list[str],
     git_configs: dict[str, KnowledgeGitConfig] | None = None,
+    poll_intervals: dict[str, int] | None = None,
     watch: bool = False,
     modes: dict[str, str] | None = None,
     memory: dict[str, object] | None = None,
@@ -351,6 +352,7 @@ def _config(
                     path=str(path),
                     watch=watch,
                     git=(git_configs or {}).get(base_id),
+                    poll_interval_seconds=(poll_intervals or {}).get(base_id),
                     mode=(modes or {}).get(base_id, "semantic"),
                 )
                 for base_id, path in bases.items()

@@ -1010,6 +1010,7 @@ async def test_a_look_during_a_pass_costs_one_more_pass_and_no_more(tmp_path: Pa
             worker._looked_again.add(graph_name)
         return await real(config, scope, now=now)
 
+    await worker._maintained_graphs(config)
     with patch.object(worker, "_ingest_graph", looked_at_during_the_first):
         await asyncio.wait_for(worker._fill(graph_name), timeout=10)
 
@@ -1041,6 +1042,49 @@ async def test_a_graph_whose_pass_loop_ended_is_filled_again_by_a_later_look(tmp
             await asyncio.gather(task, return_exceptions=True)
 
     assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_a_look_lists_the_maintained_graphs_once_however_many_passes_follow(tmp_path: Path) -> None:
+    """Passes reuse their look's listing, which reads every private instance's records, instead of listing again."""
+    config = _config(interval_seconds=3600)
+    agents = ("mind", "pal", "sage")
+    for agent in agents[1:]:
+        config.agents[agent] = AgentConfig(display_name=agent.title(), knowledge_graph=True)
+    paths, store = _paths(tmp_path), _FakeStore()
+    for agent in agents:
+        _seed(config, paths, f"!room:x:${agent}", [f"r-{agent}"], at=int(time.time()) - 10, agent=agent)
+    worker = _worker(config, paths, store)
+    listings = 0
+    real_scopes = ingestion.graph_scopes
+
+    def counted_scopes(config: Config, runtime_paths: RuntimePaths) -> list[GraphScope]:
+        nonlocal listings
+        listings += 1
+        return real_scopes(config, runtime_paths)
+
+    ended = 0
+    all_ended = asyncio.Event()
+    real_fill = worker._fill
+
+    async def signalled_fill(graph_name: str) -> None:
+        nonlocal ended
+        await real_fill(graph_name)
+        ended += 1
+        if ended == len(agents):
+            all_ended.set()
+
+    with patch.object(ingestion, "graph_scopes", counted_scopes), patch.object(worker, "_fill", signalled_fill):
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(all_ended.wait(), timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    # Each graph took a pass that added its conversation and one that found nothing more.
+    assert sorted(store.sessions()) == [f"!room:x:${agent}" for agent in agents]
+    assert listings == 1
 
 
 @pytest.mark.asyncio
@@ -1087,7 +1131,7 @@ async def test_a_pass_that_waited_for_a_place_runs_on_the_settings_after_the_wai
 
 @pytest.mark.asyncio
 async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tmp_path: Path) -> None:
-    """A failure to list the maintained graphs is reported, ends that pass loop, and leaves the worker running."""
+    """A failure to list the maintained graphs is reported and leaves the worker running."""
     config, paths = _config(interval_seconds=3600), _paths(tmp_path)
     worker = _worker(config, paths, _FakeStore())
     reported = asyncio.Event()
@@ -1107,16 +1151,13 @@ async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tm
         patch.object(ingestion, "graph_scopes", unlisted),
         patch.object(ingestion, "_report_failure", signalled_report),
     ):
-        await asyncio.wait_for(worker._fill(graph_scope("mind", config, paths, None).graph_name), timeout=10)
-        assert "OSError" in (knowledge_graph_failure() or "")
-        # A pass of a graph listed before, finishing cleanly meanwhile, does not clear the listing failure.
-        assert await worker._ingest_graph(config, graph_scope("mind", config, paths, None), now=T0 + 10) is True
-        assert "OSError" in (knowledge_graph_failure() or "")
-
-        reported.clear()
         task = asyncio.create_task(worker.run())
         try:
             await asyncio.wait_for(reported.wait(), timeout=10)
+            assert "OSError" in (knowledge_graph_failure() or "")
+            # A pass of a graph listed before, finishing cleanly meanwhile, does not clear the listing failure.
+            assert await worker._ingest_graph(config, graph_scope("mind", config, paths, None), now=T0 + 10) is True
+            assert "OSError" in (knowledge_graph_failure() or "")
             # The worker keeps running and lists the graphs again at its next look.
             reported.clear()
             wake_knowledge_graph_ingestion(after_seconds=0)
@@ -1156,6 +1197,7 @@ async def test_a_graph_no_longer_maintained_stops_filling_after_its_current_pass
         current = changed
         return progressed
 
+    await worker._maintained_graphs(config)
     with patch.object(worker, "_ingest_graph", then_raise_the_generation):
         await asyncio.wait_for(worker._fill(graph_scope("mind", config, paths, None).graph_name), timeout=10)
 

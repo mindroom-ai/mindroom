@@ -960,22 +960,22 @@ def test_prompt_cache_ladder_marks_newest_tool_result_prior_user_and_tools() -> 
 
 
 def test_prompt_cache_ladder_preserves_adjacent_turn_prefix_with_transient_context() -> None:
-    """Transient context must follow the cacheable user block across turns."""
+    """Transient context after the prompt takes no marker, so the next turn reuses the prompt's breakpoint."""
     transient_context = render_transient_context(
         ("<mindroom_message_context>Current location: Amsterdam</mindroom_message_context>",),
     )
     first_turn_messages, _system_message = format_messages(
         [
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
             Message(role="user", content="Question one"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
         ],
     )
     second_turn_messages, _system_message = format_messages(
         [
             Message(role="user", content="Question one"),
             Message(role="assistant", content="Answer one"),
-            Message(role="user", content=transient_context, add_to_agent_memory=False),
             Message(role="user", content="Question two"),
+            Message(role="user", content=transient_context, add_to_agent_memory=False),
         ],
     )
     first_request = {

@@ -31,6 +31,18 @@ TASK = "AQMkADAwATM0MDAAMS0yMDkyLWVjMzYtMDACLTAwCgBGAAAD"
 TASKS_PATH = f"/v1.0/me/todo/lists/{LIST}/tasks"
 TASK_PATH = f"{TASKS_PATH}/{TASK}"
 NOTES_CAP = 2_000
+GRAPH = "https://graph.microsoft.com/v1.0"
+NEXT_LISTS = "/me/todo/lists?$top=100&$skip=100"
+NEXT_TASKS = f"/me/todo/lists/{LIST}/tasks?$top=50&$skip=50"
+USER = "00000000-0000-0000-0000-000000000001"
+FOREIGN_PAGE_TOKENS = [
+    "/me/messages?$skiptoken=abc",
+    "/me/planner/tasks?$top=50",
+    f"{GRAPH}{NEXT_TASKS}",
+    f"/me/todo/lists/{LIST}/tasks/../../../../me/messages/tasks?x=1",
+    f"/me/todo/lists/{LIST}/tasks",
+    "",
+]
 WRITE_FUNCTIONS = ("microsoft_todo_create_task", "microsoft_todo_update_task", "microsoft_todo_delete_task")
 
 
@@ -144,16 +156,58 @@ def test_list_lists_summarizes_each_list(tmp_path: Path, monkeypatch: pytest.Mon
 
     result = _payload(tools.microsoft_todo_list_lists())
 
-    assert graph.calls() == ["GET graph.microsoft.com/v1.0/me/todo/lists"]
+    [request] = graph.requests
+    assert (request.method, request.url.path) == ("GET", "/v1.0/me/todo/lists")
+    assert dict(request.url.params) == {"$top": "100"}
     assert result["lists"] == [
         {"id": LIST, "name": "Tasks", "is_owner": True, "is_shared": False, "wellknown_list_name": "defaultList"},
         {"id": "L2", "name": "Team", "is_owner": False, "is_shared": True, "wellknown_list_name": "none"},
     ]
-    assert result["more_available"] is False
+    assert result["next_page_token"] is None
+
+
+@pytest.mark.parametrize(
+    ("next_page", "path"),
+    [
+        (NEXT_LISTS, "/v1.0/me/todo/lists"),
+        (f"/users/{USER}/todo/lists?$top=100&$skip=100", f"/v1.0/users/{USER}/todo/lists"),
+    ],
+)
+def test_list_lists_returns_and_follows_its_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_page: str,
+    path: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [], "@odata.nextLink": f"{GRAPH}{next_page}"}))
+
+    first = _payload(tools.microsoft_todo_list_lists())
+    second = _payload(tools.microsoft_todo_list_lists(page_token=first["next_page_token"]))
+
+    assert first["next_page_token"] == next_page
+    assert second["status"] == "ok"
+    continued = graph.requests[1]
+    assert continued.url.path == path
+    assert dict(continued.url.params) == {"$top": "100", "$skip": "100"}
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    [*FOREIGN_PAGE_TOKENS, "/me/todo/listsX?$skip=100", "/sites/root/lists?$top=100"],
+)
+def test_list_lists_refuses_a_foreign_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
+
+    assert _payload(tools.microsoft_todo_list_lists(page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
 
 
 def test_list_tasks_returns_open_tasks_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()], "@odata.nextLink": "https://x"}))
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()], "@odata.nextLink": f"{GRAPH}{NEXT_TASKS}"}))
 
     result = _payload(tools.microsoft_todo_list_tasks(LIST))
 
@@ -161,7 +215,7 @@ def test_list_tasks_returns_open_tasks_by_default(tmp_path: Path, monkeypatch: p
     assert (request.method, request.url.path) == ("GET", TASKS_PATH)
     assert dict(request.url.params) == {"$top": "50", "$filter": "status ne 'completed'"}
     assert result["status"] == "ok"
-    assert result["more_available"] is True
+    assert result["next_page_token"] == NEXT_TASKS
     assert result["tasks"] == [
         {
             "id": TASK,
@@ -185,7 +239,85 @@ def test_list_tasks_includes_completed_tasks_on_request(tmp_path: Path, monkeypa
 
     assert dict(graph.requests[0].url.params) == {"$top": "5"}
     assert result["tasks"][0]["status"] == "completed"
-    assert result["more_available"] is False
+    assert result["next_page_token"] is None
+
+
+@pytest.mark.parametrize(
+    ("page_token", "path"),
+    [
+        (NEXT_TASKS, TASKS_PATH),
+        (f"/users/{USER}/todo/lists/{LIST}/tasks?$top=50&$skip=50", f"/v1.0/users/{USER}/todo/lists/{LIST}/tasks"),
+    ],
+)
+def test_list_tasks_follows_its_own_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+    path: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()]}))
+
+    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5, page_token=page_token))
+
+    assert result["next_page_token"] is None
+    [request] = graph.requests
+    assert request.url.path == path
+    assert dict(request.url.params) == {"$top": "50", "$skip": "50"}
+
+
+@pytest.mark.parametrize("page_token", [*FOREIGN_PAGE_TOKENS, f"/me/todo/lists/{LIST}/tasksX?$skip=50"])
+def test_list_tasks_refuses_a_foreign_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
+
+    assert _payload(tools.microsoft_todo_list_tasks(LIST, page_token=page_token))["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("due", "returned"),
+    [
+        (
+            {"dateTime": "2026-10-22T00:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-22T00:00:00.0000000", "time_zone": "UTC"},
+        ),
+        # October 22 set in a To Do app in New Zealand daylight time (UTC+13).
+        (
+            {"dateTime": "2026-10-21T11:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-21T11:00:00.0000000", "time_zone": "UTC"},
+        ),
+        (
+            {"dateTime": "2026-10-22T16:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-22T16:00:00.0000000", "time_zone": "UTC"},
+        ),
+    ],
+)
+def test_list_tasks_returns_the_due_date_time_and_zone_as_graph_reports_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    due: dict[str, str],
+    returned: dict[str, str],
+) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(dueDateTime=due)]}))
+
+    task = _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]
+
+    assert task["due"] == returned
+    assert "due_date" not in task
+    assert "convert it to the requester's zone" in _description(tools, "microsoft_todo_list_tasks")
+
+
+def test_list_tasks_reads_html_notes_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {
+        "content": "<html><body>Attach the <b>figures</b> &amp; notes<br>Thanks</body></html>",
+        "contentType": "html",
+    }
+    tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(body=body)]}))
+
+    assert _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]["notes"] == "Attach the figures & notes\nThanks"
 
 
 def test_list_tasks_leaves_out_unset_dates_and_caps_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,15 +410,16 @@ def test_create_task_sends_due_date_notes_and_importance(tmp_path: Path, monkeyp
         LIST,
         'Ask O\'Brien about "Q3"',
         due_date="2026-10-22",
-        notes="Attach the figures.",
+        notes="Attach <figures> & totals\r\nThanks",
         importance="high",
+        time_zone="Europe/Berlin",
     )
 
     assert json.loads(graph.requests[0].content) == {
         "title": 'Ask O\'Brien about "Q3"',
         "importance": "high",
-        "dueDateTime": {"dateTime": "2026-10-22T00:00:00", "timeZone": "UTC"},
-        "body": {"content": "Attach the figures.", "contentType": "text"},
+        "dueDateTime": {"dateTime": "2026-10-22T00:00:00", "timeZone": "Europe/Berlin"},
+        "body": {"content": "Attach &lt;figures&gt; &amp; totals<br>Thanks", "contentType": "html"},
     }
     assert graph.requests[0].url.query == b""
 
@@ -300,6 +433,8 @@ def test_create_task_sends_due_date_notes_and_importance(tmp_path: Path, monkeyp
         {"title": "x", "due_date": "10/22/2026"},
         {"title": "x", "due_date": "2026-10-22T00:00:00"},
         {"title": "x", "due_date": ""},
+        {"title": "x", "due_date": "2026-10-22", "time_zone": "UTC "},
+        {"title": "x", "due_date": "2026-10-22", "time_zone": "Europe/Berlin;x"},
         {"title": "x", "importance": "urgent"},
         {"title": "x", "notes": 5},
     ],
@@ -322,11 +457,15 @@ def test_create_task_refuses_malformed_arguments_before_any_request(
         ({"completed": True}, {"status": "completed"}),
         ({"completed": False}, {"status": "notStarted"}),
         ({"due_date": "2026-11-01"}, {"dueDateTime": {"dateTime": "2026-11-01T00:00:00", "timeZone": "UTC"}}),
-        ({"due_date": ""}, {"dueDateTime": None}),
-        ({"notes": ""}, {"body": {"content": "", "contentType": "text"}}),
         (
-            {"importance": "low", "notes": "New"},
-            {"importance": "low", "body": {"content": "New", "contentType": "text"}},
+            {"due_date": "2026-11-01", "time_zone": "Pacific Standard Time"},
+            {"dueDateTime": {"dateTime": "2026-11-01T00:00:00", "timeZone": "Pacific Standard Time"}},
+        ),
+        ({"due_date": ""}, {"dueDateTime": None}),
+        ({"notes": ""}, {"body": {"content": "", "contentType": "html"}}),
+        (
+            {"importance": "low", "notes": "New\nline"},
+            {"importance": "low", "body": {"content": "New<br>line", "contentType": "html"}},
         ),
     ],
 )
@@ -348,7 +487,15 @@ def test_update_task_patches_only_the_given_fields(
 
 @pytest.mark.parametrize(
     "arguments",
-    [{}, {"title": ""}, {"due_date": "tomorrow"}, {"importance": "urgent"}, {"completed": "yes"}, {"notes": 1}],
+    [
+        {},
+        {"title": ""},
+        {"due_date": "tomorrow"},
+        {"due_date": "2026-11-01", "time_zone": ""},
+        {"importance": "urgent"},
+        {"completed": "yes"},
+        {"notes": 1},
+    ],
 )
 def test_update_task_refuses_nothing_to_change_or_malformed_fields(
     tmp_path: Path,

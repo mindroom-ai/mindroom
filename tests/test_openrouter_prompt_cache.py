@@ -252,14 +252,14 @@ def test_shared_prefix_is_independent_of_session_context() -> None:
     assert first["messages"][0]["content"][1] != second["messages"][0]["content"][1]
 
 
-def test_transient_context_moves_after_the_durable_prompt() -> None:
-    """Per-request context must stay out of the prefix that later turns replay."""
+def test_transient_context_after_the_prompt_takes_no_marker() -> None:
+    """Per-request context must not take the breakpoint that later turns replay."""
     model, requests = _model()
     transient = render_transient_context(["Current memory."])
     messages = [
         Message(role="system", content=_SHARED),
-        Message(role="user", content=transient),
         Message(role="user", content="Durable prompt."),
+        Message(role="user", content=transient),
     ]
 
     payload = _send(model, requests, messages)

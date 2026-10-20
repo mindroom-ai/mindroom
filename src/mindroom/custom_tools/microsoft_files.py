@@ -19,6 +19,9 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_error_payload,
     graph_session,
     graph_tool_result,
+    next_page_token,
+    page_offset,
+    page_path,
     path_segment,
     share_id,
 )
@@ -42,6 +45,8 @@ _MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 _MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 # Range values come back into the conversation, so one read or write stays small.
 _MAX_RANGE_CELLS = 10_000
+# Microsoft Search takes the result offset as a 32-bit integer.
+_MAX_SEARCH_OFFSET = 2**31 - 1
 _DOWNLOAD_DIR = "microsoft-files-downloads"
 _TOOL_NAME = "microsoft_files"
 _ITEM_SELECT = "id,name,size,eTag,webUrl,lastModifiedDateTime,lastModifiedBy,parentReference,file,folder"
@@ -317,22 +322,24 @@ class MicrosoftFilesTools(Toolkit):
             max_bytes=_MAX_UPLOAD_BYTES,
         )
 
-    def microsoft_files_search(self, query: str, limit: int = 25) -> str:
+    def microsoft_files_search(self, query: str, limit: int = 25, page_token: str | None = None) -> str:
         """Search the OneDrive and SharePoint files the requester can open, by name and content.
 
         Args:
             query: Search words, as typed into Microsoft 365 search.
             limit: Maximum number of files to return, from 1 to 50.
+            page_token: The next_page_token of the previous call, to continue the same search.
 
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if not isinstance(query, str) or not query.strip():
                 raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
+            offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
             request = {
                 "entityTypes": ["driveItem"],
                 "query": {"queryString": query},
-                "from": 0,
+                "from": offset,
                 "size": _limit(limit, 50),
             }
             payload = session.json("POST", "/search/query", json={"requests": [request]})
@@ -350,28 +357,43 @@ class MicrosoftFilesTools(Toolkit):
                 if isinstance(hit, dict) and isinstance(hit.get("resource"), dict)
             ]
             more = any(container.get("moreResultsAvailable") is True for container in containers)
-            return {"files": files, "more_available": more}
+            return {"files": files, "next_page_token": str(offset + len(files)) if more and files else None}
 
-        return self._run(operation)
+        return self._call(operation, validate=lambda: page_offset(page_token, _MAX_SEARCH_OFFSET))
 
-    def microsoft_files_list_folder(self, folder: str | None = None, limit: int = 50) -> str:
+    def microsoft_files_list_folder(
+        self,
+        folder: str | None = None,
+        limit: int = 50,
+        page_token: str | None = None,
+    ) -> str:
         """List the files and folders in one folder, or in the requester's OneDrive root when no folder is given.
 
         Args:
             folder: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link of the folder.
             limit: Maximum number of entries to return, from 1 to 200.
+            page_token: The next_page_token of the previous call, to continue the same listing; folder and limit
+                are then taken from the token.
 
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            path = (
-                "/me/drive/root/children" if folder is None else f"{_resolve(folder, session, 'folder').path}/children"
-            )
-            payload = session.json("GET", path, params={"$top": str(_limit(limit, 200)), "$select": _ITEM_SELECT})
+            if page_token is not None:
+                payload = session.json("GET", page_path(page_token, "/children"))
+            else:
+                parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
+                params = {"$top": str(_limit(limit, 200)), "$select": _ITEM_SELECT}
+                payload = session.json("GET", f"{parent}/children", params=params)
             entries = [_summary(entry) for entry in payload.get("value") or [] if isinstance(entry, dict)]
-            return {"files": entries, "more_available": "@odata.nextLink" in payload}
+            return {"files": entries, "next_page_token": next_page_token(payload)}
 
-        return self._call(operation, validate=None if folder is None else lambda: _parse_file(folder, "folder"))
+        def validate() -> None:
+            if page_token is not None:
+                page_path(page_token, "/children")
+            elif folder is not None:
+                _parse_file(folder, "folder")
+
+        return self._call(operation, validate=validate)
 
     def microsoft_files_get_file(self, file: str) -> str:
         """Get one OneDrive or SharePoint file's details, including the etag microsoft_files_replace_file checks.

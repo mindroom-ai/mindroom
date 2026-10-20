@@ -233,27 +233,6 @@ def _is_markable_block(block: object) -> bool:
     return True
 
 
-def _move_transient_context_to_user_suffix(messages: list[Any]) -> list[Any]:
-    """Move generated transient context after cacheable content in each user turn."""
-    prepared_messages = list(messages)
-    for message_index, message in enumerate(prepared_messages):
-        message_dict = as_dict(message)
-        content = message_dict.get("content") if message_dict is not None else None
-        if message_dict is None or message_dict.get("role") != "user" or not isinstance(content, list):
-            continue
-        transient_blocks = [block for block in content if _is_transient_context_block(block)]
-        if not transient_blocks:
-            continue
-        durable_blocks = [block for block in content if not _is_transient_context_block(block)]
-        reordered_content = [*durable_blocks, *transient_blocks]
-        if reordered_content == content:
-            continue
-        prepared_message = dict(message_dict)
-        prepared_message["content"] = reordered_content
-        prepared_messages[message_index] = prepared_message
-    return prepared_messages
-
-
 def _count_cache_markers(request_kwargs: dict[str, Any]) -> int:
     """Count cache_control markers already present in a wire-format request."""
     count = 0
@@ -521,17 +500,10 @@ def _request_kwargs_with_prompt_cache_ladder(
     cache_control: dict[str, str],
 ) -> dict[str, Any]:
     """Return request kwargs with ladder breakpoints added within the API budget."""
-    prepared_kwargs = request_kwargs
-    messages = request_kwargs.get("messages")
-    if isinstance(messages, list) and messages:
-        reordered_messages = _move_transient_context_to_user_suffix(messages)
-        if reordered_messages != messages:
-            prepared_kwargs = {**request_kwargs, "messages": reordered_messages}
-
-    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(prepared_kwargs)
+    marker_budget = MAX_CACHE_MARKERS - _count_cache_markers(request_kwargs)
     if marker_budget <= 0:
-        return prepared_kwargs
-    prepared_kwargs = dict(prepared_kwargs)
+        return request_kwargs
+    prepared_kwargs = dict(request_kwargs)
 
     messages = prepared_kwargs.get("messages")
     if isinstance(messages, list) and messages:
