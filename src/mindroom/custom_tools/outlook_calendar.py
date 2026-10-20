@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
@@ -22,22 +24,9 @@ from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-__all__ = ["FUNCTION_NAMES", "MAX_ATTENDEES", "MAX_BODY_CHARACTERS", "OutlookCalendarTools"]
-
-FUNCTION_NAMES = (
-    "outlook_calendar_list_calendars",
-    "outlook_calendar_list_events",
-    "outlook_calendar_get_event",
-    "outlook_calendar_create_event",
-    "outlook_calendar_update_event",
-    "outlook_calendar_delete_event",
-    "outlook_calendar_respond_to_event",
-)
 _WRITE_FUNCTIONS = frozenset(
     {
         "outlook_calendar_create_event",
@@ -50,9 +39,9 @@ _MAX_EVENTS = 50
 _MAX_CALENDARS = 100
 _MAX_WINDOW = timedelta(days=366)
 # Event descriptions come back into the conversation, so one read stays small.
-MAX_BODY_CHARACTERS = 20_000
+_MAX_BODY_CHARACTERS = 20_000
 # Exchange allows 500; an agent inviting more than this is almost certainly a mistake.
-MAX_ATTENDEES = 100
+_MAX_ATTENDEES = 100
 _TOOL_NAME = "outlook_calendar"
 _UTC = 'outlook.timezone="UTC"'
 _UTC_TEXT = f'{_UTC}, outlook.body-content-type="text"'
@@ -183,8 +172,8 @@ def _attendees(value: object) -> list[dict[str, Any]]:
     ):
         msg = "attendees must be a list of email addresses, such as alex@contoso.com."
         raise _invalid(msg)
-    if len(addresses) > MAX_ATTENDEES:
-        msg = f"attendees may list at most {MAX_ATTENDEES} addresses."
+    if len(addresses) > _MAX_ATTENDEES:
+        msg = f"attendees may list at most {_MAX_ATTENDEES} addresses."
         raise _invalid(msg)
     return [{"emailAddress": {"address": address}, "type": "required"} for address in addresses]
 
@@ -228,7 +217,7 @@ def _event(event: Mapping[str, Any]) -> dict[str, Any]:
         "organizer": _person(event.get("organizer")),
         "attendees": [
             {**_person(attendee), "response": _dict(attendee.get("status")).get("response")}
-            for attendee in attendees[:MAX_ATTENDEES]
+            for attendee in attendees[:_MAX_ATTENDEES]
         ],
         "attendee_count": len(attendees),
         "is_online_meeting": event.get("isOnlineMeeting"),
@@ -246,7 +235,7 @@ def _event(event: Mapping[str, Any]) -> dict[str, Any]:
 def _event_with_body(event: Mapping[str, Any]) -> dict[str, Any]:
     content = _dict(event.get("body")).get("content")
     text = content if isinstance(content, str) else ""
-    return {**_event(event), "body": text[:MAX_BODY_CHARACTERS], "truncated": len(text) > MAX_BODY_CHARACTERS}
+    return {**_event(event), "body": text[:_MAX_BODY_CHARACTERS], "truncated": len(text) > _MAX_BODY_CHARACTERS}
 
 
 def _calendar(calendar: Mapping[str, Any]) -> dict[str, Any]:
