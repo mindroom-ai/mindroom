@@ -1,4 +1,5 @@
 """Tests for the OneDrive and SharePoint files toolkit."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -15,7 +16,13 @@ from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
-from tests.microsoft_graph_test_support import FakeGraph, publish_grant, runtime_paths, save_client_config, worker_target
+from tests.microsoft_graph_test_support import (
+    FakeGraph,
+    publish_grant,
+    runtime_paths,
+    save_client_config,
+    worker_target,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,10 +58,10 @@ class _Graph:
         self.item = item or _item()
         self.content = content
         self.write = httpx.Response(200, json=_item())
-        self.extra: Callable[[httpx.Request], httpx.Response | None] = lambda _request: None
+        self.answer_first: Callable[[httpx.Request], httpx.Response | None] = lambda _request: None
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        if (answer := self.extra(request)) is not None:
+        if (answer := self.answer_first(request)) is not None:
             return answer
         path = unquote(request.url.path)
         if request.method == "GET" and path == f"/v1.0{ITEM_PATH}":
@@ -114,7 +121,7 @@ def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
     assert metadata.requires_primary_runtime is True
     assert metadata.consumes_workspace_paths is True
     assert metadata.file_access == ToolFileAccess.AGENT
-    assert set(metadata.function_names) == set(microsoft_files.FUNCTION_NAMES)
+    assert len(metadata.function_names) == 9
 
 
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +140,7 @@ def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.Mo
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert set(tools.functions) == set(microsoft_files.FUNCTION_NAMES)
+    assert set(tools.functions) == set(TOOL_METADATA["microsoft_files"].function_names)
 
 
 def test_descriptions_keep_edits_safe_and_writes_legible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,7 +166,7 @@ def test_item_paths_with_or_without_the_graph_prefix_need_no_lookup(
 
 def test_a_sharing_link_resolves_through_shares(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"id": ITEM, "parentReference": {"driveId": DRIVE}})
         if "/shares/u!" in request.url.path
         else None
@@ -215,7 +222,7 @@ def test_get_file_summarizes_the_item(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_search_asks_microsoft_search_for_drive_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(
             200,
             json={
@@ -247,7 +254,7 @@ def test_search_asks_microsoft_search_for_drive_items(tmp_path: Path, monkeypatc
 
 def test_list_folder_defaults_to_the_requester_onedrive_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"value": [_item(name="Reports", folder=True)], "@odata.nextLink": "https://x"})
         if request.url.path == "/v1.0/me/drive/root/children"
         else None
@@ -280,7 +287,7 @@ def test_download_refuses_a_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_download_checks_the_size_before_fetching_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph(item=_item(size=microsoft_files.MAX_DOWNLOAD_BYTES + 1)))
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph(item=_item(size=microsoft_files._MAX_DOWNLOAD_BYTES + 1)))
 
     assert _payload(tools.microsoft_files_download_file(ITEM_PATH))["code"] == "too_large"
     assert len(graph.requests) == 1
@@ -376,7 +383,7 @@ def test_upload_refuses_names_onedrive_rejects(tmp_path: Path, monkeypatch: pyte
 
 def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"value": [{"id": "{1}", "name": "Budget", "position": 0, "visibility": "Visible"}]})
         if request.url.path == f"/v1.0{ITEM_PATH}/workbook/worksheets"
         else None
@@ -390,7 +397,7 @@ def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_excel_read_range_escapes_the_worksheet_and_address(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"address": "'Q3 Budget'!A1:B2", "values": [[1, 2], [3, 4]], "rowCount": 2})
         if "/workbook/worksheets/" in request.url.path
         else None
@@ -400,12 +407,14 @@ def test_excel_read_range_escapes_the_worksheet_and_address(tmp_path: Path, monk
     result = _payload(tools.microsoft_files_excel_read_range(ITEM_PATH, "Q3 Budget", "A1:B2"))
 
     assert result["range"]["values"] == [[1, 2], [3, 4]]
-    assert unquote(graph.requests[0].url.path) == f"/v1.0{ITEM_PATH}/workbook/worksheets/Q3 Budget/range(address='A1:B2')"
+    assert (
+        unquote(graph.requests[0].url.path) == f"/v1.0{ITEM_PATH}/workbook/worksheets/Q3 Budget/range(address='A1:B2')"
+    )
 
 
 def test_excel_read_without_an_address_reads_the_used_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"address": "Budget!A1:A1", "values": [["x"]], "rowCount": 1})
         if "/workbook/worksheets/" in request.url.path
         else None
@@ -420,7 +429,7 @@ def test_excel_read_without_an_address_reads_the_used_range(tmp_path: Path, monk
 def test_excel_read_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     files = _Graph()
     big = [[0] * 200 for _ in range(100)]
-    files.extra = lambda request: (
+    files.answer_first = lambda request: (
         httpx.Response(200, json={"address": "A1:GR100", "values": big, "rowCount": 100, "columnCount": 200})
         if "/workbook/worksheets/" in request.url.path
         else None

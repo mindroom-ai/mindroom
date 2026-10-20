@@ -72,7 +72,7 @@ _SHARE_PATH = re.compile(r"/shares/[^/]+")
 class MicrosoftGraphError(Exception):
     """A refused or failed Graph operation, described only by a stable code, a fixed message, and safe details."""
 
-    def __init__(self, code: str, message: str, **details: object) -> None:
+    def __init__(self, *, code: str, message: str, **details: object) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -108,7 +108,7 @@ def path_segment(value: object, field_name: str) -> str:
         or any(character in "/\\?#" or ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         msg = f"{field_name} must be a Microsoft Graph ID."
-        raise MicrosoftGraphError("invalid_argument", msg)
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return quote(value, safe="!:@=")
 
 
@@ -141,7 +141,7 @@ def checked_upload_source(
             field_name=field_name,
         )
     except ValueError as exc:
-        raise MicrosoftGraphError("invalid_local_path", str(exc)) from None
+        raise MicrosoftGraphError(code="invalid_local_path", message=str(exc)) from None
     with source.open() as handle:
         _check_upload_size(source, os.fstat(handle.fileno()).st_size, max_bytes)
     return source
@@ -150,7 +150,7 @@ def checked_upload_source(
 def _check_upload_size(source: AuthorizedFile, size: int, max_bytes: int) -> None:
     if size > max_bytes:
         msg = f"{source.display_path} is {size} bytes; the limit is {max_bytes} bytes."
-        raise MicrosoftGraphError("too_large", msg)
+        raise MicrosoftGraphError(code="too_large", message=msg)
 
 
 def _chunks(handle: BinaryIO) -> Iterator[bytes]:
@@ -188,18 +188,18 @@ class GraphSession:
         if response.url.host != _GRAPH_HOST:
             # The host Graph redirected to refused the download; reconnecting cannot fix that.
             msg = "SharePoint refused the download link Microsoft Graph returned."
-            raise MicrosoftGraphError("download_rejected", msg, status_code=response.status_code)
+            raise MicrosoftGraphError(code="download_rejected", message=msg, status_code=response.status_code)
         if response.status_code == 401:
             raise oauth_connection_required(self.context, reason=OAUTH_ACCESS_REJECTED_REASON)
         if response.status_code == 429:
             msg = "Microsoft Graph is throttling these requests; retry later."
-            raise MicrosoftGraphError("throttled", msg, retry_after_seconds=_retry_after_seconds(response))
+            raise MicrosoftGraphError(code="throttled", message=msg, retry_after_seconds=_retry_after_seconds(response))
         if response.status_code in _STATUS_ERRORS:
             code, message = _STATUS_ERRORS[response.status_code]
-            raise MicrosoftGraphError(code, message, graph_code=_graph_error_code(response))
+            raise MicrosoftGraphError(code=code, message=message, graph_code=_graph_error_code(response))
         raise MicrosoftGraphError(
-            "graph_error",
-            "Microsoft Graph rejected the request.",
+            code="graph_error",
+            message="Microsoft Graph rejected the request.",
             status_code=response.status_code,
             graph_code=_graph_error_code(response),
         )
@@ -218,7 +218,10 @@ class GraphSession:
         except ValueError:
             payload = None
         if not isinstance(payload, dict):
-            raise MicrosoftGraphError("graph_invalid_response", "Microsoft Graph returned a response that is not JSON.")
+            raise MicrosoftGraphError(
+                code="graph_invalid_response",
+                message="Microsoft Graph returned a response that is not JSON.",
+            )
         return payload
 
     def save_download(
@@ -233,11 +236,18 @@ class GraphSession:
         """Stream one Graph content response into the workspace directory, atomically and within `max_bytes`."""
         target = workspace_root.absolute() / directory / filename
         if _unsafe_filename(filename):
-            raise MicrosoftGraphError("unsafe_name", "Microsoft Graph reported an unsafe file name.", name=filename)
+            raise MicrosoftGraphError(
+                code="unsafe_name",
+                message="Microsoft Graph reported an unsafe file name.",
+                name=filename,
+            )
         try:
             resolve_path_within_root(workspace_root, target, symlinks="reject")
         except ValueError:
-            raise MicrosoftGraphError("unsafe_name", "The download target escapes its directory.") from None
+            raise MicrosoftGraphError(
+                code="unsafe_name",
+                message="The download target escapes its directory.",
+            ) from None
         with self.client.stream("GET", path, follow_redirects=True) as response:
             self.check(response)
             with (
@@ -248,7 +258,7 @@ class GraphSession:
                 for chunk in response.iter_bytes(_CHUNK_BYTES):
                     if len(chunk) > remaining:
                         msg = f"The download exceeds {max_bytes} bytes."
-                        raise MicrosoftGraphError("too_large", msg)
+                        raise MicrosoftGraphError(code="too_large", message=msg)
                     remaining -= len(chunk)
                     handle.write(chunk)
         return target
@@ -301,7 +311,7 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
     except OAuthProviderError as exc:
         logger.warning("microsoft_oauth_refresh_failed", provider_id=provider.id, error_type=type(exc).__name__)
         msg = "Microsoft authorization could not be refreshed. Retry this request shortly."
-        raise MicrosoftGraphError("oauth_refresh_failed", msg) from None
+        raise MicrosoftGraphError(code="oauth_refresh_failed", message=msg) from None
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
         raise oauth_connection_required(context)
@@ -319,7 +329,13 @@ def graph_session(
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> Iterator[GraphSession]:
     """Open one Graph session as the active requester, mapping transport failures to safe errors."""
-    context = active_oauth_credential_context(provider, runtime_paths, credentials_manager, worker_target, config=config)
+    context = active_oauth_credential_context(
+        provider,
+        runtime_paths,
+        credentials_manager,
+        worker_target,
+        config=config,
+    )
     if context.worker_target is None:
         # Requester-scoped credentials never fall back to a shared or installation-level token.
         raise oauth_connection_required(context)
@@ -332,11 +348,11 @@ def graph_session(
             yield GraphSession(client, context)
     except httpx.TimeoutException:
         msg = f"Microsoft Graph did not answer within {timeout_seconds:g} seconds."
-        raise MicrosoftGraphError("graph_timeout", msg) from None
+        raise MicrosoftGraphError(code="graph_timeout", message=msg) from None
     except httpx.HTTPError as exc:
         # The exception text can name URLs; report only its type.
         msg = "Microsoft Graph could not be reached."
-        raise MicrosoftGraphError("graph_unreachable", msg, error_type=type(exc).__name__) from None
+        raise MicrosoftGraphError(code="graph_unreachable", message=msg, error_type=type(exc).__name__) from None
 
 
 def graph_error_payload(tool_name: str, exc: MicrosoftGraphError) -> str:

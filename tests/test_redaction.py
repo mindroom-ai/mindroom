@@ -93,9 +93,7 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
 
 def test_redact_sensitive_text_redacts_sharepoint_tempauth_download_urls() -> None:
     """A pre-authenticated SharePoint download URL grants file access on its own, so its tempauth must not be logged."""
-    line = (
-        'HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret "HTTP/1.1 200 OK"'
-    )
+    line = 'HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret "HTTP/1.1 200 OK"'
 
     assert redact_sensitive_text(line) == (
         "HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx"

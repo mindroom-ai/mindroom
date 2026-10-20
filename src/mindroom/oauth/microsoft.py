@@ -24,7 +24,7 @@ __all__ = [
 ]
 
 MICROSOFT_CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
-MICROSOFT_TENANT_ENV = "MICROSOFT_TENANT_ID"
+_TENANT_ENV = "MICROSOFT_TENANT_ID"
 GRAPH_ME_URL = "https://graph.microsoft.com/v1.0/me"
 ACCOUNT_LOOKUP_TIMEOUT_SECONDS = 5.0
 _DEFAULT_TENANT = "organizations"
@@ -41,9 +41,9 @@ def _endpoint(tenant: str, kind: str) -> str:
 
 def microsoft_tenant(runtime_paths: RuntimePaths) -> str:
     """Return the Microsoft Entra tenant that sign-in and token requests use."""
-    tenant = (runtime_paths.env_value(MICROSOFT_TENANT_ENV) or _DEFAULT_TENANT).strip()
+    tenant = (runtime_paths.env_value(_TENANT_ENV) or _DEFAULT_TENANT).strip()
     if not _TENANT.fullmatch(tenant):
-        msg = f"{MICROSOFT_TENANT_ENV} must be a tenant ID, a verified domain, organizations, common, or consumers."
+        msg = f"{_TENANT_ENV} must be a tenant ID, a verified domain, organizations, common, or consumers."
         raise OAuthProviderError(msg)
     return tenant
 

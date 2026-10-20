@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlsplit
 
 from agno.tools import Toolkit
@@ -33,27 +33,16 @@ if TYPE_CHECKING:
     from mindroom.file_access import AuthorizedFile
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-FUNCTION_NAMES = (
-    "microsoft_files_search",
-    "microsoft_files_list_folder",
-    "microsoft_files_get_file",
-    "microsoft_files_download_file",
-    "microsoft_files_replace_file",
-    "microsoft_files_upload_file",
-    "microsoft_files_excel_list_worksheets",
-    "microsoft_files_excel_read_range",
-    "microsoft_files_excel_update_range",
-)
 _WRITE_FUNCTIONS = frozenset(
     {"microsoft_files_replace_file", "microsoft_files_upload_file", "microsoft_files_excel_update_range"},
 )
 # Downloads land on the primary's storage volume, so one file must not fill it.
-MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 # Graph's single-request upload limit.
-MAX_UPLOAD_BYTES = 250 * 1024 * 1024
+_MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 # Range values come back into the conversation, so one read or write stays small.
-MAX_RANGE_CELLS = 10_000
-DOWNLOAD_DIR = "microsoft-files-downloads"
+_MAX_RANGE_CELLS = 10_000
+_DOWNLOAD_DIR = "microsoft-files-downloads"
 _TOOL_NAME = "microsoft_files"
 _ITEM_SELECT = "id,name,size,eTag,webUrl,lastModifiedDateTime,lastModifiedBy,parentReference,file,folder"
 _ITEM_PATH = re.compile(rf"^(?:{re.escape(GRAPH_URL)})?/?drives/(?P<drive>[^/]+)/items/(?P<item>[^/]+)/?$")
@@ -93,31 +82,39 @@ def _parse_file(file: object, field_name: str = "file") -> _Item | None:
         try:
             _ = item.path
         except MicrosoftGraphError:
-            raise MicrosoftGraphError("invalid_file", _INVALID_FILE.replace("file", field_name, 1)) from None
+            raise MicrosoftGraphError(
+                code="invalid_file",
+                message=_INVALID_FILE.replace("file", field_name, 1),
+            ) from None
         return item
     if _is_link(value):
         return None
-    raise MicrosoftGraphError("invalid_file", _INVALID_FILE.replace("file", field_name, 1))
+    raise MicrosoftGraphError(code="invalid_file", message=_INVALID_FILE.replace("file", field_name, 1))
 
 
 def _resolve(file: str, session: GraphSession, field_name: str = "file") -> _Item:
     if (item := _parse_file(file, field_name)) is not None:
         return item
-    shared = session.json("GET", f"/shares/{share_id(file.strip())}/driveItem", params={"$select": "id,parentReference"})
+    shared = session.json(
+        "GET",
+        f"/shares/{share_id(file.strip())}/driveItem",
+        params={"$select": "id,parentReference"},
+    )
     parent = shared.get("parentReference")
     drive_id = parent.get("driveId") if isinstance(parent, dict) else None
     item_id = shared.get("id")
     if not isinstance(drive_id, str) or not isinstance(item_id, str):
-        raise MicrosoftGraphError("graph_invalid_response", "Microsoft Graph returned an unexpected item.")
+        raise MicrosoftGraphError(code="graph_invalid_response", message="Microsoft Graph returned an unexpected item.")
     return _Item(drive_id, item_id)
 
 
 def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, check, and replace one item."""
-    parent = item.get("parentReference") if isinstance(item.get("parentReference"), dict) else {}
+    raw_parent = item.get("parentReference")
+    parent: Mapping[str, Any] = raw_parent if isinstance(raw_parent, dict) else {}
     modified_by = item.get("lastModifiedBy")
-    user = modified_by.get("user") if isinstance(modified_by, dict) else None
-    user = user if isinstance(user, dict) else {}
+    raw_user = modified_by.get("user") if isinstance(modified_by, dict) else None
+    user: Mapping[str, Any] = raw_user if isinstance(raw_user, dict) else {}
     drive_id = parent.get("driveId")
     return {
         "drive_id": drive_id,
@@ -137,7 +134,7 @@ def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
 def _limit(value: object, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         msg = f"limit must be an integer from 1 to {maximum}."
-        raise MicrosoftGraphError("invalid_argument", msg)
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
 
 
@@ -152,7 +149,7 @@ def _upload_name_error(name: str) -> str | None:
 def _address(value: object) -> str:
     if not isinstance(value, str) or not _ADDRESS.fullmatch(value.strip()):
         msg = "address must be a cell or range such as A1 or A1:C10, without a worksheet name."
-        raise MicrosoftGraphError("invalid_argument", msg)
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value.strip()
 
 
@@ -161,19 +158,23 @@ def _cell_count(values: list[Any]) -> int:
 
 
 def _values(value: object) -> list[list[Any]]:
-    rows = value if isinstance(value, list) else None
-    width = len(rows[0]) if rows and isinstance(rows[0], list) else 0
+    invalid = MicrosoftGraphError(
+        code="invalid_argument",
+        message="values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls.",
+    )
+    if not isinstance(value, list) or not value or not all(isinstance(row, list) for row in value):
+        raise invalid
+    rows = cast("list[list[Any]]", value)
+    width = len(rows[0])
     if (
-        not rows
-        or width == 0
-        or any(not isinstance(row, list) or len(row) != width for row in rows)
+        width == 0
+        or any(len(row) != width for row in rows)
         or any(cell is not None and not isinstance(cell, str | int | float | bool) for row in rows for cell in row)
     ):
-        msg = "values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls."
-        raise MicrosoftGraphError("invalid_argument", msg)
-    if _cell_count(rows) > MAX_RANGE_CELLS:
-        msg = f"values cover more than {MAX_RANGE_CELLS} cells; write a smaller range."
-        raise MicrosoftGraphError("too_large", msg)
+        raise invalid
+    if _cell_count(rows) > _MAX_RANGE_CELLS:
+        msg = f"values cover more than {_MAX_RANGE_CELLS} cells; write a smaller range."
+        raise MicrosoftGraphError(code="too_large", message=msg)
     return rows
 
 
@@ -181,9 +182,9 @@ def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
     values = payload.get("values")
     if not isinstance(values, list):
         values = []
-    if _cell_count(values) > MAX_RANGE_CELLS:
-        msg = f"The range has more than {MAX_RANGE_CELLS} cells; read a smaller address."
-        raise MicrosoftGraphError("too_large", msg)
+    if _cell_count(values) > _MAX_RANGE_CELLS:
+        msg = f"The range has more than {_MAX_RANGE_CELLS} cells; read a smaller address."
+        raise MicrosoftGraphError(code="too_large", message=msg)
     return {
         "address": payload.get("address"),
         "values": values,
@@ -254,7 +255,7 @@ class MicrosoftFilesTools(Toolkit):
             local_path,
             workspace_root=self._workspace_root,
             file_access=self._file_access,
-            max_bytes=MAX_UPLOAD_BYTES,
+            max_bytes=_MAX_UPLOAD_BYTES,
         )
 
     def microsoft_files_search(self, query: str, limit: int = 25) -> str:
@@ -268,8 +269,13 @@ class MicrosoftFilesTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if not isinstance(query, str) or not query.strip():
-                raise MicrosoftGraphError("invalid_argument", "query must not be empty.")
-            request = {"entityTypes": ["driveItem"], "query": {"queryString": query}, "from": 0, "size": _limit(limit, 50)}
+                raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
+            request = {
+                "entityTypes": ["driveItem"],
+                "query": {"queryString": query},
+                "from": 0,
+                "size": _limit(limit, 50),
+            }
             payload = session.json("POST", "/search/query", json={"requests": [request]})
             containers = [
                 container
@@ -299,7 +305,9 @@ class MicrosoftFilesTools(Toolkit):
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            path = "/me/drive/root/children" if folder is None else f"{_resolve(folder, session, 'folder').path}/children"
+            path = (
+                "/me/drive/root/children" if folder is None else f"{_resolve(folder, session, 'folder').path}/children"
+            )
             payload = session.json("GET", path, params={"$top": str(_limit(limit, 200)), "$select": _ITEM_SELECT})
             entries = [_summary(entry) for entry in payload.get("value") or [] if isinstance(entry, dict)]
             return {"files": entries, "more_available": "@odata.nextLink" in payload}
@@ -331,20 +339,20 @@ class MicrosoftFilesTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if self._workspace_root is None:
-                raise MicrosoftGraphError("workspace_required", "Downloads need an agent workspace.")
+                raise MicrosoftGraphError(code="workspace_required", message="Downloads need an agent workspace.")
             item = _resolve(file, session)
             summary = _summary(self._metadata(item, session))
             if summary["is_folder"]:
-                raise MicrosoftGraphError("is_folder", "That item is a folder, not a file.")
-            if isinstance(summary["size"], int) and summary["size"] > MAX_DOWNLOAD_BYTES:
-                msg = f"The file is {summary['size']} bytes; downloads are limited to {MAX_DOWNLOAD_BYTES} bytes."
-                raise MicrosoftGraphError("too_large", msg)
+                raise MicrosoftGraphError(code="is_folder", message="That item is a folder, not a file.")
+            if isinstance(summary["size"], int) and summary["size"] > _MAX_DOWNLOAD_BYTES:
+                msg = f"The file is {summary['size']} bytes; downloads are limited to {_MAX_DOWNLOAD_BYTES} bytes."
+                raise MicrosoftGraphError(code="too_large", message=msg)
             path = session.save_download(
                 f"{item.path}/content",
                 workspace_root=self._workspace_root,
-                directory=DOWNLOAD_DIR,
+                directory=_DOWNLOAD_DIR,
                 filename=str(summary["name"] or ""),
-                max_bytes=MAX_DOWNLOAD_BYTES,
+                max_bytes=_MAX_DOWNLOAD_BYTES,
             )
             return {"file": summary, "path": str(path)}
 
@@ -368,11 +376,11 @@ class MicrosoftFilesTools(Toolkit):
             source = self._upload_source(local_path)
             item = _resolve(file, session)
             if _summary(self._metadata(item, session))["is_folder"]:
-                raise MicrosoftGraphError("is_folder", "That item is a folder, not a file.")
+                raise MicrosoftGraphError(code="is_folder", message="That item is a folder, not a file.")
             headers = {"If-Match": expected_etag} if expected_etag else {}
             return {
                 "file": _summary(
-                    session.upload("PUT", f"{item.path}/content", source, max_bytes=MAX_UPLOAD_BYTES, headers=headers),
+                    session.upload("PUT", f"{item.path}/content", source, max_bytes=_MAX_UPLOAD_BYTES, headers=headers),
                 ),
             }
 
@@ -395,22 +403,22 @@ class MicrosoftFilesTools(Toolkit):
             if folder is not None:
                 _parse_file(folder, "folder")
             source = self._upload_source(local_path)
-            file_name = source.name if name is None else name
-            if error := _upload_name_error(file_name):
-                raise MicrosoftGraphError("invalid_name", error)
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
+        file_name = source.name if name is None else name
+        if error := _upload_name_error(file_name):
+            return graph_error_payload(_TOOL_NAME, MicrosoftGraphError(code="invalid_name", message=error))
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
             path = f"{parent}:/{quote(file_name, safe='')}:/content?@microsoft.graph.conflictBehavior=fail"
             try:
-                result = session.upload("PUT", path, source, max_bytes=MAX_UPLOAD_BYTES)
+                result = session.upload("PUT", path, source, max_bytes=_MAX_UPLOAD_BYTES)
             except MicrosoftGraphError as exc:
                 if exc.code != "conflict":
                     raise
                 msg = "A file with that name already exists there; use microsoft_files_replace_file or another name."
-                raise MicrosoftGraphError("name_conflict", msg) from None
+                raise MicrosoftGraphError(code="name_conflict", message=msg) from None
             return {"file": _summary(result)}
 
         return self._run(operation)

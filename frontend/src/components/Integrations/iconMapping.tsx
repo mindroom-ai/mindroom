@@ -76,10 +76,7 @@ import {
   SiX,
   SiZoom,
 } from "react-icons/si";
-import {
-  TbBrain,
-  TbBrandOnedrive,
-} from "react-icons/tb";
+import { TbBrain, TbBrandOnedrive } from "react-icons/tb";
 import { WiDaySunny } from "react-icons/wi";
 import { AwsRedshift } from "./awsIcons";
 import {

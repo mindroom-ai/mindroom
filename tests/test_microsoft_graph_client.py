@@ -1,4 +1,5 @@
 """Tests for the shared Microsoft Graph client used by the Microsoft 365 tools."""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -10,7 +11,6 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom.custom_tools import microsoft_graph
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
@@ -36,13 +36,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
 
+    from mindroom.custom_tools.microsoft_graph import GraphSession
+
 PROVIDER = microsoft_files_oauth_provider()
 SHARE_LINK = "https://contoso-my.sharepoint.com/:w:/r/personal/alex/Documents/report.docx?d=w1&web=1"
 
 
 def _result(
     tmp_path: Path,
-    operation: Callable[[microsoft_graph.GraphSession], Mapping[str, object]],
+    operation: Callable[[GraphSession], Mapping[str, object]],
     *,
     connected: bool = True,
     requester: bool = True,

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 ALICE = "@alice:example.org"
-TOKEN = "graph-access-token"
+TOKEN = "graph-access-token"  # noqa: S105
 
 type Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -125,4 +125,3 @@ class FakeGraph:
     def calls(self) -> list[str]:
         """Return each request as `METHOD host/path`."""
         return [f"{request.method} {request.url.host}{request.url.path}" for request in self.requests]
-

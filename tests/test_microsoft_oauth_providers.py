@@ -1,4 +1,5 @@
 """Tests for the built-in Microsoft 365 OAuth providers."""
+# ruff: noqa: D103, S105
 
 from __future__ import annotations
 
@@ -116,7 +117,9 @@ def test_endpoints_use_the_configured_tenant(tmp_path: Path) -> None:
 
     endpoints = asyncio.run(microsoft_files_oauth_provider().runtime_endpoints(runtime_paths))
 
-    assert endpoints.authorization_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize"
+    assert (
+        endpoints.authorization_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize"
+    )
     assert endpoints.token_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
 
 
