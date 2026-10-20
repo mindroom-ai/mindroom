@@ -275,6 +275,7 @@ LAN_CHAT = "http://192.168.1.10:8080"
 def test_portal_on_a_local_address_works_over_http_with_no_settings(signin: dict[str, Any]) -> None:
     """A Docker stack on a home network signs Chat users in over HTTP with a cookie the browser keeps there."""
     _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_AGENT="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    signin["binds"].return_value = True
     client = TestClient(main.app, base_url=LAN_PORTAL)
     response = sign_in(client, "alice", origin=LAN_CHAT, headers={"Origin": LAN_PORTAL})
     assert response.status_code == 200, response.text
@@ -317,10 +318,15 @@ def test_local_chat_cannot_sign_in_to_a_public_portal_by_default(signin: dict[st
     assert sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat").status_code == 200
 
 
-def test_hosted_chat_default_waits_for_a_binding_homeserver_on_a_public_portal(signin: dict[str, Any]) -> None:
-    """Unbound tokens could be replayed by any backend the user opened, so a public portal needs binding or a list."""
-    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
-    refused = sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat")
+@pytest.mark.parametrize("portal", [PORTAL_ORIGIN, LAN_PORTAL, "http://localhost:8765"])
+def test_default_chat_origins_wait_for_a_binding_homeserver(signin: dict[str, Any], portal: str) -> None:
+    """Unbound tokens could be replayed by any backend the user opened, and a forged `Host` can claim any address.
+
+    So under the default list every portal, local-looking or not, needs binding; an explicit list accepts the risk.
+    """
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    client = TestClient(main.app, base_url=portal)
+    refused = sign_in(client, "alice", origin="https://chat.mindroom.chat", headers={"Origin": portal})
     assert refused.status_code == 403
     assert refused.json() == {
         "detail": "Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, "
@@ -328,13 +334,8 @@ def test_hosted_chat_default_waits_for_a_binding_homeserver_on_a_public_portal(s
     }
     assert "set-cookie" not in refused.headers
     signin["verifier"].assert_not_awaited()
-    # An operator's explicit list and a portal on a local address need no binding.
-    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.mindroom.chat"]')
-    assert sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat").status_code == 200
-    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
-    local = TestClient(main.app, base_url=LAN_PORTAL)
-    response = sign_in(local, "alice", origin="https://chat.mindroom.chat", headers={"Origin": LAN_PORTAL})
-    assert response.status_code == 200
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.mindroom.chat"]')
+    assert sign_in(client, "alice", origin="https://chat.mindroom.chat", headers={"Origin": portal}).status_code == 200
 
 
 def test_empty_chat_allowlist_turns_matrix_sign_in_off(signin: dict[str, Any]) -> None:
