@@ -144,7 +144,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
-- [Microsoft 365](microsoft-365.md) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail, and Outlook calendars through Microsoft Graph.
+- [Microsoft 365](microsoft-365.md) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail and calendars, and To Do tasks through Microsoft Graph.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Mem0 and Zep external memory services; the built-in [`memory`](../memory.md#memory) tool is documented with the memory system.
 - [Agent Orchestration](agent-orchestration.md) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.

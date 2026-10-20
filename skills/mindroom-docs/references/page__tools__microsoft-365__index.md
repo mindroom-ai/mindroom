@@ -1,6 +1,6 @@
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail, and Outlook calendars through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, and Microsoft To Do through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
@@ -9,6 +9,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
+| `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -61,6 +62,7 @@ agents:
       - microsoft_files
       - outlook_mail
       - outlook_calendar
+      - microsoft_todo
 ```
 
 | Option | Tool | Type | Default | Notes |
@@ -68,6 +70,7 @@ agents:
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
+| `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 
@@ -160,6 +163,20 @@ Deleting a meeting the requester only attends removes it from their calendar wit
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
 
+## To Do
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_todo_list_lists` | no | List the requester's task lists, including lists shared with them, and whether the requester owns each. |
+| `microsoft_todo_list_tasks` | no | List up to 50 open tasks of one list, or completed ones too when asked, with notes up to 2,000 characters each. |
+| `microsoft_todo_create_task` | yes | Create a task with a title and, optionally, a due date, notes, and importance. |
+| `microsoft_todo_update_task` | yes | Change a task's title, due date, notes, or importance, or mark it completed or not started again. |
+| `microsoft_todo_delete_task` | yes | Delete a task. |
+
+The lists include the requester's default Tasks list and the list of flagged Outlook messages.
+Due dates are calendar dates without a time of day.
+Updating a task's notes replaces them completely.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
@@ -187,6 +204,12 @@ tool_approval:
       action: require_approval
     - match: outlook_calendar_respond_to_event
       action: require_approval
+    - match: microsoft_todo_create_task
+      action: require_approval
+    - match: microsoft_todo_update_task
+      action: require_approval
+    - match: microsoft_todo_delete_task
+      action: require_approval
 ```
 
 Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`.
@@ -204,7 +227,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
-| `not_found` | The item does not exist or the connected account cannot see it. |
+| `not_found` | The item does not exist, a task was looked up in another list, or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
