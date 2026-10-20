@@ -16,6 +16,7 @@ from mindroom.providers.agno_compat_claude import (
     terminal_message,
 )
 from mindroom.providers.claude_native_compaction import ClaudeNativeCompaction
+from mindroom.providers.model_http_client import KeepHttpClient
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -42,7 +43,7 @@ _CUT_OFF_TOOL_CALL_RESULT = (
 )
 
 
-class ClaudeProviderCompat(ClaudeProviderSDKCompat, ClaudeNativeCompaction):
+class ClaudeProviderCompat(KeepHttpClient, ClaudeProviderSDKCompat, ClaudeNativeCompaction):
     """Apply current Claude request constraints, preserve typed refusals, and recover cut-off tool calls."""
 
     id: str

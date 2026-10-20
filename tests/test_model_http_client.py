@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import gc
 import os
 import socket
@@ -18,8 +19,13 @@ from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.knowledge_graph.store import _GraphLoop, run_on_loop
 from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.providers.model_http_client import aclose_model_http_client, closing_model_connections
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.model_http_client import (
+    MODEL_HTTP_CLIENT,
+    aclose_model_http_client,
+    closing_model_connections,
+)
+from mindroom.providers.model_loading import _SHARED_HTTP_CLIENT_PROVIDERS, get_model_instance
+from mindroom.tool_system.tool_hooks import _run_coroutine_from_sync
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -144,6 +150,15 @@ async def test_one_model_sends_from_the_runtime_loop_and_a_finishing_thread_loop
 
 
 @pytest.mark.asyncio
+async def test_sync_tool_hook_bridge_closes_its_loop_pool(tmp_path: Path, server: _ModelsServer) -> None:
+    """Hook work run on its own loop from a worker thread closes that loop's model connections when it ends."""
+    config, runtime_paths = _model_config(tmp_path, "openai", server.url)
+    client = get_model_instance(config, runtime_paths).get_async_client()
+    await asyncio.to_thread(_run_coroutine_from_sync, _list_models(client))
+    await asyncio.wait_for(server.closed.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_finished_loop_pool_is_dropped(tmp_path: Path, server: _ModelsServer) -> None:
     """A loop that ended without closing its pool loses it at the next request, so its sockets get collected."""
     config, runtime_paths = _model_config(tmp_path, "openai", server.url)
@@ -170,7 +185,9 @@ async def test_pooled_connections_probe_idle_tcp_connections(tmp_path: Path, ser
     config, runtime_paths = _model_config(tmp_path, "anthropic", server.url)
     await _list_models(get_model_instance(config, runtime_paths).get_async_client())
     assert _keepalive_option(server.peer, socket.SO_KEEPALIVE)
-    assert _keepalive_option(server.peer, socket.TCP_KEEPIDLE) == 60
+    # macOS names the idle time TCP_KEEPALIVE.
+    idle_option = socket.TCP_KEEPIDLE if hasattr(socket, "TCP_KEEPIDLE") else socket.TCP_KEEPALIVE
+    assert _keepalive_option(server.peer, idle_option) == 60
 
 
 @pytest.mark.asyncio
@@ -212,3 +229,20 @@ async def test_runtime_shutdown_closes_pooled_model_connections(tmp_path: Path, 
         stall_detector=None,
     )
     await asyncio.wait_for(server.closed.wait(), timeout=5)
+
+
+_PROVIDER_SETTINGS = {
+    "azure": {"azure_endpoint": "https://example.openai.azure.com", "api_version": "2024-06-01"},
+    "bedrock_claude": {"aws_region": "us-east-1", "aws_access_key": "test", "aws_secret_key": "test"},
+    "vertexai_claude": {"project_id": "test", "region": "us-east5"},
+}
+
+
+@pytest.mark.parametrize("provider", sorted(_SHARED_HTTP_CLIENT_PROVIDERS))
+def test_deep_copied_model_keeps_the_shared_http_client(tmp_path: Path, provider: str) -> None:
+    """Agno Learning deep-copies the model every run, and the copy must keep sending through the shared client."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    extra_kwargs = {"api_key": "test", **_PROVIDER_SETTINGS.get(provider, {})}
+    model = ModelConfig(provider=provider, id="gpt-6-astra", extra_kwargs=extra_kwargs)
+    config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)
+    assert copy.deepcopy(get_model_instance(config, runtime_paths)).http_client is MODEL_HTTP_CLIENT

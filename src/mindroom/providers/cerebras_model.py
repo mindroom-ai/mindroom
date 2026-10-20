@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.models.cerebras import Cerebras
 
+from mindroom.providers.model_http_client import KeepHttpClient
 from mindroom.providers.tool_policy import disable_tool_selection
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class MindRoomCerebras(Cerebras):
+class MindRoomCerebras(KeepHttpClient, Cerebras):
     """Cerebras model that prevents tool selection during participation checks."""
 
     def get_request_params(
