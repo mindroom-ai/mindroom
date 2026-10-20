@@ -1826,7 +1826,7 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
 
 
 @pytest.mark.parametrize(("saved_count", "expected_attempts"), [(0, 4), (2, 2), (4, 0)])
-def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_attempts: int) -> None:
+def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_attempts: int) -> None:
     """Restoring a schema boundary cannot reset the logical turn budget or leak stale text."""
     log = _AdapterLog()
     prompts: list[str] = []
@@ -1867,8 +1867,8 @@ def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_
     assert completed[0].metadata_content is None
 
 
-def test_resumed_schema_change_preserves_count_on_next_pause() -> None:
-    """A second approval must save the consumed fresh schema step."""
+def test_resumed_continuation_preserves_count_on_next_pause() -> None:
+    """A second approval must save the consumed fresh continuation attempt."""
     log = _AdapterLog()
     completed: list[CompletedAttempt] = []
 
@@ -1900,8 +1900,8 @@ def test_resumed_schema_change_preserves_count_on_next_pause() -> None:
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_fresh_schema_change_saves_count_before_first_approval(streaming: bool) -> None:
-    """The budget starts with the first schema change, before any approval checkpoint."""
+def test_fresh_continuation_saves_count_before_first_approval(streaming: bool) -> None:
+    """The budget starts with the first continuation, before any approval checkpoint."""
     log = _AdapterLog()
     calls = 0
     completed: list[CompletedAttempt] = []

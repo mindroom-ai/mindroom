@@ -182,7 +182,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     show_tool_calls: bool,
     outcome: str,
 ) -> None:
-    """A fresh schema step retains history and may pause again without replaying approved work."""
+    """A fresh continuation attempt retains history and may pause again without replaying approved work."""
     switch_when = {"switch_after": "after-toolcall", "switch_next": "next-turn"}.get(outcome)
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -229,9 +229,9 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     )
     responses: list[ModelResponse | RuntimeError] = [
         _call("add", "approved", a=2, b=3),
-        _continue_call("loader"),
+        _continue_call("continue"),
         *(
-            [_continue_call(f"loader-{index}") for index in range(4)]
+            [_continue_call(f"continue-{index}") for index in range(4)]
             if outcome == "limit"
             else [
                 _deferred_call("sleeper", "sleep", seconds=0),
@@ -242,7 +242,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     if outcome == "error":
         responses[2:] = [RuntimeError("Provider continuation failed")]
     if outcome == "pause_limit":
-        responses[3:] = [_continue_call(f"reload-{index}") for index in range(4)]
+        responses[3:] = [_continue_call(f"continue-again-{index}") for index in range(4)]
     if outcome == "immediate_pause":
         responses[1:1] = [_call("add", "approved-again", a=4, b=5)]
     if switch_when:
@@ -430,7 +430,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     assert models[-1] == ("alternate" if switch_when == "after-toolcall" else "default")
     assert not responses
     assert any(message.role == "tool" and message.tool_call_id == "approved" for message in requests[-1])
-    assert any(message.role == "tool" and message.tool_call_id == "loader" for message in requests[-1])
+    assert any(message.role == "tool" and message.tool_call_id == "continue" for message in requests[-1])
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
 
@@ -584,9 +584,9 @@ async def test_approval_settlement_uses_typed_status(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["history", "child", "projected_child"])
 async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: str) -> None:
-    """Only newly completed parent tools can request another parent schema step."""
+    """Only newly completed parent tools can request another parent continuation attempt."""
     tool = ToolExecution(
-        tool_call_id="old-loader",
+        tool_call_id="old-continue",
         tool_name="switch_thread_model",
         result=json.dumps(
             {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
@@ -599,7 +599,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         if source == "child":
             yield ToolCallCompletedEvent(run_id="child", parent_run_id="parent", tool=tool)
         elif source == "projected_child":
-            projected = replace(tool, tool_call_id="delegate:old-loader")
+            projected = replace(tool, tool_call_id="delegate:old-continue")
             yield ToolCallCompletedEvent(run_id="parent", tool=projected)
             parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
         yield RunCompletedEvent(run_id="parent", content="Final parent answer.")

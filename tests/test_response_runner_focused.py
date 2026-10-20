@@ -8633,7 +8633,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     streaming: bool,
     spent: int,
 ) -> None:
-    """A live hidden approval checkpoint retains the parent's consumed schema step."""
+    """A live hidden approval checkpoint retains the parent's consumed continuation attempt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)

@@ -1239,7 +1239,7 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
 
 
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:
-    """Voice-style immutable schemas expose deferred tools without load_tool."""
+    """Voice-style immutable schemas send every deferred tool eagerly instead of through tool search."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {"sleep": {"defer": True}},

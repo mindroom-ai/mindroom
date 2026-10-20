@@ -176,7 +176,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     switch_arguments = {"model_name": "default", "when": "next-turn"}
     requirement = RunRequirement(
         ToolExecution(
-            tool_call_id="loader",
+            tool_call_id="switch",
             tool_name="switch_thread_model",
             tool_args=switch_arguments,
             requires_confirmation=True,
@@ -196,7 +196,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         continuation_count=continuation_count,
         calls=(
             ApprovalCall(
-                "loader",
+                "switch",
                 "switch_thread_model",
                 "helper",
                 100,
@@ -208,7 +208,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             "kind": "agent_cli",
             "toolkit": "thread_model",
             "function": "switch_thread_model",
-            "call_id": "loader",
+            "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
             "requirements": [requirement.to_dict()],
@@ -234,8 +234,8 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         paused_answer=PausedAnswer(),
         execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
-        decisions={"loader": True},
-        denial_reasons={"loader": None},
+        decisions={"switch": True},
+        denial_reasons={"switch": None},
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,

@@ -137,7 +137,7 @@ async def _collect_agent_continuation(  # noqa: C901
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
     # Child approval results are also projected into the root presentation.
-    # Only calls owned by the parent run can change its next tool schema.
+    # Only calls owned by the parent run can continue its turn.
     parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
     current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
     _reconcile_agent_tools(presentation, response)
