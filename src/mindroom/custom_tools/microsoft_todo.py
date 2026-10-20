@@ -61,6 +61,17 @@ def _task_path(list_id: object, task_id: object) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
 
 
+def _todo_page_path(page_token: object, collection_suffix: str) -> str:
+    """Return the Graph path a To Do page token continues; Tasks.ReadWrite also reaches Planner, so stay in To Do."""
+    token = page_path(page_token, collection_suffix)
+    if "/todo/lists/" not in f"{token.partition('?')[0]}/":
+        raise MicrosoftGraphError(
+            code="invalid_page_token",
+            message="page_token must be the next_page_token this function returned.",
+        )
+    return token
+
+
 def _limit(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_TASKS:
         raise MicrosoftGraphError(code="invalid_argument", message=f"limit must be an integer from 1 to {_MAX_TASKS}.")
@@ -223,7 +234,7 @@ class MicrosoftTodoTools(Toolkit):
 
         def build() -> _Request:
             if page_token is not None:
-                return _Request("GET", page_path(page_token, "/lists"))
+                return _Request("GET", _todo_page_path(page_token, "/lists"))
             return _Request("GET", "/me/todo/lists", params={"$top": str(_MAX_LISTS)})
 
         return self._send(
@@ -257,7 +268,7 @@ class MicrosoftTodoTools(Toolkit):
 
         def build() -> _Request:
             if page_token is not None:
-                return _Request("GET", page_path(page_token, "/tasks"))
+                return _Request("GET", _todo_page_path(page_token, "/tasks"))
             params = {"$top": str(_limit(limit))}
             if not _flag(include_completed, "include_completed"):
                 params["$filter"] = _OPEN_TASKS_FILTER

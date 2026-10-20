@@ -34,8 +34,10 @@ NOTES_CAP = 2_000
 GRAPH = "https://graph.microsoft.com/v1.0"
 NEXT_LISTS = "/me/todo/lists?$top=100&$skip=100"
 NEXT_TASKS = f"/me/todo/lists/{LIST}/tasks?$top=50&$skip=50"
+USER = "00000000-0000-0000-0000-000000000001"
 FOREIGN_PAGE_TOKENS = [
     "/me/messages?$skiptoken=abc",
+    "/me/planner/tasks?$top=50",
     f"{GRAPH}{NEXT_TASKS}",
     f"/me/todo/lists/{LIST}/tasks/../../../../me/messages/tasks?x=1",
     f"/me/todo/lists/{LIST}/tasks",
@@ -164,20 +166,35 @@ def test_list_lists_summarizes_each_list(tmp_path: Path, monkeypatch: pytest.Mon
     assert result["next_page_token"] is None
 
 
-def test_list_lists_returns_and_follows_its_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [], "@odata.nextLink": f"{GRAPH}{NEXT_LISTS}"}))
+@pytest.mark.parametrize(
+    ("next_page", "path"),
+    [
+        (NEXT_LISTS, "/v1.0/me/todo/lists"),
+        (f"/users/{USER}/todo/lists?$top=100&$skip=100", f"/v1.0/users/{USER}/todo/lists"),
+    ],
+)
+def test_list_lists_returns_and_follows_its_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_page: str,
+    path: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [], "@odata.nextLink": f"{GRAPH}{next_page}"}))
 
     first = _payload(tools.microsoft_todo_list_lists())
     second = _payload(tools.microsoft_todo_list_lists(page_token=first["next_page_token"]))
 
-    assert first["next_page_token"] == NEXT_LISTS
+    assert first["next_page_token"] == next_page
     assert second["status"] == "ok"
     continued = graph.requests[1]
-    assert continued.url.path == "/v1.0/me/todo/lists"
+    assert continued.url.path == path
     assert dict(continued.url.params) == {"$top": "100", "$skip": "100"}
 
 
-@pytest.mark.parametrize("page_token", [*FOREIGN_PAGE_TOKENS, "/me/todo/listsX?$skip=100"])
+@pytest.mark.parametrize(
+    "page_token",
+    [*FOREIGN_PAGE_TOKENS, "/me/todo/listsX?$skip=100", "/sites/root/lists?$top=100"],
+)
 def test_list_lists_refuses_a_foreign_page_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -225,14 +242,26 @@ def test_list_tasks_includes_completed_tasks_on_request(tmp_path: Path, monkeypa
     assert result["next_page_token"] is None
 
 
-def test_list_tasks_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("page_token", "path"),
+    [
+        (NEXT_TASKS, TASKS_PATH),
+        (f"/users/{USER}/todo/lists/{LIST}/tasks?$top=50&$skip=50", f"/v1.0/users/{USER}/todo/lists/{LIST}/tasks"),
+    ],
+)
+def test_list_tasks_follows_its_own_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+    path: str,
+) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task()]}))
 
-    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5, page_token=NEXT_TASKS))
+    result = _payload(tools.microsoft_todo_list_tasks(LIST, include_completed=True, limit=5, page_token=page_token))
 
     assert result["next_page_token"] is None
     [request] = graph.requests
-    assert request.url.path == TASKS_PATH
+    assert request.url.path == path
     assert dict(request.url.params) == {"$top": "50", "$skip": "50"}
 
 
