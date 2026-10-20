@@ -1527,6 +1527,7 @@ def test_tool_search_without_matches_suggests_other_keywords() -> None:
 
     assert payload["matches"] == []
     assert "toolkit name" in payload["message"]
+    assert "tool_search() without a query" in payload["message"]
 
 
 def test_tool_search_skips_functions_removed_after_build() -> None:

@@ -92,7 +92,10 @@ class DynamicToolsToolkit(Toolkit):
             "usage": "Call a match with call_tool(name, arguments), passing arguments as a JSON object.",
         }
         if not matches:
-            payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
+            payload["message"] = (
+                "No deferred function matched. Try other keywords or a toolkit name from the system prompt, "
+                "or call tool_search() without a query to list them."
+            )
         elif len(scored) > len(matches):
             if len(matches) < _MAX_RESULTS_LIMIT:
                 hint = (

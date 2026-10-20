@@ -134,6 +134,16 @@ def test_resolve_missing_arguments_means_empty_object() -> None:
     assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
 
 
+@pytest.mark.parametrize("arguments", [[], "[]"])
+def test_resolve_treats_an_empty_list_as_no_arguments(arguments: object) -> None:
+    # Agno runs a direct call whose arguments are [] as a call without arguments, so the wrapper does too.
+    call = _call("c1", "call_tool", json.dumps({"name": "crm_lookup", "arguments": arguments}))
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert resolved["function"] == {"name": "crm_lookup", "arguments": "{}"}
+
+
 def test_resolve_treats_empty_string_arguments_as_no_arguments() -> None:
     call = _call("c1", "call_tool", '{"name": "crm_lookup", "arguments": ""}')
 

@@ -201,6 +201,9 @@ def _json_object(value: object) -> dict[str, Any] | None:
             except json.JSONDecodeError:
                 # Agno accepts Python-literal arguments on direct calls, so the wrapper does too.
                 value = ast.literal_eval(value)
+        if value == []:
+            # Agno runs a call whose arguments are an empty list as a call without arguments.
+            return {}
         if not isinstance(value, dict):
             return None
         json.dumps(value)
