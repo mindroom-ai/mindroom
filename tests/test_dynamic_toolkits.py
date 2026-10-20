@@ -1478,23 +1478,45 @@ def test_tool_search_without_a_query_lists_every_deferred_function() -> None:
     assert "tool_search" in payload["usage"]
 
 
-def test_tool_search_listing_stops_at_the_size_limit() -> None:
-    """A listing too large for one result names how many functions it left out."""
-
-    def documented_function(index: int) -> Function:
-        return Function(name=f"bulk_{index}", description="x" * 200, entrypoint=lambda: "ok")
+def _bulk_search_toolkit(count: int, description: str) -> DynamicToolsToolkit:
+    def bulk_function(index: int) -> Function:
+        return Function(name=f"bulk_{index}", description=description, entrypoint=lambda: "ok")
 
     bulk = Toolkit(name="bulk")
-    for index in range(200):
-        bulk.functions[f"bulk_{index}"] = documented_function(index)
-    toolkit = _search_toolkit(_deferred(bulk, "Bulk operations"))
+    for index in range(count):
+        bulk.functions[f"bulk_{index}"] = bulk_function(index)
+    return _search_toolkit(_deferred(bulk, "Bulk operations"))
 
-    result = toolkit.tool_search("")
+
+def test_tool_search_listing_leaves_out_descriptions_before_functions() -> None:
+    """A listing too large with descriptions lists every function by name and toolkit instead."""
+    result = _bulk_search_toolkit(200, "x" * 200).tool_search()
     payload = _tool_payload(result)
 
     assert len(result.encode()) <= 16 * 1024
-    assert 0 < len(payload["functions"]) < 200
-    assert f"{len(payload['functions'])} of 200" in payload["message"]
+    assert payload["functions"][:2] == [{"name": "bulk_0", "toolkit": "bulk"}, {"name": "bulk_1", "toolkit": "bulk"}]
+    assert len(payload["functions"]) == 200
+    assert "Descriptions were left out" in payload["message"]
+
+
+def test_tool_search_listing_stops_at_the_size_limit() -> None:
+    """A listing too large even without descriptions names how many functions it left out."""
+    result = _bulk_search_toolkit(1000, "Bulk operation.").tool_search("")
+    payload = _tool_payload(result)
+
+    assert len(result.encode()) <= 16 * 1024
+    assert 0 < len(payload["functions"]) < 1000
+    assert "description" not in payload["functions"][0]
+    assert f"{len(payload['functions'])} of 1000" in payload["message"]
+
+
+def test_tool_search_lists_functions_for_a_query_without_words() -> None:
+    """A query with no searchable words, such as a wildcard, lists the deferred functions."""
+    toolkit = _search_toolkit(_deferred(_WeatherTools(), "Forecasts"))
+
+    assert _tool_payload(toolkit.tool_search("*"))["functions"] == [
+        {"name": "forecast", "toolkit": "weather", "description": "Return the forecast for a city."},
+    ]
 
 
 def test_tool_search_without_matches_suggests_other_keywords() -> None:

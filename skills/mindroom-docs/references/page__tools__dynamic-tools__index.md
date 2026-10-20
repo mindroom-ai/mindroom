@@ -53,7 +53,7 @@ Toolkit instructions are omitted from the system prompt when every function in t
 On every other model, an agent with at least one deferred tool gets the `dynamic_tools` toolkit, with `tool_search(query, max_results)` and `call_tool(name, arguments)`.
 The system prompt lists the deferred toolkits with their descriptions.
 `tool_search` matches function names, toolkit names, and keywords in descriptions and parameter names, and returns the full definitions of up to `max_results` functions (default 5, at most 20) with the instructions they and their toolkit would otherwise add to the system prompt.
-Without a query, `tool_search` lists the name, toolkit, and description of every deferred function, without definitions.
+Without a query, `tool_search` lists each deferred function's name, toolkit, and description, without definitions; when they do not fit in one result it leaves out the descriptions, and if the names still do not fit it says how many functions it left out.
 The agent then calls a function with `call_tool`, passing its arguments as a JSON object; approval rules, hooks, and the chat display treat the call as a call of that function.
 Discovering and calling deferred tools never changes the tool list or the system prompt, so it does not invalidate the provider's prompt cache.
 Found definitions stay in the conversation until compaction summarizes them, after which the agent searches again.

@@ -57,20 +57,21 @@ class DynamicToolsToolkit(Toolkit):
         return json.dumps({"status": status, "tool": "dynamic_tools", **kwargs}, sort_keys=True)
 
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
-        """Search deferred functions by name or keywords and return their full definitions, or list them all.
+        """Search deferred functions by name or keywords and return their full definitions, or list them.
 
         Call a returned function with call_tool(name, arguments).
 
         Args:
             query: Function name, toolkit name, or keywords describing the needed capability.
-                Leave it empty to list every deferred function without its definition.
+                Leave it empty to list the deferred functions without their definitions.
             max_results: Maximum number of function definitions to return, at most 20.
 
         """
         raw_query = query.strip().lower()
-        if not raw_query:
-            return self._listing()
         query_tokens = _tokens(raw_query)
+        # No function name lacks word characters, so a query without them can only browse.
+        if not query_tokens:
+            return self._listing()
         scored: list[tuple[int, int, DeferredToolkit, dict[str, Any]]] = []
         for deferred in self._deferred_toolkits:
             for definition in _function_definitions(deferred):
@@ -103,8 +104,8 @@ class DynamicToolsToolkit(Toolkit):
         return self._payload("ok", **payload)
 
     def _listing(self) -> str:
-        """List every deferred function's name, toolkit, and description, within the size of one result."""
-        functions = [
+        """List each deferred function's name, toolkit, and description, leaving out descriptions, then functions, to fit."""
+        described = [
             {
                 "name": definition["name"],
                 "toolkit": deferred.domain_name,
@@ -113,22 +114,19 @@ class DynamicToolsToolkit(Toolkit):
             for deferred in self._deferred_toolkits
             for definition in _function_definitions(deferred)
         ]
-        listed: list[dict[str, str]] = []
-        size = _LISTING_ENVELOPE_BYTES
-        for function in functions:
-            size += len(json.dumps(function)) + 2
-            if size > _LISTING_BYTE_LIMIT:
-                break
-            listed.append(function)
+        listed = _within_listing_limit(described)
         payload: dict[str, object] = {
-            "functions": listed,
             "usage": "Call tool_search with a function's exact name to get its definition, then call it with call_tool.",
         }
-        if len(listed) < len(functions):
+        if len(listed) < len(described):
+            listed = _within_listing_limit([{"name": item["name"], "toolkit": item["toolkit"]} for item in described])
             payload["message"] = (
-                f"Listed {len(listed)} of {len(functions)} deferred functions; "
+                "Descriptions were left out to fit the listing."
+                if len(listed) == len(described)
+                else f"Listed {len(listed)} of {len(described)} deferred functions, without descriptions; "
                 "search by keywords or a toolkit name to find the others."
             )
+        payload["functions"] = listed
         return self._payload("ok", **payload)
 
     def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:
@@ -142,6 +140,18 @@ class DynamicToolsToolkit(Toolkit):
             "error",
             message=f"{subject}. Use an exact function name from tool_search and pass arguments as a JSON object.",
         )
+
+
+def _within_listing_limit(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return the leading entries that fit in one listing result."""
+    listed: list[dict[str, str]] = []
+    size = _LISTING_ENVELOPE_BYTES
+    for entry in entries:
+        size += len(json.dumps(entry)) + 2
+        if size > _LISTING_BYTE_LIMIT:
+            break
+        listed.append(entry)
+    return listed
 
 
 def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, Any]:
