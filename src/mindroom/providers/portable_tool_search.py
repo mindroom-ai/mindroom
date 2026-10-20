@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import ast
 import json
+from contextlib import aclosing
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks, install_tool_call_rewrite
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Container, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Container, Coroutine
 
     from agno.models.base import Model
     from agno.models.message import Message
@@ -45,35 +47,65 @@ def install_portable_deferred_tool_search(model: Model, *, deferred_tool_names: 
         return
     vars(model)[_DEFERRED_TOOL_NAMES_ATTR] = frozenset(deferred_tool_names)
 
-    def projected(kwargs: dict[str, Any]) -> dict[str, Any]:
+    def projected(kwargs: dict[str, Any]) -> tuple[dict[str, Any], Callable[[], None]]:
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
-            return kwargs
+            return kwargs, lambda: None
         projected_messages, wire_tools = project_portable_request(
             messages,
             kwargs.get("tools"),
             portable_deferred_tool_names(model),
         )
-        return {**kwargs, "messages": projected_messages, "tools": wire_tools}
+        return {**kwargs, "messages": projected_messages, "tools": wire_tools}, partial(
+            _publish_temporary_message_removal,
+            messages,
+            projected_messages,
+        )
 
     def wrap_invoke(
         original: Callable[..., Coroutine[object, object, ModelResponse]],
     ) -> Callable[..., Coroutine[object, object, ModelResponse]]:
         async def invoke(*args: object, **kwargs: Any) -> ModelResponse:  # noqa: ANN401
-            return await original(*args, **projected(kwargs))
+            request, publish_temporary_message_removal = projected(kwargs)
+            try:
+                return await original(*args, **request)
+            finally:
+                publish_temporary_message_removal()
 
         return invoke
 
     def wrap_stream(
         original: Callable[..., AsyncIterator[ModelResponse]],
     ) -> Callable[..., AsyncIterator[ModelResponse]]:
-        def stream(*args: object, **kwargs: Any) -> AsyncIterator[ModelResponse]:  # noqa: ANN401
-            return original(*args, **projected(kwargs))
+        async def stream(*args: object, **kwargs: Any) -> AsyncIterator[ModelResponse]:  # noqa: ANN401
+            request, publish_temporary_message_removal = projected(kwargs)
+            try:
+                async with aclosing(cast("AsyncGenerator[ModelResponse]", original(*args, **request))) as responses:
+                    async for response in responses:
+                        yield response
+            finally:
+                publish_temporary_message_removal()
 
         return stream
 
     install_async_invocation_hooks(model, marker=_INVOCATION_MARKER, wrap_invoke=wrap_invoke, wrap_stream=wrap_stream)
     install_tool_call_rewrite(model, marker=_REWRITE_MARKER, rewrite=resolve_call_tool_calls)
+
+
+# AGNO_COMPAT: Retry guidance is removed from the request message list instead of run history.
+# Reason: After a malformed function call, Agno's retry loop appends a temporary guidance message to the run's
+# message list, and Gemini removes it after the retry succeeds by rewriting, in place, the list its invoke
+# received. A projected request hands the provider a copy, so without mirroring the removal the guidance stays in
+# run history and is replayed as an ordinary user message on every later turn.
+# Upstream issue: Tracking gap; no Agno issue asks for the retry loop to own removal of its temporary messages.
+# Upstream PR: None identified.
+# Remove when: Agno removes temporary retry messages from the list its retry loop owns rather than inside a
+# provider's invoke.
+# Coverage: tests/test_portable_tool_search.py::test_retry_guidance_the_provider_drops_stays_out_of_history.
+def _publish_temporary_message_removal(messages: list[Message], projected_messages: list[Message]) -> None:
+    """Drop temporary messages from ``messages`` once the provider has dropped them from its projected request."""
+    if any(message.temporary for message in messages) and not any(message.temporary for message in projected_messages):
+        messages[:] = [message for message in messages if not message.temporary]
 
 
 def portable_deferred_tool_names(model: object) -> frozenset[str]:

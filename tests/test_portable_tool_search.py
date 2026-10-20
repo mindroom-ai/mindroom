@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.agent import Agent
+from agno.exceptions import RetryableModelProviderError
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -246,6 +247,22 @@ class _ScriptedModel(SyntheticModel):
         yield await self.ainvoke(messages, **kwargs)
 
 
+class _GuidanceRetryModel(_ScriptedModel):
+    """Fail the first request like Gemini's malformed function call, then drop the retry guidance it was sent."""
+
+    async def ainvoke(self, messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
+        if not self.requests:
+            self.requests.append((list(messages), kwargs.get("tools")))
+            raise RetryableModelProviderError(
+                retry_guidance_message="Retry with valid JSON.",
+                original_error="malformed",
+            )
+        response = await super().ainvoke(messages, **kwargs)
+        if kwargs.get("retry_with_guidance") is True:
+            self._remove_temporary_messages(messages)
+        return response
+
+
 async def _run(agent: Agent, *, stream: bool) -> RunOutput:
     if not stream:
         output = await agent.arun("Look up customers 7 and 8")
@@ -299,6 +316,25 @@ async def test_installed_model_routes_call_tool_and_keeps_real_names_in_history(
     assert _call_names(model.requests[2][0]) == ["call_tool", "call_tool"]
     assert {message.tool_name for message in model.requests[2][0] if message.role == "tool"} == {"call_tool"}
     assert _call_names(output.messages or []) == ["crm_lookup", "crm_lookup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_retry_guidance_the_provider_drops_stays_out_of_history(*, stream: bool) -> None:
+    def crm_lookup(customer_id: int) -> str:
+        return f"customer {customer_id}"
+
+    model = _GuidanceRetryModel([ModelResponse(), ModelResponse(content="done")])
+    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
+    agent = Agent(name="Assistant", model=model, tools=[crm_lookup], telemetry=False)
+
+    output = await _run(agent, stream=stream)
+
+    assert output.content == "done"
+    assert [message.content for message in model.requests[1][0] if message.temporary] == ["Retry with valid JSON."]
+    assert [message.content for message in output.messages or [] if message.role == "user"] == [
+        "Look up customers 7 and 8",
+    ]
 
 
 @pytest.mark.asyncio
