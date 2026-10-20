@@ -548,7 +548,7 @@ class OutlookCalendarTools(Toolkit):
 
         Before calling, tell the requester the meeting's subject, time, and organizer, the response, and any comment,
         because an approval prompt may show only IDs. With send_response, the organizer receives the response and
-        comment by email; a declined meeting leaves the requester's calendar.
+        comment by email.
 
         Args:
             event_id: An event id from outlook_calendar_list_events.
