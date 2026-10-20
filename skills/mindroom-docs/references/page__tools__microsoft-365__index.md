@@ -47,7 +47,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive and Outlook mail but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail, and Outlook calendars but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -151,8 +151,10 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 
 Event times in results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
+Calendar and event listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
 Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
+Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
 Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
@@ -205,6 +207,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
+| `online_meeting_unavailable` | The calendar has no default online meeting provider, such as Teams, so the event cannot get a join link; create it without an online meeting. |
 | `online_meeting_body` | The update tried to replace an online meeting's description; change the other fields, or edit the description in Outlook. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
