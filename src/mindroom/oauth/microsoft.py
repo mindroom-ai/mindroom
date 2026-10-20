@@ -20,6 +20,7 @@ __all__ = [
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
     "microsoft_token_url",
+    "outlook_mail_oauth_provider",
 ]
 
 _CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
@@ -128,4 +129,14 @@ def microsoft_files_oauth_provider() -> OAuthProvider:
         display_name="Microsoft OneDrive and SharePoint",
         scopes=("Files.ReadWrite.All",),
         status_capabilities=("search, read, and save OneDrive and SharePoint files",),
+    )
+
+
+def outlook_mail_oauth_provider() -> OAuthProvider:
+    """Return the Outlook mail provider."""
+    return microsoft_oauth_provider(
+        provider_id="outlook_mail",
+        display_name="Outlook Mail",
+        scopes=("Mail.ReadWrite", "Mail.Send"),
+        status_capabilities=("search, read, draft, send, and organize Outlook mail",),
     )
