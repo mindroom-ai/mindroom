@@ -163,8 +163,8 @@ _HTML_CELL_BREAK = "\t"
 class _HtmlText(HTMLParser):
     """Collect an HTML fragment's visible text.
 
-    Lines break at `br`, rows, and block elements, cells on a row are marked apart, emoji keep their alt text,
-    and quoted lines start with `> ` for each quote level.
+    Lines break at `br`, rows, and block elements, cells on a row are marked apart, images show as `[image]`,
+    emoji keep their alt text, and quoted lines start with `> ` for each quote level.
     """
 
     def __init__(self) -> None:
@@ -188,6 +188,8 @@ class _HtmlText(HTMLParser):
             self._break_line()
         elif tag in _HTML_CELL_TAGS and not self._line_start:
             self.parts.append(_HTML_CELL_BREAK)
+        elif tag == "img":
+            self.handle_data("[image]")
         elif tag == "emoji":
             # Teams sends an emoji as an empty element whose alt attribute is the emoji itself.
             self.handle_data(dict(attrs).get("alt") or "")
@@ -215,7 +217,8 @@ class _HtmlText(HTMLParser):
 def html_to_text(html: str) -> str:
     """Return the readable text of an HTML body: tags dropped, entities decoded, line breaks and quotes kept.
 
-    Cells on a table row are separated by ` | `, and quoted lines start with `> ` for each quote level.
+    Cells on a table row are separated by ` | `, images show as `[image]`, and quoted lines start with `> ` for each
+    quote level.
     """
     parser = _HtmlText()
     parser.feed(html)
