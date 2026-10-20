@@ -125,7 +125,6 @@ def test_registered_metadata_declares_a_primary_runtime_tool_without_files() -> 
     assert metadata.file_access == ToolFileAccess.NONE
     assert metadata.consumes_workspace_paths is False
     assert metadata.icon == "TbBrandTeams"
-    assert metadata.function_names == microsoft_teams.FUNCTION_NAMES
 
 
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,7 +142,7 @@ def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.Mo
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    assert set(tools.functions) == set(microsoft_teams.FUNCTION_NAMES)
+    assert set(tools.functions) == set(TOOL_METADATA["microsoft_teams"].function_names)
 
 
 def test_send_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
@@ -20,22 +22,10 @@ from mindroom.oauth.microsoft import microsoft_teams_oauth_provider
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.custom_tools.microsoft_graph import GraphSession
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-FUNCTION_NAMES = (
-    "microsoft_teams_list_teams",
-    "microsoft_teams_list_channels",
-    "microsoft_teams_list_channel_messages",
-    "microsoft_teams_list_chats",
-    "microsoft_teams_list_chat_messages",
-    "microsoft_teams_send_channel_message",
-    "microsoft_teams_reply_to_channel_message",
-    "microsoft_teams_send_chat_message",
-)
 _WRITE_FUNCTIONS = frozenset(
     {
         "microsoft_teams_send_channel_message",
