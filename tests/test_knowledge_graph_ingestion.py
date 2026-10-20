@@ -806,11 +806,22 @@ async def test_no_more_graphs_than_the_limit_are_ingested_at_once(tmp_path: Path
     config = _config()
     config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
     paths, store = _paths(tmp_path), _InFlightStore()
-    _seed(config, paths, "!room:x:$m1", ["m1"])
-    _seed(config, paths, "!room:x:$p1", ["p1"], agent="pal")
+    at = int(time.time()) - 10
+    _seed(config, paths, "!room:x:$m1", ["m1"], at=at)
+    _seed(config, paths, "!room:x:$p1", ["p1"], at=at, agent="pal")
+
+    async def both_ingested() -> None:
+        while len(set(store.sessions())) < 2:
+            store.added.clear()
+            await store.added.wait()
 
     with patch.object(ingestion, "_CONCURRENT_GRAPHS", 1):
-        await _pass(_worker(config, paths, store), config, now=T0 + 10)
+        task = asyncio.create_task(_worker(config, paths, store).run())
+        try:
+            await asyncio.wait_for(both_ingested(), timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     assert sorted(store.sessions()) == ["!room:x:$m1", "!room:x:$p1"]
     assert not store.overlapped.is_set()
@@ -839,18 +850,17 @@ async def test_a_pass_that_ingested_something_starts_the_next_at_once(tmp_path: 
 
 @dataclass
 class _HeldStore(_FakeStore):
-    """Holds one graph's episodes until released, as a long extraction would, and counts how many are in flight."""
+    """Holds one graph's episodes until released, as a long extraction would, and counts the ones held now."""
 
     held_graph: str = ""
+    hold_all: bool = False
     release: asyncio.Event = field(default_factory=asyncio.Event)
     holding: asyncio.Event = field(default_factory=asyncio.Event)
     in_flight: int = 0
-    most_in_flight: int = 0
 
     async def add_episode(self, scope: GraphScope, episode: EpisodeInput, usage: UsageTarget) -> None:
-        if scope.graph_name == self.held_graph:
+        if self.hold_all or scope.graph_name == self.held_graph:
             self.in_flight += 1
-            self.most_in_flight = max(self.most_in_flight, self.in_flight)
             self.holding.set()
             try:
                 await self.release.wait()
@@ -1007,6 +1017,75 @@ async def test_a_look_during_a_pass_costs_one_more_pass_and_no_more(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_a_graph_whose_pass_loop_ended_is_filled_again_by_a_later_look(tmp_path: Path) -> None:
+    """A graph that ran out of work starts a new pass loop when the worker next looks, such as on a wake."""
+    config = _config(interval_seconds=3600)
+    paths, store = _paths(tmp_path), _FakeStore()
+    worker = _worker(config, paths, store)
+    ended = asyncio.Event()
+    real_fill = worker._fill
+
+    async def signalled_fill(graph_name: str) -> None:
+        await real_fill(graph_name)
+        ended.set()
+
+    with patch.object(worker, "_fill", signalled_fill):
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(ended.wait(), timeout=10)
+            _seed(config, paths, "!room:x:$t1", ["r1"], at=int(time.time()) - 10)
+            wake_knowledge_graph_ingestion(after_seconds=0)
+            await asyncio.wait_for(store.added.wait(), timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert store.sessions() == ["!room:x:$t1"]
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_waited_for_a_place_runs_on_the_settings_after_the_wait(tmp_path: Path) -> None:
+    """A graph queued behind another's pass when the generation changes runs no pass on its old graph."""
+    config = _config(interval_seconds=3600)
+    config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
+    paths, store = _paths(tmp_path), _HeldStore(hold_all=True)
+    at = int(time.time()) - 10
+    _seed(config, paths, "!room:x:$m1", ["m1"], at=at)
+    _seed(config, paths, "!room:x:$p1", ["p1"], at=at, agent="pal")
+    changed = config.model_copy(deep=True)
+    changed.knowledge_graph.generation = 1
+    current = config
+    old = {graph_scope(agent, config, paths, None).graph_name for agent in ("mind", "pal")}
+    new = {graph_scope(agent, changed, paths, None).graph_name for agent in ("mind", "pal")}
+
+    async def new_graphs_filled() -> None:
+        while not new <= {graph for graph, _, _ in store.episodes}:
+            store.added.clear()
+            await store.added.wait()
+
+    with patch.object(ingestion, "_CONCURRENT_GRAPHS", 1):
+        worker = KnowledgeGraphIngestionWorker(
+            runtime_paths=paths,
+            config_provider=lambda: current,
+            store=store,
+            redacted_event_ids=_no_redactions,
+        )
+        task = asyncio.create_task(worker.run())
+        try:
+            # One graph's pass holds the only place while the other's waits for it.
+            await asyncio.wait_for(store.holding.wait(), timeout=10)
+            current = changed
+            store.release.set()
+            await asyncio.wait_for(new_graphs_filled(), timeout=10)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    # Only the pass already running when the generation changed added to an old graph.
+    assert len({graph for graph, _, _ in store.episodes if graph in old}) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_graph_no_longer_maintained_stops_filling_after_its_current_pass(tmp_path: Path) -> None:
     """After a generation change, the old graph finishes the pass it is in and takes no further pass."""
     config = _config(max_sessions_per_cycle=1)
@@ -1074,26 +1153,46 @@ class _HeldSessionStore(_FakeStore):
 
 
 @pytest.mark.asyncio
-async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure", ["extraction", "redaction check", "unreadable"])
+async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_path: Path, failure: str) -> None:
     """Another graph's clean pass ending meanwhile does not clear a failure from a pass that is still running."""
     config = _config()
     config.agents["pal"] = AgentConfig(display_name="Pal", knowledge_graph=True)
     paths = _paths(tmp_path)
-    store = _HeldSessionStore(failing={"!room:x:$bad"}, held_session="!room:x:$slow")
+    store = _HeldSessionStore(held_session="!room:x:$slow")
+    if failure == "extraction":
+        store.failing.add("!room:x:$bad")
     _seed(config, paths, "!room:x:$bad", ["b1"], at=T0)
     _seed(config, paths, "!room:x:$slow", ["s1"], at=T0 + 5)
     _seed(config, paths, "!room:x:$good", ["g1"], agent="pal")
-    worker = _worker(config, paths, store)
-    mind = asyncio.create_task(worker._ingest_graph(config, graph_scope("mind", config, paths, None), now=T0 + 100))
-    try:
-        await asyncio.wait_for(store.holding.wait(), timeout=10)
-        assert knowledge_graph_failure() is not None
+    real = ingestion.session_runs
 
-        assert await worker._ingest_graph(config, graph_scope("pal", config, paths, None), now=T0 + 100) is True
-        assert knowledge_graph_failure() is not None
-    finally:
-        store.release.set()
-        await mind
+    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
+        del agent_name, room_id
+        if failure == "redaction check" and "$event-b1" in event_ids:
+            msg = "event journal unavailable"
+            raise RuntimeError(msg)
+        return frozenset()
+
+    def runs(storage: object, session_id: str) -> list[RunOutput]:
+        if failure == "unreadable" and session_id == "!room:x:$bad":
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id)
+
+    worker = _worker(config, paths, store, redacted)
+    with patch.object(ingestion, "session_runs", runs):
+        mind_scope = graph_scope("mind", config, paths, None)
+        mind = asyncio.create_task(worker._ingest_graph(config, mind_scope, now=T0 + 100))
+        try:
+            await asyncio.wait_for(store.holding.wait(), timeout=10)
+            assert knowledge_graph_failure() is not None
+
+            assert await worker._ingest_graph(config, graph_scope("pal", config, paths, None), now=T0 + 100) is True
+            assert knowledge_graph_failure() is not None
+        finally:
+            store.release.set()
+            await mind
 
     assert sorted(store.sessions()) == ["!room:x:$good", "!room:x:$slow"]
     assert knowledge_graph_failure() is not None
