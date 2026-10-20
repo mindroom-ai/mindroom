@@ -1568,15 +1568,19 @@ def test_tool_search_ranks_functions_matching_more_query_words_first() -> None:
     ("provider", "model_id"),
     [("openai", "gpt-4o-mini"), ("anthropic", "claude-opus-5")],
 )
-def test_deferred_function_shadowed_by_an_eager_one_stays_eager_and_unsearchable(
+@pytest.mark.parametrize("deferred_first", [False, True])
+def test_config_order_decides_which_same_named_function_is_registered(
     tmp_path: Path,
     provider: str,
     model_id: str,
+    *,
+    deferred_first: bool,
 ) -> None:
-    """Agno runs the first toolkit's function for a name, so a later deferred duplicate is neither hidden nor offered."""
+    """Agno registers the first toolkit's function for a name; deferral follows that owner and search offers only it."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    raw["agents"]["code"]["tools"] = ["file", {"coding": {"defer": True}}]  # type: ignore[index]
+    tools: list[object] = ["file", {"coding": {"defer": True}}]
+    raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
     agent = create_agent("code", config, _runtime_paths(tmp_path), execution_identity=None)
@@ -1585,12 +1589,12 @@ def test_deferred_function_shadowed_by_an_eager_one_stays_eager_and_unsearchable
         _DEFERRED_TOOL_NAMES_ATTR,
         frozenset(),
     )
-    assert "read_file" not in deferred_names
-    assert deferred_names
+    assert ("read_file" in deferred_names) is deferred_first
     search = next((tool for tool in agent.tools if tool.name == "dynamic_tools"), None)
     if search is not None:
         matches = _tool_payload(search.tool_search("read_file"))["matches"]
-        assert all(match["name"] != "read_file" for match in matches)
+        offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
+        assert offered == (["coding"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

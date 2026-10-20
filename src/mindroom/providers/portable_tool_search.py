@@ -144,8 +144,8 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     if arguments is None:
         return call
     # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
-    # the call too; nested arguments win a conflict.
-    extras = {key: value for key, value in payload.items() if key not in {"name", "arguments"}}
+    # the call too; nested arguments win a conflict, and a null extra means the key was omitted.
+    extras = {key: value for key, value in payload.items() if key not in {"name", "arguments"} and value is not None}
     resolved_arguments = json.dumps({**extras, **arguments}, ensure_ascii=False)
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 

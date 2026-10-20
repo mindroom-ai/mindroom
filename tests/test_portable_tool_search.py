@@ -157,6 +157,15 @@ def test_resolve_merges_top_level_extras_into_arguments() -> None:
     assert json.loads(resolved["function"]["arguments"]) == {"customer_id": 7, "background_after": 0}
 
 
+def test_resolve_drops_null_top_level_extras() -> None:
+    # A null background_after means the same as omitting it, and inline-only functions reject the key.
+    call = _call("c1", "call_tool", '{"name": "crm_lookup", "arguments": {"id": 7}, "background_after": null}')
+
+    [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+
+    assert json.loads(resolved["function"]["arguments"]) == {"id": 7}
+
+
 def test_resolve_prefers_nested_arguments_over_top_level_extras() -> None:
     call = _call("c1", "call_tool", '{"name": "crm_lookup", "customer_id": 1, "arguments": {"customer_id": 7}}')
 
