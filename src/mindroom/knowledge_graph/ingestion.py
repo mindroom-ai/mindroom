@@ -249,7 +249,7 @@ class KnowledgeGraphIngestionWorker:
         """
         outcomes: list[bool] = []
         progressed: list[bool] = []
-        # One agent or private instance whose conversations cannot be read must not stop the others.
+        # A pass that fails holds its graph's health failing and leaves its pass loop running.
         try:
             # These read files, so they stay off the event loop.
             automation_thread_ids = await asyncio.to_thread(automation_threads, self.runtime_paths)
@@ -286,13 +286,13 @@ class KnowledgeGraphIngestionWorker:
             self._hold_failure(scope, "Knowledge graph ingestion failed for an agent", exc)
             outcomes.append(False)
             progressed = []
-        # A pass that tried nothing says nothing about the graph, so it neither holds nor clears a failure.
+        # A pass that tried nothing drops the graph's outcome, so the graph no longer holds health failing.
         if outcomes:
             self._clean[scope.graph_name] = all(outcomes)
         else:
             self._clean.pop(scope.graph_name, None)
-        # Health reports a failure until a pass ingests something cleanly while every other graph's last pass that
-        # tried something was clean too, and no conversation's last attempt failed.
+        # Health clears at the end of any pass once every maintained graph's last pass that tried something was clean;
+        # a conversation still waiting for its retry makes each of its graph's passes unclean.
         if self._clean and all(self._clean.values()):
             record_knowledge_graph_failure(None)
         return bool(progressed)

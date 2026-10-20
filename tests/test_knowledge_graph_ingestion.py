@@ -1086,6 +1086,40 @@ async def test_a_pass_that_waited_for_a_place_runs_on_the_settings_after_the_wai
 
 
 @pytest.mark.asyncio
+async def test_graphs_that_cannot_be_listed_are_reported_and_looked_for_again(tmp_path: Path) -> None:
+    """A failure to list the maintained graphs is reported, ends that pass loop, and leaves the worker running."""
+    config, paths = _config(interval_seconds=3600), _paths(tmp_path)
+    worker = _worker(config, paths, _FakeStore())
+    reported = asyncio.Event()
+    real_report = ingestion._report_failure
+
+    def unlisted(config: Config, runtime_paths: RuntimePaths) -> list[GraphScope]:
+        del config, runtime_paths
+        msg = "private instance records unreadable"
+        raise OSError(msg)
+
+    def signalled_report(message: str, exc: Exception, **context: str) -> None:
+        real_report(message, exc, **context)
+        reported.set()
+
+    with (
+        patch.object(ingestion, "graph_scopes", unlisted),
+        patch.object(ingestion, "_report_failure", signalled_report),
+    ):
+        await asyncio.wait_for(worker._fill(graph_scope("mind", config, paths, None).graph_name), timeout=10)
+        assert "OSError" in (knowledge_graph_failure() or "")
+
+        reported.clear()
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(reported.wait(), timeout=10)
+            assert not task.done()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_a_graph_no_longer_maintained_stops_filling_after_its_current_pass(tmp_path: Path) -> None:
     """After a generation change, the old graph finishes the pass it is in and takes no further pass."""
     config = _config(max_sessions_per_cycle=1)
