@@ -81,7 +81,7 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
     )
     poll_interval_seconds: int | None = Field(
         default=None,

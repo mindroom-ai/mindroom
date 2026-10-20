@@ -89,7 +89,7 @@ from mindroom.knowledge.registry import (
     save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
-from mindroom.knowledge.watch import KnowledgeSourceWatcher
+from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
 from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -1297,18 +1297,19 @@ def _assert_poller_lifecycle_logged(
         assert {field: matching[0][field] for field in expected_fields} == expected_fields
 
 
+def _polled_docs_config(tmp_path: Path, docs_path: Path, *, git: bool) -> Config:
+    """Configure one shared base polled every 5 seconds through its Git source or the local poll interval."""
+    if git:
+        git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
+        return _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    return _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], poll_intervals={"docs": 5})
+
+
 @pytest.mark.asyncio
-async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
-    """Shared Git bases should not burst refresh work immediately when runtime support starts."""
-    docs_path = tmp_path / "docs"
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
-        watch=False,
-    )
+@pytest.mark.parametrize("git", [True, False], ids=["git", "local"])
+async def test_knowledge_polling_waits_before_startup_refresh(tmp_path: Path, git: bool) -> None:
+    """Polled shared bases should not burst refresh work immediately when runtime support starts."""
+    config = _polled_docs_config(tmp_path, tmp_path / "docs", git=git)
     runtime_paths = runtime_paths_for(config)
     refresh_scheduler = MagicMock()
     source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
@@ -1321,24 +1322,23 @@ async def test_git_knowledge_polling_waits_before_startup_refresh(tmp_path: Path
             await source_watcher.shutdown()
 
     refresh_scheduler.schedule_refresh.assert_not_called()
-    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=True)
+    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=git)
 
 
 @pytest.mark.asyncio
-async def test_git_knowledge_polling_repeats_after_poll_interval(
+@pytest.mark.parametrize(
+    ("git", "docs_dir"),
+    [(True, "docs"), (False, "docs"), (False, "not-yet-created/docs")],
+    ids=["git", "local", "local-missing-directory"],
+)
+async def test_knowledge_polling_repeats_after_poll_interval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    git: bool,
+    docs_dir: str,
 ) -> None:
-    """Shared Git bases should keep scheduling refreshes on their configured poll interval."""
-    docs_path = tmp_path / "docs"
-    git_config = KnowledgeGitConfig(repo_url="https://example.com/org/repo.git", poll_interval_seconds=5)
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        git_configs={"docs": git_config},
-        watch=False,
-    )
+    """Polled shared bases keep scheduling refreshes on their interval, even before the first writer creates the folder."""
+    config = _polled_docs_config(tmp_path, tmp_path / docs_dir, git=git)
     runtime_paths = runtime_paths_for(config)
     second_schedule = asyncio.Event()
     refresh_scheduler = MagicMock()
@@ -1369,7 +1369,7 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
                 break
             await asyncio.sleep(0)
         else:
-            pytest.fail("Git poller did not schedule refresh after interval")
+            pytest.fail("Poller did not schedule refresh after interval")
     finally:
         await source_watcher.shutdown()
 
@@ -1378,157 +1378,10 @@ async def test_git_knowledge_polling_repeats_after_poll_interval(
     assert [call.args for call in refresh_scheduler.schedule_refresh.call_args_list] == [("docs",), ("docs",)]
 
 
-@pytest.mark.asyncio
-async def test_local_knowledge_polling_repeats_after_poll_interval(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shared local bases with a poll interval keep scheduling refreshes, so writes from other hosts get indexed."""
-    docs_path = tmp_path / "docs"
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        poll_intervals={"docs": 5},
-        watch=False,
-    )
-    runtime_paths = runtime_paths_for(config)
-    second_schedule = asyncio.Event()
-    refresh_scheduler = MagicMock()
-
-    def _record_schedule(*_args: object, **_kwargs: object) -> None:
-        if refresh_scheduler.schedule_refresh.call_count == 2:
-            second_schedule.set()
-
-    refresh_scheduler.schedule_refresh.side_effect = _record_schedule
-    wait_calls = 0
-
-    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
-        nonlocal wait_calls
-        assert kwargs == {"timeout": 5.0}
-        wait_calls += 1
-        if wait_calls <= 2:
-            awaitable.close()
-            raise TimeoutError
-        return await awaitable
-
-    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
-
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    try:
-        for _attempt in range(50):
-            if second_schedule.is_set():
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("Local poller did not schedule refresh after interval")
-    finally:
-        await source_watcher.shutdown()
-
-    assert refresh_scheduler.schedule_refresh.call_count >= 2
-    assert wait_calls >= 2
-    assert {call.args for call in refresh_scheduler.schedule_refresh.call_args_list} == {("docs",)}
-
-
-@pytest.mark.asyncio
-async def test_local_knowledge_polling_waits_before_startup_refresh(tmp_path: Path) -> None:
-    """A local poller waits one interval first, so runtime start-up does not burst refresh work."""
-    docs_path = tmp_path / "docs"
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        poll_intervals={"docs": 5},
-        watch=False,
-    )
-    runtime_paths = runtime_paths_for(config)
-    refresh_scheduler = MagicMock()
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
-
-    with capture_logs() as logs:
-        await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-        try:
-            await asyncio.sleep(0)
-        finally:
-            await source_watcher.shutdown()
-
-    refresh_scheduler.schedule_refresh.assert_not_called()
-    _assert_poller_lifecycle_logged(logs, base_id="docs", poll_interval_seconds=5.0, git=False)
-
-
-@pytest.mark.asyncio
-async def test_local_knowledge_without_poll_interval_starts_no_poller(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without poll_interval_seconds a local base starts no poller, even once the wait would time out."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], watch=False)
-    runtime_paths = runtime_paths_for(config)
-    refresh_scheduler = MagicMock()
-
-    async def _timeout_immediately(awaitable: Coroutine[object, object, object], **_kwargs: object) -> object:
-        awaitable.close()
-        raise TimeoutError
-
-    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _timeout_immediately)
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
-
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    try:
-        for _attempt in range(10):
-            await asyncio.sleep(0)
-    finally:
-        await source_watcher.shutdown()
-
-    refresh_scheduler.schedule_refresh.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_local_knowledge_polling_tolerates_missing_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A poller for a folder that does not exist yet still schedules refreshes, so the first writer can create it."""
-    docs_path = tmp_path / "not-yet-created" / "docs"
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        poll_intervals={"docs": 5},
-        watch=False,
-    )
-    runtime_paths = runtime_paths_for(config)
-    first_schedule = asyncio.Event()
-    refresh_scheduler = MagicMock()
-    refresh_scheduler.schedule_refresh.side_effect = lambda *_args, **_kwargs: first_schedule.set()
-    wait_calls = 0
-
-    async def _fake_wait_for(awaitable: Coroutine[object, object, object], **kwargs: object) -> object:
-        nonlocal wait_calls
-        assert kwargs == {"timeout": 5.0}
-        wait_calls += 1
-        if wait_calls == 1:
-            awaitable.close()
-            raise TimeoutError
-        return await awaitable
-
-    monkeypatch.setattr("mindroom.knowledge.watch.asyncio.wait_for", _fake_wait_for)
-    source_watcher = KnowledgeSourceWatcher(refresh_scheduler)
-
-    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
-    try:
-        for _attempt in range(50):
-            if first_schedule.is_set():
-                break
-            await asyncio.sleep(0)
-        else:
-            pytest.fail("Local poller did not schedule refresh for a missing directory")
-    finally:
-        await source_watcher.shutdown()
-
-    assert refresh_scheduler.schedule_refresh.call_count >= 1
+def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) -> None:
+    """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    assert _shared_poll_targets(config, runtime_paths_for(config)) == {}
 
 
 @pytest.mark.asyncio
