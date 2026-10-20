@@ -493,21 +493,26 @@ def test_listings_refuse_a_foreign_page_token_before_any_request(
         ("microsoft_teams_send_chat_message", (CHAT,), f"/v1.0/chats/{CHAT}/messages"),
     ],
 )
-def test_sends_post_plain_text(
+def test_sends_post_escaped_text_with_line_breaks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     function: str,
     args: tuple[str, ...],
     path: str,
 ) -> None:
-    text = "Ship it <b>today</b> & tell <at>everyone</at>"
+    text = "Ship it <b>today</b> & tell <at>everyone</at>\r\nThen rest"
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_message(content=text), status=201))
 
     result = _payload(getattr(tools, function)(*args, text))
 
     [request] = graph.requests
     assert (request.method, _raw_path(request)) == ("POST", path)
-    assert json.loads(request.content) == {"body": {"contentType": "text", "content": text}}
+    assert json.loads(request.content) == {
+        "body": {
+            "contentType": "html",
+            "content": "Ship it &lt;b&gt;today&lt;/b&gt; &amp; tell &lt;at&gt;everyone&lt;/at&gt;<br>Then rest",
+        },
+    }
     assert result["status"] == "ok"
     assert result["message"]["id"] == MESSAGE
     assert result["message"]["body"] == text
@@ -576,8 +581,9 @@ def test_limits_outside_one_to_fifty_are_refused(
         (None, "invalid_argument"),
         ("é" * (microsoft_teams._MAX_MESSAGE_BYTES // 2 + 1), "too_large"),
         ("x" * (microsoft_teams._MAX_MESSAGE_BYTES + 1), "too_large"),
+        ("<" * (microsoft_teams._MAX_MESSAGE_BYTES // 4 + 1), "too_large"),
     ],
-    ids=["empty", "blank", "none", "multibyte-over-limit", "ascii-over-limit"],
+    ids=["empty", "blank", "none", "multibyte-over-limit", "ascii-over-limit", "escaped-over-limit"],
 )
 @pytest.mark.parametrize(
     "call",
