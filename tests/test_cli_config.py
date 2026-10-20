@@ -299,7 +299,6 @@ class TestConfigInit:
         assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
-            "coding",
             "memory",
             "scheduler",
             "update_awareness",

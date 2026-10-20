@@ -1226,7 +1226,6 @@ agents:
       - HEARTBEAT.md
     tools:
       - shell
-      - coding
       - memory
       - scheduler
       - update_awareness

@@ -86,7 +86,6 @@ agents:
     - HEARTBEAT.md
     tools:
     - shell
-    - coding
     - memory
     - scheduler
     - todo
