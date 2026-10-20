@@ -1428,6 +1428,7 @@ visibility = [
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
+    "mindroom.custom_tools.microsoft_graph",
     "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",

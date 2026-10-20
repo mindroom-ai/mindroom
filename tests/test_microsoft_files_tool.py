@@ -178,6 +178,8 @@ def test_a_sharing_link_resolves_through_shares(tmp_path: Path, monkeypatch: pyt
 
     assert (result["file"]["drive_id"], result["file"]["item_id"]) == (DRIVE, ITEM)
     assert graph.calls()[0].endswith("/driveItem")
+    # Redeeming the link grants the lasting access the direct item requests that follow need.
+    assert graph.requests[0].headers["prefer"] == "redeemSharingLink"
 
 
 @pytest.mark.parametrize(
@@ -440,7 +442,9 @@ def test_excel_read_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypa
     )
     tools, _graph = _tools(tmp_path, monkeypatch, files)
 
-    assert _payload(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget"))["code"] == "too_large"
+    result = _payload(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget"))
+
+    assert (result["code"], result["address"]) == ("too_large", "A1:GR100")
 
 
 def test_excel_update_range_patches_the_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

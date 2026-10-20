@@ -17,14 +17,12 @@ if TYPE_CHECKING:
 __all__ = [
     "ACCOUNT_LOOKUP_TIMEOUT_SECONDS",
     "GRAPH_ME_URL",
-    "MICROSOFT_CLIENT_CONFIG_SERVICE",
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
-    "microsoft_tenant",
     "microsoft_token_url",
 ]
 
-MICROSOFT_CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
+_CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
 _TENANT_ENV = "MICROSOFT_TENANT_ID"
 GRAPH_ME_URL = "https://graph.microsoft.com/v1.0/me"
 ACCOUNT_LOOKUP_TIMEOUT_SECONDS = 5.0
@@ -40,7 +38,7 @@ def _endpoint(tenant: str, kind: str) -> str:
     return f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/{kind}"
 
 
-def microsoft_tenant(runtime_paths: RuntimePaths) -> str:
+def _microsoft_tenant(runtime_paths: RuntimePaths) -> str:
     """Return the Microsoft Entra tenant that sign-in and token requests use."""
     tenant = (runtime_paths.env_value(_TENANT_ENV) or _DEFAULT_TENANT).strip()
     if not _TENANT.fullmatch(tenant):
@@ -51,11 +49,11 @@ def microsoft_tenant(runtime_paths: RuntimePaths) -> str:
 
 def microsoft_token_url(runtime_paths: RuntimePaths) -> str:
     """Return the token endpoint of the configured tenant, which every stored connection must be bound to."""
-    return _endpoint(microsoft_tenant(runtime_paths), "token")
+    return _endpoint(_microsoft_tenant(runtime_paths), "token")
 
 
 async def _microsoft_runtime_endpoints(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
-    tenant = microsoft_tenant(runtime_paths)
+    tenant = _microsoft_tenant(runtime_paths)
     return OAuthRuntimeEndpoints(
         authorization_url=_endpoint(tenant, "authorize"),
         token_url=microsoft_token_url(runtime_paths),
@@ -113,7 +111,7 @@ def microsoft_oauth_provider(
         credential_service=f"{provider_id}_oauth",
         tool_config_service=provider_id,
         client_config_services=(f"{provider_id}_oauth_client",),
-        shared_client_config_services=(MICROSOFT_CLIENT_CONFIG_SERVICE,),
+        shared_client_config_services=(_CLIENT_CONFIG_SERVICE,),
         token_endpoint_auth_method="client_secret_post",  # noqa: S106
         pkce_code_challenge_method="S256",
         requester_scoped_credentials=True,

@@ -27,8 +27,8 @@ Microsoft's Work IQ MCP server can read most Microsoft 365 data, but its writes 
   The tools call Graph with `httpx`, as the Atlassian tools call their gateway.
   The Microsoft Graph SDK and MSAL were rejected as heavy dependencies that the primary's import graph would have to defer, for a REST surface of a few dozen calls.
   Tokens stay in the primary runtime and are sent only to `graph.microsoft.com`.
-- **Workspace files follow `file_access`.**
-  Downloads, uploads, and mail attachments read and write the agent workspace from the primary runtime and follow the agent's `file_access`, as Google Drive and Gmail do.
+- **Uploads follow `file_access`; downloads stay in the workspace.**
+  Uploads and outgoing mail attachments read workspace files from the primary runtime and follow the agent's `file_access`, and downloads always write into the workspace, as Google Drive and Gmail do.
   Uploads use Graph's single-request upload, which accepts up to 250 MB; mail attachments use inline attachments, which Graph caps at 3 MB each.
 - **Downloads survive the end of `tempauth` links.**
   Graph answers a content download with a redirect to a pre-authenticated SharePoint URL until Microsoft retires those URLs on 2027-04-01 (MC1492958), and with the content itself afterwards.
@@ -39,7 +39,7 @@ Microsoft's Work IQ MCP server can read most Microsoft 365 data, but its writes 
 - **Excel ranges through the files connection.**
   Reading and updating worksheet ranges uses the same `Files.ReadWrite.All` grant, so those functions live in the files toolkit instead of a separate provider that would need its own connection.
 - **Optimistic concurrency for replaces.**
-  Replacing a file takes the eTag the agent downloaded and sends it as `If-Match`, so an edit someone made since fails instead of being overwritten; a new upload never overwrites an existing name.
+  Replacing a file requires the eTag the edit started from and sends it as `If-Match`, so an edit someone made since fails instead of being overwritten; a new upload never overwrites an existing name.
 - **No approval rule by default.**
   Like Gmail and Google Drive, these tools run without approval unless the operator adds `tool_approval` rules; the docs give rules for sending and writing.
   Each tool's `write` setting registers or removes its write functions, but scopes stay read-write, because separate read-only providers would double the consent and connection surface.

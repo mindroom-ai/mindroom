@@ -19,7 +19,7 @@ Every provider also requests `User.Read`, to label the connected account, and `o
 An administrator registers one app in Microsoft Entra for the MindRoom installation, and every Microsoft 365 tool uses it.
 
 1. In the [Microsoft Entra admin center](https://entra.microsoft.com), open **App registrations** and choose **New registration**.
-2. Under **Supported account types**, choose your organization only, or any organization's accounts if people from several tenants connect.
+2. Under **Supported account types**, choose your organization only, any organization's accounts if people from several tenants connect, or also personal Microsoft accounts if people use those.
 3. Add a **Web** redirect URI for each tool you enable, such as `https://mindroom.example.com/api/oauth/microsoft_files/callback`, replacing the origin with your public MindRoom origin.
 4. Under **Certificates & secrets**, create a client secret and copy its value.
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
@@ -94,7 +94,7 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 | `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
-Downloads and uploads use the agent's workspace and follow its [`file_access`](../configuration/agents.md) setting.
+Uploads read from the agent's workspace and follow its [`file_access`](../configuration/agents.md) setting, and downloads always land in the workspace.
 
 To edit a document, the agent downloads it, saves its edited copy under a new name outside `microsoft-files-downloads/`, and replaces the original with the `etag` from the download.
 The replace then fails with `etag_mismatch` if someone changed the file in the meantime, and the file's version history keeps the replaced version.

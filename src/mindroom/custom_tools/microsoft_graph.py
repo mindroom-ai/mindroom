@@ -23,8 +23,11 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.credential_lifecycle import oauth_credentials_usable, refresh_oauth_credentials_blocking
-from mindroom.oauth.credential_store import OAuthCredentialUnreadableError
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialUnreadableError,
+    oauth_credentials_usable,
+    refresh_oauth_credentials_blocking,
+)
 from mindroom.oauth.microsoft import microsoft_token_url
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,

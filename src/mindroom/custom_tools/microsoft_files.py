@@ -97,10 +97,12 @@ def _parse_file(file: object, field_name: str = "file") -> _Item | None:
 def _resolve(file: str, session: GraphSession, field_name: str = "file") -> _Item:
     if (item := _parse_file(file, field_name)) is not None:
         return item
+    # Redeeming the link is the same as opening it in a browser; without it, access lasts only for this request.
     shared = session.json(
         "GET",
         f"/shares/{share_id(file.strip())}/driveItem",
         params={"$select": "id,parentReference"},
+        headers={"Prefer": "redeemSharingLink"},
     )
     parent = shared.get("parentReference")
     drive_id = parent.get("driveId") if isinstance(parent, dict) else None
@@ -239,7 +241,7 @@ def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
         values = []
     if _cell_count(values) > _MAX_RANGE_CELLS:
         msg = f"The range has more than {_MAX_RANGE_CELLS} cells; read a smaller address."
-        raise MicrosoftGraphError(code="too_large", message=msg)
+        raise MicrosoftGraphError(code="too_large", message=msg, address=payload.get("address"))
     return {
         "address": payload.get("address"),
         "values": values,
