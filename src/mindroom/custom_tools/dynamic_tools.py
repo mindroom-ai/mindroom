@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
@@ -18,6 +19,14 @@ if TYPE_CHECKING:
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _MAX_RESULTS_LIMIT = 20
+_CALL_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "Exact function name from tool_search."},
+        "arguments": {"type": "object", "description": "The function's arguments as a JSON object."},
+    },
+    "required": ["name"],
+}
 _EXACT_NAME_SCORE = 1000
 
 
@@ -31,6 +40,11 @@ class DynamicToolsToolkit(Toolkit):
     def __init__(self, *, deferred_toolkits: Sequence[DeferredToolkit]) -> None:
         self._deferred_toolkits = tuple(deferred_toolkits)
         super().__init__(name="dynamic_tools", tools=[self.tool_search, self.call_tool])
+        # Agno would render the argument values of a typed dict as empty objects, and Gemini conversion drops the
+        # description of an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
+        call_tool = self.functions["call_tool"]
+        call_tool.parameters = deepcopy(_CALL_TOOL_PARAMETERS)
+        call_tool.skip_entrypoint_processing = True
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -40,6 +54,11 @@ class DynamicToolsToolkit(Toolkit):
         """Search deferred functions by name or keywords and return their full definitions.
 
         Call a returned function with call_tool(name, arguments).
+
+        Args:
+            query: Function name, toolkit name, or keywords describing the needed capability.
+            max_results: Maximum number of function definitions to return.
+
         """
         raw_query = query.strip().lower()
         query_tokens = _tokens(raw_query)
@@ -65,9 +84,7 @@ class DynamicToolsToolkit(Toolkit):
             payload["message"] = "No deferred function matched. Try other keywords or a toolkit name from the list."
         return self._payload("ok", **payload)
 
-    # A bare dict renders as an object with arbitrary values; Agno renders dict[str, Any] values as empty objects,
-    # which schema-enforcing servers would then require.
-    def call_tool(self, name: str, arguments: dict | None = None) -> str:
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Call a deferred function found with tool_search, passing its arguments as a JSON object."""
         del arguments
         return self._payload(

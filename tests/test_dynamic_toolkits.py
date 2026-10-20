@@ -1482,6 +1482,8 @@ def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
 
     assert converted is not None
     assert "example_key" not in str(converted)
+    assert converted.properties is not None
+    assert "JSON object" in (converted.properties["arguments"].description or "")
 
 
 class _DualTools(Toolkit):
