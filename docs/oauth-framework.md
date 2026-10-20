@@ -120,7 +120,7 @@ See [Authorization](authorization.md#platform-and-credential-authority) for admi
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub and Atlassian, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -131,7 +131,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub and Google OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -140,6 +140,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](deployment/google-services-oauth.md) |
+| Microsoft 365 (OneDrive and SharePoint) | [Microsoft 365](tools/microsoft-365.md) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](mcp.md#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
