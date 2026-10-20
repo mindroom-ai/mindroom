@@ -331,7 +331,7 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
         raise oauth_connection_required(context)
     if (credentials or {}).get("token_uri") != token_url:
         # The connection was made for another tenant; a tenant change must not leave it usable until refresh.
-        raise oauth_connection_required(context)
+        raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON)
     return token
 
 

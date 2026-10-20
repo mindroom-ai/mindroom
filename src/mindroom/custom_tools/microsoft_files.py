@@ -194,6 +194,8 @@ def _worksheet(value: object) -> str:
     if (
         not isinstance(value, str)
         or not 1 <= len(value) <= 31
+        # A name of only dots would be read as a relative path segment and reach another endpoint.
+        or not value.strip(".")
         or any(character in _INVALID_WORKSHEET_CHARACTERS or ord(character) < 32 for character in value)
     ):
         msg = r"worksheet must be a worksheet name of 1 to 31 characters without \ / ? * [ ] or :."

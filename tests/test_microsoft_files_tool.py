@@ -499,7 +499,7 @@ def test_excel_worksheet_names_may_contain_a_hash(tmp_path: Path, monkeypatch: p
     assert "/worksheets/Budget%20%231/" in graph.requests[0].url.raw_path.decode()
 
 
-@pytest.mark.parametrize("worksheet", ["", "a/b", "a:b", "a?b", "a*b", "a[b", "a]b", "a\\b", "x" * 32])
+@pytest.mark.parametrize("worksheet", ["", ".", "..", "a/b", "a:b", "a?b", "a*b", "a[b", "a]b", "a\\b", "x" * 32])
 def test_excel_refuses_impossible_worksheet_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

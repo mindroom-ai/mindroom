@@ -44,7 +44,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
-Setting it also limits sign-in to accounts of that tenant.
+Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
 `consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 

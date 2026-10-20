@@ -444,6 +444,7 @@ def test_a_tenant_change_retires_connections_made_for_another_tenant(
     result = json.loads(graph_tool_result("microsoft_files", run))
 
     assert result["oauth_connection_required"] is True
+    assert result["reason"] == "refresh_rejected"
     assert graph.requests == []
 
 
