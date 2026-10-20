@@ -7099,7 +7099,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
-- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files and Excel ranges through Microsoft Graph.
+- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, and Outlook mail through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
@@ -12544,13 +12544,14 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive and SharePoint through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, and Outlook mail through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
 | Tool | What it covers | Provider ID | Delegated Graph permissions |
 | --- | --- | --- | --- |
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
+| `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -12560,12 +12561,12 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 
 1. In the [Microsoft Entra admin center](https://entra.microsoft.com), open **App registrations** and choose **New registration**.
 2. Under **Supported account types**, choose your organization only, any organization's accounts if people from several tenants connect, or also personal Microsoft accounts if people use those.
-3. Add a **Web** redirect URI for each tool you enable, such as `https://mindroom.example.com/api/oauth/microsoft_files/callback`, replacing the origin with your public MindRoom origin.
+3. Add a **Web** redirect URI `https://mindroom.example.com/api/oauth/<provider ID>/callback` for each tool you enable, such as `https://mindroom.example.com/api/oauth/outlook_mail/callback`, replacing the origin with your public MindRoom origin.
 4. Under **Certificates & secrets**, create a client secret and copy its value.
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
 
-For a local installation, the redirect URI is `http://localhost:8765/api/oauth/microsoft_files/callback`.
+For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
 A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
 Do not add application permissions; the tools only use delegated permissions, which act as the signed-in user.
 
@@ -12601,11 +12602,13 @@ agents:
   assistant:
     tools:
       - microsoft_files
+      - outlook_mail
 ```
 
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 
@@ -12648,6 +12651,31 @@ A written string that starts with `=` becomes a formula.
 Search uses Microsoft Search, which covers work and school accounts.
 Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
 
+## Mail
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `outlook_mail_search` | no | List messages newest first, in one folder or across the mailbox, optionally matching an Outlook search query, up to 50 results. |
+| `outlook_mail_get_message` | no | Read a message as plain text, up to 20,000 characters, with its recipients and attachment list. |
+| `outlook_mail_download_attachment` | no | Save a file attachment, up to 50 MB, into the workspace's `outlook-mail-attachments/` directory. |
+| `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
+| `outlook_mail_send_draft` | yes, sends mail | Send an existing draft. |
+| `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
+| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original. |
+| `outlook_mail_mark_read` | yes | Mark a message read or unread. |
+| `outlook_mail_move` | yes | Move a message to a folder. |
+
+Search takes Outlook search syntax, such as `from:sam@example.com subject:invoice hasAttachments:true`.
+Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID.
+Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
+A new message takes at most 50 email addresses across To and Cc.
+To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook.
+
+Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
+Each attached file may be at most 3 MB, and all attachments of one message together about 3 MB; share larger files through OneDrive and send a link instead.
+Only file attachments can be downloaded, not attached Outlook items such as forwarded messages or invitations, and not cloud links.
+A later download of the same attachment name overwrites the copy in `outlook-mail-attachments/`.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
@@ -12661,7 +12689,16 @@ tool_approval:
       action: require_approval
     - match: microsoft_files_excel_update_range
       action: require_approval
+    - match: outlook_mail_send
+      action: require_approval
+    - match: outlook_mail_send_draft
+      action: require_approval
+    - match: outlook_mail_reply
+      action: require_approval
 ```
+
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`.
+`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
 
 To give an agent read access only, set `write: false` on the tool.
 
@@ -12676,10 +12713,13 @@ To give an agent read access only, set `write: false` on the tool.
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
 | `not_found` | The item does not exist or the connected account cannot see it. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
+| `invalid_argument` | An ID, folder, email address, or other argument is malformed, or a message names more than 50 recipients. |
+| `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
+| `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `locked` | The file is checked out or locked; try again later. |
 | `name_conflict` | A file with that name already exists in the folder; replace it or choose another name. |
-| `too_large` | The file or range exceeds a limit above. |
+| `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |
 | `throttled` | Microsoft Graph is limiting requests; retry after `retry_after_seconds`. |
 | `download_rejected` | SharePoint refused the download link Microsoft Graph returned; retry the download. |
 
@@ -14468,7 +14508,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](https://docs.mindroom.chat/tools/project-management/#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
-| Microsoft 365 (OneDrive and SharePoint) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
+| Microsoft 365 (OneDrive, SharePoint, and Outlook mail) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.
@@ -14873,7 +14913,7 @@ It writes an approved proposal into `memory/` from bytes worker code staged, whi
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
@@ -14898,6 +14938,7 @@ Reads of worker-controlled files are capped per surface.
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
 | `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
+| `outlook_mail` attachments | 3 MB per file, Microsoft Graph's inline attachment limit | Refused with a tool error before any request |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
@@ -14930,7 +14971,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
@@ -14985,10 +15026,10 @@ Do not report or "fix" these; they are deliberate.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
-- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, and Microsoft Files may still use every file in the agent workspace.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, and Outlook mail may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, and Microsoft Files take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, and Outlook mail take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
