@@ -350,7 +350,8 @@ class OutlookMailTools(Toolkit):
             folder: A well-known folder name (inbox, sentitems, drafts, archive, deleteditems, junkemail) or a folder
                 ID, such as a message's parent_folder_id; omit it to cover every folder.
             limit: Maximum number of messages to return, from 1 to 50.
-            page_token: The next_page_token of the previous call, to continue the same listing or search.
+            page_token: The next_page_token of the previous call, to continue the same listing or search; a search
+                with query stops after its first 1,000 matches, so narrow the query to find more.
 
         """
 

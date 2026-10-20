@@ -127,6 +127,7 @@ Search and folder listings return a `next_page_token` while more results exist; 
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
 Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
+A search with `query` stops after its first 1,000 matches, so a narrower query finds the rest.
 Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
 Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
