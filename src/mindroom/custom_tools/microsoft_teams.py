@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
@@ -15,6 +14,7 @@ from mindroom.custom_tools.microsoft_graph import (
     graph_error_payload,
     graph_session,
     graph_tool_result,
+    html_to_text,
     next_page_token,
     page_path,
     path_segment,
@@ -45,10 +45,6 @@ _TOOL_NAME = "microsoft_teams"
 _CHANNEL_SELECT = "id,displayName,description,membershipType,webUrl,isArchived"
 # Graph orders chats only by their last message, and returns that message's time only when it is expanded.
 _CHAT_PARAMS = {"$expand": "members,lastMessagePreview", "$orderby": "lastMessagePreview/createdDateTime desc"}
-# Tags that start a new line in the plain-text rendering of an HTML message.
-_LINE_TAGS = frozenset(
-    {"br", "p", "div", "li", "tr", "pre", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "table"},
-)
 
 
 @dataclass(frozen=True)
@@ -62,56 +58,6 @@ class _Request:
 
     def send(self, session: GraphSession) -> dict[str, Any]:
         return session.json(self.method, self.path, params=self.params, json=self.body)
-
-
-class _PlainText(HTMLParser):
-    """Collect an HTML message's text, one line per block.
-
-    Images show as [image], emoji as their text, and quoted replies as lines prefixed with `> `.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.lines: list[str] = []
-        self._line: list[str] = []
-        self._quote_depth = 0
-
-    def end_line(self) -> None:
-        text = " ".join("".join(self._line).split())
-        if text:
-            self.lines.append("> " * self._quote_depth + text)
-        self._line = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _LINE_TAGS:
-            self.end_line()
-        if tag == "blockquote":
-            self._quote_depth += 1
-        elif tag == "img":
-            self._line.append("[image]")
-        elif tag == "emoji":
-            self._line.append(dict(attrs).get("alt") or "")
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _LINE_TAGS:
-            self.end_line()
-        if tag == "blockquote":
-            self._quote_depth = max(self._quote_depth - 1, 0)
-
-    def handle_data(self, data: str) -> None:
-        first, *rest = data.split("\n")
-        self._line.append(first)
-        for line in rest:
-            self.end_line()
-            self._line.append(line)
-
-
-def _plain_text(html: str) -> str:
-    parser = _PlainText()
-    parser.feed(html)
-    parser.close()
-    parser.end_line()
-    return "\n".join(parser.lines)
 
 
 def _team_path(team_id: object) -> str:
@@ -176,7 +122,7 @@ def _body_text(message: Mapping[str, Any]) -> str:
     body = message.get("body")
     if not isinstance(body, dict) or not isinstance(content := body.get("content"), str):
         return ""
-    return _plain_text(content) if str(body.get("contentType", "")).casefold() == "html" else content
+    return html_to_text(content) if str(body.get("contentType", "")).casefold() == "html" else content
 
 
 def _kind(message: Mapping[str, Any]) -> str:

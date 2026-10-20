@@ -254,39 +254,6 @@ def test_list_channel_messages_returns_plain_text_newest_first(
     assert dict(request.url.params) == {"$top": "5"}
 
 
-@pytest.mark.parametrize(
-    ("html", "text"),
-    [
-        ("first<br>second", "first\nsecond"),
-        ("<ul><li>one</li><li>two</li></ul>", "one\ntwo"),
-        ('<p>see</p><img src="https://graph.microsoft.com/x" alt="chart">', "see\n[image]"),
-        ("<systemEventMessage/>", ""),
-        ('<attachment id="ee8d"></attachment>', ""),
-        ("<p>a   b</p>\n\n\n<p></p><p>c</p>", "a b\nc"),
-        ('<p>Ship it <emoji id="1f44d_thumbsup" alt="\U0001f44d" title="Thumbs up"></emoji></p>', "Ship it \U0001f44d"),
-        (
-            '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1616965872000">'
-            '<strong itemprop="mri">Sam Example</strong><p itemprop="preview">Can we ship today?</p></blockquote>'
-            "<p>Yes, after the review.</p>",
-            "> Sam Example\n> Can we ship today?\nYes, after the review.",
-        ),
-        (
-            "<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply",
-            "> outer\n> > inner\n> after\nreply",
-        ),
-    ],
-)
-def test_html_bodies_become_plain_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    html: str,
-    text: str,
-) -> None:
-    tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": [_message(content=html, content_type="html")]}))
-
-    assert _payload(tools.microsoft_teams_list_chat_messages(CHAT))["messages"][0]["body"] == text
-
-
 def test_text_bodies_are_returned_as_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": [_message(content="1 < 2 &amp; <b>x</b>")]}))
 
