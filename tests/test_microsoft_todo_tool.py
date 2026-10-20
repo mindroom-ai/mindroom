@@ -205,7 +205,7 @@ def test_list_tasks_returns_open_tasks_by_default(tmp_path: Path, monkeypatch: p
             "title": "Send the quarterly report",
             "status": "notStarted",
             "importance": "high",
-            "due_date": "2026-10-22",
+            "due": {"date_time": "2026-10-22T00:00:00.0000000", "time_zone": "UTC"},
             "reminder": {"date_time": "2026-10-21T08:00:00.0000000", "time_zone": "UTC"},
             "created": "2026-10-20T11:15:19.9359889Z",
             "last_modified": "2026-10-20T11:15:20.0614375Z",
@@ -249,23 +249,36 @@ def test_list_tasks_refuses_a_foreign_page_token(
 
 
 @pytest.mark.parametrize(
-    ("due", "due_date"),
+    ("due", "returned"),
     [
-        ({"dateTime": "2026-10-22T00:00:00.0000000", "timeZone": "UTC"}, "2026-10-22"),
-        ({"dateTime": "2026-10-21T22:00:00.0000000", "timeZone": "UTC"}, "2026-10-22"),
-        ({"dateTime": "2026-10-22T05:00:00", "timeZone": "UTC"}, "2026-10-22"),
-        ({"dateTime": "not a date", "timeZone": "UTC"}, None),
+        (
+            {"dateTime": "2026-10-22T00:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-22T00:00:00.0000000", "time_zone": "UTC"},
+        ),
+        # October 22 set in a To Do app in New Zealand daylight time (UTC+13).
+        (
+            {"dateTime": "2026-10-21T11:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-21T11:00:00.0000000", "time_zone": "UTC"},
+        ),
+        (
+            {"dateTime": "2026-10-22T16:00:00.0000000", "timeZone": "UTC"},
+            {"date_time": "2026-10-22T16:00:00.0000000", "time_zone": "UTC"},
+        ),
     ],
 )
-def test_list_tasks_reads_the_due_date_as_the_nearest_calendar_date(
+def test_list_tasks_returns_the_due_date_time_and_zone_as_graph_reports_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     due: dict[str, str],
-    due_date: str | None,
+    returned: dict[str, str],
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({"value": [_task(dueDateTime=due)]}))
 
-    assert _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]["due_date"] == due_date
+    task = _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"][0]
+
+    assert task["due"] == returned
+    assert "due_date" not in task
+    assert "convert it to the requester's zone" in _description(tools, "microsoft_todo_list_tasks")
 
 
 def test_list_tasks_reads_html_notes_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,7 +299,7 @@ def test_list_tasks_leaves_out_unset_dates_and_caps_notes(tmp_path: Path, monkey
 
     capped, empty = _payload(tools.microsoft_todo_list_tasks(LIST))["tasks"]
 
-    assert (capped["due_date"], capped["reminder"]) == (None, None)
+    assert (capped["due"], capped["reminder"]) == (None, None)
     assert capped["notes"] == long_notes[:NOTES_CAP]
     assert capped["notes_truncated"] is True
     assert empty["notes"] is None

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.tools import Toolkit
@@ -117,22 +117,6 @@ def _date_time(value: object) -> dict[str, object] | None:
     return {"date_time": fields["dateTime"], "time_zone": fields.get("timeZone")}
 
 
-def _due_date(value: object) -> str | None:
-    """Return a due date as YYYY-MM-DD, rounding Graph's UTC time to the nearest midnight.
-
-    A due date set in another zone comes back as that zone's midnight in UTC, so October 22 in UTC+2
-    reads `2026-10-21T22:00:00`.
-    """
-    moment = _fields(value).get("dateTime")
-    if not isinstance(moment, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(moment.split(".", 1)[0])
-    except ValueError:
-        return None
-    return (parsed + timedelta(hours=12)).date().isoformat()
-
-
 def _task(task: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, read, and change one task."""
     body = _fields(task.get("body"))
@@ -145,7 +129,7 @@ def _task(task: Mapping[str, Any]) -> dict[str, Any]:
         "title": task.get("title"),
         "status": task.get("status"),
         "importance": task.get("importance"),
-        "due_date": _due_date(task.get("dueDateTime")),
+        "due": _date_time(task.get("dueDateTime")),
         "reminder": _date_time(task.get("reminderDateTime")) if task.get("isReminderOn") is True else None,
         "created": task.get("createdDateTime"),
         "last_modified": task.get("lastModifiedDateTime"),
@@ -260,6 +244,8 @@ class MicrosoftTodoTools(Toolkit):
         """List the tasks in one Microsoft To Do list; completed tasks are left out unless include_completed is true.
 
         Each task's notes are cut at 2,000 characters, and notes_truncated is true when they were cut.
+        A task's due is the date, time, and zone Graph reports; a due date set in a To Do app is midnight in that
+        person's zone, usually reported in UTC, so convert it to the requester's zone before naming the day.
 
         Args:
             list_id: The list's id from microsoft_todo_list_lists.
