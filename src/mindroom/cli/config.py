@@ -1329,6 +1329,13 @@ tool_approval:
   rules:
     - match: resolve_thread
       action: require_approval
+    # Ask before config_manager changes the configuration; its inspect and validate calls never ask.
+    - match: manage_config
+      action: require_approval
+    - match: manage_agent
+      action: require_approval
+    - match: manage_team
+      action: require_approval
 
 background_tool_jobs:
   enabled: true
