@@ -46,7 +46,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive but not SharePoint.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive and Outlook mail but not SharePoint.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -117,12 +117,13 @@ Search and folder listings return a `next_page_token` while more results exist; 
 | `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
 | `outlook_mail_send_draft` | yes, sends mail | Send an existing draft. |
 | `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
-| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original. |
+| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
 | `outlook_mail_move` | yes | Move a message to a folder. |
 
-Search takes Outlook search syntax, such as `from:sam@example.com subject:invoice hasAttachments:true`.
-Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID.
+Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
+Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
+Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
 Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook.
