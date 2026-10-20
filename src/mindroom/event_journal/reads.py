@@ -105,14 +105,8 @@ def read_conversation(
     budget, and then carries a cursor exactly as a full page does. Its rows are
     sized first and only the ones that fit are loaded.
 
-    The size and content queries can see different snapshots on both
-    backends, so the content is loaded for exactly the rows the size query
-    kept. Running the window again for the kept count let replies committed in
-    between push the oldest kept rows, the thread root first, out of the page
-    while it still reported nothing behind it. A write in between can still
-    change a kept row's content and carry the page past its budget by what it
-    changed. That overshoot is accepted rather than folding the thread root's
-    separate lookup into one windowed statement.
+    Both queries read one snapshot, the read transaction's, so the content
+    loaded is exactly what the page was sized on.
     """
     if limit <= 0:
         msg = "A conversation read requires a positive limit"
@@ -137,15 +131,12 @@ def read_conversation(
             refresh_pending.append(_refresh_request(row))
             continue
         messages.append(_visible_message(row))
-    # The oldest row the page covers is the oldest one it kept, even when that
-    # row was deleted before its content was loaded; anything older is behind it.
-    last = rows[-1] if trimmed else (sizes[kept - 1] if kept else None)
     next_cursor = (
         ConversationCursor(
-            created_ts=int(last["created_ts"]),
-            logical_event_id=last["logical_event_id"],
+            created_ts=int(rows[-1]["created_ts"]),
+            logical_event_id=rows[-1]["logical_event_id"],
         )
-        if last is not None and (trimmed or kept < len(sizes) or len(sizes) == limit)
+        if rows and (trimmed or kept < len(sizes) or len(sizes) == limit)
         else None
     )
     return ConversationPage(
@@ -206,11 +197,7 @@ def _load_rows(
     room_id: str,
     sized: tuple[Row, ...],
 ) -> tuple[Row, ...]:
-    """Return the full rows a page was sized on, in the same order, by primary key.
-
-    A row deleted since it was sized is simply absent, as it would be from any
-    later read.
-    """
+    """Return the full rows a page was sized on, in the same order, by primary key."""
     if not sized:
         return ()
     placeholders = ", ".join("?" for _ in sized)
@@ -224,7 +211,7 @@ def _load_rows(
             (principal_id, room_id, *(row["logical_event_id"] for row in sized)),
         )
     }
-    return tuple(loaded[row["logical_event_id"]] for row in sized if row["logical_event_id"] in loaded)
+    return tuple(loaded[row["logical_event_id"]] for row in sized)
 
 
 def _rows_within_content_budget(rows: tuple[Row, ...]) -> int:

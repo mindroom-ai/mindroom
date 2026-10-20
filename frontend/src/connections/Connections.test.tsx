@@ -393,6 +393,7 @@ describe("brokered API keys on agent cards", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     installApi({
@@ -761,6 +762,7 @@ describe("connections", () => {
         closed: false,
         close: vi.fn(),
         location: { href: "about:blank" },
+        document: document.implementation.createHTMLDocument(),
       };
       const open = vi
         .spyOn(window, "open")
@@ -823,6 +825,7 @@ describe("connections", () => {
         closed: false,
         close: vi.fn(),
         location: { href: "about:blank" },
+        document: document.implementation.createHTMLDocument(),
       };
       vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
       let connected = false;
@@ -941,6 +944,7 @@ describe("connections", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     installApi({
@@ -1477,6 +1481,7 @@ describe("shared accounts on agent cards", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     beforeEach(() => {
       vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
