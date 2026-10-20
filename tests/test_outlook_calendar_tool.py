@@ -141,7 +141,6 @@ def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
     assert metadata.requires_primary_runtime is True
     assert metadata.file_access == ToolFileAccess.NONE
     assert metadata.consumes_workspace_paths is False
-    assert metadata.function_names == outlook_calendar.FUNCTION_NAMES
 
 
 def test_provider_requests_only_calendar_read_write() -> None:
@@ -158,13 +157,13 @@ def test_provider_requests_only_calendar_read_write() -> None:
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, write=False)
 
-    assert set(tools.functions) == set(outlook_calendar.FUNCTION_NAMES) - WRITE_FUNCTIONS
+    assert set(tools.functions) == set(TOOL_METADATA["outlook_calendar"].function_names) - WRITE_FUNCTIONS
 
 
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch)
 
-    assert set(tools.functions) == set(outlook_calendar.FUNCTION_NAMES)
+    assert set(tools.functions) == set(TOOL_METADATA["outlook_calendar"].function_names)
 
 
 def test_descriptions_state_utc_and_make_writes_legible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,7 +247,7 @@ def test_event_summary_caps_attendees_and_keeps_a_foreign_time_zone_visible(
 
     [summary] = _payload(tools.outlook_calendar_list_events("2026-10-21", "2026-10-22"))["events"]
 
-    assert len(summary["attendees"]) == outlook_calendar.MAX_ATTENDEES
+    assert len(summary["attendees"]) == outlook_calendar._MAX_ATTENDEES
     assert summary["attendee_count"] == 150
     assert summary["start"] == "2026-10-21T09:00:00 (Europe/Berlin)"
 
@@ -296,13 +295,13 @@ def test_get_event_returns_the_text_body(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_get_event_truncates_a_long_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    content = "x" * (outlook_calendar.MAX_BODY_CHARACTERS + 5)
+    content = "x" * (outlook_calendar._MAX_BODY_CHARACTERS + 5)
     routes = {("GET", f"/me/events/{EVENT_ID}"): httpx.Response(200, json=_graph_event(body={"content": content}))}
     tools, _graph = _tools(tmp_path, monkeypatch, routes)
 
     event = _payload(tools.outlook_calendar_get_event(EVENT_ID))["event"]
 
-    assert len(event["body"]) == outlook_calendar.MAX_BODY_CHARACTERS
+    assert len(event["body"]) == outlook_calendar._MAX_BODY_CHARACTERS
     assert event["truncated"] is True
 
 
