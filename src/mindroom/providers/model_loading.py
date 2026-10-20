@@ -11,7 +11,6 @@ from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host,
 from mindroom.llm_request_logging import install_llm_request_logging
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, ZAI_BASE_URL_DEFAULT
-from mindroom.providers.agno_compat_sdk_clients import remove_sdk_client_finalizers
 from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.providers.google_adc import load_google_application_credentials
 from mindroom.providers.media_fallback import install_provider_media_fallback
@@ -45,6 +44,12 @@ _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 300.0
 # Local servers can stay silent for minutes while a request queues or a model
 # loads, so they and custom endpoints get an idle limit only when configured.
 _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
+# Providers whose models hand `http_client` to their OpenAI, Groq, Cerebras, or Anthropic SDK client,
+# which otherwise builds an HTTP client of its own per model.
+_SHARED_HTTP_CLIENT_PROVIDERS = frozenset(
+    {"openai", "azure", "openrouter", "zai", "deepseek", "llama_cpp", "groq", "cerebras"}
+    | {"anthropic", "vertexai_claude", _BEDROCK_CLAUDE_PROVIDER},
+)
 
 
 def canonical_provider(provider: str) -> str:
@@ -484,6 +489,10 @@ def get_model_instance(
 
     if canonical_provider(provider) in {"codex", "openai_codex"}:
         extra_kwargs.setdefault("default_instructions", config.get_prompt("CODEX_DEFAULT_INSTRUCTIONS"))
+    if canonical_provider(provider) in _SHARED_HTTP_CLIENT_PROVIDERS:
+        from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT  # noqa: PLC0415
+
+        extra_kwargs["http_client"] = MODEL_HTTP_CLIENT
 
     model = _create_model_for_provider(
         provider,
@@ -516,5 +525,4 @@ def get_model_instance(
         model,
         fallback_prompt=config.get_prompt("INLINE_MEDIA_FALLBACK_PROMPT"),
     )
-    remove_sdk_client_finalizers()
     return model

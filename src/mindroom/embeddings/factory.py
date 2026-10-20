@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_host
 from mindroom.embeddings.signatures import create_sentence_transformers_embedder
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.agno_compat_sdk_clients import remove_sdk_client_finalizers
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -92,7 +91,6 @@ def create_configured_embedder(
         # provider's SDK loads (#1436).
         from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
 
-        remove_sdk_client_finalizers()
         if health_recorder is None:
             return MindRoomOpenAIEmbedder(
                 id=settings.model,
