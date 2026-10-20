@@ -21,6 +21,7 @@ from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
 from mindroom.oauth.microsoft import (
     microsoft_files_oauth_provider,
+    microsoft_todo_oauth_provider,
     outlook_calendar_oauth_provider,
     outlook_mail_oauth_provider,
 )
@@ -67,6 +68,7 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         microsoft_files_oauth_provider(),
         outlook_mail_oauth_provider(),
         outlook_calendar_oauth_provider(),
+        microsoft_todo_oauth_provider(),
     )
 
 
