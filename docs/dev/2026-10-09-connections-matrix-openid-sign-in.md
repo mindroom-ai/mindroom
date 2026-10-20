@@ -27,6 +27,7 @@ Rejected: an administrator-only dashboard for every trusted upstream deployment,
 The allowlist exists only against login CSRF, where a page hands the portal an attacker's token.
 Unset, it allows MindRoom's hosted Chat, which MindRoom operates, plus any Chat on a local address while the portal itself is on one, so a Docker stack on a home network works without knowing the host's address.
 The local rule never applies to a portal on a public address, and `[]` still turns sign-in from Chat off.
+For a portal on a public address, the hosted-Chat default waits for a homeserver that binds tokens: without binding, any backend a user opens from Chat could replay their token to every deployment it can reach, a risk the old opt-in left to operators who set the list.
 
 ### Allow plain HTTP on local addresses
 

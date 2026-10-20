@@ -6,7 +6,7 @@ It is on by default, and users open it from MindRoom Chat.
 ## Open It From MindRoom Chat
 
 In MindRoom Chat, the user opens **Connections** in Settings, General, which opens `/connections/` in a new window and signs them in with the account Chat is signed in to.
-MindRoom needs no settings for this when Chat is MindRoom's hosted Chat at `https://chat.mindroom.chat`, or when MindRoom and Chat both run on local addresses, as in the Docker stack.
+MindRoom needs no settings for this when MindRoom and Chat both run on local addresses, as in the Docker stack, when MindRoom runs on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or when MindRoom is on a public address and its homeserver binds tokens (see [Token Binding](#token-binding)).
 When other devices on a home network reach MindRoom, set `MINDROOM_PUBLIC_URL` to the address Chat opens, such as `http://192.168.1.10:8765`, so OAuth callbacks come back to MindRoom and a homeserver that binds tokens accepts them.
 Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
 Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
@@ -25,7 +25,7 @@ If two Connections tabs, on the Agents or Agent Keys page, are signed in as diff
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address; `[]` turns sign-in from Chat off |
+| `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, on a public address only while the homeserver binds tokens, plus any Chat on a local address while MindRoom itself is on a local address; `[]` turns sign-in from Chat off |
 | `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, while OAuth callbacks and the token audience use `http://localhost:<port>` |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
@@ -76,9 +76,9 @@ Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongsid
 
 MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<port>` when it is unset, the address Chat opens for a backend on the same machine.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
-MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 until `MINDROOM_PUBLIC_URL` names the origin Chat opens.
+MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
-On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel).
+On such a homeserver, keep the OpenID token lifetime short (`openid_token_ttl` on Tuwunel), and a MindRoom on a public address accepts sign-in from Chat only from origins listed in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts that risk.
 Roll out in this order: first MindRoom backends, then MindRoom Chat clients including the iOS app, and only then the homeserver release that binds tokens.
 Older backends verify Computers tokens without an audience and would reject Chat's bound tokens with 401.
 Older Chat clients, including iOS app versions that are still in App Store review, send unbound tokens that a new backend rejects with 401 once the homeserver binds.
@@ -98,6 +98,7 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 | `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable strict JWT mode |
 | `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
+| `403 Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | Turn on token binding on the homeserver (`mindroom_openid_audience` on MindRoom's Tuwunel fork) and set `MINDROOM_PUBLIC_URL`, or list the Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` to accept the replay risk described under [Token Binding](#token-binding) |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
 | An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL`, or `http://localhost:<port>` when unset, is the origin Chat opens; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |

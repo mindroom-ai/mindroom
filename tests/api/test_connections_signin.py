@@ -310,10 +310,31 @@ def test_https_portal_ignores_a_plain_http_session_cookie(signin: dict[str, Any]
 def test_local_chat_cannot_sign_in_to_a_public_portal_by_default(signin: dict[str, Any]) -> None:
     """Without a list, only MindRoom's hosted Chat signs users in to a portal that is not on a local address."""
     _serve(signin, MINDROOM_CONNECTIONS_AGENT="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    signin["binds"].return_value = True
     refused = sign_in(signin["client"], "alice", origin=LAN_CHAT)
     assert refused.status_code == 403
     assert refused.json() == {"detail": "Connections sign-in is not allowed from this client"}
     assert sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat").status_code == 200
+
+
+def test_hosted_chat_default_waits_for_a_binding_homeserver_on_a_public_portal(signin: dict[str, Any]) -> None:
+    """Unbound tokens could be replayed by any backend the user opened, so a public portal needs binding or a list."""
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    refused = sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat")
+    assert refused.status_code == 403
+    assert refused.json() == {
+        "detail": "Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, "
+        "or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS",
+    }
+    assert "set-cookie" not in refused.headers
+    signin["verifier"].assert_not_awaited()
+    # An operator's explicit list and a portal on a local address need no binding.
+    _serve(signin, MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.mindroom.chat"]')
+    assert sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat").status_code == 200
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    local = TestClient(main.app, base_url=LAN_PORTAL)
+    response = sign_in(local, "alice", origin="https://chat.mindroom.chat", headers={"Origin": LAN_PORTAL})
+    assert response.status_code == 200
 
 
 def test_empty_chat_allowlist_turns_matrix_sign_in_off(signin: dict[str, Any]) -> None:

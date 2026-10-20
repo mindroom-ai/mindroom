@@ -103,18 +103,32 @@ def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...
         return ()
 
 
+def _connections_origins_configured(paths: RuntimePaths) -> bool:
+    return bool((paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) or "").strip())
+
+
 def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, server_origin: str | None) -> bool:
     """Return whether MindRoom Chat at `client_origin` may sign users in to the Connections portal at `server_origin`.
 
     Without a configured list, MindRoom's hosted Chat may, and so may any Chat on a local address when the portal
     is on one too, as in a Docker stack on a home network.
     """
-    if (paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) or "").strip():
+    if _connections_origins_configured(paths):
         return client_origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
     return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
 
 
+def connections_default_needs_binding(paths: RuntimePaths, server_origin: str | None) -> bool:
+    """Return whether sign-in under the default list waits for a homeserver that binds tokens to one deployment.
+
+    Without binding, any backend a user opens from Chat could replay their token to a portal it can reach, which an
+    explicit list leaves to the operator; a portal on a local address is out of a remote backend's reach.
+    """
+    return not _connections_origins_configured(paths) and not is_local_origin(server_origin)
+
+
 def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
     """Return whether some MindRoom Chat may sign users in: the list is unset, or lists at least one valid origin."""
-    configured = (paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) or "").strip()
-    return not configured or bool(allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV))
+    return not _connections_origins_configured(paths) or bool(
+        allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV),
+    )

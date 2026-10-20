@@ -139,7 +139,11 @@ async def test_no_audience_without_a_usable_public_url(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("env", "audience"),
-    [({}, "http://localhost:8765"), ({"MINDROOM_PORT": "9000"}, "http://localhost:9000")],
+    [
+        ({}, "http://localhost:8765"),
+        ({"MINDROOM_PORT": "9000"}, "http://localhost:9000"),
+        ({"MINDROOM_PORT": "80"}, "http://localhost"),
+    ],
 )
 async def test_audience_defaults_to_the_local_api_origin(
     homeserver: tuple[ComputerPeer, RuntimePaths],

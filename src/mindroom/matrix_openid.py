@@ -47,7 +47,7 @@ def _openid_audience(paths: RuntimePaths) -> str | None:
     the address MindRoom Chat opens for a backend on the same machine.
     """
     public_url = (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
-    return normalized_origin(public_url) if public_url else local_api_origin(paths)
+    return normalized_origin(public_url or local_api_origin(paths))
 
 
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:

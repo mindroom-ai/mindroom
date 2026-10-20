@@ -31,7 +31,7 @@ from mindroom.matrix_openid import (
     homeserver_binds_openid_audience,
     verify_matrix_openid,
 )
-from mindroom.origins import connections_client_origin_allowed, deployment_origin
+from mindroom.origins import connections_client_origin_allowed, connections_default_needs_binding, deployment_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -114,6 +114,13 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     origin = deployment_origin(paths, str(request.base_url))
     if not connections_client_origin_allowed(paths, body.client_origin, origin):
         raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
+    if connections_default_needs_binding(paths, origin) and not await homeserver_binds_openid_audience(paths):
+        raise HTTPException(
+            403,
+            "Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, "
+            "or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS",
+            headers=CONNECTIONS_HEADERS,
+        )
     try:
         matrix_user_id = await verify_matrix_openid(body.openid_token, paths)
     except MatrixOpenIDError as error:
