@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
+from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from ._entrypoint_snapshots import ConversationRef
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
@@ -216,8 +219,14 @@ async def build_memory_prompt_parts(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    conversation: ConversationRef | None = None,
 ) -> MemoryPromptParts:
-    """Split stable entrypoint context from turn-local searched memories."""
+    """Split stable entrypoint context from turn-local searched memories.
+
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while entries are only added and its
+    prompt cache may be warm.
+    """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemoryPromptParts()
@@ -246,6 +255,14 @@ async def build_memory_prompt_parts(
     )
     if agent_entrypoint.text or agent_entrypoint.omitted_lines:
         session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
+    if conversation is not None:
+        session_preamble = stable_entrypoint_preamble(
+            agent_name,
+            conversation,
+            agent_entrypoint,
+            session_preamble,
+            now=time.monotonic(),
+        )
 
     # The automatic per-turn path must not silently drop the degradation
     # signal: a broken embedder would otherwise look like an agent with no

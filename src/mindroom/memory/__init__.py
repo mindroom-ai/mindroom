@@ -1,5 +1,6 @@
 """Memory management for MindRoom agents and teams."""
 
+from mindroom.memory._entrypoint_snapshots import ConversationRef
 from mindroom.memory._file_backend import (
     read_scope_memory_files,
     refresh_agent_memory_search,
@@ -23,6 +24,7 @@ from mindroom.memory.functions import (
 )
 
 __all__ = [
+    "ConversationRef",
     "MemoryAutoFlushWorker",
     "MemoryPromptParts",
     "MemoryResult",

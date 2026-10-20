@@ -59,7 +59,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
-from mindroom.history.replay import apply_replay_plan
+from mindroom.history.replay import apply_replay_plan, current_summary_text
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -83,7 +83,12 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import (
+    ConversationRef,
+    MemoryPromptParts,
+    build_memory_prompt_parts,
+    strip_user_turn_time_prefix,
+)
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
@@ -1059,12 +1064,21 @@ def _minimal_turn_enrichment(
     )
 
 
+def _memory_conversation(scope_context: ScopeSessionContext | None) -> ConversationRef | None:
+    """Name the conversation whose prompt cache the turn's inlined MEMORY.md keeps warm."""
+    if scope_context is None or scope_context.session_id is None:
+        return None
+    session = scope_context.session
+    return ConversationRef(scope_context.session_id, current_summary_text(session) if session is not None else None)
+
+
 async def _prepare_turn_memory(
     ctx: ResponseTurnContext,
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn; an authored persona recalls none."""
     if ctx.persona is not None:
@@ -1076,6 +1090,7 @@ async def _prepare_turn_memory(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        conversation=conversation,
     )
 
 
@@ -1187,6 +1202,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         execution_identity,
+                        _memory_conversation(scope_context),
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1202,7 +1218,14 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(ctx, prompt, config, runtime_paths, execution_identity)
+        prompt_parts = await _prepare_turn_memory(
+            ctx,
+            prompt,
+            config,
+            runtime_paths,
+            execution_identity,
+            _memory_conversation(scope_context),
+        )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,

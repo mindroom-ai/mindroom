@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+import mindroom.memory._entrypoint_snapshots as entrypoint_snapshots
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -19,7 +20,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
-from mindroom.memory import MemoryPromptParts
+from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
 from mindroom.memory import delete_agent_memory as public_delete_agent_memory
@@ -1579,6 +1580,44 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
     assert "is inlined below automatically every turn" in prompt_parts.session_preamble
     assert str(memory_path) in prompt_parts.session_preamble
     assert "truncated" not in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_added(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it."""
+    monkeypatch.setattr(entrypoint_snapshots, "_snapshots", {})
+    config.memory.backend = "file"
+    config.memory.file.path = str(storage_path / "memory-files")
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n", encoding="utf-8")
+
+    async def preamble(conversation: ConversationRef | None) -> str:
+        prompt_parts = await public_build_memory_prompt_parts(
+            "What should I remember?",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            get_tool_execution_identity(),
+            conversation=conversation,
+        )
+        return prompt_parts.session_preamble
+
+    first = await preamble(ConversationRef("thread", None))
+    await add_agent_memory("Added fact.", "general", storage_path, config)
+
+    assert await preamble(ConversationRef("thread", None)) == first
+    assert "Added fact." not in first
+    assert "Added fact." in await preamble(ConversationRef("other-thread", None))
+    assert "Added fact." in await preamble(None)
+
+    (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    assert "Curated fact." not in await preamble(ConversationRef("thread", None))
 
 
 @pytest.mark.asyncio

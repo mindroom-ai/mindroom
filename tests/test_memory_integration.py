@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import render_transient_context
-from mindroom.memory import MemoryPromptParts
+from mindroom.memory import ConversationRef, MemoryPromptParts
 from tests.conftest import make_turn_context
 from tests.identity_helpers import persist_entity_accounts
 
@@ -100,6 +100,7 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
+                conversation=ConversationRef("test_session", None),
             )
 
             # Verify enhanced prompt was used
@@ -147,6 +148,7 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
+                conversation=ConversationRef("test_session", None),
             )
 
             # Note: Memory storage now happens at the bot level, not in ai_response

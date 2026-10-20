@@ -285,8 +285,9 @@ Previous {context_type} memories that might be related:
 {memory_lines}"""
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
     "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
-    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
-    "or when a marker says lines were omitted."
+    "automatically every turn, as this conversation last loaded it, so entries added from other conversations "
+    "since then may be missing. Do not re-read it to recall what it says; open it to edit it, to look for such "
+    "newer entries, or when a marker says lines were omitted."
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "[Memory entrypoint truncated - showing the first {included_lines} of {total_lines} lines "
