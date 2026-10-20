@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _SOURCE = "$event"
-_INTERMEDIATE = "Loading the tool now."
+_INTERMEDIATE = "Switching models now."
 _ANSWER = "The real answer."
 
 
@@ -483,7 +483,7 @@ class TestStreamedAgentContinuation:
 
     @staticmethod
     def _streams(timeline: list[str]) -> MagicMock:
-        """Return an `arun` stand-in: narrate, load a tool, then answer."""
+        """Return an `arun` stand-in: narrate, switch models, then answer."""
 
         async def first() -> AsyncIterator[object]:
             timeline.append("attempt")

@@ -2127,7 +2127,7 @@ class TestUserIdPassthrough:
         first_agent.arun = AsyncMock(return_value=first_run_output)
 
         second_run_output = MagicMock()
-        second_run_output.content = "Finished on the new model."
+        second_run_output.content = "Finished the task."
         second_run_output.tools = []
         second_run_output.status = RunStatus.completed
         second_agent.arun = AsyncMock(return_value=second_run_output)
@@ -2150,7 +2150,7 @@ class TestUserIdPassthrough:
                 tool_trace_collector=tool_trace,
             )
 
-        assert response == "Finished on the new model."
+        assert response == "Finished the task."
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."
         assert mock_prepare.await_args_list[1].kwargs["model_prompt"] == "Use attachment att_1."
@@ -2417,8 +2417,8 @@ class TestUserIdPassthrough:
             yield RunCompletedEvent(content=None)
 
         async def second_stream() -> AsyncIterator[object]:
-            yield RunContentEvent(content="Finished on the new model.")
-            yield RunCompletedEvent(content="Finished on the new model.")
+            yield RunContentEvent(content="Finished the task.")
+            yield RunCompletedEvent(content="Finished the task.")
 
         first_agent.arun = MagicMock(return_value=first_stream())
         second_agent.arun = MagicMock(return_value=second_stream())
@@ -2443,7 +2443,7 @@ class TestUserIdPassthrough:
             ]
 
         assert [chunk.content for chunk in chunks if isinstance(chunk, RunContentEvent)] == [
-            "Finished on the new model.",
+            "Finished the task.",
         ]
         assert mock_prepare.await_count == 2
         assert mock_prepare.await_args_list[0].kwargs["model_prompt"] == "test\n\nUse attachment att_1."

@@ -134,7 +134,7 @@ async def test_team_response_continues_after_member_model_switch() -> None:
     mock_team.arun = AsyncMock(
         side_effect=[
             _continuing_team_output(),
-            TeamRunOutput(content="Finished on the new model."),
+            TeamRunOutput(content="Finished the task."),
         ],
     )
     recorder = TurnRecorder(user_message="Switch to the large model and finish the task.")
@@ -153,9 +153,9 @@ async def test_team_response_continues_after_member_model_switch() -> None:
             run_id_callback=run_ids.append,
         )
 
-    assert "Finished on the new model." in response
+    assert "Finished the task." in response
     assert mock_team.arun.await_count == 2
-    # The continuation rebuilds member agents so they run on the switched model.
+    # The continuation rebuilds member agents for its second attempt.
     assert mock_create.call_count == 2
     second_prompt = mock_team.arun.await_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
@@ -164,7 +164,7 @@ async def test_team_response_continues_after_member_model_switch() -> None:
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
     assert recorder.outcome == "completed"
-    assert "Finished on the new model." in recorder.assistant_text
+    assert "Finished the task." in recorder.assistant_text
     # The turn-level trace still carries the first attempt's model-switch call.
     assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
@@ -202,7 +202,7 @@ async def test_team_continuation_pins_member_model_for_whole_turn() -> None:
                 model_name="default",
             )
             return _continuing_team_output()
-        return TeamRunOutput(content="Finished on the new model.")
+        return TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = AsyncMock(side_effect=run_team)
@@ -222,7 +222,7 @@ async def test_team_continuation_pins_member_model_for_whole_turn() -> None:
             ctx=make_turn_context(session_id=None, room_id=room_id),
         )
 
-    assert "Finished on the new model." in response
+    assert "Finished the task." in response
     assert [call.kwargs["active_model_name"] for call in mock_create.call_args_list] == ["large", "large"]
 
 
@@ -408,7 +408,7 @@ async def test_team_response_stream_continues_after_terminal_continuing_output()
         yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Finished on the new model.")
+        yield TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -435,11 +435,11 @@ async def test_team_response_stream_continues_after_terminal_continuing_output()
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Finished on the new model." in rendered
+    assert "Finished the task." in rendered
     # The superseded first attempt's fallback document must not leak.
     assert "No team response generated." not in rendered
     assert recorder.outcome == "completed"
-    assert "Finished on the new model." in recorder.assistant_text
+    assert "Finished the task." in recorder.assistant_text
 
 
 @pytest.mark.asyncio
@@ -456,7 +456,7 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished on the new model.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -491,9 +491,9 @@ async def test_team_response_stream_continues_after_streamed_member_model_switch
     second_prompt = mock_team.arun.call_args_list[1].args[0]
     assert "MODEL SWITCH TOOL CALL COMPLETED" in second_prompt[-1].content
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Finished on the new model." in rendered
+    assert "Finished the task." in rendered
     assert recorder.outcome == "completed"
-    assert "Finished on the new model." in recorder.assistant_text
+    assert "Finished the task." in recorder.assistant_text
     assert any(entry.tool_name == "switch_thread_model" for entry in recorder.completed_tools)
 
 
@@ -510,7 +510,7 @@ async def test_team_response_stream_continues_from_hidden_member_model_switch() 
         )
 
     async def second_stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished on the new model.")
+        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])
@@ -535,7 +535,7 @@ async def test_team_response_stream_continues_from_hidden_member_model_switch() 
     assert mock_team.arun.call_count == 2
     assert mock_create.call_count == 2
     rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "Finished on the new model." in rendered
+    assert "Finished the task." in rendered
     assert recorder.outcome == "completed"
 
 
@@ -593,7 +593,7 @@ async def test_team_response_logs_continuation_prompt_in_request_log_context() -
     mock_team.arun = AsyncMock(
         side_effect=[
             _continuing_team_output(),
-            TeamRunOutput(content="Finished on the new model."),
+            TeamRunOutput(content="Finished the task."),
         ],
     )
     logged_prompts: list[object] = []
@@ -633,7 +633,7 @@ async def test_team_response_stream_logs_continuation_prompt_in_request_log_cont
         yield _continuing_team_output()
 
     async def second_stream() -> AsyncIterator[object]:
-        yield TeamRunOutput(content="Finished on the new model.")
+        yield TeamRunOutput(content="Finished the task.")
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(side_effect=[first_stream(), second_stream()])

@@ -1764,7 +1764,7 @@ def _extract_cancelled_team_tool_trace(
 def _collect_team_tool_executions(response: TeamRunOutput | RunOutput) -> list[ToolExecution]:
     """Collect raw tool executions from a possibly nested team response.
 
-    Any member's completed load/unload call surfaces here and drives a
+    Any member's completed model-switch call surfaces here and drives a
     whole-fan continuation, even when the team already produced visible
     output. That mirrors the agent path deliberately: gating on visible
     output would disable continuation in coordinate mode, where the leader
