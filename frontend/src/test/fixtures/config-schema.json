@@ -2300,7 +2300,7 @@
             }
           ],
           "default": null,
-          "description": "How often to schedule a background refresh for a local knowledge folder that another host writes to, such as an NFS share, where filesystem watching never sees the writes; unset means no polling; Git-backed bases use git.poll_interval_seconds instead",
+          "description": "How often to schedule a background refresh for a local knowledge folder that another host writes to, such as an NFS share, where filesystem watching never sees the writes; unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead",
           "title": "Poll Interval Seconds"
         },
         "require_content_before_publish": {

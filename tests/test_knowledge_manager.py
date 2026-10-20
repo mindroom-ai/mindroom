@@ -1337,7 +1337,7 @@ async def test_knowledge_polling_repeats_after_poll_interval(
     git: bool,
     docs_dir: str,
 ) -> None:
-    """Polled shared bases keep scheduling refreshes on their interval, even before the first writer creates the folder."""
+    """Polled shared bases keep scheduling refreshes on their interval, and a poll target does not require its folder to exist."""
     config = _polled_docs_config(tmp_path, tmp_path / docs_dir, git=git)
     runtime_paths = runtime_paths_for(config)
     second_schedule = asyncio.Event()
@@ -1960,6 +1960,12 @@ def test_local_poll_interval_is_rejected_on_git_bases() -> None:
             poll_interval_seconds=60,
             git=KnowledgeGitConfig(repo_url="https://example.com/x.git"),
         )
+
+
+def test_local_poll_interval_is_rejected_on_files_mode_bases() -> None:
+    """Files-mode bases have no index to refresh, so a poller would only hash every file for nothing."""
+    with pytest.raises(ValidationError, match="poll_interval_seconds applies to semantic local knowledge bases"):
+        KnowledgeBaseConfig(mode="files", poll_interval_seconds=60)
 
 
 def test_tracked_path_listing_rejects_directories_and_missing_paths(tmp_path: Path) -> None:
