@@ -60,8 +60,9 @@ logger = get_logger(__name__)
 
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
 _GRAPH_HOST = "graph.microsoft.com"
-# Windows zone names ("W. Europe Standard Time", "UTC-11") and IANA names ("America/New_York").
-_TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/-]{0,63}")
+# Windows zone names ("W. Europe Standard Time", "Central Standard Time (Mexico)", "UTC-11") and IANA names
+# ("America/New_York"); the name only goes into JSON bodies, never a URL or OData string.
+_TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/()-]{0,63}")
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CHUNK_BYTES = 1024 * 1024
 _OFFSET = re.compile(r"[0-9]{1,10}")

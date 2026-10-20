@@ -22,6 +22,7 @@ from mindroom.custom_tools.microsoft_graph import (
     path_segment,
     read_upload_source,
     share_id,
+    time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.redaction import redact_sensitive_text
@@ -385,6 +386,29 @@ def test_path_segments_accept_graph_ids(value: str, segment: str) -> None:
 def test_path_segments_refuse_anything_that_changes_the_path(value: object) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
         path_segment(value, "id")
+
+    assert excinfo.value.code == "invalid_argument"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "W. Europe Standard Time",
+        "Central Standard Time (Mexico)",
+        "Pacific Standard Time (Mexico)",
+        "UTC-11",
+        "America/New_York",
+        "Etc/GMT+5",
+    ],
+)
+def test_time_zone_names_accept_windows_and_iana_names(value: str) -> None:
+    assert time_zone_name(value) == value
+
+
+@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n", 7, None])
+def test_time_zone_names_refuse_anything_else(value: object) -> None:
+    with pytest.raises(MicrosoftGraphError) as excinfo:
+        time_zone_name(value)
 
     assert excinfo.value.code == "invalid_argument"
 
