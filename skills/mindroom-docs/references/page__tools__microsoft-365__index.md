@@ -152,15 +152,19 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 | `outlook_calendar_list_calendars` | no | List the requester's calendars, whether the requester can edit each, and which one is the default. |
 | `outlook_calendar_list_events` | no | List events between two moments in the default calendar or another, in start order, up to 50, with attendees and their responses and the online meeting link. |
 | `outlook_calendar_get_event` | no | Read an event with its description as plain text, up to 20,000 characters. |
+| `outlook_calendar_get_free_busy` | no | Look up when up to 20 colleagues, distribution lists, or rooms are busy, with their working hours, to find a time to meet. |
 | `outlook_calendar_create_event` | yes | Create an event, optionally with attendees, a location, a description, and an online meeting; Outlook emails each attendee an invitation. |
 | `outlook_calendar_update_event` | yes | Change an event's subject, start, end, location, or description; attendees of a meeting the requester organizes receive the update. |
 | `outlook_calendar_delete_event` | yes | Delete an event; for a meeting the requester organizes, Outlook sends every attendee a cancellation. |
 | `outlook_calendar_respond_to_event` | yes | Accept, tentatively accept, or decline a meeting invitation, optionally with a comment to the organizer. |
 
-Event times in results are in UTC, and the agent converts them to the requester's time zone.
+Event times in event results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
 Calendar and event listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
+Free/busy lookups take local times plus a time zone, like new events, and return times in that zone.
+A free/busy window must be shorter than 62 days, and each member of a distribution list counts toward the 20.
+Free/busy shows another person's event subjects and locations only when their calendar sharing allows it, and it needs a work or school account.
 Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
 Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
 Changing or deleting the series master changes or deletes every occurrence.
