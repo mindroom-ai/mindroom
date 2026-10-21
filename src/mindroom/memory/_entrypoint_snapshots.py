@@ -11,11 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
+
 if TYPE_CHECKING:
     from pathlib import Path
-
-# Most provider prompt caches expire within an hour idle; after that the request misses anyway.
-_IDLE_REFRESH_SECONDS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -64,7 +63,7 @@ def stable_entrypoint_preamble(
     An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
     Keying by the file keeps one requester's private memory out of another requester's turns.
     """
-    for key in [key for key, snapshot in _snapshots.items() if now - snapshot.used_at >= _IDLE_REFRESH_SECONDS]:
+    for key in [key for key, snapshot in _snapshots.items() if now - snapshot.used_at >= PROMPT_CACHE_IDLE_SECONDS]:
         del _snapshots[key]
     key = (agent_name, conversation.session_id, source_path)
     snapshot = _snapshots.get(key)

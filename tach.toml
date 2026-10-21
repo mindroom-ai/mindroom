@@ -3389,7 +3389,7 @@ visibility = ["mindroom.memory.auto_flush"]
 
 [[modules]]
 path = "mindroom.memory._entrypoint_snapshots"
-depends_on = []
+depends_on = ["mindroom.constants"]
 visibility = ["mindroom.memory", "mindroom.memory.functions"]
 
 [[modules]]
@@ -7635,7 +7635,7 @@ visibility = ["mindroom.providers.model_loading"]
 
 [[modules]]
 path = "mindroom.config.cold_cache"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.constants"]
 visibility = ["mindroom.config.agent"]
 
 [[modules]]
