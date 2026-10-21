@@ -609,14 +609,14 @@ def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, t
 
 
 @pytest.mark.parametrize(
-    ("page_token", "suffix"),
+    ("page_token", "collection"),
     [
-        ("/me/drive/root/children?$skiptoken=a", "/children"),
-        ("/me/todo/lists/AAMk-1=/tasks?$skip=50&$filter=a%2Eb", "/tasks"),
+        ("/me/drive/root/children?$skiptoken=a", "/me/drive/root/children"),
+        ("/me/todo/lists/AAMk-1=/tasks?$skip=50&$filter=a%2Eb", r"/me/todo/lists/[^/]+/tasks"),
     ],
 )
-def test_page_paths_continue_their_own_collection(page_token: str, suffix: str) -> None:
-    assert page_path(page_token, suffix) == page_token
+def test_page_paths_continue_their_own_collection(page_token: str, collection: str) -> None:
+    assert page_path(page_token, collection) == page_token
 
 
 @pytest.mark.parametrize(
@@ -634,7 +634,7 @@ def test_page_paths_continue_their_own_collection(page_token: str, suffix: str) 
 )
 def test_page_paths_refuse_tokens_that_can_leave_the_collection(page_token: str) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
-        page_path(page_token, "/tasks")
+        page_path(page_token, r"/me/todo/lists/.+/tasks")
 
     assert excinfo.value.code == "invalid_page_token"
 

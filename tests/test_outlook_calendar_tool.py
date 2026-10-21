@@ -283,16 +283,22 @@ def test_list_events_escapes_a_calendar_id(tmp_path: Path, monkeypatch: pytest.M
     assert graph.requests[0].url.raw_path.split(b"?")[0] == b"/v1.0/me/calendars/AAMkCal%2B1=/calendarView"
 
 
-def test_list_events_follows_its_own_page_token_in_utc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    routes = {("GET", "/me/calendar/calendarView"): httpx.Response(200, json={"value": [_graph_event()]})}
+@pytest.mark.parametrize("calendar_path", ["/me/calendar", f"/me/calendars/{CALENDAR_ID}"])
+def test_list_events_follows_its_own_page_token_in_utc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calendar_path: str,
+) -> None:
+    routes = {("GET", f"{calendar_path}/calendarView"): httpx.Response(200, json={"value": [_graph_event()]})}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
+    page_token = calendar_path + NEXT_EVENTS.removeprefix("/me/calendar")
 
-    result = _payload(tools.outlook_calendar_list_events("2026-10-21", "2026-10-22", page_token=NEXT_EVENTS))
+    result = _payload(tools.outlook_calendar_list_events("2026-10-21", "2026-10-22", page_token=page_token))
 
     assert result["events"] == [EVENT_SUMMARY]
     [request] = graph.requests
     assert request.headers["prefer"] == 'outlook.timezone="UTC"'
-    assert request.url.path == "/v1.0/me/calendar/calendarView"
+    assert request.url.path == f"/v1.0{calendar_path}/calendarView"
     assert dict(request.url.params) == {
         "startDateTime": "2026-10-21T00:00:00Z",
         "endDateTime": "2026-10-22T00:00:00Z",

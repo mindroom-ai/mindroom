@@ -254,13 +254,15 @@ def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkey
     ]
 
 
-def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mailbox_path", ["/me", "/me/mailFolders/inbox"])
+def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mailbox_path: str) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    page_token = f"{mailbox_path}/messages?$top=25&$skiptoken=page2"
 
-    result = _payload(tools.outlook_mail_search(query="ignored", folder="inbox", page_token=NEXT_MESSAGES))
+    result = _payload(tools.outlook_mail_search(query="ignored", folder="inbox", page_token=page_token))
 
     [request] = graph.requests
-    assert (request.method, request.url.path) == ("GET", "/v1.0/me/messages")
+    assert (request.method, request.url.path) == ("GET", f"/v1.0{mailbox_path}/messages")
     assert dict(request.url.params) == {"$top": "25", "$skiptoken": "page2"}
     assert result["next_page_token"] == NEXT_MESSAGES
 
@@ -269,6 +271,7 @@ def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.M
     "page_token",
     [
         "/me/events?$skiptoken=abc",
+        "/chats/19:2da4c29f6d7041eca70b638b43d45437@thread.v2/messages?$top=1",
         f"{GRAPH}{NEXT_MESSAGES}",
         "/me/messages/../../me/events/messages?x=1",
         "/me/messagesX?$skiptoken=abc",

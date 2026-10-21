@@ -372,7 +372,7 @@ class OutlookCalendarTools(Toolkit):
 
         def build() -> _GraphRequest:
             if page_token is not None:
-                return _GraphRequest("GET", page_path(page_token, "/calendars"))
+                return _GraphRequest("GET", page_path(page_token, "/me/calendars"))
             return _GraphRequest(
                 "GET",
                 "/me/calendars",
@@ -414,7 +414,7 @@ class OutlookCalendarTools(Toolkit):
 
         def build() -> _GraphRequest:
             if page_token is not None:
-                return _GraphRequest("GET", page_path(page_token, "/calendarView"))
+                return _GraphRequest("GET", page_path(page_token, r"/me/(calendar|calendars/[^/]+)/calendarView"))
             window_start, window_end = _window(start, end)
             return _GraphRequest(
                 "GET",

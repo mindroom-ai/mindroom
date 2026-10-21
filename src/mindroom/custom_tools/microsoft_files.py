@@ -52,6 +52,7 @@ _TOOL_NAME = "microsoft_files"
 _ITEM_SELECT = "id,name,size,eTag,webUrl,lastModifiedDateTime,lastModifiedBy,parentReference,file,folder"
 _ITEM_PATH = re.compile(rf"^(?:{re.escape(GRAPH_URL)})?/?drives/(?P<drive>[^/]+)/items/(?P<item>[^/]+)/?$")
 _LINK_HOSTS = frozenset({"onedrive.live.com", "1drv.ms"})
+_CHILDREN_PAGES = r"/(me/drive|drives/[^/]+)/(root|items/[^/]+)/children"
 _ADDRESS = re.compile(r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?")
 # Characters OneDrive and SharePoint refuse in file names.
 _INVALID_NAME_CHARACTERS = frozenset('"*:<>?/\\|')
@@ -379,7 +380,7 @@ class MicrosoftFilesTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if page_token is not None:
-                payload = session.json("GET", page_path(page_token, "/children"))
+                payload = session.json("GET", page_path(page_token, _CHILDREN_PAGES))
             else:
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
                 params = {"$top": str(_limit(limit, 200)), "$select": _ITEM_SELECT}
@@ -389,7 +390,7 @@ class MicrosoftFilesTools(Toolkit):
 
         def validate() -> None:
             if page_token is not None:
-                page_path(page_token, "/children")
+                page_path(page_token, _CHILDREN_PAGES)
             elif folder is not None:
                 _parse_file(folder, "folder")
 
