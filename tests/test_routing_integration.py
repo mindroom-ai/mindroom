@@ -29,7 +29,6 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -38,12 +37,10 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
@@ -52,13 +49,8 @@ class TestRoutingIntegration:
         When a user mentions @MindRoomResearch, only that agent should respond.
         MindRoomNews should NOT respond or route.
         """
-
-        # Create generator for streaming response
-        async def streaming_generator() -> AsyncIterator[str]:
-            yield "I am MindRoomResearch and I can help with research tasks"
-
-        mock_stream_agent_response.return_value = streaming_generator()
-        mock_ai_response.return_value = "I am MindRoomResearch and I can help with research tasks"
+        reply = "I am MindRoomResearch and I can help with research tasks"
+        mock_ai_response.return_value = reply
 
         # Create agents
         research_agent = AgentMatrixUser(
@@ -153,13 +145,14 @@ class TestRoutingIntegration:
         await news_bot._on_message(mock_room, user_message)
         await drain_coalescing(research_bot, news_bot)
 
-        # Only research bot should respond (streaming makes 2 calls)
-        assert research_bot.client.room_send.call_count >= 1  # At least initial message
+        # Only the research bot should respond
+        assert research_bot.client.room_send.call_count >= 1
         assert news_bot.client.room_send.call_count == 0
 
         # Router should NOT have been called at all
         assert mock_suggest_responder.call_count == 0
 
-        # Verify the response was sent
+        # Verify the generated reply replaced the placeholder
+        assert mock_ai_response.await_count == 1
         last_call = research_bot.client.room_send.call_args_list[-1]
-        assert "body" in last_call[1]["content"]
+        assert last_call[1]["content"]["m.new_content"]["body"] == reply
