@@ -3,22 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.metrics import MessageMetrics
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.session.summary import SessionSummary
 from agno.team import Team
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.replay import compaction_summary_message
+from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
+    _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
@@ -26,14 +25,17 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import set_force_compaction_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import record_native_checkpoint
-from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
+from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
-    FakeModel,
     _agent,
     _completed_run,
     _completed_team_run,
@@ -42,9 +44,56 @@ from tests.history_helpers import (
     _team_session,
     compact_runs,
 )
+from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.history.types import NativeHistory
+    from mindroom.providers.openai.responses import ResponsesAdapter
+
+_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+_CHECKPOINT = [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}]
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_environment() -> Iterator[None]:
+    with isolated_provider_environment():
+        yield
+
+
+def _inputs(config: Config) -> HistoryPreparationInputs:
+    """Resolve the configured test agent's history inputs for a 100-token static prompt."""
+    return resolve_agent_preparation_inputs(
+        agent_name="test_agent",
+        history_settings=config.resolve_entity("test_agent").history_settings,
+        config=config,
+        static_prompt_tokens=100,
+    )
+
+
+def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: NativeHistory | None) -> dict[str, Any]:
+    """Return the ``responses.create`` arguments a request of ``messages`` sends under ``native``."""
+    request = ModelRequest(
+        messages=tuple(messages),
+        native_compaction=native.native_compaction if native is not None else None,
+        portable_replay=native.portable_replay if native is not None else False,
+    )
+    return responses_request_kwargs(
+        model_id=adapter.identity.id,
+        request=request,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+
+
+def _continues(sent: dict[str, Any]) -> str | None:
+    """Return the stored response a request continues, if any."""
+    return (sent.get("extra_body") or {}).get("previous_response_id")
 
 
 @pytest.mark.asyncio
@@ -85,28 +134,22 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
             ],
         ),
     )
-    db.close()
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     session = db.load_session("session", "agent")
     assert session is not None
-    original = [run.to_dict() for run in session.runs or []]
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    original = [run.to_dict() for run in session.runs]
+    model = responses_adapter(tmp_path, store=True)
+    resolved = _inputs(config)
 
     prepared = await prepare_scope_history(
-        agent=agent,
         agent_name="test_agent",
+        scope=_SCOPE,
+        model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -117,11 +160,18 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     assert final.replay_plan is not None
     assert final.replay_plan.mode == "limited"
     assert final.replay_plan.num_history_runs == 1
-    messages = session.get_messages(agent_id="test_agent", last_n_runs=final.replay_plan.num_history_runs)
+    messages = scope_history_messages(
+        session.runs,
+        scope=_SCOPE,
+        num_history_runs=final.replay_plan.num_history_runs,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
     assert model.estimate_portable_replay_tokens(messages) <= final.replay_plan.estimated_tokens <= 1000
     messages.append(Message(role="user", content="Continue"))
-    assert "previous_response_id" not in model.get_request_params(messages=messages)
-    assert model._format_messages(messages) == [
+    sent = _sent(model, messages, final.native_history)
+    assert _continues(sent) is None
+    assert sent["input"] == [
         {"role": "user", "content": "Check the service."},
         {
             "type": "function_call",
@@ -135,84 +185,76 @@ async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_histo
     ]
     persisted = db.load_session("session", "agent")
     assert persisted is not None
-    assert [run.to_dict() for run in persisted.runs or []] == original
-    assert [run.to_dict() for run in session.runs or []] == original
-    db.close()
+    assert [run.to_dict() for run in persisted.runs] == original
+    assert [run.to_dict() for run in session.runs] == original
 
 
-def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> None:
-    """An unbounded plan must not inherit portable replay from a prior bounded plan."""
+def test_portable_replay_follows_each_plans_replay_budget(tmp_path: Path) -> None:
+    """An unbounded plan continues the stored response; a bounded one replays its history explicitly."""
     config, _ = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    model = responses_adapter(tmp_path, store=True)
+    resolved = _inputs(config)
     messages = [
         Message(role="assistant", content="Previous answer", provider_data={"response_id": "resp_previous"}),
         Message(role="user", content="Continue"),
     ]
     for budget in (1000, None, 2000):
-        configure_native_history(
+        native = configure_native_history(
             model,
             plan=replace(resolved.execution_plan, hard_replay_budget_tokens=budget),
             history_settings=resolved.history_settings,
             session=None,
             allowed=False,
         )
-        request = model.get_request_params(messages=messages)
-        replay = model._format_messages(messages)
+        sent = _sent(model, messages, native)
         if budget is None:
-            assert request["previous_response_id"] == "resp_previous"
-            assert replay == [{"role": "user", "content": "Continue"}]
+            assert _continues(sent) == "resp_previous"
+            assert sent["input"] == [{"role": "user", "content": "Continue"}]
         else:
-            assert "previous_response_id" not in request
-            assert replay[0] == {"role": "assistant", "content": "Previous answer"}
+            assert _continues(sent) is None
+            assert sent["input"][0] == {"role": "assistant", "content": "Previous answer"}
 
 
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
-def test_restore_native_policy_requires_latest_compatible_response(change: str) -> None:
+def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Path, change: str) -> None:
     """A rebuild must not recover stale policy from an older checkpoint or foreign route."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=1024)
-    checkpoint = ModelResponse(content="Ready")
-    record_native_checkpoint(
-        checkpoint,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}],
-        model.native_compaction,
-    )
-    latest = ModelResponse(content="Waiting for approval")
-    record_native_checkpoint(latest, [], None if change == "disabled" else model.native_compaction)
+    paused = responses_adapter(tmp_path, store=False)
+    native = paused.native_compaction_settings(threshold=1024)
+    assert native is not None
+    checkpoint = Message(role="assistant", content="Ready")
+    record_native_checkpoint(checkpoint, _CHECKPOINT, native)
+    latest = Message(role="assistant", content="Waiting for approval")
+    record_native_checkpoint(latest, [], None if change == "disabled" else native)
     if change == "missing":
         latest.provider_data = None
     elif change == "invalid_threshold":
+        assert latest.provider_data is not None
         latest.provider_data["mindroom_native_compaction"]["threshold"] = True
     messages = [
         Message(role="user", content="Canonical facts"),
-        Message(role="assistant", content=checkpoint.content, provider_data=checkpoint.provider_data),
+        checkpoint,
         Message(role="user", content="Continue"),
-        Message(role="assistant", content=latest.content, provider_data=latest.provider_data),
+        latest,
     ]
     run = _completed_run("paused", messages=messages)
     session = _session("session", runs=[run])
-    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    rebuilt.configure_native_compaction(threshold=2048)
-    if change == "model":
-        rebuilt.id = "unsupported-route"
-    elif change == "endpoint":
-        rebuilt.base_url = "https://other.example/v1"
-    elif change == "summary":
-        session.summary = SessionSummary(summary="New portable summary")
-    restore_native_history(rebuilt, persisted_run=run, session=session)
-    replay = rebuilt._format_messages(messages)
+    rebuilt_kwargs: dict[str, Any] = {"store": False}
+    if change == "endpoint":
+        rebuilt_kwargs["base_url"] = "https://other.example/v1"
+    rebuilt = responses_adapter(tmp_path, "unsupported-route" if change == "model" else "gpt-6-astra", **rebuilt_kwargs)
+    if change == "summary":
+        session.summary = ScopeSummary(text="New portable summary", updated_at=datetime.now(UTC))
+
+    restored = restore_native_history(rebuilt, persisted_run=run, session=session)
+
+    assert restored is not None
+    replay = _sent(rebuilt, messages, restored)["input"]
     if change == "none":
-        assert rebuilt.native_compaction is not None
-        assert rebuilt.native_compaction.threshold == 1024
+        assert restored.native_compaction is not None
+        assert restored.native_compaction.threshold == 1024
         assert replay[0]["type"] == "compaction"
     else:
-        assert rebuilt.native_compaction is None
+        assert restored.native_compaction is None
         assert replay[0] == {"role": "user", "content": "Canonical facts"}
 
 
@@ -224,50 +266,31 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=120000)
-    response = ModelResponse(content="Ready")
-    record_native_checkpoint(
-        response,
-        [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}],
-        model.native_compaction,
+    model = responses_adapter(tmp_path, store=False)
+    answer = Message(
+        role="assistant",
+        content="Ready",
+        # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
+        metrics=MessageMetrics(input_tokens=190000),
     )
-    run = _completed_run(
-        "old",
-        messages=[
-            Message(role="user", content="large old transcript " * 50000),
-            # Billed for the transcript the checkpoint replaced, over the 183,516-token hard budget.
-            Message(
-                role="assistant",
-                content="Ready",
-                provider_data=response.provider_data,
-                metrics=MessageMetrics(input_tokens=190000),
-            ),
-        ],
-    )
-    run.model = model.id
-    run.model_provider = model.provider
+    record_native_checkpoint(answer, _CHECKPOINT, model.native_compaction_settings(threshold=120000))
+    run = _completed_run("old", messages=[Message(role="user", content="large old transcript " * 50000), answer])
+    run.model = model.identity.id
+    run.model_provider = model.identity.provider
     session = _session("session", runs=[run])
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     text_compact = AsyncMock(side_effect=AssertionError("Canonical history must remain intact"))
     monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
     prepared = await prepare_scope_history(
-        agent=agent,
         agent_name="test_agent",
-        resolved_inputs=resolved,
+        scope=_SCOPE,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -280,9 +303,8 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     assert final.replay_plan.num_history_messages is None
     assert final.replay_plan.estimated_tokens < 1000
     assert final.replays_persisted_history
-    assert len(session.runs or []) == 1
-    assert len(session.runs[0].messages[0].content) > 900000
-    db.close()
+    assert len(session.runs) == 1
+    assert len(str(session.runs[0].messages[0].content)) > 900000
 
 
 @pytest.mark.asyncio
@@ -300,14 +322,14 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
     )
     monkeypatch.setattr(
-        "mindroom.providers.model_loading.get_model_instance",
-        lambda *_args, **_kwargs: FakeModel(id="summary"),
+        "mindroom.history.compaction.build_model_provider",
+        lambda *_args: summary_model(model_id="summary"),
     )
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
-        AsyncMock(return_value=SessionSummary(summary="Keep the recent instruction")),
+        AsyncMock(return_value="Keep the recent instruction"),
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", base_url="https://proxy.example/v1", store=True)
+    model = responses_adapter(tmp_path, base_url="https://proxy.example/v1", store=True)
     latest = [
         Message(role="user", content="Keep the recent instruction"),
         Message(
@@ -326,22 +348,15 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     )
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
     prepared = await prepare_scope_history(
-        agent=agent,
         agent_name="test_agent",
-        resolved_inputs=resolved,
+        scope=_SCOPE,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
     )
     final = finalize_history_preparation(
         prepared_scope_history=prepared,
@@ -352,19 +367,19 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     if auto_compact:
         assert prepared.compaction_reply_outcome == "success"
         assert session.summary is not None
-        assert session.summary.summary == "Keep the recent instruction"
-        assert len(session.runs or []) == 0
+        assert session.summary.text == "Keep the recent instruction"
+        assert session.runs == []
     else:
         assert final.replay_plan.mode == "limited"
         assert final.replay_plan.num_history_runs == 1
         assert final.replay_plan.estimated_tokens < 100
-        assert len(session.runs or []) == 2
-    assert model.native_compaction is None
-    messages = [*latest, Message(role="user", content="Continue")]
-    assert "previous_response_id" not in model.get_request_params(messages=messages)
-    assert model._format_messages(messages)[0] == {"role": "user", "content": "Keep the recent instruction"}
+        assert len(session.runs) == 2
+    assert final.native_history is not None
+    assert final.native_history.native_compaction is None
+    sent = _sent(model, [*latest, Message(role="user", content="Continue")], final.native_history)
+    assert _continues(sent) is None
+    assert sent["input"][0] == {"role": "user", "content": "Keep the recent instruction"}
     assert latest[-1].provider_data == {"response_id": "resp_large_context"}
-    db.close()
 
 
 @pytest.mark.asyncio
@@ -391,48 +406,45 @@ async def test_native_activation_respects_history_policy(
         },
     )
     model = (
-        MindRoomAnthropicClaude(id="claude-sonnet-5", context_management={"edits": [{"type": "compact_20260112"}]})
+        provider_for(
+            {
+                "provider": "anthropic",
+                "id": "claude-sonnet-5",
+                "extra_kwargs": {
+                    "api_key": "test-key",
+                    "context_management": {"edits": [{"type": "compact_20260112"}]},
+                },
+            },
+            tmp_path / "claude",
+            httpx.AsyncClient(),
+        )
         if authored_claude
-        else MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+        else responses_adapter(tmp_path, store=False)
     )
     session = _session("session", runs=[_completed_run("old")])
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":
-        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+        set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    if case == "manual":
-        # The policy must reach the existing text owner, with native replay disabled.
-        async def text_compact(**_kwargs: object) -> None:
-            assert model.native_compaction is None
-            message = "Reached portable compaction"
-            raise RuntimeError(message)
+    # A manual request must reach the portable text owner, which returns no outcome here.
+    text_compact = AsyncMock(return_value=_ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed"))
+    monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
 
-        monkeypatch.setattr("mindroom.history.runtime._run_scope_compaction_with_lifecycle", text_compact)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
+    prepared = await prepare_scope_history(
         agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    kwargs = dict(  # noqa: C408
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+        scope=_SCOPE,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
         allow_native_compaction=case != "scheduled",
     )
-    if case == "manual":
-        with pytest.raises(RuntimeError, match="Reached portable compaction"):
-            await prepare_scope_history(**kwargs)
-    else:
-        await prepare_scope_history(**kwargs)
-        assert (model.native_compaction is not None) is (case == "normal")
-    db.close()
+
+    native = prepared.native_history
+    assert (native is not None and native.native_compaction is not None) is (case == "normal")
+    assert text_compact.await_count == (1 if case == "manual" else 0)
 
 
 @pytest.mark.asyncio
@@ -443,31 +455,25 @@ async def test_text_summary_change_invalidates_checkpoint(tmp_path: Path) -> Non
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    model.configure_native_compaction(threshold=120000)
-    old_route = model.native_compaction.route
-    session = _session("session", summary=SessionSummary(summary="New portable summary."))
+    model = responses_adapter(tmp_path, store=False)
+    old = model.native_compaction_settings(threshold=120000)
+    assert old is not None
+    session = _session("session", summary=ScopeSummary(text="New portable summary.", updated_at=datetime.now(UTC)))
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(db, session)
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
+    prepared = await prepare_scope_history(
         agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
+        scope=_SCOPE,
+        model=model,
+        resolved_inputs=_inputs(config),
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
     )
-    assert model.native_compaction is not None
-    assert model.native_compaction.route != old_route
-    db.close()
+    assert prepared.native_history is not None
+    assert prepared.native_history.native_compaction is not None
+    assert prepared.native_history.native_compaction.route != old.route
 
 
 @pytest.mark.asyncio
@@ -478,40 +484,33 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    model = responses_adapter(tmp_path, store=False)
     seeded = _session(
         "session",
         runs=[_completed_run("folded", messages=[Message(role="user", content="Earlier")])],
-        summary=SessionSummary(summary="Stale summary."),
+        summary=ScopeSummary(text="Stale summary.", updated_at=datetime.now(UTC)),
     )
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
-    assert isinstance(db, SqliteDb)
     seed_session(db, seeded)
-    compact_runs(db, seeded, scope, ["folded"], "Archived summary.")
+    compact_runs(db, seeded, _SCOPE, ["folded"], "Archived summary.")
     session = db.load_session("session", "agent")
     assert session is not None
-    agent = _agent(model=model, db=db)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
+    resolved = _inputs(config)
+    prepared = await prepare_scope_history(
         agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
+        scope=_SCOPE,
+        model=model,
         resolved_inputs=resolved,
         non_prompt_tokens=0,
         runtime_paths=paths,
         config=config,
-        scope_context=ScopeSessionContext(scope, db, session),
+        scope_context=ScopeSessionContext(_SCOPE, db, session),
     )
 
     assert session.summary is not None
-    assert session.summary.summary == "Archived summary."
+    assert session.summary.text == "Archived summary."
     expected = configure_native_history(
-        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        responses_adapter(tmp_path, store=False),
         plan=resolved.execution_plan,
         history_settings=resolved.history_settings,
         session=session,
@@ -519,9 +518,9 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
     )
     assert expected is not None
     assert expected.native_compaction is not None
-    assert model.native_compaction is not None
-    assert model.native_compaction.route == expected.native_compaction.route
-    db.close()
+    assert prepared.native_history is not None
+    assert prepared.native_history.native_compaction is not None
+    assert prepared.native_history.native_compaction.route == expected.native_compaction.route
 
 
 @pytest.mark.asyncio
@@ -608,7 +607,12 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[str, Any], *, portable: bool) -> None:
+def test_restore_portable_policy_requires_latest_provenance(
+    tmp_path: Path,
+    provider_data: dict[str, Any],
+    *,
+    portable: bool,
+) -> None:
     """Without legacy provenance the original budget is unknown; retain stored continuation."""
     messages = [
         Message(
@@ -623,15 +627,14 @@ def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[
         ),
         Message(role="user", content="Continue"),
     ]
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
-    model.configure_portable_replay(enabled=not portable)
-    restore_native_history(model, persisted_run=_completed_run("paused", messages=messages), session=None)
-    request = model.get_request_params(messages=messages)
+    model = responses_adapter(tmp_path, store=True)
+    restored = restore_native_history(model, persisted_run=_completed_run("paused", messages=messages), session=None)
+    sent = _sent(model, messages, restored)
     if portable:
-        assert "previous_response_id" not in request
+        assert _continues(sent) is None
     else:
-        assert request["previous_response_id"] == "resp_latest"
-        assert model._format_messages(messages) == [{"role": "user", "content": "Continue"}]
+        assert _continues(sent) == "resp_latest"
+        assert sent["input"] == [{"role": "user", "content": "Continue"}]
 
 
 @pytest.mark.parametrize("summary", ["S1", ""])
@@ -642,15 +645,11 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(),
-        agent_name="test_agent",
-        config=config,
-        static_prompt_tokens=100,
-    )
-    session = _session("session", summary=SessionSummary(summary=summary) if summary else None)
+    resolved = _inputs(config)
+    session = _session("session", summary=ScopeSummary(text=summary, updated_at=datetime.now(UTC)) if summary else None)
+    model = responses_adapter(tmp_path, store=False)
     configured = configure_native_history(
-        MindRoomOpenAIResponses(id="gpt-6-astra", store=False),
+        model,
         plan=resolved.execution_plan,
         history_settings=resolved.history_settings,
         session=session,
@@ -658,10 +657,9 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     )
 
     def route_for(history_generation: str) -> str:
-        model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-        model.configure_native_compaction(threshold=120000, history_generation=history_generation)
-        assert model.native_compaction is not None
-        return model.native_compaction.route
+        native = model.native_compaction_settings(threshold=120000, history_generation=history_generation)
+        assert native is not None
+        return native.route
 
     assert configured is not None
     assert configured.native_compaction is not None
