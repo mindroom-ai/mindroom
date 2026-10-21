@@ -74,8 +74,25 @@ class RequestOverrides:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class NativeCompactionReplay:
+    """The provider-managed compaction route one request replays.
+
+    ``route`` identifies the model, endpoint, and history generation whose stored checkpoints may be
+    replayed; ``threshold`` is the input-token trigger MindRoom asks for, or None to keep the authored
+    provider policy while still replaying that route's checkpoints.
+    """
+
+    route: str
+    threshold: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
-    """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts."""
+    """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts.
+
+    ``deferred_tool_names`` are the tools a route with native tool search sends as deferred definitions, and
+    ``native_compaction`` is the provider-managed compaction route this request replays, when any.
+    """
 
     messages: Sequence[Message]
     tools: Sequence[ToolSpec] = ()
@@ -83,6 +100,8 @@ class ModelRequest:
     response_format: type[BaseModel] | Mapping[str, Any] | None = None
     native_tools: Sequence[Mapping[str, Any]] = ()
     overrides: RequestOverrides = RequestOverrides()
+    deferred_tool_names: frozenset[str] = frozenset()
+    native_compaction: NativeCompactionReplay | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +208,7 @@ __all__ = [
     "ModelProvider",
     "ModelRequest",
     "ModelTurn",
+    "NativeCompactionReplay",
     "ReasoningDelta",
     "RequestOverrides",
     "StopReason",
