@@ -12765,7 +12765,7 @@ Shared channels from a team the requester is not a member of are not reachable.
 | `microsoft_meetings_get_transcript` | no | Read one transcript as timestamped lines labeled with their speaker, up to 30,000 characters per call. |
 
 To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_list_events` or `outlook_calendar_get_event`, finds the meeting, lists its transcripts, and reads one.
-Transcript lines look like `00:12:03 Alex Doe: text`, timed from the start of transcription, with each speaker's consecutive sentences on one line.
+Transcript lines look like `00:12:03 Alex Doe: text`, timed from the start of transcription, with each speaker's consecutive sentences joined into lines of up to about 2,000 characters.
 A long transcript comes back in chunks with a `next_page_token`; passing it back continues the same transcript, and transcript listings page the same way.
 A recurring meeting series is one meeting, so its listing holds a transcript for each occurrence that was transcribed.
 

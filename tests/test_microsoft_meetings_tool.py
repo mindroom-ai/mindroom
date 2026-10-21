@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -325,21 +326,39 @@ def test_list_transcripts_reports_a_meeting_without_transcripts(
     assert "transcription" in result["message"]
 
 
-def test_list_transcripts_returns_and_follows_its_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(
+def test_list_transcripts_returns_its_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(
         tmp_path,
         monkeypatch,
         _answer({"value": [_transcript()], "@odata.nextLink": f"{GRAPH}{NEXT_TRANSCRIPTS}"}),
     )
 
-    first = _payload(tools.microsoft_meetings_list_transcripts(MEETING))
-    second = _payload(tools.microsoft_meetings_list_transcripts(MEETING, page_token=first["next_page_token"]))
+    assert _payload(tools.microsoft_meetings_list_transcripts(MEETING))["next_page_token"] == NEXT_TRANSCRIPTS
 
-    assert first["next_page_token"] == NEXT_TRANSCRIPTS
-    assert second["status"] == "ok"
-    continued = graph.requests[1]
-    assert continued.url.path == TRANSCRIPTS_PATH
-    assert dict(continued.url.params) == {"$skiptoken": "transcripts2"}
+
+@pytest.mark.parametrize(
+    "page_token",
+    [
+        NEXT_TRANSCRIPTS,
+        # Graph's transcript service writes keys in parentheses, as in its own @odata.context and content URLs.
+        f"/users('ba321e0d-79ee-478d-8e28-85a19507f456')/onlineMeetings('{MEETING}')/transcripts?$skiptoken=t2",
+        f"/me/onlineMeetings('{MEETING}')/transcripts?$top=10&$skiptoken=t2",
+    ],
+)
+def test_list_transcripts_follows_its_page_token_without_other_parameters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page_token: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": [_transcript()]}))
+
+    result = _payload(tools.microsoft_meetings_list_transcripts("ignored-meeting", page_token=page_token))
+
+    assert (result["status"], result["next_page_token"]) == ("ok", None)
+    [request] = graph.requests
+    expected = httpx.URL(f"{GRAPH}{page_token}")
+    assert (request.method, request.url.raw_path) == ("GET", expected.raw_path)
+    assert dict(request.url.params) == dict(expected.params)
 
 
 def test_a_later_empty_transcript_page_is_not_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,7 +374,6 @@ def test_a_later_empty_transcript_page_is_not_an_error(tmp_path: Path, monkeypat
     [
         f"{GRAPH}{NEXT_TRANSCRIPTS}",
         f"/me/onlineMeetings/{MEETING}/transcripts",
-        f"/me/adhocCalls/{MEETING}/transcripts?$skiptoken=x",
         f"/me/onlineMeetings/{MEETING}/../../messages/transcripts?$skiptoken=x",
         "/me/onlineMeetings/%2e%2e/%2e%2e/messages/transcripts?$skiptoken=x",
         f"/me/onlineMeetings/{MEETING}/recordings?$skiptoken=x",
@@ -413,6 +431,37 @@ def test_get_transcript_of_an_empty_transcript_is_empty(tmp_path: Path, monkeypa
     result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT))
 
     assert (result["transcript"], result["total_characters"], result["next_page_token"]) == ("", 0, None)
+
+
+def test_get_transcript_splits_a_long_monologue_into_labeled_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentence = "This sentence keeps the same speaker talking for a long while. " * 3
+    blocks = [
+        f"00:{index // 60:02d}:{index % 60:02d}.000 --> 00:{index // 60:02d}:{index % 60:02d}.900\n"
+        f"<v Alex Doe>{index}: {sentence}</v>"
+        for index in range(200)
+    ]
+    tools, _graph = _tools(tmp_path, monkeypatch, _vtt("WEBVTT\n\n" + "\n\n".join(blocks) + "\n"))
+
+    chunks: list[str] = []
+    token: str | None = None
+    while True:
+        result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=token))
+        chunks.append(result["transcript"])
+        token = result["next_page_token"]
+        if token is None:
+            break
+
+    lines = "\n".join(chunks).split("\n")
+    assert len(chunks) > 1
+    assert len(lines) > 1
+    assert all(len(line) <= len("00:00:00 Alex Doe: ") + 2_000 for line in lines)
+    assert all(re.match(r"\d{2}:\d{2}:\d{2} Alex Doe: \d+: ", line) for line in lines)
+    assert all(re.match(r"\d{2}:\d{2}:\d{2} Alex Doe: ", chunk) for chunk in chunks)
+    spoken = " ".join(line.split(": ", 1)[1] for line in lines)
+    assert spoken == " ".join(f"{index}: {sentence.strip()}" for index in range(200))
 
 
 def _long_vtt(cues: int) -> str:
