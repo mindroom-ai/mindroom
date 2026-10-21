@@ -6,8 +6,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from agno.agent import Agent
-
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -125,7 +123,7 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
 
 
 def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: Path) -> None:
-    """Bookkeeping storage and the real Agno team run must use the same private ad hoc scope."""
+    """Bookkeeping storage and the team run must use the same private ad hoc scope."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -160,11 +158,6 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    agents = [
-        Agent(id="private_worker", name="PrivateWorker"),
-        Agent(id="shared", name="Shared"),
-    ]
-
     writer_scope = writer.team_history_scope(
         [ids["private_worker"], ids["shared"]],
         requester_user_id="@alice:localhost",
@@ -177,7 +170,7 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         execution_identity=execution_identity,
     )
     with open_bound_scope_session_context(
-        agents=agents,
+        member_names=["private_worker", "shared"],
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
