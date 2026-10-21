@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -133,7 +133,7 @@ async def _retried(
                     except StopAsyncIteration:
                         return
                     if isinstance(event, UsageReported) and event.final:
-                        attempt_usage = event.usage
+                        attempt_usage = add_usage(attempt_usage, event.usage)
                     visible = visible or is_visible_output(event)
                     yield with_carried_usage(event, carried)
         except ProviderError as error:
@@ -141,5 +141,4 @@ async def _retried(
                 raise
             if delay:
                 await asyncio.sleep(delay)
-        if attempt_usage is not None:
-            carried = attempt_usage if carried is None else carried + attempt_usage
+        carried = add_usage(carried, attempt_usage)

@@ -1,21 +1,20 @@
-"""The Chat Completions adapter and the routes that use it.
+"""The Chat Completions adapter shared by every OpenAI-compatible route.
 
-One adapter serves every OpenAI-compatible Chat Completions route; a route fixes the endpoint, identity
-strings, wire dialect, and capabilities, and the per-model settings come from ``extra_kwargs``.
+A route fixes the endpoint, identity strings, wire dialect, and capabilities (see ``build``); the per-model
+settings come from ``extra_kwargs``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
-    ChatTurnParts,
     ChatWire,
     chat_request_kwargs,
     chat_stop_reason,
@@ -25,86 +24,46 @@ from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openrouter_prompt_cache import openrouter_prompt_cache_control, with_prompt_cache_ladder
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from openai import AsyncOpenAI
 
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
     from mindroom.providers.openai.settings import ChatSettings
 
-__all__ = ["ChatAdapter", "ClientFactory"]
+__all__ = ["ChatAdapter"]
 
-type ClientFactory = Callable[[], AsyncOpenAI]
-
-
-def _assistant_message(
-    parts: ChatTurnParts,
-    identity: ModelIdentity,
-    *,
-    started: float,
-    first_token: float | None,
-) -> Message:
-    message = Message(
-        role="assistant",
-        content=parts.content,
-        reasoning_content=parts.reasoning,
-        tool_calls=parts.tool_calls or None,
-        provider_data={
-            **parts.provider_data,
-            "mindroom_model": {"id": identity.id, "provider": identity.provider_name},
-        },
-    )
-    if parts.usage is not None:
-        message.metrics = parts.usage
-    message.metrics.duration = time.monotonic() - started
-    if first_token is not None:
-        message.metrics.time_to_first_token = first_token - started
-    return message
+# OpenAI's own endpoints take the newer output-limit name; OpenAI-compatible servers kept ``max_tokens``.
+_MAX_COMPLETION_TOKENS_ROUTES = frozenset({"openai", "azure"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChatAdapter:
-    """One model behind a Chat Completions route.
-
-    ``client_factory`` builds the SDK client; routes whose credentials can expire between requests (Kimi)
-    build a fresh client per request, the others cache the first one.
-    """
+    """One model behind a Chat Completions route."""
 
     identity: ModelIdentity
     capabilities: Capabilities
     wire: ChatWire
     settings: ChatSettings
-    client_factory: ClientFactory
-    fresh_client_per_request: bool = False
-    _client_cache: list[AsyncOpenAI] = field(default_factory=list, repr=False, compare=False)
+    clients: SDKClients
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
         """Chat Completions takes one tool message per result, in order."""
         return list(results)
 
     async def _client(self, request: ModelRequest) -> AsyncOpenAI:
-        if self.fresh_client_per_request:
-            # Building the client may refresh a CLI OAuth token under a file lock.
-            client = await asyncio.to_thread(self.client_factory)
-        elif self._client_cache:
-            client = self._client_cache[0]
-        else:
-            client = self.client_factory()
-            self._client_cache.append(client)
-        if request.overrides.sdk_max_retries is not None:
-            client = client.with_options(max_retries=request.overrides.sdk_max_retries)
-        if self.wire.route == "openrouter":
-            control = openrouter_prompt_cache_control(
-                self.identity.id,
-                cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache is not False,
-                extended_cache_time=self.settings.extended_cache_time,
-            )
-            client = cast("AsyncOpenAI", with_prompt_cache_ladder(client, lambda: control))
-        return client
+        client = await self.clients.client(request.overrides)
+        if self.wire.route != "openrouter":
+            return client
+        control = openrouter_prompt_cache_control(
+            self.identity.id,
+            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache is not False,
+            extended_cache_time=self.settings.extended_cache_time,
+        )
+        return cast("AsyncOpenAI", with_prompt_cache_ladder(client, lambda: control))
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
-        settings = self.settings
-        overrides = request.overrides
         kwargs = chat_request_kwargs(
             model_id=self.identity.id,
             messages=request.messages,
@@ -113,21 +72,17 @@ class ChatAdapter:
             tool_choice=request.tool_choice,
             response_format=request.response_format,
             stream=request.stream,
-            settings=settings,
+            settings=self.settings,
             wire=self.wire,
         )
-        body = dict(kwargs.get("extra_body") or {})
-        if overrides.temperature is not None and not self.capabilities.provider_default_sampling:
-            body["temperature"] = overrides.temperature
-        if overrides.max_output_tokens is not None:
-            # OpenAI's own endpoints take the newer name; OpenAI-compatible servers kept ``max_tokens``.
-            key = "max_completion_tokens" if self.wire.route in {"openai", "azure"} else "max_tokens"
-            body[key] = overrides.max_output_tokens
-        if body:
-            kwargs["extra_body"] = body
-        if overrides.timeout_seconds is not None:
-            kwargs["timeout"] = overrides.timeout_seconds
-        return kwargs
+        return with_overrides(
+            kwargs,
+            request.overrides,
+            temperature=not self.capabilities.provider_default_sampling,
+            output_limit_key="max_completion_tokens"
+            if self.wire.route in _MAX_COMPLETION_TOKENS_ROUTES
+            else "max_tokens",
+        )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""
@@ -143,8 +98,7 @@ class ChatAdapter:
                 try:
                     async for chunk in sdk_stream:
                         for event in accumulator.add(chunk):
-                            if first_token is None:
-                                first_token = time.monotonic()
+                            first_token = first_token or time.monotonic()
                             yield event
                 finally:
                     await sdk_stream.close()
@@ -158,7 +112,16 @@ class ChatAdapter:
                     yield TextDelta(parts.content)
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
-        message = _assistant_message(parts, self.identity, started=started, first_token=first_token)
+        message = assistant_message(
+            self.identity,
+            content=parts.content,
+            reasoning=parts.reasoning,
+            tool_calls=parts.tool_calls,
+            provider_data=parts.provider_data,
+            usage=parts.usage,
+            started=started,
+            first_token=first_token,
+        )
         for call in parts.tool_calls:
             yield ToolCallReady(call)
         if parts.usage is not None:

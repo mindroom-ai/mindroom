@@ -506,7 +506,7 @@ def chat_request_kwargs(
     return with_sdk_options(kwargs, params, keywords=("tools", "tool_choice"))
 
 
-# --- Responses ------------------------------------------------------------------------------------------------
+# --- Replies --------------------------------------------------------------------------------------------------
 
 
 def _extra(model: BaseModel | None) -> dict[str, Any]:
@@ -538,7 +538,7 @@ def _detail(usage: Mapping[str, Any], section: str, name: str) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _counted_usage(usage: Mapping[str, Any], *, timing_keys: tuple[str, ...]) -> MessageMetrics:
+def _counted_usage(usage: Mapping[str, Any], *, timing_keys: tuple[str, ...], keep_zero: bool) -> MessageMetrics:
     """Read Groq and Cerebras usage: totals recomputed and timing counters kept as provider metrics."""
     input_tokens = usage.get("prompt_tokens") or 0
     output_tokens = usage.get("completion_tokens") or 0
@@ -549,22 +549,22 @@ def _counted_usage(usage: Mapping[str, Any], *, timing_keys: tuple[str, ...]) ->
         cache_read_tokens=_detail(usage, "prompt_tokens_details", "cached_tokens"),
         reasoning_tokens=_detail(usage, "completion_tokens_details", "reasoning_tokens"),
     )
-    timings = {key: usage[key] for key in timing_keys if usage.get(key)}
+    timings = {key: usage[key] for key in timing_keys if (usage.get(key) is not None if keep_zero else usage.get(key))}
     if timings:
         metrics.provider_metrics = timings
     return metrics
 
 
 def _groq_usage(usage: Mapping[str, Any]) -> MessageMetrics:
-    return _counted_usage(usage, timing_keys=("completion_time", "prompt_time", "queue_time", "total_time"))
+    return _counted_usage(
+        usage,
+        timing_keys=("completion_time", "prompt_time", "queue_time", "total_time"),
+        keep_zero=False,
+    )
 
 
 def _cerebras_usage(usage: Mapping[str, Any]) -> MessageMetrics:
-    return _counted_usage(usage, timing_keys=("time_system", "time_prompt"))
-
-
-def _usage_dict(usage: BaseModel) -> dict[str, Any]:
-    return usage.model_dump()
+    return _counted_usage(usage, timing_keys=("time_system", "time_prompt"), keep_zero=True)
 
 
 def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
@@ -615,9 +615,9 @@ def _reasoning_field(fields: Mapping[str, Any]) -> object:
 
 def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
     if wire.dialect == "groq":
-        return _groq_usage(_usage_dict(usage))
+        return _groq_usage(usage.model_dump())
     if wire.dialect == "cerebras":
-        return _cerebras_usage(_usage_dict(usage))
+        return _cerebras_usage(usage.model_dump())
     return _openai_usage(usage)
 
 

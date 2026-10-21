@@ -450,3 +450,25 @@ async def test_composed_pipeline_drains_with_complete() -> None:
 
     assert (turn.content, turn.stop_reason, len(inner.requests)) == ("done", "end", 2)
     assert provider.identity == inner.identity
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_media_limits")
+async def test_reported_usage_always_sums_to_the_finished_turn() -> None:
+    """Usage of transient retries inside a media retry is counted once, in reports and in the final metrics."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(MessageMetrics(input_tokens=5)), _transient()],
+            [UsageReported(MessageMetrics(input_tokens=7)), rejection],
+            [UsageReported(MessageMetrics(input_tokens=10)), _turn(usage=MessageMetrics(input_tokens=10))],
+        ],
+    )
+    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+
+    events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    reported = sum(event.usage.input_tokens for event in events if isinstance(event, UsageReported))
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert reported == finished.message.metrics.input_tokens == 22

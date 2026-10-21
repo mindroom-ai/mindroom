@@ -14,8 +14,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "CEREBRAS_FIELDS",
+    "CHAT_FIELDS",
     "CHAT_REQUEST_FIELDS",
     "CLIENT_FIELDS",
+    "CODEX_FIELDS",
+    "GROQ_FIELDS",
     "RESPONSES_FIELDS",
     "ChatSettings",
     "ResponsesSettings",
@@ -62,6 +66,37 @@ CHAT_REQUEST_FIELDS = frozenset(
         "role_map",
     },
 )
+CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
+# Agno's Groq and Cerebras classes took their own field sets; Groq had no ``organization`` or ``extra_body``.
+GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_logprobs",
+    "top_p",
+    "user",
+    "extra_headers",
+    "extra_query",
+    "request_params",
+}
+CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
+    "parallel_tool_calls",
+    "max_completion_tokens",
+    "repetition_penalty",
+    "temperature",
+    "top_p",
+    "top_k",
+    "strict_output",
+    "extra_headers",
+    "extra_query",
+    "extra_body",
+    "request_params",
+}
 RESPONSES_FIELDS = CLIENT_FIELDS | {
     "include",
     "max_output_tokens",
@@ -85,6 +120,7 @@ RESPONSES_FIELDS = CLIENT_FIELDS | {
     "request_params",
     "cache_system_prompt",
 }
+CODEX_FIELDS = RESPONSES_FIELDS | {"codex_home", "prompt_cache_key", "session_id", "default_instructions"}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

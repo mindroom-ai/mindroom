@@ -17,7 +17,7 @@ from mindroom.llm.errors import ContextWindowExceeded, ProviderError
 from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
-from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -182,7 +182,7 @@ async def media_fallback_stream(
         async with closing_async_stream(events):
             async for event in events:
                 if isinstance(event, UsageReported) and event.final:
-                    attempt_usage = event.usage
+                    attempt_usage = add_usage(attempt_usage, event.usage)
                 visible = visible or is_visible_output(event)
                 yield event
     except ProviderError as error:

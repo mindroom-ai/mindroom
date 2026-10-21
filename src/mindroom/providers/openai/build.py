@@ -24,13 +24,13 @@ from mindroom.model_defaults import (
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire
 from mindroom.providers.openai.codex_auth import (
     CODEX_BASE_URL,
     CodexAuthError,
     borrow_codex_key,
-    codex_installation_metadata,
     normalize_codex_model_id,
 )
 from mindroom.providers.openai.errors import missing_api_key_error
@@ -38,8 +38,10 @@ from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, bo
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import (
-    CHAT_REQUEST_FIELDS,
-    CLIENT_FIELDS,
+    CEREBRAS_FIELDS,
+    CHAT_FIELDS,
+    CODEX_FIELDS,
+    GROQ_FIELDS,
     RESPONSES_FIELDS,
     ChatSettings,
     ResponsesSettings,
@@ -74,37 +76,6 @@ _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 _CHAT_OMITTED_MEDIA: frozenset[MediaKind] = frozenset({"video"})
 _ALL_MEDIA: frozenset[MediaKind] = frozenset({"audio", "image", "file", "video"})
 
-_GROQ_FIELDS = CLIENT_FIELDS - {"organization"} | {
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "max_tokens",
-    "presence_penalty",
-    "seed",
-    "stop",
-    "temperature",
-    "top_logprobs",
-    "top_p",
-    "user",
-    "extra_headers",
-    "extra_query",
-    "request_params",
-}
-_CEREBRAS_FIELDS = CLIENT_FIELDS - {"organization"} | {
-    "parallel_tool_calls",
-    "max_completion_tokens",
-    "repetition_penalty",
-    "temperature",
-    "top_p",
-    "top_k",
-    "strict_output",
-    "extra_headers",
-    "extra_query",
-    "extra_body",
-    "request_params",
-}
-_CHAT_FIELDS = CHAT_REQUEST_FIELDS | CLIENT_FIELDS
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _ChatRoute:
@@ -128,7 +99,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=None,
         api_key_env="OPENAI_API_KEY",
         dialect="openai",
-        accepted=_CHAT_FIELDS,
+        accepted=CHAT_FIELDS,
         developer_system_role=True,
     ),
     "azure": _ChatRoute(
@@ -137,7 +108,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=None,
         api_key_env=AZURE_OPENAI_ENV_BY_KEY["api_key"],
         dialect="openai",
-        accepted=_CHAT_FIELDS
+        accepted=CHAT_FIELDS
         | {"api_version", "azure_endpoint", "azure_deployment", "azure_ad_token", "azure_ad_token_provider"},
     ),
     "openrouter": _ChatRoute(
@@ -146,7 +117,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url="https://openrouter.ai/api/v1",
         api_key_env="OPENROUTER_API_KEY",
         dialect="openai",
-        accepted=_CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
+        accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
     ),
     "deepseek": _ChatRoute(
         provider="DeepSeek",
@@ -154,7 +125,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url="https://api.deepseek.com",
         api_key_env="DEEPSEEK_API_KEY",
         dialect="openai",
-        accepted=_CHAT_FIELDS | {"use_thinking"},
+        accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="json_mode",
     ),
     "zai": _ChatRoute(
@@ -163,7 +134,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=ZAI_BASE_URL_DEFAULT,
         api_key_env=None,
         dialect="openai",
-        accepted=_CHAT_FIELDS,
+        accepted=CHAT_FIELDS,
     ),
     "llama_cpp": _ChatRoute(
         provider="LlamaCpp",
@@ -171,7 +142,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url="http://127.0.0.1:8080/v1",
         api_key_env=None,
         dialect="openai",
-        accepted=_CHAT_FIELDS,
+        accepted=CHAT_FIELDS,
     ),
     "kimi": _ChatRoute(
         provider="Kimi",
@@ -179,7 +150,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=KIMI_BASE_URL,
         api_key_env=None,
         dialect="openai",
-        accepted=_CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
+        accepted=CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
     ),
     "groq": _ChatRoute(
         provider="Groq",
@@ -187,7 +158,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=None,
         api_key_env="GROQ_API_KEY",
         dialect="groq",
-        accepted=_GROQ_FIELDS,
+        accepted=GROQ_FIELDS,
         structured_output="json_mode",
         omitted_media=frozenset({"audio", "file", "video"}),
     ),
@@ -197,7 +168,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=None,
         api_key_env="CEREBRAS_API_KEY",
         dialect="cerebras",
-        accepted=_CEREBRAS_FIELDS,
+        accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
         omitted_media=_ALL_MEDIA,
     ),
@@ -205,8 +176,9 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
 _ROUTE_ALIASES = {"openai_codex": "codex", "kimi_code": "kimi"}
 # Every ``provider`` value this module builds, after canonicalization.
 OPENAI_FAMILY_PROVIDERS = frozenset(_CHAT_ROUTES) | {"codex", "openai_codex", "kimi_code"}
+_ROUTE_KEY_VARIABLES = {"azure": AZURE_OPENAI_ENV_BY_KEY["api_key"], "zai": PROVIDER_ENV_KEYS["zai"]}
 # Providers whose models authenticate without the shared key.
-_NO_SHARED_KEY = frozenset({"llama_cpp", "codex", "kimi"})
+_NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -245,17 +217,11 @@ def _configured_key(route_key: str, model_config: ModelConfig, runtime: Provider
     )
     if key or alternative_auth or route_key in _NO_SHARED_KEY:
         return key or None
-    if route_key == "azure":
-        return get_secret_from_env(
-            AZURE_OPENAI_ENV_BY_KEY["api_key"],
-            runtime_paths=runtime.runtime_paths,
-        ) or get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths)
-    if route_key == "zai":
-        return get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths) or get_secret_from_env(
-            PROVIDER_ENV_KEYS["zai"],
-            runtime_paths=runtime.runtime_paths,
-        )
-    return get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths)
+    shared = get_api_key_for_provider(route_key, runtime_paths=runtime.runtime_paths)
+    # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
+    if shared or route_key not in _ROUTE_KEY_VARIABLES:
+        return shared
+    return get_secret_from_env(_ROUTE_KEY_VARIABLES[route_key], runtime_paths=runtime.runtime_paths)
 
 
 def _provider_default_sampling(model_id: str) -> bool:
@@ -441,15 +407,10 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         capabilities=capabilities,
         wire=wire,
         settings=settings,
-        client_factory=_chat_client_factory(
-            route_key,
-            route,
-            settings,
-            api_key=api_key,
-            base_url=base_url,
-            runtime=runtime,
+        clients=SDKClients(
+            _chat_client_factory(route_key, route, settings, api_key=api_key, base_url=base_url, runtime=runtime),
+            per_request=route_key == "kimi",
         ),
-        fresh_client_per_request=route_key == "kimi",
     )
 
 
@@ -485,7 +446,7 @@ def _build_responses(
     accepted = RESPONSES_FIELDS
     if route_key == "codex":
         model_id = normalize_codex_model_id(model_id)
-        accepted = RESPONSES_FIELDS | {"codex_home", "prompt_cache_key", "session_id", "default_instructions"}
+        accepted = CODEX_FIELDS
         _with_agent_cache_key(extra_kwargs, runtime)
         if runtime.execution_identity is not None:
             extra_kwargs["session_id"] = derive_session_routing_key(
@@ -549,9 +510,7 @@ def _build_responses(
             capabilities=capabilities,
             wire=wire,
             settings=settings,
-            client_factory=codex_client,
-            fresh_client_per_request=True,
-            client_metadata=codex_installation_metadata(codex_home=settings.codex_home),
+            clients=SDKClients(codex_client, per_request=True),
         )
     api_key_env = "OPENAI_API_KEY"
     api_key = _configured_key("openai", model_config, runtime) or runtime.runtime_paths.process_env.get(api_key_env)
@@ -566,7 +525,7 @@ def _build_responses(
         capabilities=capabilities,
         wire=wire,
         settings=settings,
-        client_factory=openai_client,
+        clients=SDKClients(openai_client),
     )
 
 

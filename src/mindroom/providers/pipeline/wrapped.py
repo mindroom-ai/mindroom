@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["AGGREGATE_USAGE_KEY", "WrappedProvider", "is_visible_output", "with_carried_usage"]
+__all__ = ["AGGREGATE_USAGE_KEY", "WrappedProvider", "add_usage", "is_visible_output", "with_carried_usage"]
 
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 
@@ -62,6 +62,13 @@ def is_visible_output(event: StreamEvent) -> bool:
     if isinstance(event, TextDelta | ReasoningDelta):
         return bool(event.text)
     return isinstance(event, ToolCallReady)
+
+
+def add_usage(total: MessageMetrics | None, usage: MessageMetrics | None) -> MessageMetrics | None:
+    """Return the sum of two optional usage reports."""
+    if total is None or usage is None:
+        return usage if total is None else total
+    return total + usage
 
 
 def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:

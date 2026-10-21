@@ -21,6 +21,7 @@ from mindroom.logging_config import get_logger
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.agno_compat_openai_responses_items import RESPONSE_OUTPUT_KEY, TOOL_SEARCH_ITEMS_KEY
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
+from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.errors import responses_event_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
@@ -257,21 +258,16 @@ def _with_encrypted_reasoning(params: dict[str, Any]) -> None:
     params["include"] = include
 
 
-def _codex_params(
-    params: dict[str, Any],
-    settings: ResponsesSettings,
-    wire: ResponsesWire,
-    client_metadata: dict[str, str],
-) -> None:
+def _codex_params(params: dict[str, Any], settings: ResponsesSettings, wire: ResponsesWire) -> None:
     """Add what the Codex endpoint requires and drop what it rejects."""
-    from mindroom.providers.openai.codex_auth import codex_session_headers  # noqa: PLC0415 - Codex-only
-
     params.setdefault("instructions", wire.default_instructions)
     if settings.prompt_cache_key:
         params.setdefault("prompt_cache_key", settings.prompt_cache_key)
     if settings.session_id:
         params["extra_headers"] = {**codex_session_headers(settings.session_id), **(params.get("extra_headers") or {})}
-    if (settings.prompt_cache_key or settings.session_id) and client_metadata:
+    if (settings.prompt_cache_key or settings.session_id) and (
+        client_metadata := codex_installation_metadata(codex_home=settings.codex_home)
+    ):
         extra_body = dict(params.get("extra_body") or {})
         existing = extra_body.get("client_metadata")
         if isinstance(existing, dict):
@@ -346,12 +342,10 @@ def responses_request_kwargs(
     request: ModelRequest,
     settings: ResponsesSettings,
     wire: ResponsesWire,
-    client_metadata: dict[str, str],
 ) -> dict[str, Any]:
     """Return the ``responses.create`` keyword arguments for one request.
 
     ``model``, ``input``, and ``tools`` are SDK keywords; other body fields travel in ``extra_body``.
-    ``client_metadata`` is the Codex installation metadata, empty on other routes.
     """
     store = request_store(wire, request)
     params = _base_params(settings, request, store)
@@ -365,7 +359,7 @@ def responses_request_kwargs(
     _add_replay_policy(params, request)
     params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tool_names))
     if wire.route == "codex":
-        _codex_params(params, settings, wire, client_metadata)
+        _codex_params(params, settings, wire)
     kwargs: dict[str, Any] = {
         "model": model_id,
         "input": responses_input(
