@@ -161,7 +161,7 @@ def test_owners_opening_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
 
 
 def test_rows_without_an_index_are_numbered_in_read_order(tmp_path: Path) -> None:
-    """Agno read rows without an index first; sessions that hold none keep their indexes, gaps included."""
+    """Agno read rows without an index first, oldest first; other sessions keep their indexes, gaps included."""
     with closing(sqlite3.connect(tmp_path / "code.db")) as connection:
         for statement in run_log_sql(_NAMES):
             connection.execute(statement)
@@ -173,8 +173,8 @@ def test_rows_without_an_index_are_numbered_in_read_order(tmp_path: Path) -> Non
             "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, run_index, run_data, created_at) "
             "VALUES (?, ?, 'agent', 'code', ?, '{}', ?)",
             [
-                ("late", "session-1", None, 9),
-                ("early", "session-1", None, 3),
+                ("newer", "session-1", None, 9),
+                ("older", "session-1", None, 3),
                 ("first", "session-1", 4, 1),
                 ("second", "session-1", 7, 2),
                 ("kept-a", "session-2", 2, 1),
@@ -188,8 +188,8 @@ def test_rows_without_an_index_are_numbered_in_read_order(tmp_path: Path) -> Non
             "SELECT session_id, run_id, run_index FROM code_sessions_runs ORDER BY session_id, run_index",
         ).fetchall()
     assert rows == [
-        ("session-1", "early", 0),
-        ("session-1", "late", 1),
+        ("session-1", "older", 0),
+        ("session-1", "newer", 1),
         ("session-1", "first", 2),
         ("session-1", "second", 3),
         ("session-2", "kept-a", 2),

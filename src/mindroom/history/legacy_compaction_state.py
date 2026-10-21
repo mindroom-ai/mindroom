@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
     from mindroom.session_storage.schema import TableNames
 
+_BUSY_TIMEOUT_SECONDS = 30.0
+
 # LEGACY_COMPAT: Destructive compaction state without an archive.
 # Legacy format: A v2 ``mindroom_compaction`` scope state holding ``compacted_run_ids``
 # tombstones and ``last_compacted_at``/``last_summary_model``/``last_compacted_run_count``
@@ -45,7 +47,6 @@ if TYPE_CHECKING:
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},
 )
-_BUSY_TIMEOUT_SECONDS = 30.0
 _COMPACTION_STATE_VERSION = 2
 _SEEN_STATE_VERSION = 1
 _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
