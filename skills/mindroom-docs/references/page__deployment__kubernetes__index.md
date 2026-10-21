@@ -182,7 +182,7 @@ Workers do not inherit the runtime's `.env` or provider keys; for per-workspace 
 ### Brokered Egress
 
 Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
-The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section lists the [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) and gateway settings that users without dashboard access need.
+The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section explains opening the page from MindRoom Chat and lists the [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) and gateway settings for signing users in through a gateway instead.
 [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
 
 ### Knowledge Source Visibility

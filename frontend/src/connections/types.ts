@@ -53,8 +53,6 @@ export interface ConnectionsIdentity {
   is_administrator: boolean;
   /** The egress broker is on, so the Agent Keys page exists. */
   egress_enabled: boolean;
-  /** The Agents page is served; the Agent Keys page can be served without it. */
-  portal_enabled: boolean;
 }
 
 export interface ConnectionStatus {

@@ -163,7 +163,7 @@ Counter values can change between reports as coverage improves.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
 The endpoint requires [strict JWT mode](deployment/trusted-upstream-auth.md#strict-jwt-mode) with a verified Matrix identity.
-A [Connections portal](deployment/trusted-upstream-auth.md#connections-portal) session from Matrix sign-in does not authorize it.
+A [Connections portal](connections-portal.md) session from MindRoom Chat does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 

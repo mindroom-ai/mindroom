@@ -242,6 +242,9 @@ describe("connection popup", () => {
     ["http://portal.example.com", "auth_url", "http://localhost/start"],
     ["http://localhost:3000", "auth_url", "http://localhost.example.com/start"],
     ["http://localhost:3000", "auth_url", "http://127.0.0.1.example.com/start"],
+    ["http://192.168.1.10:8765", "completion_origin", "http://100.64.0.1:8765"],
+    ["http://192.168.1.10:8765", "completion_origin", "http://172.32.0.1:8765"],
+    ["https://portal.example.com", "completion_origin", "http://192.168.1.10"],
     ["http://localhost:3000", "auth_url", "javascript:alert(1)"],
     ["http://localhost:3000", "completion_origin", "data:text/html,hello"],
   ])(
@@ -271,8 +274,17 @@ describe("connection popup", () => {
     },
   );
 
-  it.each(["localhost", "127.8.2.1", "[::1]", "app.localhost"])(
-    "allows HTTP loopback targets when the portal runs on HTTP %s",
+  it.each([
+    "localhost",
+    "127.8.2.1",
+    "[::1]",
+    "app.localhost",
+    "192.168.1.10",
+    "10.0.0.2",
+    "172.16.5.4",
+    "[fd00::1]",
+  ])(
+    "allows HTTP local targets when the portal runs on HTTP %s",
     async (hostname) => {
       jsdom.reconfigure({ url: `http://${hostname}:3000/connections/` });
       const authUrl = `http://${hostname}:8765/start`;

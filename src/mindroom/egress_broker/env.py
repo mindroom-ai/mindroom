@@ -7,8 +7,8 @@ from pathlib import Path  # noqa: TC003
 from urllib.parse import urlsplit
 
 from mindroom.constants import WORKER_EGRESS_NO_PROXY, RuntimePaths, compose_worker_proxy_env
-from mindroom.origins import allowed_client_origins
-from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV, EGRESS_BROKER_ENV_BY_KEY
+from mindroom.origins import connections_sign_in_enabled
+from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
 
 __all__ = [
     "BROKER_CA_PEM_ENV",
@@ -42,17 +42,14 @@ def personal_page_served(runtime_paths: RuntimePaths) -> bool:
 
     Only that page, `/connections/egress`, sets the keys of `user` and `user_agent` agents, which belong to each
     requester. Its API needs a verified Matrix identity, from trusted upstream auth with a signed JWT or from
-    Matrix sign-in, which needs the Connections portal and at least one MindRoom Chat origin it accepts.
+    Matrix sign-in, which an empty MindRoom Chat allowlist turns off.
     """
     if not egress_broker_enabled(runtime_paths):
         return False
     upstream_sign_in = runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") and runtime_paths.env_flag(
         "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
     )
-    matrix_sign_in = bool((runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()) and bool(
-        allowed_client_origins(runtime_paths, CONNECTIONS_ALLOWED_ORIGINS_ENV),
-    )
-    return upstream_sign_in or matrix_sign_in
+    return upstream_sign_in or connections_sign_in_enabled(runtime_paths)
 
 
 def egress_tool_unavailable(tool_name: str, runtime_paths: RuntimePaths) -> bool:

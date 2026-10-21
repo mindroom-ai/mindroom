@@ -342,16 +342,6 @@ describe("ConnectionsSignIn without an opener", () => {
     expect(await sentUser()).toBe("@alice:example.org");
   });
 
-  it("renders the page as is when the portal is off", async () => {
-    installBackend({
-      get: json({ detail: "Connections are not enabled" }, 404),
-    });
-    renderGate();
-    expect(await screen.findByText("Portal content")).toBeInTheDocument();
-    expect(sessionCalls("POST")).toHaveLength(0);
-    expect(await sentUser()).toBeUndefined();
-  });
-
   it.each([
     ["a user that is not a string", json({ matrix_user_id: null })],
     ["a body that is not JSON", new Response("ok", { status: 200 })],

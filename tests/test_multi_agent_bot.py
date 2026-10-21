@@ -11,7 +11,6 @@ from uuid import UUID
 
 import nio
 import pytest
-from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 from nio.durable import DurableSyncConfig
@@ -59,6 +58,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    FakeModel,
     drain_coalescing,
     runtime_paths_for,
     unwrap_extracted_collaborator,
@@ -1611,7 +1611,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_load_config.return_value = config
 
         # Mock get_model_instance to return a mock model
-        mock_model = Ollama(id="test-model")
+        mock_model = FakeModel(id="test-model", provider="fake")
         mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()

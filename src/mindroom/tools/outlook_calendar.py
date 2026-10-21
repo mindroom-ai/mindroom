@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         "outlook_calendar_list_calendars",
         "outlook_calendar_list_events",
         "outlook_calendar_get_event",
+        "outlook_calendar_get_free_busy",
         "outlook_calendar_create_event",
         "outlook_calendar_update_event",
         "outlook_calendar_delete_event",
