@@ -334,7 +334,7 @@ class MicrosoftMeetingsTools(Toolkit):
 
         def build() -> _Request:
             if page_token is not None:
-                return _Request(page_path(page_token, "/transcripts"), reads_transcripts=True)
+                return _Request(page_path(page_token, r"/me/onlineMeetings/[^/]+/transcripts"), reads_transcripts=True)
             return _Request(f"{_meeting_path(meeting_id)}/transcripts", reads_transcripts=True)
 
         def result(response: httpx.Response) -> Mapping[str, object]:
