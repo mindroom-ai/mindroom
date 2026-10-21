@@ -20,7 +20,6 @@ const identity = (
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
-  portal_enabled: true,
   ...overrides,
 });
 
@@ -118,16 +117,6 @@ describe("connections header", () => {
     expect(
       Array.from(nav.querySelectorAll("a")).map((link) => link.textContent),
     ).toEqual(["Agents"]);
-  });
-
-  it("drops the Agents link where only the Agent Keys page is served", async () => {
-    answerWith(async () => json(identity({ portal_enabled: false })));
-    renderHeader("keys");
-    await screen.findByText("Signed in as Bob Builder");
-    const nav = screen.getByRole("navigation", { name: "Connections pages" });
-    expect(
-      Array.from(nav.querySelectorAll("a")).map((link) => link.textContent),
-    ).toEqual(["Agent Keys"]);
   });
 
   it("keeps the Agents link, and the open page's, when the identity cannot be loaded", async () => {

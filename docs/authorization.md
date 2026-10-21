@@ -166,8 +166,8 @@ Dashboard access follows deployment authentication; the Matrix `administrators` 
 
 - Standalone: `MINDROOM_API_KEY` protects the dashboard and its API; without it, access is unauthenticated, so set it before exposing an instance beyond a trusted local network.
 - Hosted (Supabase): the user's platform sign-in is validated, and the instance owner account is enforced when configured.
-- [Trusted upstream auth](deployment/trusted-upstream-auth.md): every gateway-authenticated user may change configuration unless Connections is enabled, which adds an `administrators` check; see its [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary).
-- [Matrix sign-in from MindRoom Chat](deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat): with the Connections portal enabled, a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only outside hosted platform mode and when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
+- [Trusted upstream auth](deployment/trusted-upstream-auth.md): every gateway-authenticated user may change configuration unless `MINDROOM_CONNECTIONS_AGENT` is set, which adds an `administrators` check; see its [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary).
+- [Connections from MindRoom Chat](connections-portal.md#sessions-and-dashboard-access): a user in `administrators` who opens Connections from Chat also reaches the dashboard without the API key, but only outside hosted platform mode and when the homeserver binds OpenID tokens to this deployment; everyone else keeps the authentication above.
 
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so dashboard requests made with the API key act as the owner's Matrix identity for credential management.
 Browser changes made with a dashboard sign-in or trusted upstream identity must come from the dashboard's own origin; see [Browser Mutation Protection](deployment/trusted-upstream-auth.md#browser-mutation-protection).

@@ -77,7 +77,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](deployment/trusted-upstream-auth.md#connections-portal) (signed in through trusted upstream auth or [Matrix sign-in from MindRoom Chat](deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat)), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](connections-portal.md) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -113,8 +113,8 @@ Standalone installs identify the dashboard user through `MINDROOM_OWNER_USER_ID`
 
 Room-independent access comes from `access.users`, administrator authority, or a `members_of_rooms` grant; `access.current_room_members` and team access do not apply, because a browser request has no current room or team.
 Managing a personal connection grants no general dashboard access and no authority over shared credentials.
-With the Connections portal enabled, eligible users manage their connections there, and under trusted upstream auth ordinary dashboard routes require administrator authority.
-A portal session from Matrix sign-in covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Matrix sign-in from MindRoom Chat](deployment/trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat)).
+Eligible users manage their connections on the Connections portal, and under trusted upstream auth with `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard routes require administrator authority.
+A portal session from MindRoom Chat covers the portal, the OAuth callback for flows it starts, and the OAuth success page, and reaches dashboard routes only for an administrator whose token the homeserver bound to this deployment ([Sessions and dashboard access](connections-portal.md#sessions-and-dashboard-access)).
 Unauthorized connect, authorize, status, disconnect, and callback requests return HTTP 403 before any credential is exposed or changed.
 See [Authorization](authorization.md#platform-and-credential-authority) for administrators and credential managers.
 
@@ -140,7 +140,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](deployment/google-services-oauth.md) |
-| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, and Teams) | [Microsoft 365](tools/microsoft-365.md) |
+| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](tools/microsoft-365.md) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](mcp.md#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.

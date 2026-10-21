@@ -22,7 +22,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
 from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
-from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, read_connections_session
+from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
 from mindroom.authorization import is_platform_administrator
 from mindroom.matrix.identity import (
@@ -30,7 +30,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import normalized_origin
+from mindroom.origins import deployment_origin, normalized_origin
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -615,11 +615,6 @@ async def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _Sup
     return response.user
 
 
-def _dashboard_origin(request: Request, settings: _ApiAuthSettings) -> str | None:
-    """Return this dashboard's public origin, which platform logins and browser mutations must name."""
-    return normalized_origin(settings.public_url or str(request.base_url))
-
-
 def _verified_platform_sso_claims(
     request: Request,
     settings: _ApiAuthSettings,
@@ -629,7 +624,7 @@ def _verified_platform_sso_claims(
     required_claims: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify a platform login ticket or session signed with this instance's own SSO key."""
-    audience = _dashboard_origin(request, settings)
+    audience = deployment_origin(settings.public_url, str(request.base_url))
     if settings.platform_sso_secret is None or audience is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
     try:
@@ -736,9 +731,7 @@ async def request_has_frontend_access(request: Request) -> bool:
     authorization = request.headers.get("authorization")
     snapshot = _bind_authenticated_request_snapshot(request)
     auth_state = cast("ApiAuthState", snapshot.auth_state)
-    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
-        request.scope["path"],
-    ):
+    if _is_connections_path(request.scope["path"]):
         # The portal page is a static shell that signs itself in; its APIs authenticate every request.
         return True
     try:
@@ -997,15 +990,15 @@ def _connections_session_path_honored(request: Request) -> bool:
 
 
 def _connections_session_auth_user(request: Request) -> dict[str, Any] | None:
-    """Return the Connections session identity while the portal is enabled.
+    """Return the Connections session identity.
 
     It is honored on portal paths, and on dashboard routes for an administrator whose sign-in the homeserver bound
     to this deployment, outside hosted platform mode and never on OAuth callbacks.
     """
     snapshot = _bind_authenticated_request_snapshot(request)
-    if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
-        return None
-    token = request.cookies.get(CONNECTIONS_SESSION_COOKIE)
+    public_url = cast("ApiAuthState", snapshot.auth_state).settings.public_url
+    cookie = connections_session_cookie(deployment_origin(public_url, str(request.base_url)))
+    token = request.cookies.get(cookie)
     session = read_connections_session(token, now=time.time()) if token else None
     if session is None:
         return None
@@ -1034,7 +1027,7 @@ def _require_connections_route_authorized(
     auth_user: dict[str, Any],
     snapshot: ApiSnapshot,
 ) -> None:
-    """Keep trusted personal users outside administrator routes when the portal is enabled."""
+    """Keep trusted personal users outside administrator routes while `MINDROOM_CONNECTIONS_AGENT` is set."""
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]
@@ -1214,7 +1207,7 @@ def _require_browser_mutation_origin(
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = _dashboard_origin(request, settings)
+    origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)

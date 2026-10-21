@@ -76,6 +76,15 @@ def test_builtin_oauth_registry_includes_microsoft_files() -> None:
     assert providers["microsoft_files"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
+def test_builtin_oauth_registry_includes_microsoft_sharepoint() -> None:
+    """Microsoft SharePoint shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_sharepoint"].credential_service == "microsoft_sharepoint_oauth"
+    assert providers["microsoft_sharepoint"].tool_config_service == "microsoft_sharepoint"
+    assert providers["microsoft_sharepoint"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
 def test_builtin_oauth_registry_includes_outlook_mail() -> None:
     """Outlook mail shares the Microsoft app client config but keeps its own token and settings services."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
@@ -112,13 +121,31 @@ def test_builtin_oauth_registry_includes_microsoft_teams() -> None:
     assert providers["microsoft_teams"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
-def test_builtin_oauth_registry_includes_microsoft_sharepoint() -> None:
-    """Microsoft SharePoint shares the Microsoft app client config but keeps its own token and settings services."""
+def test_builtin_oauth_registry_includes_microsoft_meetings() -> None:
+    """Microsoft Teams meetings share the Microsoft app client config but keep their own token and settings services."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
 
-    assert providers["microsoft_sharepoint"].credential_service == "microsoft_sharepoint_oauth"
-    assert providers["microsoft_sharepoint"].tool_config_service == "microsoft_sharepoint"
-    assert providers["microsoft_sharepoint"].shared_client_config_services == ("microsoft_oauth_client",)
+    assert providers["microsoft_meetings"].credential_service == "microsoft_meetings_oauth"
+    assert providers["microsoft_meetings"].tool_config_service == "microsoft_meetings"
+    assert providers["microsoft_meetings"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
+def test_builtin_oauth_registry_includes_microsoft_onenote() -> None:
+    """Microsoft OneNote shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_onenote"].credential_service == "microsoft_onenote_oauth"
+    assert providers["microsoft_onenote"].tool_config_service == "microsoft_onenote"
+    assert providers["microsoft_onenote"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
+def test_builtin_oauth_registry_includes_microsoft_people() -> None:
+    """Microsoft 365 People shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_people"].credential_service == "microsoft_people_oauth"
+    assert providers["microsoft_people"].tool_config_service == "microsoft_people"
+    assert providers["microsoft_people"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
 def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:

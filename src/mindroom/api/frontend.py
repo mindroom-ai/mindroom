@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from mindroom.api.auth import login_redirect_for_request, request_has_frontend_access, sanitize_next_path
 from mindroom.api.config_lifecycle import api_runtime_paths
-from mindroom.egress_broker.env import egress_broker_enabled, personal_page_served
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 if TYPE_CHECKING:
@@ -19,8 +19,6 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 _API_ROUTE_PREFIXES = frozenset({"api", "v1"})
-# The personal egress page and its bundle assets, served under trusted upstream auth without the portal.
-_EGRESS_PAGE_SEGMENTS = frozenset({"egress", "assets"})
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -50,17 +48,9 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
 
 
 def _connections_frontend_enabled(runtime_paths: RuntimePaths, path: str) -> bool:
-    """Return whether the dedicated connections bundle may serve one request path.
-
-    The personal egress page, and the assets it loads without the portal, exist only while the broker is on.
-    """
+    """Return whether the dedicated connections bundle may serve one request path: the egress page needs the broker."""
     segments = path.split("/")
-    page = segments[1] if len(segments) > 1 else ""
-    if page == "egress" and not egress_broker_enabled(runtime_paths):
-        return False
-    if (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
-        return True
-    return page in _EGRESS_PAGE_SEGMENTS and personal_page_served(runtime_paths)
+    return not (len(segments) > 1 and segments[1] == "egress" and not egress_broker_enabled(runtime_paths))
 
 
 @router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
@@ -71,9 +61,9 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")
 
-    # A disabled portal is absent for everyone, before any login redirect.
+    # The Agent Keys page is absent for everyone while the broker is off, before any login redirect.
     if first_segment == "connections" and not _connections_frontend_enabled(api_runtime_paths(request), path):
-        raise HTTPException(status_code=404, detail="Connections are not enabled")
+        raise HTTPException(status_code=404, detail="Agent Keys are not enabled")
 
     if not await request_has_frontend_access(request):
         target_path = sanitize_next_path(f"/{path}" if path else "/")
