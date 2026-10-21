@@ -36,13 +36,14 @@ class AgentSpec:
 class RunContext:
     """The identity of one run and the state its tools share.
 
-    ``metadata`` is stored on the run record; ``session_state`` is handed to every tool call, which may change it
-    in place.
+    ``parent_run_id`` names the run that started this one, as a team run starts its member runs. ``metadata`` is
+    stored on the run record; ``session_state`` is handed to every tool call, which may change it in place.
     """
 
     run_id: str
     session_id: str
     user_id: str | None = None
+    parent_run_id: str | None = None
     metadata: dict[str, Any] | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
 
