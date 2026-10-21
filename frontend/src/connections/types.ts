@@ -46,6 +46,8 @@ export interface ConnectionList {
 /** Who the Connections pages are open for, from `GET /api/connections/me`. */
 export interface ConnectionsIdentity {
   matrix_user_id: string;
+  /** The Matrix display name, or the localpart when the profile has none. */
+  display_name: string;
   email: string | null;
   /** The administrator dashboard is open to this user too. */
   is_administrator: boolean;

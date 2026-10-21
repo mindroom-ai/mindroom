@@ -325,12 +325,39 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
     assert response.status_code == 200, response.text
     assert response.json() == {
         "matrix_user_id": f"@{user}:example.org",
+        "display_name": user,
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
         "portal_enabled": True,
     }
     assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "expected"),
+    [(200, {"displayname": "Bob Builder"}, "Bob Builder"), (200, {}, "bob"), (404, {"errcode": "M_NOT_FOUND"}, "bob")],
+)
+def test_me_names_the_user_by_matrix_display_name(
+    portal: dict[str, Any],
+    status: int,
+    payload: dict[str, str],
+    expected: str,
+) -> None:
+    """The header greets the user by their Matrix display name, and by their localpart when the profile has none."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
+            status=status,
+            payload=payload,
+        )
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        assert len(matrix.requests) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == expected
 
 
 @pytest.mark.parametrize("broker_on", [False, True])

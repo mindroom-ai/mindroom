@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, cast
 
+import nio
 from aiohttp import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
@@ -21,6 +22,7 @@ from mindroom.api.connection_agents import (
     resolve_connection_user,
 )
 from mindroom.api.egress_credentials import EgressCredentialService, egress_services_for_agent
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.logging_config import get_logger
@@ -112,9 +114,11 @@ class ConnectionsIdentity(BaseModel):
 
     `egress_enabled` says whether the egress broker is on, so the pages link the Agent Keys page only then.
     `portal_enabled` says whether the Agents page is served: the Agent Keys page can be served without it.
+    `display_name` is the user's Matrix display name, or their localpart when the homeserver has none to give.
     """
 
     matrix_user_id: str
+    display_name: str
     email: str | None
     is_administrator: bool
     egress_enabled: bool
@@ -326,6 +330,23 @@ async def _egress_services(
         return None
 
 
+async def _matrix_display_name(user_id: str, runtime_paths: RuntimePaths) -> str:
+    """Read the user's display name as the router, falling back to the localpart when it cannot be read."""
+    fallback = user_id.removeprefix("@").split(":", 1)[0] or user_id
+    try:
+        client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
+    except ValueError:
+        return fallback
+    try:
+        async with asyncio.timeout(5):
+            response = await client.get_displayname(user_id)
+    except (ClientError, TimeoutError):
+        return fallback
+    finally:
+        await client.close()
+    return (isinstance(response, nio.ProfileGetDisplayNameResponse) and response.displayname) or fallback
+
+
 @router.get("/me")
 async def me(request: Request, response: Response) -> ConnectionsIdentity:
     """Return the signed-in identity for the Connections pages' header.
@@ -342,6 +363,7 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
     email = auth_user.get("email")
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
+        display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),
         email=email if isinstance(email, str) and email else None,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),

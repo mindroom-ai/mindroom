@@ -153,7 +153,7 @@ MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.example.org"]'
 Sign-in works as follows:
 
 1. In MindRoom Chat, the user opens **Connections** in Settings, General, which opens `/connections/` in a new window.
-2. The portal signs the user in with the account that Chat is signed in to, and shows `Signed in as <Matrix ID>`.
+2. The portal signs the user in with the account that Chat is signed in to, and shows `Signed in as <display name>`, with the Matrix ID on hover.
    It shows nothing until that succeeds and ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
    When the portal is opened directly rather than from MindRoom Chat, as with trusted upstream sign-in, or reloaded after the Chat tab that opened it closed, it uses the existing session or signed upstream identity, or asks the user to open Connections from Chat.
 3. MindRoom accepts only users of its configured homeserver, and only from Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`.

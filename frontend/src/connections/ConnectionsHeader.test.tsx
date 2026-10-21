@@ -16,6 +16,7 @@ const identity = (
   overrides: Partial<ConnectionsIdentity> = {},
 ): ConnectionsIdentity => ({
   matrix_user_id: "@bob:example.org",
+  display_name: "Bob Builder",
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
@@ -51,11 +52,12 @@ afterEach(() => {
 });
 
 describe("connections header", () => {
-  it("shows who is signed in and links the two pages", async () => {
+  it("shows who is signed in by name, with their Matrix ID on hover, and links the two pages", async () => {
     renderHeader();
-    expect(
-      await screen.findByText("Signed in as @bob:example.org"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Signed in as Bob Builder")).toHaveAttribute(
+      "title",
+      "@bob:example.org",
+    );
     expect(screen.getByRole("heading", { name: "Your title" })).toBeVisible();
     expect(screen.getByText("The intro.")).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
@@ -87,7 +89,7 @@ describe("connections header", () => {
 
   it("offers the dashboard to administrators only", async () => {
     renderHeader();
-    await screen.findByText("Signed in as @bob:example.org");
+    await screen.findByText("Signed in as Bob Builder");
     expect(screen.queryByRole("link", { name: "Dashboard" })).toBeNull();
     cleanup();
 
@@ -95,14 +97,13 @@ describe("connections header", () => {
       json(
         identity({
           matrix_user_id: "@alice:example.org",
+          display_name: "Alice",
           is_administrator: true,
         }),
       ),
     );
     renderHeader();
-    expect(
-      await screen.findByText("Signed in as @alice:example.org"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Signed in as Alice")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute(
       "href",
       "/",
@@ -112,7 +113,7 @@ describe("connections header", () => {
   it("links Agent Keys only while the egress broker is on", async () => {
     answerWith(async () => json(identity({ egress_enabled: false })));
     renderHeader();
-    await screen.findByText("Signed in as @bob:example.org");
+    await screen.findByText("Signed in as Bob Builder");
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
     expect(
       Array.from(nav.querySelectorAll("a")).map((link) => link.textContent),
@@ -122,7 +123,7 @@ describe("connections header", () => {
   it("drops the Agents link where only the Agent Keys page is served", async () => {
     answerWith(async () => json(identity({ portal_enabled: false })));
     renderHeader("keys");
-    await screen.findByText("Signed in as @bob:example.org");
+    await screen.findByText("Signed in as Bob Builder");
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
     expect(
       Array.from(nav.querySelectorAll("a")).map((link) => link.textContent),
