@@ -100,7 +100,7 @@ from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
-from mindroom.history.prompt_tokens import agent_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_scope_history,
@@ -109,7 +109,6 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     open_resolved_scope_session_context,
-    resolve_history_scope,
 )
 from mindroom.history.types import (
     CompactionLifecycle,
@@ -123,6 +122,7 @@ from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.legacy_delivery_payloads import _inline_final_result
+from mindroom.llm.messages import Message
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -159,12 +159,12 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
     from xdist.workermanage import WorkerController
 
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
+    from mindroom.llm.provider import ModelProvider
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -491,13 +491,13 @@ TestFunction = Callable[..., object]
 
 async def prepare_history_for_run_for_test(
     *,
-    agent: "Agent",
     agent_name: str,
     full_prompt: str,
     session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: "ToolExecutionIdentity | None",
+    model: "ModelProvider | None" = None,
     storage: "ConversationStore | None" = None,
     session: "ConversationSession | None" = None,
     history_settings: ResolvedHistorySettings | None = None,
@@ -509,21 +509,23 @@ async def prepare_history_for_run_for_test(
     execution_plan: ResolvedHistoryExecutionPlan | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
-    """Compose the production history-preparation seams for one test run."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    static_token_estimator = agent_static_token_estimator(agent)
+    """Compose the production history-preparation seams for one test run of an agent without instructions or tools.
+
+    ``model`` is the provider the run's requests go to; None sizes history by estimate alone, as a test double does.
+    """
+    resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
+    static_token_estimator = build_static_token_estimator(Message(role="system", content=""), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_agent_preparation_inputs(
-        agent=agent,
         agent_name=agent_name,
+        history_settings=history_settings
+        or config.resolve_entity(agent_name if agent_name in config.agents else None).history_settings,
         config=config,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    if history_settings is not None:
-        resolved_inputs = replace(resolved_inputs, history_settings=history_settings)
     if execution_plan is not None:
         resolved_inputs = replace(resolved_inputs, execution_plan=execution_plan)
     if available_history_budget is not None:
@@ -538,16 +540,16 @@ async def prepare_history_for_run_for_test(
             ),
         )
     scope_history_kwargs = {
-        "agent": agent,
         "agent_name": agent_name,
+        "scope": resolved_scope,
+        "model": model,
         "resolved_inputs": resolved_inputs,
         "non_prompt_tokens": static_token_estimator.non_prompt_tokens(),
         "runtime_paths": runtime_paths,
         "config": config,
-        "scope": resolved_scope,
         "compaction_lifecycle": compaction_lifecycle,
     }
-    if storage is not None and resolved_scope is not None and session_id is not None:
+    if storage is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
             persisted_session = storage.load_session(session_id, resolved_scope.kind)

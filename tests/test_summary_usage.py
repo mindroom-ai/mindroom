@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 from contextlib import closing
-from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -29,9 +29,9 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from tests.conftest import prepare_history_for_run_for_test
-from tests.fakes.summary_model import Reply, ScriptedSummaryModel, summary_model, summary_turn
+from tests.fakes.scripted_model import Await
+from tests.fakes.summary_model import Reply, ScriptedSummaryModel, summary_model, summary_steps, summary_turn
 from tests.history_helpers import (
-    _agent,
     _completed_run,
     _forced_compaction_context,
     _reported,
@@ -42,14 +42,10 @@ from tests.history_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.llm.provider import TurnCompleted
-
 
 def _summary_model(*replies: Reply) -> ScriptedSummaryModel:
     """Return a summary model whose stored usage rows name ``test-provider``."""
-    model = summary_model(*replies)
-    model.identity = replace(model.identity, provider="test-provider", provider_name="test-provider")
-    return model
+    return summary_model(*replies, provider="test-provider")
 
 
 @pytest.mark.asyncio
@@ -204,7 +200,6 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
         patch("mindroom.history.compaction.build_model_provider", return_value=model),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session",
@@ -362,17 +357,15 @@ async def test_late_summary_response_still_records_usage_after_timeout(tmp_path:
     assert isinstance(storage, ConversationStore)
     recorded = asyncio.Event()
 
-    async def late(_request: object) -> TurnCompleted:
-        try:
+    async def ignore_cancellation() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
             await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            return summary_turn(
-                "Late summary.",
-                usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
-            )
-        raise AssertionError
 
-    model = _summary_model(late)
+    late_summary = summary_turn(
+        "Late summary.",
+        usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+    )
+    model = _summary_model([Await(ignore_cancellation), *summary_steps(late_summary)])
 
     async def record(usage: MessageMetrics) -> None:
         await record_summary_usage(model.identity, usage, storage=storage, session_id="session", requester_id=None)

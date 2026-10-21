@@ -74,7 +74,6 @@ from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
     StoredSummaryRow,
-    _agent,
     _completed_run,
     _forced_compaction_context,
     _hook_runtime_context,
@@ -674,7 +673,6 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before_first, before_second, after])])
     registry_state = HookRegistryState(registry)
-    agent = _agent(db=storage)
     runtime_context = replace(
         _hook_runtime_context(
             config=config,
@@ -699,7 +697,6 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             compaction_lifecycle=lifecycle,
-            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -893,7 +890,6 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
 
     with tool_runtime_context(runtime_context):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -942,7 +938,6 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -997,7 +992,6 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1070,7 +1064,6 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1187,7 +1180,6 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1243,7 +1235,6 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -2041,7 +2032,6 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
         ),
     ):
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",

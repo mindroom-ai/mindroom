@@ -1,22 +1,24 @@
-"""A compaction summary model: a ``ModelProvider`` that answers each summary request with its next scripted reply."""
+"""Compaction summary models: a ``ScriptedModel`` that answers each summary request with its next reply."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, TurnCompleted, UsageReported
 from mindroom.llm.usage import MessageMetrics
+from tests.fakes.scripted_model import Await, ScriptedModel
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent
+    from tests.fakes.scripted_model import ScriptStep
 
-SUMMARY_IDENTITY = ModelIdentity(id="summary-model", provider="fake", provider_name="fake")
-
-type Reply = str | TurnCompleted | BaseException | Callable[[ModelRequest], Awaitable[str | TurnCompleted]]
+# A reply is the summary text, a finished turn, an exception the request raises, or the scripted events of the
+# request, so a test can block or wait for cancellation with an ``Await`` step before (or instead of) the turn.
+type Reply = str | TurnCompleted | BaseException | Sequence[ScriptStep]
 
 
 def summary_turn(
@@ -31,54 +33,53 @@ def summary_turn(
     return TurnCompleted(message=message, stop_reason=stop_reason)
 
 
+def summary_steps(reply: str | TurnCompleted) -> list[ScriptStep]:
+    """Return the events of one finished summary response: its usage, when it reports any, then the turn."""
+    turn = summary_turn(reply) if isinstance(reply, str) else reply
+    usage = turn.message.metrics
+    return [UsageReported(usage), turn] if usage.to_dict() else [turn]
+
+
+def _steps(reply: Reply) -> list[ScriptStep]:
+    if isinstance(reply, BaseException):
+
+        async def fail() -> None:
+            raise reply
+
+        return [Await(fail)]
+    if isinstance(reply, str | TurnCompleted):
+        return summary_steps(reply)
+    return list(reply)
+
+
 @dataclass
-class ScriptedSummaryModel:
-    """Answer each request with the next reply, or with ``default`` once the replies run out.
+class ScriptedSummaryModel(ScriptedModel):
+    """Answer each request with the next scripted reply, then with ``default`` once the replies run out."""
 
-    A reply is the summary text, a finished turn, an exception to raise, or an async callable of the request that
-    returns either, so a test can block, wait for cancellation, or inspect the request. ``requests`` keeps every
-    request in order.
-    """
-
-    replies: list[Reply] = field(default_factory=list)
-    default: str | None = "ok"
-    identity: ModelIdentity = SUMMARY_IDENTITY
-    capabilities: Capabilities = field(default_factory=Capabilities)
-    requests: list[ModelRequest] = field(default_factory=list)
+    default: Sequence[ScriptStep] | None = None
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Yield the usage and the finished turn of the next reply."""
-        self.requests.append(request)
-        reply = self.replies.pop(0) if self.replies else self.default
-        assert reply is not None, f"ScriptedSummaryModel has no reply for request {len(self.requests)}"
-        if isinstance(reply, BaseException):
-            raise reply
-        if not isinstance(reply, str | TurnCompleted):
-            reply = await reply(request)
-        turn = summary_turn(reply) if isinstance(reply, str) else reply
-        if turn.message.metrics.to_dict():
-            yield UsageReported(turn.message.metrics)
-        yield turn
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Summary requests offer no tools, so nothing ever formats a result."""
-        del messages
-        return list(results)
+        """Yield the next reply's events."""
+        if not self.turns and self.default is not None:
+            self.turns.append(self.default)
+        async for event in super().stream(request):
+            yield event
 
 
 def summary_model(
     *replies: Reply,
     model_id: str = "summary-model",
+    provider: str = "fake",
     claude: bool = False,
     default: str | None = "ok",
 ) -> ScriptedSummaryModel:
     """Return a summary model named ``model_id``; ``claude`` gives it Claude's conservative input sizing."""
     return ScriptedSummaryModel(
-        replies=list(replies),
-        default=default,
-        identity=replace(SUMMARY_IDENTITY, id=model_id),
+        turns=[_steps(reply) for reply in replies],
+        identity=ModelIdentity(id=model_id, provider=provider, provider_name=provider),
         capabilities=Capabilities(claude_family=claude),
+        default=summary_steps(default) if default is not None else None,
     )
 
 
-__all__ = ["SUMMARY_IDENTITY", "Reply", "ScriptedSummaryModel", "summary_model", "summary_turn"]
+__all__ = ["Reply", "ScriptedSummaryModel", "summary_model", "summary_steps", "summary_turn"]

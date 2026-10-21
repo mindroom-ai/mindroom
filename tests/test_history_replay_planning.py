@@ -246,9 +246,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     )
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -309,7 +307,6 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -348,7 +345,6 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -387,7 +383,6 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1366,7 +1361,6 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1403,7 +1397,6 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1463,7 +1456,6 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1512,7 +1504,6 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     with (
         patch(
             "mindroom.history.compaction.build_model_provider",
@@ -1527,7 +1518,6 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
         pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
         await prepare_history_for_run_for_test(
-            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",

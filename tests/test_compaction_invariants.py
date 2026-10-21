@@ -188,7 +188,6 @@ async def test_a_stale_save_of_a_folded_run_never_replays(tmp_path: Path) -> Non
     seed_session(storage, _session([_completed_run("run-1"), _completed_run("run-2")]))
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -383,7 +382,6 @@ async def test_chunk_progress_survives_interruption_and_restart(tmp_path: Path) 
         ),
     ):
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1568,7 +1566,6 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1616,7 +1613,6 @@ async def test_two_timeouts_exhaust_current_attempt_without_persisting_suppressi
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",

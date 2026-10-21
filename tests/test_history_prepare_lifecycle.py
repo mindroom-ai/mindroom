@@ -29,7 +29,6 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     open_resolved_scope_session_context,
-    resolve_history_scope,
 )
 from mindroom.history.storage import (
     read_chunk_basis,
@@ -52,15 +51,16 @@ from mindroom.history.types import (
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.usage import MessageMetrics
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import prepare_history_for_run_for_test, seed_session
+from tests.fakes.scripted_model import ScriptedModel
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
-    _agent,
     _completed_run,
     _completed_team_run,
     _make_config,
@@ -87,10 +87,9 @@ def test_prepare_scope_history_boundary_does_not_accept_execution_identity() -> 
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    agent = _agent()
-    agent.team_id = "team-123"
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
     with open_resolved_scope_session_context(
-        scope=resolve_history_scope(agent),
+        scope=team_scope,
         agent_name="test_agent",
         session_id="session-1",
         runtime_paths=runtime_paths,
@@ -99,7 +98,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         create_session_if_missing=True,
     ) as scope_context:
         assert scope_context is not None
-        assert scope_context.scope == HistoryScope(kind="team", scope_id="team-123")
+        assert scope_context.scope == team_scope
         session = _team_session(
             "session-1",
             team_id="team-123",
@@ -109,13 +108,13 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
         seed_session(scope_context.storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=None,
+        scope=team_scope,
     )
 
     assert prepared.replays_persisted_history is True
@@ -143,7 +142,6 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     with (
         patch(
             "mindroom.history.compaction.build_model_provider",
@@ -159,7 +157,6 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             compaction_lifecycle=lifecycle,
-            agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -224,7 +221,6 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -269,7 +265,6 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
 
     with patch("mindroom.history.compaction.build_model_provider", side_effect=ValueError("bad summary model")):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -319,7 +314,6 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
         patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=error)),
     ):
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -370,7 +364,6 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
         pytest.raises(asyncio.CancelledError),
     ):
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -421,7 +414,6 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -448,7 +440,6 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
 
     with patch("mindroom.history.session_context.create_scope_session_storage") as mock_create_scope_storage:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -510,7 +501,6 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             compaction_lifecycle=lifecycle,
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id=thread_session_id,
@@ -659,7 +649,6 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
             compaction_lifecycle=lifecycle,
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -782,7 +771,6 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -855,10 +843,13 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         summary_input_budget_tokens=50_000,
         compaction_timeout_seconds=600.0,
     )
-    agent = _agent(db=storage)
     resolved_inputs = replace(
-        resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
-        history_settings=_ALL_HISTORY_SETTINGS,
+        resolve_agent_preparation_inputs(
+            agent_name="test_agent",
+            history_settings=_ALL_HISTORY_SETTINGS,
+            config=config,
+            static_prompt_tokens=0,
+        ),
         execution_plan=execution_plan,
     )
     summary_mock = AsyncMock(return_value="short summary")
@@ -872,8 +863,9 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            agent=agent,
             agent_name="test_agent",
+            scope=scope,
+            model=None,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
@@ -1006,7 +998,6 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="CURRENT-RUN prompt",
             session_id="session-1",
@@ -1186,7 +1177,6 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     ):
         lifecycle = RecordingCompactionLifecycle()
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1312,7 +1302,6 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         ),
     ):
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1388,7 +1377,6 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         patch("mindroom.history.compaction.logger.warning") as warning_mock,
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1479,7 +1467,6 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
         ),
     ):
         first_prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1493,7 +1480,6 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
         persisted_before_second = storage.load_session("session-1", "agent")
         assert persisted_before_second is not None
         second_prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1549,9 +1535,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
         ],
     )
     seed_session(storage, session)
-    agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1603,10 +1587,8 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
     seed_session(storage, session)
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
-    agent = _agent(db=storage)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1673,7 +1655,6 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1739,7 +1720,6 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
     ):
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -1781,7 +1761,6 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1878,10 +1857,13 @@ async def _prepare_with_reported_usage(
         scope=scope,
         history_settings=history_settings,
     )
-    agent = _agent(db=storage)
     resolved_inputs = replace(
-        resolve_agent_preparation_inputs(agent=agent, agent_name="test_agent", config=config, static_prompt_tokens=0),
-        history_settings=history_settings,
+        resolve_agent_preparation_inputs(
+            agent_name="test_agent",
+            history_settings=history_settings,
+            config=config,
+            static_prompt_tokens=0,
+        ),
         execution_plan=_REPORTED_USAGE_PLAN,
     )
     lifecycle = RecordingCompactionLifecycle()
@@ -1897,8 +1879,10 @@ async def _prepare_with_reported_usage(
     ):
         prepared = await prepare_scope_history(
             compaction_lifecycle=lifecycle,
-            agent=agent,
             agent_name="test_agent",
+            scope=scope,
+            # The model that answered the stored runs, so its reported request sizes apply.
+            model=ScriptedModel([], identity=ModelIdentity(id="fake-model", provider="fake", provider_name="fake")),
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=400,
             runtime_paths=runtime_paths,
