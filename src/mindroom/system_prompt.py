@@ -22,7 +22,7 @@ def render_date_context(timezone_str: str, *, datetime_context_template: str) ->
 def render_session_context(date_context: str) -> str:
     """Start the system suffix that may change between conversations or turns.
 
-    Agno appends skills, summaries, and learning after additional_context.
+    Agno appends skills and summaries after additional_context.
     Keep those sections behind this conservative boundary as well, without
     parsing Agno's generated prose or changing their system-message role.
     """

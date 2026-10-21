@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.knowledge.knowledge import Knowledge
-from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 
 import mindroom.tools  # noqa: F401
 from mindroom import constants
@@ -118,7 +117,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, FileAccess
+    from mindroom.config.models import EffectiveToolConfig, FileAccess
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
@@ -1064,35 +1063,10 @@ def _registry_tool_routes_through_worker(
     )
 
 
-def _is_learning_enabled(agent_config: AgentConfig, defaults: DefaultsConfig) -> bool:
-    """Check if learning is enabled for an agent, falling back to defaults."""
-    learning = agent_config.learning if agent_config.learning is not None else defaults.learning
-    return learning is not False
-
-
 def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
     if execution_identity is None or execution_identity.room_id is not None:
         return frozenset()
     return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
-
-
-def _resolve_agent_learning(
-    agent_config: AgentConfig,
-    defaults: DefaultsConfig,
-    learning_storage: BaseDb | None = None,
-) -> bool | LearningMachine:
-    """Resolve Agent.learning setting from MindRoom agent configuration."""
-    if not _is_learning_enabled(agent_config, defaults):
-        return False
-
-    learning_mode = agent_config.learning_mode or defaults.learning_mode
-    learning_mode_value = LearningMode.AGENTIC if learning_mode == "agentic" else LearningMode.ALWAYS
-
-    return LearningMachine(
-        db=learning_storage,
-        user_profile=UserProfileConfig(mode=learning_mode_value),
-        user_memory=UserMemoryConfig(mode=learning_mode_value),
-    )
 
 
 def _build_dynamic_tooling_instruction_block(
@@ -1917,7 +1891,7 @@ def create_agent(  # noqa: PLR0915
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
         persist_runtime_state: Whether this agent instance should write durable
-            Agno history and learning state.
+            Agno history.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         disabled_tool_names: Resolved tool names to omit from this instance.
@@ -1964,8 +1938,8 @@ def create_agent(  # noqa: PLR0915
     # Gate on this agent's resolved runtime model (thread overrides and team
     # members resolve per agent), not on any surrounding team's model.
     runtime_model_config = config.models.get(active_model_name or agent_config.model or "default")
-    # An authored persona's prompt replaces the agent's identity; it gets no learning of its own and only the caller
-    # skills and knowledge bases its persona keeps.
+    # An authored persona's prompt replaces the agent's identity; it gets only the caller skills and knowledge bases
+    # its persona keeps.
     # An explicit tool list is small and must be present from the first request, so every toolkit it names loads
     # up front; it also hides functions Agno generates without an owning toolkit, other than kept skills and knowledge.
     persona_prompt = persona.system_prompt if persona is not None else None
@@ -2021,17 +1995,6 @@ def create_agent(  # noqa: PLR0915
         agent_runtime,
         history_storage=history_storage,
         persist_runtime_state=persist_runtime_state,
-    )
-    learns = persist_runtime_state and persona is None
-    learning_storage = (
-        agent_storage.create_state_storage(
-            storage_name=agent_name,
-            state_root=agent_runtime.state_root,
-            subdir="learning",
-            session_table=f"{agent_name}_learning_sessions",
-        )
-        if learns and _is_learning_enabled(agent_config, defaults)
-        else None
     )
 
     role_context = _build_agent_role_context(
@@ -2143,12 +2106,6 @@ def create_agent(  # noqa: PLR0915
     history_settings = entity_view.history_settings
     history_policy = history_settings.policy
 
-    compress_tool_results = (
-        agent_config.compress_tool_results
-        if agent_config.compress_tool_results is not None
-        else defaults.compress_tool_results
-    )
-
     agent = _initialize_agent_instance(
         agent_mode=agent_mode,
         cli_shell=cli_shell,
@@ -2171,7 +2128,6 @@ def create_agent(  # noqa: PLR0915
             ),
         ),
         db=storage,
-        learning=_resolve_agent_learning(agent_config, defaults, learning_storage) if learns else False,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         knowledge=knowledge if knowledge_enabled else None,
         knowledge_sources=knowledge_sources,
@@ -2185,7 +2141,6 @@ def create_agent(  # noqa: PLR0915
         num_history_messages=history_policy.num_history_messages,
         # Keep persisted runs raw even though Agno replays history natively.
         store_history_messages=False,
-        compress_tool_results=compress_tool_results,
         max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
         tool_call_limit=entity_view.max_tool_calls_per_turn,
         telemetry=False,

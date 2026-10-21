@@ -13,7 +13,6 @@ from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
-from agno.learn import LearningMachine
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -67,7 +66,7 @@ __all__ = [
     "create_state_engine",
     "create_state_storage",
     "ensure_session_row",
-    "get_agent_runtime_state_dbs",
+    "get_agent_runtime_state_db",
     "get_agent_session",
     "get_team_session",
     "load_agent_session",
@@ -173,12 +172,9 @@ async def run_session_storage_operation[Result](
     )
 
 
-def get_agent_runtime_state_dbs(agent: Agent) -> tuple[BaseDb | None, BaseDb | None]:
-    """Return the runtime-owned Agno DB handles attached to one agent."""
-    history_db = agent.db if isinstance(agent.db, BaseDb) else None
-    learning = agent.learning
-    learning_db = learning.db if isinstance(learning, LearningMachine) and isinstance(learning.db, BaseDb) else None
-    return history_db, learning_db
+def get_agent_runtime_state_db(agent: Agent) -> BaseDb | None:
+    """Return the runtime-owned Agno DB handle attached to one agent."""
+    return agent.db if isinstance(agent.db, BaseDb) else None
 
 
 def create_state_storage(

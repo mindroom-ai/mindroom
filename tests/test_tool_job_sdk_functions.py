@@ -1,4 +1,4 @@
-"""SDK-generated knowledge, skill, and learning functions keep their native schemas and run inline."""
+"""SDK-generated knowledge and skill functions keep their native schemas and run inline."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
 from agno.knowledge.knowledge import Knowledge
-from agno.learn.stores.user_memory import UserMemoryStore
 from agno.models.response import ModelResponse
 from agno.tools.function import Function, FunctionCall
 
@@ -17,7 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.session_storage.agent_storage import get_agent_runtime_state_dbs
+from mindroom.session_storage.agent_storage import get_agent_runtime_state_db
 from mindroom.tool_jobs.agno_execution import wrap_tool_execution
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution_authority import authorized_tool_call
@@ -45,12 +44,12 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
-_SDK_FUNCTIONS = ("search_knowledge_base", "get_skill_instructions", "update_user_memory")
+_SDK_FUNCTIONS = ("search_knowledge_base", "get_skill_instructions")
 
 
 @dataclass
 class _SdkFunctionModel(RecordingModel):
-    """Call each SDK-generated function once and answer the extraction that learning runs internally."""
+    """Call each SDK-generated function once."""
 
     schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -60,14 +59,11 @@ class _SdkFunctionModel(RecordingModel):
         schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
         if messages[-1].role == "tool":
             return ModelResponse(content="done")
-        if "add_memory" in schemas:
-            return ModelResponse(tool_calls=[_call("add_memory", "extract", memory="User prefers jasmine tea.")])
         self.schemas = schemas
         return ModelResponse(
             tool_calls=[
                 _call("search_knowledge_base", "knowledge", query="tea"),
                 _call("get_skill_instructions", "skill", skill_name="demo"),
-                _call("update_user_memory", "learning", task="User prefers jasmine tea."),
             ],
         )
 
@@ -88,8 +84,6 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
     lead = config.agents["lead"]
     lead.delegate_to = []
     lead.knowledge_bases = ["probe"]
-    lead.learning = True
-    lead.learning_mode = "agentic"
     coordinator = team_coordinator(tmp_path, config)
     paths, owner = coordinator.runtime_paths, completed_delegation_job().owner
     entity_ids(config, paths)
@@ -113,7 +107,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
                 tool_execution_identity(owner),
             ):
                 response = await agent.arun(
-                    "Look up tea, read the demo skill, and remember my preference.",
+                    "Look up tea and read the demo skill.",
                     session_id=owner.session_id,
                     user_id=owner.requester_id,
                 )
@@ -126,18 +120,10 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         assert set(model.schemas["search_knowledge_base"]["properties"]) == {"query"}
         assert all("background_after" not in model.schemas[name]["properties"] for name in _SDK_FUNCTIONS)
         assert await saved_jobs(paths.storage_root) == {}
-        machine = agent.learning_machine
-        assert machine is not None
-        store = machine.user_memory_store
-        assert isinstance(store, UserMemoryStore)
-        saved = await store.aget(user_id=owner.requester_id)
-        assert saved is not None
-        assert [memory["content"] for memory in saved.memories] == ["User prefers jasmine tea."]
     finally:
         await coordinator.stop()
-        for db in get_agent_runtime_state_dbs(agent):
-            if db is not None:
-                db.close()
+        if (db := get_agent_runtime_state_db(agent)) is not None:
+            db.close()
 
 
 @pytest.mark.asyncio

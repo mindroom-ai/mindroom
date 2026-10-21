@@ -158,10 +158,7 @@ def test_materialized_agents_keep_distinct_cache_identity(
 ) -> None:
     """Members created under one team execution retain their own model identity."""
     config = Config(
-        agents={
-            name: AgentConfig(display_name=name, include_default_tools=False, learning=False)
-            for name in ("writer", "editor")
-        },
+        agents={name: AgentConfig(display_name=name, include_default_tools=False) for name in ("writer", "editor")},
         models={"default": ModelConfig(provider=provider, id="k3" if provider == "kimi" else "gpt-6-astra")},
     )
     runtime_paths = resolve_runtime_paths(

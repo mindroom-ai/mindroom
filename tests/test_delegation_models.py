@@ -49,7 +49,7 @@ async def test_subagent_model_selection(
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
             "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)

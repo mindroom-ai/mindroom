@@ -72,7 +72,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
 ) -> None:
     """Ordinary saved runs omit job authority, including after an ignored config toggle."""
     config = Config(
-        agents={"lead": AgentConfig(display_name="Lead", tools=[], learning=False)},
+        agents={"lead": AgentConfig(display_name="Lead", tools=[])},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
     )
     config.memory.backend = "none"
@@ -280,7 +280,7 @@ def test_disabled_construction_leaves_sdk_bindings_unchanged_in_fresh_process(tm
         from tests.identity_helpers import persist_entity_accounts
 
         config = Config(
-            agents={"lead": AgentConfig(display_name="Lead", tools=["calculator"], learning=False)},
+            agents={"lead": AgentConfig(display_name="Lead", tools=["calculator"])},
             models={"default": ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs={
                 "chars_per_second": 0, "tool_call_probability": 0, "min_response_chars": 32, "max_response_chars": 32,
             })},

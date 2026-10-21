@@ -132,7 +132,6 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
         display_name="Helper",
         tools=["shell", "calculator"],
         memory_backend="file",
-        learning=False,
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -240,9 +239,8 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             tools=["shell"],
             delegate_to=["code"],
             memory_backend="file",
-            learning=False,
         )
-        runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
+        runtime.config.agents["code"] = AgentConfig(display_name="Code")
         with_responder_access(runtime.config, "code", users=[runtime.requester_id])
         runtime = replace(
             runtime,
@@ -336,7 +334,6 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         tools=["shell"],
-        learning=False,
         memory_backend="file",
     )
     runtime = replace(
@@ -471,7 +468,6 @@ async def test_deferred_toolkit_is_callable_through_bash_without_loading(respons
     h = response_harness
     h.runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        learning=False,
         memory_backend="file",
         tools=["shell", {"calculator": {"defer": True}}],
     )
@@ -500,7 +496,6 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     h.runtime.config.mcp_servers = {"echo": MCPServerConfig(transport="stdio", command="uv", args=["run", str(script)])}
     h.runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        learning=False,
         memory_backend="file",
         private=AgentPrivateConfig(per="user_agent") if private else None,
         tools=[
@@ -742,7 +737,6 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
         config.agents[name] = AgentConfig(
             display_name=name,
             tools=["shell", "parity"],
-            learning=False,
             memory_backend="file",
             worker_scope=scope,
         )

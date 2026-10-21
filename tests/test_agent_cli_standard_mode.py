@@ -58,7 +58,6 @@ def _helper_runtime(
         display_name="Helper",
         tools=["shell", "calculator"],
         memory_backend=memory_backend,
-        learning=False,
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -401,7 +400,7 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
     # Delegation reads the managed runtime's spend monitor, which this harness leaves out.
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=running_api, budgets=None))
     runtime.config.agents["helper"].delegate_to = ["code"]
-    runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
+    runtime.config.agents["code"] = AgentConfig(display_name="Code")
     with_responder_access(runtime.config, "code", users=[runtime.requester_id])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
 

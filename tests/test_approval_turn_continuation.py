@@ -127,7 +127,7 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 "memory": {"backend": "none"},
                 "agents": {"general": {"display_name": "General", "tools": [{"calculator": {"defer": True}}]}},
                 "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
@@ -192,7 +192,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 "agents": {
                     "general": {
                         "display_name": "General",
@@ -628,7 +628,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
                 "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
                 "tool_approval": {

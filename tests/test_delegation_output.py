@@ -77,7 +77,6 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         },
         defaults=DefaultsConfig(
             tools=[],
-            learning=False,
             tool_output_auto_save_threshold_bytes=16 if mode == "automatic" else 100_000,
         ),
         memory={"backend": "none"},

@@ -55,7 +55,7 @@ async def _agent_request(
                 instructions=[instructions],
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(
                 provider="anthropic",

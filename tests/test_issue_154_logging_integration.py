@@ -95,7 +95,6 @@ class _InvokeAgent:
         self.name = "GeneralAgent"
         self.add_history_to_context = False
         self.db = None
-        self.learning = None
         self._bridge = bridge
         self._captured_metadata = captured_metadata
 
@@ -138,7 +137,6 @@ class _StreamAgent:
         self.name = "GeneralAgent"
         self.add_history_to_context = False
         self.db = None
-        self.learning = None
         self._bridge = bridge
         self._captured_metadata = captured_metadata
 

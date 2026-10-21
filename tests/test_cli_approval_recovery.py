@@ -125,7 +125,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         display_name="Helper",
         tools=["shell", "thread_model"],
         memory_backend="file",
-        learning=False,
     )
     runtime.config.administrators = [runtime.requester_id]
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
@@ -616,7 +615,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         display_name="Helper",
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
     registry = TurnToolRegistry()
     runtime = replace(
@@ -1002,7 +1000,6 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
         display_name="Helper",
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
     runtime.config.administrators = [runtime.requester_id]
     runtime = replace(runtime, tool_function_filter=lambda function: permitted or function.name != "remember")

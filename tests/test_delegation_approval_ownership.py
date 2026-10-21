@@ -90,7 +90,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
             for name in {"leader", child_name}
         },
         teams={"squad": {"display_name": "Squad", "role": "Coordinate", "agents": ["leader"]}},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "run_subagent" if gate else "add", "action": "require_approval"}]},
     )
@@ -373,7 +373,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
             "child": AgentConfig(display_name="Child", tools=["calculator"] if child_pauses else []),
         },
         teams={"squad": {"display_name": "Squad", "role": "Coordinate", "agents": ["leader"]}},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={
             "rules": [

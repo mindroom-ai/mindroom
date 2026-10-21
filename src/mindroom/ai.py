@@ -1521,7 +1521,7 @@ async def ai_response(  # noqa: C901, PLR0915
     Args:
         ctx: Per-turn identity constants for this response turn. ``entity_label``
             names the agent, ``session_id`` is required, and ``requester_id`` is
-            the Matrix sender used for Agno learning and prompt attribution.
+            the Matrix sender used for prompt attribution.
         prompt: User prompt
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
@@ -2060,7 +2060,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     Args:
         ctx: Per-turn identity constants for this response turn. ``entity_label``
             names the agent, ``session_id`` is required, and ``requester_id`` is
-            the Matrix sender used for Agno learning and prompt attribution.
+            the Matrix sender used for prompt attribution.
         prompt: User prompt
         runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration

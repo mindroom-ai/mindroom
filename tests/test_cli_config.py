@@ -279,7 +279,7 @@ class TestConfigInit:
 
         assert mind["display_name"] == "Mind"
         assert mind["include_default_tools"] is False
-        assert mind["learning"] is False
+        assert "learning" not in mind
         assert mind["memory_backend"] == "file"
         assert mind["rooms"] == ["personal"]
         assert config["rooms"]["personal"]["description"]  # becomes the topic, so no model call writes one

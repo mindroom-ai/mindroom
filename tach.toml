@@ -6259,7 +6259,7 @@ from = ["mindroom.agents"]
 expose = [
     "create_session_storage",
     "create_state_storage",
-    "get_agent_runtime_state_dbs",
+    "get_agent_runtime_state_db",
     "get_agent_session",
     "get_team_session",
     "load_agent_session",

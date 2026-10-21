@@ -215,7 +215,7 @@ async def _exercise_team_member_assembly(
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 # Each member owns a different deferred toolkit, so a sibling never gains the paused owner's tools.
                 "agents": {
                     "alpha": {"display_name": "Alpha", "tools": [{"calculator": {"defer": True}}]},
@@ -332,7 +332,7 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 # Each member owns a different deferred toolkit, so a sibling never gains the paused owner's tools.
                 "agents": {
                     "alpha": {"display_name": "Alpha", "tools": [{"calculator": {"defer": True}}]},

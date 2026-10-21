@@ -364,8 +364,6 @@ describe("configStore", () => {
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe("test");
       expect(state.agents[0].display_name).toBe("Test Agent");
-      expect(state.agents[0].learning).toBe(true);
-      expect(state.agents[0].learning_mode).toBe("always");
       expect(state.agentPoliciesByAgent).toEqual({
         test: makeAgentPolicy("test"),
       });
@@ -552,49 +550,6 @@ describe("configStore", () => {
       expect(state.config?.defaults?.tools).toEqual(["gmail", "file"]);
     });
 
-    it("should apply global learning defaults when agent settings are omitted", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-          },
-        },
-        defaults: {
-          learning: false,
-          learning_mode: "agentic",
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe("agentic");
-    });
-
     it("normalizes teams without authored rooms when loading configuration", async () => {
       const mockConfig = {
         agents: {
@@ -662,86 +617,6 @@ describe("configStore", () => {
           mode: "coordinate",
         },
       ]);
-    });
-
-    it("should preserve explicit learning=false from configuration", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-            learning: false,
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning).toBe(false);
-      expect(state.agents[0].learning_mode).toBe("always");
-    });
-
-    it("should preserve explicit learning_mode from configuration", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
-            display_name: "Test Agent",
-            role: "Test role",
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-            learning: true,
-            learning_mode: "agentic",
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
-      });
-
-      const { loadConfig } = useConfigStore.getState();
-      await loadConfig();
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
     it("should preserve private agent configuration from the backend", async () => {
@@ -1279,8 +1154,6 @@ describe("configStore", () => {
             skills: [],
             instructions: [],
             rooms: [],
-            learning: true,
-            learning_mode: "always",
           },
         ],
       });
@@ -1689,8 +1562,6 @@ describe("configStore", () => {
             skills: [],
             instructions: [],
             rooms: ["lobby"],
-            learning: true,
-            learning_mode: "always",
           },
         ],
         agentPoliciesByAgent: {
@@ -1747,8 +1618,6 @@ describe("configStore", () => {
           knowledge_bases: [],
           delegate_to: [],
           context_files: [],
-          learning: true,
-          learning_mode: "always",
         },
       ]);
       expect(state.agentPoliciesByAgent).toEqual({});
@@ -3066,8 +2935,6 @@ describe("configStore", () => {
                 knowledge_bases: [],
                 delegate_to: [],
                 context_files: [],
-                learning: true,
-                learning_mode: "always",
               },
             },
           }),
@@ -3759,47 +3626,8 @@ describe("configStore", () => {
       expect(state.agents).toHaveLength(3);
       const newAgent = state.agents[2];
       expect(newAgent.display_name).toBe("New Agent");
-      expect(newAgent.learning).toBe(true);
-      expect(newAgent.learning_mode).toBe("always");
       expect(state.selectedAgentId).toBe(newAgent.id);
       expect(state.isDirty).toBe(true);
-    });
-
-    it("should create new agent with learning values from global defaults", () => {
-      const newAgentData = {
-        display_name: "New Agent",
-        role: "New role",
-        tools: [],
-        skills: [],
-        instructions: [],
-        rooms: [],
-      };
-      useConfigStore.setState({
-        config: {
-          memory: {
-            embedder: {
-              provider: "openai",
-              config: { model: "text-embedding-3-small" },
-            },
-          },
-          models: {},
-          agents: {},
-          defaults: {
-            markdown: true,
-            learning: false,
-            learning_mode: "agentic",
-          },
-          router: { model: "default" },
-        },
-      });
-
-      const { createAgent } = useConfigStore.getState();
-      createAgent(newAgentData);
-
-      const state = useConfigStore.getState();
-      const newAgent = state.agents[state.agents.length - 1];
-      expect(newAgent?.learning).toBe(false);
-      expect(newAgent?.learning_mode).toBe("agentic");
     });
 
     it("refreshes agent policies when creating a standard shared agent", async () => {

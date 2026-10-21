@@ -73,7 +73,7 @@ def _config(*, helper_tools: list[str], approval: ToolApprovalConfig | None = No
             "plain": AgentConfig(display_name="Plain"),
         },
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         **({"tool_approval": approval} if approval is not None else {}),
     )

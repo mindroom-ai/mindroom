@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import structlog
-from agno.compression.manager import CompressionManager
 from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
@@ -116,14 +115,7 @@ class _ScriptedModel(SyntheticModel):
         tools: Sequence[Mapping[str, Any]] | None = None,
         **_kwargs: object,
     ) -> ModelResponse:
-        # Like an adapter, a request sends a tool result's compressed text once the loop compresses tool results.
-        compressed = bool(_kwargs.get("compress_tool_results"))
-        contents = [
-            compressed_text
-            if compressed and isinstance(compressed_text := message.get_content(use_compressed_content=True), str)
-            else message.get_content_string()
-            for message in messages
-        ]
+        contents = [message.get_content_string() for message in messages]
         self.requests.append(contents)
         self.offered_tools.append({tool["function"]["name"] for tool in tools or []})
         self.tool_requests.append(list(tools or []))
@@ -1427,7 +1419,6 @@ async def _answer(
     tools: Sequence[Function | dict[str, Any]],
     run_id: str = "r1",
     model_name: str = "default",
-    compression_manager: CompressionManager | None = None,
 ) -> None:
     """Run one agent response loop whose final request the capture records, as a primary attempt does."""
     messages = [
@@ -1439,7 +1430,6 @@ async def _answer(
             messages=messages,
             tools=list(tools),
             run_response=RunOutput(run_id=run_id),
-            compression_manager=compression_manager,
         )
 
 
@@ -1495,7 +1485,6 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
         "no skill_manage",
         "skill_manage needs approval",
         "skill_manage asks as its job",
-        "compressed tool results",
         "conversation too long to fork",
         "no capture",
     ],
@@ -1517,8 +1506,7 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
         tool.approval_type = JOB_APPROVAL_TYPE
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
-    compression = _ShortenToolResults() if reason == "compressed tool results" else None
-    await _answer(primary, capture, tools, compression_manager=compression)
+    await _answer(primary, capture, tools)
     if reason == "no final answer":
         capture = replace(
             capture,
@@ -1664,22 +1652,6 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(tm
         assert fork[history][: len(primary[history])] == primary[history]
         assert len(fork[history]) == len(primary[history]) + 2, "the fork adds the final answer and the review prompt"
     assert not wire.selection_disabled(fork)
-
-
-_COMPRESSED_RESULT = "Skill loaded; instructions shortened."
-
-
-@dataclass
-class _ShortenToolResults(CompressionManager):
-    """Tool-result compression like an agent's ``compress_tool_results``, without a compression model."""
-
-    async def ashould_compress(self, messages: list[Message], *_args: object, **_kwargs: object) -> bool:
-        return any(message.role == "tool" and message.compressed_content is None for message in messages)
-
-    async def acompress(self, messages: list[Message], *_args: object, **_kwargs: object) -> None:
-        for message in messages:
-            if message.role == "tool" and message.compressed_content is None:
-                message.compressed_content = _COMPRESSED_RESULT
 
 
 @pytest.mark.asyncio

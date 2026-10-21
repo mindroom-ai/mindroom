@@ -16,10 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.agent._init import set_learning_machine
 from agno.db.in_memory import InMemoryDb
 from agno.knowledge.knowledge import Knowledge
-from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
@@ -44,6 +42,7 @@ from mindroom.agents import (
     get_agent_toolkit_names,
 )
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.config import legacy_fields
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -81,7 +80,7 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_runtime_state_dbs
+from mindroom.session_storage.agent_storage import create_session_storage, get_agent_runtime_state_db
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
@@ -447,11 +446,6 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     assert "General assistant" in agent.role
     assert "## Core Expertise" not in agent.role
     assert "Use the configured instruction." in agent.instructions
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.ALWAYS
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.ALWAYS
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -790,33 +784,11 @@ def test_restricted_agent_omits_tool_execution_environment(
     assert "## Tool Execution Environment" not in agent.role
 
 
-def test_get_agent_runtime_state_dbs_accepts_backend_neutral_agno_storage() -> None:
+def test_get_agent_runtime_state_db_accepts_backend_neutral_agno_storage() -> None:
     """Runtime DB discovery should not require SQLite-specific storage handles."""
     history_db = InMemoryDb()
-    learning_db = InMemoryDb()
-    agent = Agent(db=history_db, learning=LearningMachine(db=learning_db))
 
-    assert get_agent_runtime_state_dbs(agent) == (history_db, learning_db)
-
-
-def test_get_agent_runtime_state_dbs_includes_learning_storage(tmp_path: Path) -> None:
-    """Runtime-owned agent DB cleanup should include the separate learning storage."""
-    config = _test_config()
-    config.models = {"default": ModelConfig(provider="ollama", id="test-model")}
-    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent.learning, LearningMachine)
-    history_db, learning_db = get_agent_runtime_state_dbs(agent)
-    assert history_db is agent.db
-    assert learning_db is agent.learning.db
-    assert history_db is not learning_db
-
-    if learning_db is not None:
-        learning_db.close()
-    if history_db is not None:
-        history_db.close()
+    assert get_agent_runtime_state_db(Agent(db=history_db)) is history_db
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -2610,76 +2582,14 @@ def test_get_agent_unknown() -> None:
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
-    """Tests that learning can be disabled per agent."""
-    config = _test_config()
-    config.agents["general"].learning = False
-    agent = _create_agent_for_test("general", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.learning is False
-    assert mock_storage.call_count == 1
-
-
-@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
-    """Tests that defaults.learning is used when per-agent learning is omitted."""
-    config = _test_config()
-    config.defaults.learning = False
-    config.agents["general"].learning = None
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent, Agent)
-    assert agent.learning is False
-    # Learning storage should not be created when defaults disable learning.
-    assert mock_storage.call_count == 1
-
-
-@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that learning mode can be configured as agentic."""
-    config = _test_config()
-    config.agents["general"].learning_mode = "agentic"
-    agent = _create_agent_for_test("general", config=config)
-    assert isinstance(agent, Agent)
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.AGENTIC
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.AGENTIC
-
-
-@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
-    """Tests that learning mode falls back to defaults when agent config is None."""
-    config = _test_config()
-    # Agent has no explicit learning settings (None), defaults say enabled + agentic.
-    config.agents["general"].learning = None
-    config.agents["general"].learning_mode = None
-    config.defaults.learning = True
-    config.defaults.learning_mode = "agentic"
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent, Agent)
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.AGENTIC
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.AGENTIC
-    assert mock_storage.call_count == 2
-
-
-@patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Session and learning databases should live under the canonical agent state root."""
+def test_get_agent_uses_storage_path_for_sessions(mock_storage: MagicMock, tmp_path: Path) -> None:
+    """Session databases should live under the canonical agent state root."""
     config = _test_config()
     _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -2687,7 +2597,7 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     mock_storage: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Dedicated session storage must not move learning or workspace state."""
+    """Dedicated session storage holds the agent's session database instead of its state root."""
     storage_root = tmp_path / "storage"
     session_storage_root = tmp_path / "session-state"
     runtime_paths = resolve_runtime_paths(
@@ -2701,13 +2611,12 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
 
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert session_storage_root / "agents" / "general" / "sessions" / "general.db" in db_files
-    assert agent_state_root_path(storage_root, "general") / "learning" / "general.db" in db_files
     assert agent_state_root_path(storage_root, "general") / "sessions" / "general.db" not in db_files
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
-def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Worker scope should not change the canonical session and learning paths."""
+def test_get_agent_uses_worker_storage_for_sessions(mock_storage: MagicMock, tmp_path: Path) -> None:
+    """Worker scope should not change the canonical session path."""
     config = _test_config()
     config.agents["general"].worker_scope = "user"
     execution_identity = ToolExecutionIdentity(
@@ -2728,7 +2637,6 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -2761,7 +2669,6 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -3293,7 +3200,6 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                 rooms=["personal"],
                 tools=[],
                 include_default_tools=False,
-                learning=False,
                 memory_backend="file",
                 context_files=[
                     "SOUL.md",
@@ -3351,7 +3257,6 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
@@ -3388,7 +3293,6 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     canonical_workspace = agent_workspace_root_path(shared_root, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
     assert not any(path.is_relative_to(dedicated_root) for path in db_files)
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
@@ -4367,9 +4271,7 @@ async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(
         discovered_automations=(),
     )
     config = _config_with_workspace_skill(tmp_path)
-    config.agents["general"].learning_mode = "agentic"
     agent = _create_agent_for_test("general", config, hook_registry=HookRegistry.from_plugins([plugin]))
-    set_learning_machine(agent)
 
     functions = await _generated_functions(agent, user_id="@alice:localhost")
     skill_call = FunctionCall(
@@ -4377,17 +4279,10 @@ async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(
         arguments={"skill_name": "scripted"},
         call_id="call-1",
     )
-    memory_call = FunctionCall(
-        function=functions["update_user_memory"],
-        arguments={"task": "Remember the user prefers tea."},
-        call_id="call-2",
-    )
     skill_result = await skill_call.aexecute()
-    memory_result = await memory_call.aexecute()
 
     assert "[TOOL CALL DECLINED]" in str(skill_result.result)
     assert "SKILL BODY" not in str(skill_result.result)
-    assert "[TOOL CALL DECLINED]" in str(memory_result.result)
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -4604,6 +4499,72 @@ def test_config_rejects_retired_auto_resume_after_restart() -> None:
             defaults={"auto_resume_after_restart": True},
             agents={"calculator": {"display_name": "CalculatorAgent"}},
         )
+
+
+def _agent_from_config_with_retired_field(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> tuple[Config, Agent, list[Path], list[dict[str, object]]]:
+    """Load a config that sets a retired field in defaults and on two agents, then build one of them."""
+    legacy_fields._warn_retired_field.cache_clear()
+    with capture_logs() as logs:
+        config = Config.model_validate(
+            {
+                "defaults": {"tools": [], field: value},
+                "agents": {
+                    "general": {"display_name": "GeneralAgent", field: value},
+                    "summary": {"display_name": "SummaryAgent", field: value},
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-6-luna"}},
+            },
+        )
+        config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+        with patch("mindroom.session_storage.agent_storage._ConversationSqliteDb") as storage:
+            agent = _create_agent_for_test("general", config=config)
+    db_files = [Path(str(call.kwargs["db_file"])) for call in storage.call_args_list]
+    warnings = [log for log in logs if log["log_level"] == "warning" and log.get("field") == field]
+    return config, agent, db_files, warnings
+
+
+def test_config_ignores_retired_learning_with_one_warning(tmp_path: Path) -> None:
+    """A config that still enables Agno Learning loads with one warning, and its agents open no learning database."""
+    config, agent, db_files, warnings = _agent_from_config_with_retired_field(tmp_path, "learning", value=True)
+
+    assert len(warnings) == 1
+    assert "learning" not in config.authored_model_dump()["defaults"]
+    assert "learning" not in config.authored_model_dump()["agents"]["general"]
+    assert agent.learning is None
+    assert db_files == [agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"]
+
+
+def test_config_ignores_retired_learning_mode_with_one_warning(tmp_path: Path) -> None:
+    """A config that still picks a Learning mode loads with one warning, and its agents run without Learning."""
+    config, agent, _db_files, warnings = _agent_from_config_with_retired_field(
+        tmp_path,
+        "learning_mode",
+        value="agentic",
+    )
+
+    assert len(warnings) == 1
+    assert "learning_mode" not in config.authored_model_dump()["defaults"]
+    assert "learning_mode" not in config.authored_model_dump()["agents"]["general"]
+    assert agent.learning is None
+
+
+def test_config_ignores_retired_compress_tool_results_with_one_warning(tmp_path: Path) -> None:
+    """A config that still compresses tool results loads with one warning, and its agents replay them unchanged."""
+    config, agent, _db_files, warnings = _agent_from_config_with_retired_field(
+        tmp_path,
+        "compress_tool_results",
+        value=True,
+    )
+
+    assert len(warnings) == 1
+    assert "compress_tool_results" not in config.authored_model_dump()["defaults"]
+    assert "compress_tool_results" not in config.authored_model_dump()["agents"]["general"]
+    assert agent.compress_tool_results is False
+    assert agent.compression_manager is None
 
 
 def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
@@ -5698,13 +5659,11 @@ def test_team_member_matches_solo_agent_construction() -> None:
         assert member.model.id == solo.model.id
         assert [tool.name for tool in member.tools or []] == [tool.name for tool in solo.tools or []]
         assert member.markdown == solo.markdown
-        assert type(member.learning) is type(solo.learning)
         assert member.add_history_to_context == solo.add_history_to_context
         assert member.num_history_runs == solo.num_history_runs
         assert member.num_history_messages == solo.num_history_messages
         assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
         assert member.knowledge == solo.knowledge
-        assert member.compress_tool_results == solo.compress_tool_results
 
         # The only authored construction delta: members never get the Matrix
         # reaction-based interactive question prompt.

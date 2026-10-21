@@ -845,6 +845,6 @@ def resolve_agent_state_storage_path(
     """Return the canonical durable state root for one agent.
 
     Requester-scoped worker runtimes do not partition file-backed memory, mem0 state,
-    sessions, or learning. All durable agent state lives under one root per agent.
+    or sessions. All durable agent state lives under one root per agent.
     """
     return agent_state_root_path(base_storage_path, agent_name)

@@ -622,15 +622,6 @@ async def test_empty_persona_tools_build_toolless_agent(tmp_path: Path) -> None:
     assert await _function_names(agent) == []
 
 
-def test_persona_disables_learning(tmp_path: Path) -> None:
-    """A persona child never runs Agno learning for the caller."""
-    runtime = _runtime(tmp_path, tools=["file"], learning=True)
-    configured = agents.create_agent("helper", runtime.config, runtime.runtime_paths, None)
-    persona = _child(runtime, None, persist_runtime_state=True)
-    assert configured.learning
-    assert not persona.learning
-
-
 @pytest.mark.asyncio
 async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No recalled memories enter a persona child's prompt."""

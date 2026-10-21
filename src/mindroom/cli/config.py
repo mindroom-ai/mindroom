@@ -1207,7 +1207,6 @@ agents:
     role: Personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
-    learning: false
     memory_backend: file
     rooms:
       - personal

@@ -105,7 +105,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child", tools=["calculator"]),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
     )
@@ -224,7 +224,7 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"default": "require_approval"},
     )
