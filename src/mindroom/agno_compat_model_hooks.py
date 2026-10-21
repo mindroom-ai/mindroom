@@ -39,13 +39,6 @@ class _ClientProvider(Protocol):
     def get_async_client(self) -> object: ...
 
 
-# AGNO_COMPAT: Model message projection lacks a public hook.
-# Reason: Agno has no model-message projection hook shared by fallback models.
-# Upstream issue: No matching public transient-message projection issue identified.
-# Upstream PR: None identified for this extension point.
-# Remove when: A public model request hook accepts transient message projections and
-# preserves owner-controlled history publication on success, failure, and cancellation.
-# Coverage: tests/test_approval_receipt.py.
 def _with_tool_checkpoint(
     messages: list[Message],
     kwargs: dict[str, object],
@@ -433,33 +426,6 @@ def install_tool_call_rewrite(
     model_dict["get_function_calls_to_run"] = MethodType(get_function_calls_to_run, model)
 
 
-# AGNO_COMPAT: Final provider requests lack an attempt-scoped hook.
-# Reason: Agno has no attempt-scoped hook at the final provider request; agent
-# pre-hooks run before compression, and its answer cache bypasses invocation hooks.
-# Upstream issue: No matching public scoped provider-request hook issue identified.
-# Upstream PR: None identified for this extension point.
-# Remove when: A public scoped request hook runs after compression and before cached
-# answers, restoring previous hooks on exit; retain owner participation and run identity.
-# Coverage: tests/test_participation.py::test_agent_turn_applies_decision_before_model_answer;
-# tests/test_participation.py::test_cancellation_is_not_converted_to_silence;
-# tests/test_participation_ownership.py::test_helpers_cannot_acquire_primary_decision.
-def _restore(model_dict: dict[str, object], saved: dict[str, object | None]) -> None:
-    for name, value in saved.items():
-        if value is None:
-            model_dict.pop(name, None)
-        else:
-            model_dict[name] = value
-
-
-# AGNO_COMPAT: A run's final model request is not observable.
-# Reason: Agno reports neither the messages nor the tool definitions of a response loop's last request:
-# RunOutput.messages drops messages kept out of agent memory, and the tools stay inside aresponse. The skill
-# review forks that request to read the conversation from the provider's prompt cache.
-# Upstream issue: tracking gap; no Agno issue or PR proposes a scoped observer of response loops.
-# Upstream PR: none identified.
-# Remove when: Agno reports each response loop's final messages, tools, tool choice, and response format to a
-# scoped callback; the skill review's fork of that request remains MindRoom policy.
-# Coverage: tests/test_skill_learning.py::test_the_review_fork_replays_the_final_request_through_each_adapter.
 # AGNO_COMPAT: Retry cycles lack public context and classification hooks.
 # Reason: Request-scoped media state must enclose Agno's private retry loops,
 # while the owner's retry classifier must compose with Agno's predicate.
