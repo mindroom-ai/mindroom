@@ -17,8 +17,7 @@ from functools import partial
 from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
-from agno.agent import Agent
-
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
@@ -35,7 +34,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.memory.legacy_auto_flush import remove_legacy_flush_queue
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -310,21 +309,15 @@ async def _extract_memory_summary(
     )
 
     model_name = extractor.model or config.resolve_entity(agent_name).model_name
-    model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    extractor_agent = Agent(
-        name="MemoryAutoFlushExtractor",
-        role="Extract durable memory statements for long-term memory storage.",
-        model=model,
-        telemetry=False,
-    )
     invocation_id = uuid4().hex
-    response = await extractor_agent.arun(
+    response = await complete_prompt(
+        build_model_provider(config, runtime_paths, model_name),
         prompt,
+        role="Extract durable memory statements for long-term memory storage.",
         run_id=invocation_id,
-        session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}",
     )
     await record_helper_usage(
-        response,
+        response.record,
         owner=HelperUsageOwner(
             storage_factory=partial(
                 create_session_storage,
@@ -339,9 +332,7 @@ async def _extract_memory_summary(
         kind="memory_auto_flush",
         requester_id=execution_identity.requester_id if execution_identity is not None else None,
     )
-    content = response.content
-    raw_output = content if isinstance(content, str) else str(content or "")
-    return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
+    return _sanitize_extractor_output(response.content, extractor.no_reply_token)
 
 
 @dataclass

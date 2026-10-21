@@ -3,20 +3,21 @@
 Team formation is pure and assigns a heuristic provisional mode; the AI-powered
 mode selection runs separately at execution time via ``select_ad_hoc_team_mode``.
 """
-# ruff: noqa: ANN001, ANN201, F841
+# ruff: noqa: ANN001, ANN201
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import json
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import nio
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
+from mindroom.llm.errors import ProviderError
 from mindroom.teams import (
     TeamMode,
     TeamOutcome,
@@ -27,7 +28,16 @@ from mindroom.teams import (
 )
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, usage
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
+
+if TYPE_CHECKING:
+    from mindroom.llm.usage import MessageMetrics
+
+
+def _mode_model(mode: str, reasoning: str, *, metrics: MessageMetrics | None = None) -> ScriptedModel:
+    """Return a model that answers the team-mode choice with ``mode``."""
+    return ScriptedModel([answer(json.dumps({"mode": mode, "reasoning": reasoning}), metrics)])
 
 
 def _add_room_users(room: nio.MatrixRoom, user_ids: list[str]) -> None:
@@ -156,102 +166,73 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI agent response
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = RunOutput(
-                content=_TeamModeDecision(mode="coordinate", reasoning="Different agents handle different subtasks"),
+        model = _mode_model("coordinate", "Different agents handle different subtasks")
+        with patch("mindroom.teams.build_model_provider", return_value=model):
+            result = await _select_team_mode_for_test(
+                "Send me an email then call me",
+                ["email", "phone"],
+                mock_config,
             )
 
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await _select_team_mode_for_test(
-                    "Send me an email then call me",
-                    ["email", "phone"],
-                    mock_config,
-                )
-
-                assert result == TeamMode.COORDINATE
-                mock_agent.arun.assert_called_once()
+        assert result == TeamMode.COORDINATE
+        assert len(model.requests) == 1
 
     @pytest.mark.asyncio
     async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI agent response
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = RunOutput(
-                content=_TeamModeDecision(
-                    mode="collaborate",
-                    reasoning="All agents work on the same brainstorming task",
-                ),
+        model = _mode_model("collaborate", "All agents work on the same brainstorming task")
+        with patch("mindroom.teams.build_model_provider", return_value=model):
+            result = await _select_team_mode_for_test(
+                "What do you think about this idea?",
+                ["research", "analyst"],
+                mock_config,
             )
 
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await _select_team_mode_for_test(
-                    "What do you think about this idea?",
-                    ["research", "analyst"],
-                    mock_config,
-                )
-
-                assert result == TeamMode.COLLABORATE
-                mock_agent.arun.assert_called_once()
+        assert result == TeamMode.COLLABORATE
+        assert len(model.requests) == 1
 
     @pytest.mark.asyncio
     async def test_select_team_mode_fallback_on_error(self, mock_config):
         """Test fallback to collaborate mode on AI error."""
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI agent to raise an error
-            mock_agent = AsyncMock()
-            mock_agent.arun.side_effect = Exception("AI service unavailable")
 
-            with (
-                patch("mindroom.teams.Agent", return_value=mock_agent),
-                patch("mindroom.teams.logger") as mock_logger,
-            ):
-                result = await _select_team_mode_for_test(
-                    "Do something",
-                    ["email", "phone"],
-                    mock_config,
-                )
+        async def fail() -> None:
+            msg = "AI service unavailable"
+            raise ProviderError(msg, provider="Synthetic")
 
-                # Should fallback to COLLABORATE on error
-                assert result == TeamMode.COLLABORATE
-                mock_logger.exception.assert_not_called()
-                mock_logger.warning.assert_called_once()
+        with (
+            patch("mindroom.teams.build_model_provider", return_value=ScriptedModel([[Await(fail)]])),
+            patch("mindroom.teams.logger") as mock_logger,
+        ):
+            result = await _select_team_mode_for_test(
+                "Do something",
+                ["email", "phone"],
+                mock_config,
+            )
+
+        # Should fallback to COLLABORATE on error
+        assert result == TeamMode.COLLABORATE
+        mock_logger.exception.assert_not_called()
+        mock_logger.warning.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI agent response with wrong type
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = RunOutput(content="Just a string, not TeamModeDecision")
+        model = ScriptedModel([answer("Just a string, not TeamModeDecision")])
+        with patch("mindroom.teams.build_model_provider", return_value=model):
+            result = await _select_team_mode_for_test(
+                "Do something",
+                ["email", "phone"],
+                mock_config,
+            )
 
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await _select_team_mode_for_test(
-                    "Do something",
-                    ["email", "phone"],
-                    mock_config,
-                )
-
-                # Should fallback to COLLABORATE on unexpected response
-                assert result == TeamMode.COLLABORATE
+        # Should fallback to COLLABORATE on unexpected response
+        assert result == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
     async def test_team_mode_choice_is_counted_as_internal_usage(self, mock_config):
         """The mode choice is a paid model call, so organization usage reports it under system:internal."""
-        mock_agent = AsyncMock()
-        mock_agent.arun.return_value = RunOutput(
-            run_id="mode-choice",
-            content=_TeamModeDecision(mode="coordinate", reasoning="Different subtasks"),
-            model="gpt-6-luna",
-            model_provider="OpenAI",
-            metrics=RunMetrics(input_tokens=600, output_tokens=20, total_tokens=620),
-        )
-        with (
-            patch("mindroom.providers.model_loading.get_model_instance"),
-            patch("mindroom.teams.Agent", return_value=mock_agent),
-        ):
+        model = _mode_model("coordinate", "Different subtasks", metrics=usage(600, 20))
+        with patch("mindroom.teams.build_model_provider", return_value=model):
             result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
 
         assert result == TeamMode.COORDINATE
@@ -374,23 +355,14 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI to recognize different subtasks
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = _TeamModeDecision(
-                mode="coordinate",
-                reasoning="Different tasks: email agent sends email, phone agent makes call",
+        model = _mode_model("coordinate", "Different tasks: email agent sends email, phone agent makes call")
+        with patch("mindroom.teams.build_model_provider", return_value=model):
+            mode = await select_ad_hoc_team_mode(
+                "Email me the details, then call me to discuss",
+                result.eligible_members,
+                mock_config,
+                runtime_paths_for(mock_config),
             )
-            mock_agent.arun.return_value = mock_response
-
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
-                mode = await select_ad_hoc_team_mode(
-                    "Email me the details, then call me to discuss",
-                    result.eligible_members,
-                    mock_config,
-                    runtime_paths_for(mock_config),
-                )
 
         assert mode == TeamMode.COORDINATE
 
@@ -410,23 +382,14 @@ class TestIntegrationScenarios:
         assert result.outcome is TeamOutcome.TEAM
         assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            # Mock the AI to recognize same task for all
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = _TeamModeDecision(
-                mode="collaborate",
-                reasoning="All agents provide their perspective on the same question",
+        model = _mode_model("collaborate", "All agents provide their perspective on the same question")
+        with patch("mindroom.teams.build_model_provider", return_value=model):
+            mode = await select_ad_hoc_team_mode(
+                "What are your thoughts on this approach?",
+                result.eligible_members,
+                mock_config,
+                runtime_paths_for(mock_config),
             )
-            mock_agent.arun.return_value = mock_response
-
-            with patch("mindroom.teams.Agent", return_value=mock_agent):
-                mode = await select_ad_hoc_team_mode(
-                    "What are your thoughts on this approach?",
-                    result.eligible_members,
-                    mock_config,
-                    runtime_paths_for(mock_config),
-                )
 
         assert mode == TeamMode.COLLABORATE
 

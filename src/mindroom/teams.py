@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
@@ -33,6 +32,7 @@ from agno.utils.string import url_safe_string
 from pydantic import BaseModel, Field
 
 from mindroom import ai_runtime
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent, enable_all_history_replay, team_background_jobs
 from mindroom.ai import run_delegated_child_response
@@ -101,6 +101,7 @@ from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -152,6 +153,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     import nio
+    from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
@@ -1150,17 +1152,14 @@ async def _select_team_mode(
     )
 
     try:
-        model = model_loading.get_model_instance(config, runtime_paths, "default")
-        agent = Agent(
-            name="TeamModeDecider",
+        result = await complete_prompt(
+            build_model_provider(config, runtime_paths, "default"),
+            prompt,
             role="Determine team mode",
-            model=model,
-            output_schema=_TeamModeDecision,
-            telemetry=False,
+            schema=_TeamModeDecision,
         )
-        response = await agent.arun(prompt, session_id="team_mode_decision")
-        await record_system_usage(response, runtime_paths=runtime_paths, kind="team_mode")
-        decision = response.content
+        await record_system_usage(result.record, runtime_paths=runtime_paths, kind="team_mode")
+        decision = result.content
         if isinstance(decision, _TeamModeDecision):
             logger.info("team_mode_decided", mode=decision.mode, reasoning=decision.reasoning)
             return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE

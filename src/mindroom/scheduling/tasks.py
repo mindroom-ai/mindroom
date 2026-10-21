@@ -18,12 +18,11 @@ from zoneinfo import ZoneInfo
 
 import humanize
 import nio
-from agno.agent import Agent
-from agno.run.base import RunStatus
 from cron_descriptor import Options, get_description
 from croniter import CroniterError, croniter
 from pydantic import BaseModel, Field, field_validator
 
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.approval.tool_approval import (
     ToolApprovalScriptError,
     arm_scheduled_call_approval,
@@ -34,15 +33,15 @@ from mindroom.approval.tool_approval import (
     withdraw_scheduled_call_approval,
 )
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
-from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.helper_usage import record_system_usage
 from mindroom.hooks import build_hook_matrix_admin
+from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.message_target import MessageTarget
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling.recurring_schedule import (
@@ -1368,19 +1367,16 @@ async def _parse_workflow_schedule(
         existing_task_context=_existing_task_parse_context(existing_workflow) if existing_workflow else "",
     )
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-
-    agent = Agent(
-        name="WorkflowParser",
-        role="Parse scheduling requests into structured workflows",
-        model=model,
-        output_schema=ScheduledWorkflow,
-        telemetry=False,
-    )
+    provider = build_model_provider(config, runtime_paths, "default")
 
     try:
-        response = await agent.arun(prompt, session_id=f"workflow_parse_{uuid.uuid4()}")
-        await record_system_usage(response, runtime_paths=runtime_paths, kind="schedule_parse")
+        response = await complete_prompt(
+            provider,
+            prompt,
+            role="Parse scheduling requests into structured workflows",
+            schema=ScheduledWorkflow,
+        )
+        await record_system_usage(response.record, runtime_paths=runtime_paths, kind="schedule_parse")
         result = response.content
 
         if isinstance(result, ScheduledWorkflow):
@@ -1391,17 +1387,15 @@ async def _parse_workflow_schedule(
             logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
             return result
 
-        # Agno returns provider failures as errored run output text, not as raised exceptions.
-        if response.status == RunStatus.error and is_model_safeguard_refusal(str(result)):
-            logger.warning("Schedule parser model refused the request", request=request)
-            return _WorkflowParseError(error=f"The schedule parser model declined this request ({result}).")
-
         logger.error("Unexpected response type from AI", response_type=type(result).__name__)
         return _WorkflowParseError(
             error="Failed to parse the schedule request",
             suggestion="Try being more specific about the timing and what you want to happen",
         )
 
+    except ModelSafeguardRefusal as refusal:
+        logger.warning("Schedule parser model refused the request", request=request)
+        return _WorkflowParseError(error=f"The schedule parser model declined this request ({refusal}).")
     except Exception as e:
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         return _WorkflowParseError(

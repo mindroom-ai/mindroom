@@ -31,7 +31,8 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from tests.conftest import FakeModel, bind_runtime_paths, runtime_paths_for, seed_session
+from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
+from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1064,11 +1065,11 @@ async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
     _seed(config, session, [_run("r1", session, T0 + 10)])
     requested: list[str] = []
 
-    def model_instance(_config: object, _runtime_paths: object, model_name: str) -> FakeModel:
+    def model_provider(_config: object, _runtime_paths: object, model_name: str) -> ScriptedModel:
         requested.append(model_name)
-        return FakeModel(id=model_name, provider="fake")
+        return ScriptedModel([answer("NO_REPLY")])
 
-    monkeypatch.setattr(auto_flush.model_loading, "get_model_instance", model_instance)
+    monkeypatch.setattr(auto_flush, "build_model_provider", model_provider)
 
     await auto_flush._extract_memory_summary(
         config=config,

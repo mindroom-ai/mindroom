@@ -63,6 +63,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
+from mindroom.judgment import llm as judgment_llm
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -76,7 +77,6 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.providers import model_loading
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import (
@@ -111,6 +111,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import RecordingModel
 from tests.participation_helpers import ParticipationModel
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
@@ -4653,8 +4654,8 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         if enabled
         else None
     )
-    judge = ParticipationModel(ModelResponse(content='{"decision": false}'))
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    judge = ScriptedModel([answer('{"decision": false}')])
+    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
     envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
     prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
     if selection:
@@ -4742,7 +4743,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
         assert len(judge.requests) == (1 if enabled and not pending_media else 0)
         assert runner._lifecycle_coordinator.visible_progress_callback(envelope.target) is None
         if enabled and not pending_media:
-            evidence = "\n".join(str(message.content) for message in judge.requests[0]["messages"])
+            evidence = "\n".join(str(message.content) for message in judge.requests[0].messages)
             assert "I have located the requested file" in evidence
             assert "Later text" not in evidence
             if selection:

@@ -1,7 +1,7 @@
 """Graphiti's model, embedder, reranker, and database clients; the model and embedder use MindRoom's own construction.
 
 Every provider, credential rule, and base URL MindRoom supports then works for extraction without a second provider
-mapping, and each extraction call is an Agno run whose tokens are recorded like other helper work.
+mapping, and each extraction call is one helper request whose tokens are recorded like other helper work.
 """
 
 from __future__ import annotations
@@ -12,8 +12,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.agent import Agent
-from agno.run.base import RunStatus
 from graphiti_core.cross_encoder.client import CrossEncoderClient
 from graphiti_core.driver.falkordb_driver import FalkorDriver
 from graphiti_core.embedder.client import EmbedderClient
@@ -21,11 +19,12 @@ from graphiti_core.llm_client.client import LLMClient
 from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
 from pydantic import BaseModel
 
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_session_storage
 
 if TYPE_CHECKING:
@@ -82,8 +81,8 @@ class MindRoomLLMClient(LLMClient):
     ) -> dict[str, Any]:
         # The configured model entry decides its output limit, and one model serves every prompt.
         del max_tokens, model_size, model
-        # Graphiti calls from the knowledge graph loop, but model providers share HTTP clients bound to the runtime loop
-        # (the Codex and Kimi providers use Agno's global async client), so the extraction itself runs there.
+        # Graphiti calls from the knowledge graph loop, but the runtime loop owns the model providers' pooled HTTP
+        # connections, so the extraction itself runs there.
         return await run_on_loop(self._runtime_loop, self._extract(messages, response_model))
 
     async def _extract(self, messages: list[Message], response_model: type[BaseModel] | None) -> dict[str, Any]:
@@ -94,26 +93,19 @@ class MindRoomLLMClient(LLMClient):
             raise ValueError(msg)
         target = current_usage_target()
         identity = target.execution_identity if target is not None else None
-        agent = Agent(
-            name="KnowledgeGraphExtractor",
-            model=model_loading.get_model_instance(
-                config,
-                self._runtime_paths,
-                model_name,
-                execution_identity=identity,
-            ),
-            instructions="\n\n".join(message.content for message in messages if message.role == "system") or None,
-            output_schema=response_model,
-            telemetry=False,
-        )
+        provider = build_model_provider(config, self._runtime_paths, model_name, execution_identity=identity)
+        system = "\n\n".join(message.content for message in messages if message.role == "system")
         invocation_id = uuid4().hex
-        response = await agent.arun(
+        response = await complete_prompt(
+            provider,
             "\n\n".join(message.content for message in messages if message.role != "system"),
+            instructions=(system,) if system else (),
+            schema=response_model,
             run_id=invocation_id,
         )
         if target is not None:
             await record_helper_usage(
-                response,
+                response.record,
                 owner=HelperUsageOwner(
                     storage_factory=partial(
                         create_session_storage,
@@ -129,15 +121,11 @@ class MindRoomLLMClient(LLMClient):
                 requester_id=target.requester_id or (identity.requester_id if identity is not None else None),
             )
         content = response.content
-        if response.status == RunStatus.error:
-            # Agno returns a provider failure as the run's content; report it instead of a JSON parse error.
-            msg = f"Knowledge graph extraction failed: {content}"
-            raise RuntimeError(msg)
         if isinstance(content, BaseModel):
             return content.model_dump()
         # Output Graphiti cannot use counts toward dropping the episode; other errors wait like an outage.
         try:
-            parsed = json.loads(content if isinstance(content, str) else "")
+            parsed = json.loads(content)
             if response_model is not None:
                 return response_model.model_validate(parsed).model_dump()
         except ValueError as exc:

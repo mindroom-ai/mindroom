@@ -13,8 +13,10 @@ from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, load_gold
 if TYPE_CHECKING:
     from pathlib import Path
 
-# The team leader's prompt belongs to the teams runtime; its scenarios are compared there.
-GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json") if not path.stem.startswith("team_"))
+# The team leader's prompt belongs to the teams runtime, and helper requests already go through the owned provider
+# layer; their scenarios are compared in tests/team_runtime and tests/agent_loop/test_helper.py.
+_COMPARED_ELSEWHERE = ("team_", "helper_")
+GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json") if not path.stem.startswith(_COMPARED_ELSEWHERE))
 # Requests whose system message MindRoom writes itself instead of rendering an agent prompt.
 MINDROOM_WRITTEN = {("compaction_summary", 3)}
 
@@ -30,9 +32,9 @@ def _golden_system_messages(name: str, golden: dict[str, Any]) -> list[str]:
     return messages + [exported[key] for key in ("instructions", "system_prompt") if key in exported]
 
 
-def test_every_golden_but_the_team_leaders_has_a_scenario() -> None:
+def test_every_golden_compared_here_has_a_scenario() -> None:
     """Each prompt golden this module compares runs through a scenario."""
-    assert sorted(name for name in SCENARIOS if not name.startswith("team_")) == GOLDENS
+    assert sorted(name for name in SCENARIOS if not name.startswith(_COMPARED_ELSEWHERE)) == GOLDENS
 
 
 @pytest.mark.asyncio

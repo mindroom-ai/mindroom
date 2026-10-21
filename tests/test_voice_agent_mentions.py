@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +15,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.voice.handler import _process_transcription, _sanitize_unavailable_mentions
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def _voice_config(agent_display_names: dict[str, str]) -> Config:
@@ -38,6 +44,20 @@ def _persist_voice_accounts(config: Config, *, usernames: dict[str, str] | None 
     persist_entity_accounts(config, runtime_paths, usernames=usernames or actual_entity_usernames(config))
 
 
+@contextmanager
+def _normalizer(normalized: str) -> Iterator[ScriptedModel]:
+    """Serve the voice normalizer from a model that answers with ``normalized``."""
+    model = ScriptedModel([answer(normalized)])
+    with patch("mindroom.voice.handler.build_model_provider", return_value=model):
+        yield model
+
+
+def _prompt(model: ScriptedModel) -> str:
+    """Return the user prompt of the normalizer's only request."""
+    [request] = model.requests
+    return request.messages[-1].get_content_string()
+
+
 async def _process_transcription_for_test(transcription: str, config: Config, **kwargs: object) -> str:
     """Run voice transcription processing with the test config's runtime context."""
     return await _process_transcription(transcription, config, runtime_paths_for(config), **kwargs)
@@ -54,54 +74,24 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         },
     )
 
-    # Mock the Agent to return a response that tests our prompt
-    # The AI should understand to use @home not @homeassistant
-    mock_response = MagicMock()
-    mock_response.content = "@home turn on the lights"
-
+    # The model should understand to use @home, not @homeassistant.
     # Test 1: Simple agent mention
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()  # Mock model instance
-
+    with _normalizer("@home turn on the lights"):
         result = await _process_transcription_for_test("HomeAssistant turn on the lights", config)
-        assert result == "@home turn on the lights"
+    assert result == "@home turn on the lights"
 
     # Test 2: Agent mention stays natural language
-    mock_response.content = "@home schedule to turn off the lights in 10 minutes"
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@home schedule to turn off the lights in 10 minutes"):
         result = await _process_transcription_for_test(
             "hey home assistant schedule to turn off the lights in 10 minutes",
             config,
         )
-        assert result == "@home schedule to turn off the lights in 10 minutes"
+    assert result == "@home schedule to turn off the lights in 10 minutes"
 
     # Test 3: Research agent (multi-word display name)
-    mock_response.content = "@research find papers on AI"
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@research find papers on AI"):
         result = await _process_transcription_for_test("research agent find papers on AI", config)
-        assert result == "@research find papers on AI"
+    assert result == "@research find papers on AI"
 
 
 @pytest.mark.asyncio
@@ -114,36 +104,19 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         },
     )
 
-    # Capture the prompt sent to the AI
-    captured_prompt = None
-
-    async def capture_run(prompt: str, **kwargs: str) -> MagicMock:  # noqa: ARG001
-        nonlocal captured_prompt
-        captured_prompt = prompt
-        mock_resp = MagicMock()
-        mock_resp.content = "@home test"
-        return mock_resp
-
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(side_effect=capture_run)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@home test") as model:
         await _process_transcription_for_test("test", config)
 
-        # Verify the prompt shows the correct format
-        assert "@home or @actual_home:localhost (spoken as: HomeAssistant)" in captured_prompt
-        assert "@calc or @actual_calc:localhost (spoken as: Calculator)" in captured_prompt
-        assert "use an exact listed agent mention after @" in captured_prompt
-        assert 'use "@home" NOT "@homeassistant"' in captured_prompt
-        assert "NEVER rewrite speech into Matrix bot commands" in captured_prompt
-        assert "!schedule" not in captured_prompt
-        assert "!help" not in captured_prompt
-        assert "!skill" not in captured_prompt
+    # Verify the prompt shows the correct format
+    captured_prompt = _prompt(model)
+    assert "@home or @actual_home:localhost (spoken as: HomeAssistant)" in captured_prompt
+    assert "@calc or @actual_calc:localhost (spoken as: Calculator)" in captured_prompt
+    assert "use an exact listed agent mention after @" in captured_prompt
+    assert 'use "@home" NOT "@homeassistant"' in captured_prompt
+    assert "NEVER rewrite speech into Matrix bot commands" in captured_prompt
+    assert "!schedule" not in captured_prompt
+    assert "!help" not in captured_prompt
+    assert "!skill" not in captured_prompt
 
 
 @pytest.mark.asyncio
@@ -152,26 +125,10 @@ async def test_voice_prompt_uses_persisted_current_username_drift() -> None:
     config = _voice_config({"home": "HomeAssistant"})
     _persist_voice_accounts(config, usernames={"home": "actual_home_live"})
 
-    captured_prompt = None
-
-    async def capture_run(prompt: str, **kwargs: str) -> MagicMock:  # noqa: ARG001
-        nonlocal captured_prompt
-        captured_prompt = prompt
-        mock_resp = MagicMock()
-        mock_resp.content = "@home test"
-        return mock_resp
-
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(side_effect=capture_run)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@home test") as model:
         await _process_transcription_for_test("test", config)
 
+    captured_prompt = _prompt(model)
     assert "@home or @actual_home_live:localhost (spoken as: HomeAssistant)" in captured_prompt
     assert "@mindroom_home (spoken as: HomeAssistant)" not in captured_prompt
 
@@ -186,24 +143,7 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
         },
     )
 
-    captured_prompt = None
-
-    async def capture_run(prompt: str, **kwargs: str) -> MagicMock:  # noqa: ARG001
-        nonlocal captured_prompt
-        captured_prompt = prompt
-        mock_resp = MagicMock()
-        mock_resp.content = "@openclaw test"
-        return mock_resp
-
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_agent.arun = AsyncMock(side_effect=capture_run)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@openclaw test") as model:
         await _process_transcription_for_test(
             "test",
             config,
@@ -211,6 +151,7 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
             available_team_names=[],
         )
 
+    captured_prompt = _prompt(model)
     assert "@openclaw or @actual_openclaw:localhost (spoken as: OpenClaw)" in captured_prompt
     assert "@code or @actual_code:localhost (spoken as: CodeAgent)" not in captured_prompt
     assert "Available teams (use an exact listed team mention after @):\n  (none)" in captured_prompt
@@ -226,17 +167,7 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
         },
     )
 
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "@code review this"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@code review this"):
         result = await _process_transcription_for_test(
             "review this",
             config,
@@ -258,17 +189,7 @@ async def test_voice_transcription_preserves_bare_persisted_localpart() -> None:
     )
     _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "@actual_code_live review this"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@actual_code_live review this"):
         result = await _process_transcription_for_test(
             "review this",
             config,
@@ -290,17 +211,7 @@ async def test_voice_transcription_strips_unavailable_full_persisted_mxid() -> N
     )
     _persist_voice_accounts(config, usernames={"code": "actual_code_live"})
 
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "@actual_code_live:localhost review this"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("@actual_code_live:localhost review this"):
         result = await _process_transcription_for_test(
             "review this",
             config,
@@ -367,17 +278,7 @@ async def test_voice_transcription_does_not_rewrite_schedule_language_to_command
     """Voice normalization should keep schedule phrasing as plain text."""
     config = _voice_config({})
 
-    with (
-        patch("mindroom.voice.handler.Agent") as mock_agent_class,
-        patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model,
-    ):
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "schedule something tomorrow"
-        mock_agent.arun = AsyncMock(return_value=mock_response)
-        mock_agent_class.return_value = mock_agent
-        mock_get_model.return_value = MagicMock()
-
+    with _normalizer("schedule something tomorrow"):
         result = await _process_transcription_for_test("schedule something tomorrow", config)
 
     assert result == "schedule something tomorrow"
