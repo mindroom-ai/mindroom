@@ -11,10 +11,9 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.history.compaction import (
     ConversationChangedError,
-    Summarizer,
-    SummaryModel,
     compact_running_turn,
     compact_scope_history,
+    load_summarizer,
     scope_usage_recorder,
     summarize_runs,
 )
@@ -46,6 +45,7 @@ from mindroom.history.storage import (
     set_force_compaction_state,
     update_scope_state_on_latest,
 )
+from mindroom.history.summary_call import is_summary_timeout
 from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
@@ -61,8 +61,6 @@ from mindroom.history.types import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
-from mindroom.providers import model_loading
-from mindroom.providers.agno_compat_provider_errors import is_provider_timeout
 from mindroom.redaction import redact_sensitive_text
 from mindroom.timing import timed
 
@@ -70,8 +68,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from agno.agent import Agent
-    from agno.metrics import MessageMetrics
-    from agno.models.base import Model
     from agno.models.message import Message
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
@@ -82,8 +78,9 @@ if TYPE_CHECKING:
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.native_compaction import NativeCompactionModel
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -99,54 +96,7 @@ def _elapsed_ms(start: float) -> int:
 
 
 def _compaction_failure_status(error: BaseException) -> Literal["failed", "timeout"]:
-    if isinstance(error, TimeoutError) or is_provider_timeout(error):
-        return "timeout"
-    return "failed"
-
-
-@timed("system_prompt_assembly.history_prepare.compaction_model_init")
-def _load_compaction_model(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    model_name: str,
-) -> Model:
-    """Load the compaction model with dedicated history-preparation timing."""
-    return model_loading.get_model_instance(config, runtime_paths, model_name)
-
-
-def _compaction_fallback_is_distinct(
-    config: Config,
-    *,
-    primary_model_name: str,
-    fallback_model_name: str,
-) -> bool:
-    """Return whether the configured fallback targets a different serving model.
-
-    A fallback that names the primary alias, or a different alias resolving to
-    the same ``(provider, id)``, would resend the refused request to the same
-    model, so it is not loaded at all. Providers are compared through
-    ``model_loading.canonical_provider`` — the same normalization model
-    dispatch uses — so spelling variants like ``vertexai-claude`` and
-    ``vertexai_claude`` count as the same serving model.
-    """
-    if fallback_model_name == primary_model_name:
-        is_distinct = False
-    else:
-        primary_config = config.models.get(primary_model_name)
-        fallback_config = config.models.get(fallback_model_name)
-        if primary_config is None or fallback_config is None:
-            return True
-        is_distinct = (model_loading.canonical_provider(primary_config.provider), primary_config.id) != (
-            model_loading.canonical_provider(fallback_config.provider),
-            fallback_config.id,
-        )
-    if not is_distinct:
-        logger.warning(
-            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
-            compaction_model=primary_model_name,
-            fallback_model=fallback_model_name,
-        )
-    return is_distinct
+    return "timeout" if is_summary_timeout(error) else "failed"
 
 
 def note_prepared_history_timing(
@@ -660,8 +610,9 @@ async def _compact_before_reply(
             session=session,
             scope=scope,
             state=state,
-            summarizer=_load_summarizer(
-                resolved_inputs,
+            summarizer=load_summarizer(
+                resolved_inputs.execution_plan,
+                resolved_inputs.history_settings,
                 config=config,
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
@@ -685,65 +636,6 @@ async def _compact_before_reply(
         raise
 
 
-def _load_summarizer(
-    resolved_inputs: HistoryPreparationInputs,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    session_id: str,
-    scope: HistoryScope,
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None,
-) -> Summarizer:
-    """Load the summary model and, when distinct and loadable, its safeguard fallback."""
-    execution_plan = resolved_inputs.execution_plan
-    assert execution_plan.summary_input_budget_tokens is not None
-    summary_model = SummaryModel(
-        model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
-        name=execution_plan.compaction_model_name,
-        input_budget_tokens=execution_plan.summary_input_budget_tokens,
-    )
-    fallback_model_name = execution_plan.compaction_fallback_model_name
-    fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
-    fallback_model: SummaryModel | None = None
-    if (
-        fallback_model_name is not None
-        and fallback_summary_input_budget is not None
-        and _compaction_fallback_is_distinct(
-            config,
-            primary_model_name=execution_plan.compaction_model_name,
-            fallback_model_name=fallback_model_name,
-        )
-    ):
-        # The fallback is an optional resilience knob: when its construction
-        # fails (missing SDK, credentials, client setup), compaction still
-        # runs on the healthy primary instead of aborting before any call.
-        try:
-            fallback_model = SummaryModel(
-                model=_load_compaction_model(config, runtime_paths, fallback_model_name),
-                name=fallback_model_name,
-                input_budget_tokens=fallback_summary_input_budget,
-            )
-        except Exception:
-            logger.warning(
-                "Compaction fallback model failed to load; continuing without a fallback",
-                session_id=session_id,
-                scope=scope.key,
-                compaction_model=execution_plan.compaction_model_name,
-                fallback_model=fallback_model_name,
-                exc_info=True,
-            )
-    return Summarizer(
-        model=summary_model,
-        fallback=fallback_model,
-        prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
-        timeout_seconds=execution_plan.compaction_timeout_seconds,
-        history_settings=resolved_inputs.history_settings,
-        session_id=session_id,
-        scope=scope,
-        on_usage=on_usage,
-    )
-
-
 async def summarize_run_locally(
     *,
     resolved_inputs: HistoryPreparationInputs,
@@ -752,11 +644,12 @@ async def summarize_run_locally(
     scope: HistoryScope,
     config: Config,
     runtime_paths: RuntimePaths,
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
 ) -> str:
     """Summarize one run's own folded messages, oldest first, with the scope's summary model, storing nothing."""
-    summarizer = _load_summarizer(
-        resolved_inputs,
+    summarizer = load_summarizer(
+        resolved_inputs.execution_plan,
+        resolved_inputs.history_settings,
         config=config,
         runtime_paths=runtime_paths,
         session_id=snapshots[0].session_id or "",
@@ -799,8 +692,9 @@ async def compact_scope_mid_turn(
             segment=segment,
             snapshots=snapshots,
             folded_messages=folded_messages,
-            summarizer=_load_summarizer(
-                resolved_inputs,
+            summarizer=load_summarizer(
+                resolved_inputs.execution_plan,
+                resolved_inputs.history_settings,
                 config=config,
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,

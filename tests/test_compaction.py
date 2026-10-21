@@ -7,8 +7,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.db.base import SessionType
-from agno.session.team import TeamSession
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.config.agent import AgentConfig
@@ -26,6 +24,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 
@@ -355,9 +354,10 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         runtime_paths=runtime_paths,
         execution_identity=second_identity,
     )
-    session = TeamSession(
+    session = ConversationSession(
         session_id="session-1",
-        team_id="super_team",
+        kind="team",
+        owner_id="super_team",
         metadata={"source": "alice"},
         created_at=1,
         updated_at=1,
@@ -365,10 +365,10 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
     set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
     seed_session(first_storage, session)
 
-    persisted = second_storage.get_session("session-1", SessionType.TEAM)
+    persisted = second_storage.load_session("session-1", "team")
 
-    assert first_storage.db_file == second_storage.db_file
-    assert isinstance(persisted, TeamSession)
+    assert first_storage.path == second_storage.path
+    assert persisted is not None
     assert persisted.metadata["source"] == "alice"
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is True

@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.providers.synthetic_adapter import SyntheticProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider"]
+__all__ = ["build_model_provider", "canonical_provider"]
 
 logger = get_logger(__name__)
 
@@ -43,7 +43,8 @@ _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"}
 _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 
 
-def _canonical(provider: str) -> str:
+def canonical_provider(provider: str) -> str:
+    """Return the normalized ``provider`` key that dispatch and serving-model comparisons use."""
     return provider.strip().lower().replace("-", "_")
 
 
@@ -61,7 +62,7 @@ def _build_adapter(
     codex_default_instructions: str,
 ) -> _Adapter:
     """Return the bare adapter of the family that serves ``model_config.provider``."""
-    provider = _canonical(model_config.provider)
+    provider = canonical_provider(model_config.provider)
     if provider in OPENAI_FAMILY_PROVIDERS:
         runtime = ProviderRuntime(
             runtime_paths=runtime_paths,

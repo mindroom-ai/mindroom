@@ -152,6 +152,20 @@ def golden_provider(
     )
 
 
+def responses_adapter(root: Path, model_id: str = "gpt-6-astra", **extra_kwargs: Any) -> ResponsesAdapter:  # noqa: ANN401
+    """Build the bare Responses adapter of an ``openai`` model with ``api: responses``, without network access."""
+    paths = resolve_runtime_paths(config_path=root / "config.yaml", storage_path=root / "data", process_env={})
+    config = ModelConfig(
+        provider="openai",
+        id=model_id,
+        api="responses",
+        extra_kwargs={"api_key": "test-key", **extra_kwargs},
+    )
+    adapter = build_provider(config, ProviderRuntime(runtime_paths=paths))
+    assert isinstance(adapter, ResponsesAdapter)
+    return adapter
+
+
 def _native_compaction_settings(adapter: ModelProvider) -> Callable[..., NativeCompactionReplay | None] | None:
     """Return the adapter's replay-settings method where the route has one (Responses and Codex)."""
     return adapter.native_compaction_settings if isinstance(adapter, ResponsesAdapter) else None

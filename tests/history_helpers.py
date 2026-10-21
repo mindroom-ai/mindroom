@@ -28,7 +28,7 @@ from mindroom.constants import (
 )
 from mindroom.history import summary_rows
 from mindroom.history.agno_compat_message_builder import apply_patch
-from mindroom.history.compaction import Summarizer, SummaryModel
+from mindroom.history.compaction import _Summarizer, _SummaryModel
 from mindroom.history.storage import (
     append_compaction_chunk,
     new_scope_session,
@@ -64,15 +64,17 @@ from tests.conftest import (
     make_relation_lookup,
     seed_session,
 )
+from tests.fakes.summary_model import summary_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.metrics import MessageMetrics
     from agno.models.message import Message as AgnoMessage
 
     from mindroom.history.types import ScopeSummary
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -110,6 +112,42 @@ class FakeModel(Model):
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
+_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
+    policy=HistoryPolicy(mode="all"),
+    max_tool_calls_from_history=None,
+)
+
+
+def _summarizer(
+    model: ModelProvider | None = None,
+    input_budget_tokens: int = 16_000,
+    *,
+    name: str = "summary-model",
+    fallback: _SummaryModel | None = None,
+    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
+    prompt: str = COMPACTION_SUMMARY_PROMPT,
+    timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    session_id: str = "session-1",
+    scope: HistoryScope | None = None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None = None,
+) -> _Summarizer:
+    """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
+    return _Summarizer(
+        model=_SummaryModel(model or summary_model(), name, input_budget_tokens),
+        fallback=fallback,
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+        history_settings=history_settings,
+        session_id=session_id,
+        scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
+        on_usage=on_usage,
+    )
+
+
+async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
+    """Stand in for the reply lifecycle's success report."""
+    return outcome
+
 
 @dataclass
 class RecordingModel(Model):
@@ -145,43 +183,6 @@ class RecordingModel(Model):
         **_kwargs: object,
     ) -> ModelResponse:
         return response
-
-
-_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
-    policy=HistoryPolicy(mode="all"),
-    max_tool_calls_from_history=None,
-)
-
-
-def _summarizer(
-    model: Model | None = None,
-    input_budget_tokens: int = 16_000,
-    *,
-    name: str = "summary-model",
-    fallback: SummaryModel | None = None,
-    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
-    prompt: str = COMPACTION_SUMMARY_PROMPT,
-    timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-    session_id: str = "session-1",
-    scope: HistoryScope | None = None,
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None = None,
-) -> Summarizer:
-    """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
-    return Summarizer(
-        model=SummaryModel(model or FakeModel(id="summary-model", provider="fake"), name, input_budget_tokens),
-        fallback=fallback,
-        prompt=prompt,
-        timeout_seconds=timeout_seconds,
-        history_settings=history_settings,
-        session_id=session_id,
-        scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
-        on_usage=on_usage,
-    )
-
-
-async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
-    """Stand in for the reply lifecycle's success report."""
-    return outcome
 
 
 @dataclass

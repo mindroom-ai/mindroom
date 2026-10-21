@@ -24,6 +24,10 @@ from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
+from mindroom.providers.openai.replay_estimate import (
+    estimate_responses_replay_tokens,
+    responses_replay_uses_visual_tokens,
+)
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesTurnParts,
@@ -94,6 +98,19 @@ class ResponsesAdapter:
             history_generation=history_generation,
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Return whether replayed images are priced by their visual patches."""
+        return responses_replay_uses_visual_tokens(self.identity.id)
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        """Count the input an explicitly replayed request sends for ``messages``, for history budgets."""
+        return estimate_responses_replay_tokens(
+            messages,
+            model_id=self.identity.id,
+            cache_system_prompt=self.settings.cache_system_prompt,
+            explicit_breakpoint=self.wire.explicit_breakpoint,
+        )
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = responses_request_kwargs(

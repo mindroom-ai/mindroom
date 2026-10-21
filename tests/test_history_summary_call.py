@@ -8,9 +8,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
 import mindroom.background_tasks as background_tasks_module
@@ -40,13 +37,15 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistorySettings,
 )
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import prepare_history_for_run_for_test, seed_session
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
-    FakeModel,
-    RecordingModel,
     _agent,
     _completed_run,
     _make_config,
@@ -56,14 +55,13 @@ from tests.history_helpers import (
 
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_raises_owned_timeout() -> None:
-    class _SlowSummaryModel(FakeModel):
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            await asyncio.sleep(0.05)
-            return ModelResponse(content="merged summary")
+    async def slow(_request: ModelRequest) -> str:
+        await asyncio.sleep(0.05)
+        return "merged summary"
 
     with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            model=_SlowSummaryModel(id="summary-model", provider="fake"),
+            model=summary_model(slow),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
@@ -73,7 +71,7 @@ async def test_compaction_call_timeout_raises_owned_timeout() -> None:
 @pytest.mark.asyncio
 async def test_compaction_summary_uses_configured_system_prompt() -> None:
     """Compaction summaries should use the configured prompt text."""
-    model = RecordingModel(id="summary-model", provider="fake")
+    model = summary_model()
 
     await generate_compaction_summary(
         model=model,
@@ -82,97 +80,143 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
         timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     )
 
-    assert model.seen_messages[0].role == "system"
-    assert model.seen_messages[0].content == "Custom compaction instructions."
+    [request] = model.requests
+    assert [(message.role, message.content) for message in request.messages] == [
+        ("system", "Custom compaction instructions."),
+        ("user", "Current prompt"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_summary_request_is_one_call_without_provider_retries_thinking_or_cache() -> None:
+    """The request is sent once, without streaming or tools, leaving the transport timeout to the route."""
+    model = summary_model()
+
+    await generate_compaction_summary(
+        model=model,
+        summary_input="Current prompt",
+        summary_prompt=COMPACTION_SUMMARY_PROMPT,
+        timeout_seconds=42.0,
+    )
+
+    [request] = model.requests
+    assert request.stream is False
+    assert request.tools == ()
+    assert request.tool_choice is None
+    assert request.overrides == RequestOverrides(sdk_max_retries=0, prompt_cache=False, disable_thinking=True)
+
+
+class _ProviderCall:
+    """A summary reply that blocks until cancelled, recording what the provider request saw."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.release = asyncio.Event()
+        self.task: asyncio.Task[object] | None = None
+
+    async def slow_to_unwind(self, _request: ModelRequest) -> str:
+        self.started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            await asyncio.sleep(0.05)
+            raise
+        finally:
+            self.finished.set()
+        raise AssertionError
+
+    async def swallowing_cancel(self, _request: ModelRequest) -> str:
+        self.started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            await self.release.wait()
+            return "merged summary"
+        finally:
+            self.finished.set()
+        raise AssertionError
+
+    async def blocking(self, _request: ModelRequest) -> str:
+        self.task = asyncio.current_task()
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise AssertionError
+
+    async def slow_cancel_cleanup(self, _request: ModelRequest) -> str:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            await asyncio.sleep(0.05)
+            raise
+        finally:
+            self.finished.set()
+        raise AssertionError
+
+    async def failing_cleanup(self, _request: ModelRequest) -> str:
+        self.task = asyncio.current_task()
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            msg = "provider cleanup failed"
+            raise RuntimeError(msg) from None
+        raise AssertionError
 
 
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_returns_without_waiting_for_cancellation_cleanup() -> None:
-    class _SlowToUnwindSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.finished = asyncio.Event()
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.started.set()
-            try:
-                await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                await asyncio.sleep(0.05)
-                raise
-            finally:
-                self.finished.set()
-            raise AssertionError
-
-    model = _SlowToUnwindSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
     start = asyncio.get_running_loop().time()
 
     with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            model=model,
+            model=summary_model(call.slow_to_unwind),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
         )
 
     assert asyncio.get_running_loop().time() - start < 0.04
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
-    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
+    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
 
 
 @pytest.mark.asyncio
 async def test_compaction_call_timeout_raises_even_when_provider_returns_after_cancel() -> None:
-    class _SwallowingCancelSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.finished = asyncio.Event()
-            self.release_after_cancel = asyncio.Event()
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.started.set()
-            try:
-                await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                await self.release_after_cancel.wait()
-                return ModelResponse(content="merged summary")
-            finally:
-                self.finished.set()
-            raise AssertionError
-
-    model = _SwallowingCancelSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
 
     with pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"):
         await generate_compaction_summary(
-            model=model,
+            model=summary_model(call.swallowing_cancel),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
         )
 
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
-    assert not model.finished.is_set()
-    model.release_after_cancel.set()
-    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
+    assert not call.finished.is_set()
+    call.release.set()
+    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
 
 
 @pytest.mark.asyncio
 async def test_compaction_provider_timeout_propagates_unchanged() -> None:
-    class _ProviderTimeoutModel(FakeModel):
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            msg = "provider timeout"
-            raise TimeoutError(msg)
-
     with pytest.raises(TimeoutError, match="provider timeout"):
         await generate_compaction_summary(
-            model=_ProviderTimeoutModel(id="summary-model", provider="fake"),
+            model=summary_model(TimeoutError("provider timeout")),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -181,77 +225,41 @@ async def test_compaction_provider_timeout_propagates_unchanged() -> None:
 
 @pytest.mark.asyncio
 async def test_compaction_summary_cancels_model_task_when_outer_call_is_cancelled() -> None:
-    class _BlockingSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.response_task: asyncio.Task[object] | None = None
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.response_task = asyncio.current_task()
-            self.started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                raise
-            raise AssertionError
-
-    model = _BlockingSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            model=model,
+            model=summary_model(call.blocking),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
     summary_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(summary_task, timeout=0.1)
 
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
-    assert model.response_task is not None
-    assert model.response_task.done() is True
-    assert model.response_task.cancelled() is True
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
+    assert call.task is not None
+    assert call.task.done() is True
+    assert call.task.cancelled() is True
 
 
 @pytest.mark.asyncio
 async def test_compaction_summary_outer_cancellation_returns_without_waiting_for_provider_cleanup() -> None:
-    class _SlowCancelCleanupSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.finished = asyncio.Event()
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                await asyncio.sleep(0.05)
-                raise
-            finally:
-                self.finished.set()
-            raise AssertionError
-
-    model = _SlowCancelCleanupSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            model=model,
+            model=summary_model(call.slow_cancel_cleanup),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
     summary_task.cancel()
     start = asyncio.get_running_loop().time()
 
@@ -259,94 +267,56 @@ async def test_compaction_summary_outer_cancellation_returns_without_waiting_for
         await asyncio.wait_for(summary_task, timeout=0.02)
 
     assert asyncio.get_running_loop().time() - start < 0.04
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
-    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
+    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
 
 
 @pytest.mark.asyncio
 async def test_compaction_summary_outer_cancellation_wins_over_provider_cleanup_error() -> None:
-    class _CleanupErrorSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.response_task: asyncio.Task[object] | None = None
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.response_task = asyncio.current_task()
-            self.started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                msg = "provider cleanup failed"
-                raise RuntimeError(msg) from None
-            raise AssertionError
-
-    model = _CleanupErrorSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
     summary_task = asyncio.create_task(
         generate_compaction_summary(
-            model=model,
+            model=summary_model(call.failing_cleanup),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
         ),
     )
 
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
     summary_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(summary_task, timeout=0.1)
 
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
-    assert model.response_task is not None
-    assert model.response_task.done() is True
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
+    assert call.task is not None
+    assert call.task.done() is True
     with pytest.raises(RuntimeError, match="provider cleanup failed"):
-        model.response_task.result()
+        call.task.result()
 
 
 @pytest.mark.asyncio
 async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
-    class _DetachedTimeoutCleanupSummaryModel(FakeModel):
-        def __init__(self, *, model_id: str, provider: str) -> None:
-            super().__init__(id=model_id, provider=provider)
-            self.started = asyncio.Event()
-            self.cancelled = asyncio.Event()
-            self.release_cleanup = asyncio.Event()
-            self.finished = asyncio.Event()
-
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            self.started.set()
-            try:
-                await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                self.cancelled.set()
-                await self.release_cleanup.wait()
-                return ModelResponse(content="merged summary")
-            finally:
-                self.finished.set()
-            raise AssertionError
-
-    model = _DetachedTimeoutCleanupSummaryModel(model_id="summary-model", provider="fake")
+    call = _ProviderCall()
 
     with (
         patch("mindroom.history.summary_call._COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS", 0.01),
         pytest.raises(_CompactionSummaryTimeoutError, match=r"compaction summary timed out after 0.01s"),
     ):
         await generate_compaction_summary(
-            model=model,
+            model=summary_model(call.swallowing_cancel),
             summary_input="Current prompt",
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             timeout_seconds=0.01,
         )
 
-    await asyncio.wait_for(model.started.wait(), timeout=0.1)
-    await asyncio.wait_for(model.cancelled.wait(), timeout=0.1)
+    await asyncio.wait_for(call.started.wait(), timeout=0.1)
+    await asyncio.wait_for(call.cancelled.wait(), timeout=0.1)
     await asyncio.sleep(0)
     assert not background_tasks_module._background_tasks
-    model.release_cleanup.set()
-    await asyncio.wait_for(model.finished.wait(), timeout=0.2)
+    call.release.set()
+    await asyncio.wait_for(call.finished.wait(), timeout=0.2)
     await wait_for_background_tasks(timeout=0.1)
 
 
@@ -354,10 +324,9 @@ async def test_compaction_timeout_cleanup_detaches_after_grace_window() -> None:
 async def test_compaction_call_timeout_falls_back_in_runtime(
     tmp_path: Path,
 ) -> None:
-    class _SlowSummaryModel(FakeModel):
-        async def aresponse(self, *_args: object, **_kwargs: object) -> ModelResponse:
-            await asyncio.sleep(0.05)
-            return ModelResponse(content="merged summary")
+    async def slow(_request: ModelRequest) -> str:
+        await asyncio.sleep(0.05)
+        return "merged summary"
 
     config, runtime_paths = _make_config(
         tmp_path,
@@ -383,8 +352,8 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=_SlowSummaryModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(slow),
         ),
         capture_logs() as logs,
     ):

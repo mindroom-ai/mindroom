@@ -228,7 +228,7 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
-| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, and OpenAI server-side tool search tagging |
+| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/registry.py` | `build_model_provider`: the dashboard key, the family adapter for a configured model, and the request pipeline around it (not wired yet) |
 | `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing (not wired yet) |

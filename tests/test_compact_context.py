@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, get_type_hints
 from unittest.mock import AsyncMock, Mock, patch
@@ -13,10 +11,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from agno.agent import Agent
 from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools.function import Function
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -30,16 +24,19 @@ from mindroom.history.session_context import (
     open_resolved_scope_session_context,
     resolve_history_scope,
 )
-from mindroom.history.storage import read_scope_state, set_force_compaction_state
+from mindroom.history.storage import has_queued_force_compaction, read_scope_state, set_force_compaction_state
 from mindroom.history.types import (
     CompactionLifecycleStart,
     CompactionOutcome,
     HistoryScope,
     HistoryScopeState,
 )
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
@@ -56,6 +53,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import FakeModel, RecordingCompactionLifecycle, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
@@ -103,19 +101,20 @@ def _make_config_with_context_window(
     return config, runtime_paths
 
 
-def _completed_run(run_id: str, *, agent_id: str) -> RunOutput:
-    return RunOutput(
+def _completed_run(run_id: str, *, agent_id: str) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         agent_id=agent_id,
         status=RunStatus.completed,
     )
 
 
-def _session(session_id: str, *, runs: list[RunOutput] | None = None) -> AgentSession:
-    return AgentSession(
+def _session(session_id: str, *, runs: list[RunRecord] | None = None) -> ConversationSession:
+    return ConversationSession(
         session_id=session_id,
-        agent_id="test_agent",
-        runs=runs or [],
+        kind="agent",
+        owner_id="test_agent",
+        runs=list(runs or []),
         created_at=1,
         updated_at=1,
     )
@@ -168,29 +167,6 @@ def _open_scope_context(
 @contextmanager
 def _patched_scope_context(scope_context: ScopeSessionContext | SimpleNamespace) -> Iterator[object]:
     yield scope_context
-
-
-@pytest.fixture(autouse=True)
-def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Close temporary SQLite handles created directly by compact-context tests."""
-    storages: list[object] = []
-    module = sys.modules[__name__]
-    original_create_session_storage = create_session_storage
-
-    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
-        storage = original_create_session_storage(*args, **kwargs)
-        storages.append(storage)
-        return storage
-
-    monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage)
-    yield
-
-    seen_storage_ids: set[int] = set()
-    for storage in storages:
-        storage_id = id(storage)
-        if storage_id in seen_storage_ids:
-            continue
-        seen_storage_ids.add(storage_id)
 
 
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
@@ -289,10 +265,10 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path: Path) -> None:
-    """Temporary scope storage should always be closed after manual validation fails."""
+async def test_compact_context_saves_nothing_after_budget_error(tmp_path: Path) -> None:
+    """A request that manual validation refuses leaves the stored session untouched."""
     config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=None)
-    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    storage = Mock(spec=ConversationStore)
     scope_context = SimpleNamespace(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
@@ -315,14 +291,14 @@ async def test_compact_context_closes_scope_storage_after_budget_error(tmp_path:
     assert result == (
         "Error: Compaction is unavailable for this scope because no context_window is configured on the active model."
     )
-    storage.close.assert_called_once_with()
+    storage.save_session_fields.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path) -> None:
-    """Temporary scope storage should be closed after a successful scheduling request."""
+async def test_compact_context_saves_only_the_scope_metadata(tmp_path: Path) -> None:
+    """Scheduling writes only the session metadata, so it cannot overwrite runs or tool state a reply saves."""
     config, runtime_paths = _make_config(tmp_path)
-    storage = SimpleNamespace(upsert_session=Mock(), close=Mock())
+    storage = Mock(spec=ConversationStore)
     scope_context = SimpleNamespace(
         scope=HistoryScope(kind="agent", scope_id="test_agent"),
         storage=storage,
@@ -342,8 +318,7 @@ async def test_compact_context_closes_scope_storage_after_success(tmp_path: Path
         result = await tool.compact_context(agent=_agent())
 
     assert result == COMPACT_CONTEXT_SUCCESS
-    storage.upsert_session.assert_called_once_with(scope_context.session)
-    storage.close.assert_called_once_with()
+    storage.save_session_fields.assert_called_once_with(scope_context.session, "metadata")
 
 
 @pytest.mark.asyncio
@@ -446,13 +421,13 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
     ):
@@ -472,7 +447,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "success"
@@ -626,8 +601,8 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
     summary_mock = AsyncMock()
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -673,13 +648,13 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     agent = _agent()
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="single run summary", updated_at=datetime.now(UTC)),
+                return_value="single run summary",
             ),
         ),
     ):
@@ -698,7 +673,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "single run summary"
+    assert persisted.summary.text == "single run summary"
     assert persisted.runs == []
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
@@ -737,7 +712,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
         ],
     )
     stale_live_session.metadata = {}
-    stale_live_session.session_data = {"session_state": live_session_state}
+    stale_live_session.session_state = live_session_state
 
     result = await tool.compact_context(agent=_agent(), run_context=run_context)
     assert result == COMPACT_CONTEXT_SUCCESS
@@ -746,13 +721,13 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            "mindroom.history.compaction.build_model_provider",
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
     ):
@@ -772,8 +747,10 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert prepared.compaction_reply_outcome == "success"
+    # The request was consumed, so the reply after this one does not compact again.
+    assert not has_queued_force_compaction(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"))
 
 
 @pytest.mark.asyncio

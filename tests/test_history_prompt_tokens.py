@@ -14,10 +14,8 @@ from threading import Thread
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import Agent
-from agno.models.message import Message
 from agno.run import RunContext
 from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
@@ -38,7 +36,9 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     ResolvedHistorySettings,
+    ScopeSummary,
 )
+from mindroom.llm.messages import Message
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.history_helpers import FakeModel
 
@@ -234,7 +234,7 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
             ),
         ],
     )
-    original_snapshots = [message.model_dump() for run in session.runs or [] for message in run.messages or []]
+    original_snapshots = [message.to_dict() for run in session.runs for message in run.messages]
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=1,
@@ -247,7 +247,7 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
     )
 
     assert estimated_tokens > 0
-    assert [message.model_dump() for run in session.runs or [] for message in run.messages or []] == original_snapshots
+    assert [message.to_dict() for run in session.runs for message in run.messages] == original_snapshots
 
 
 def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
@@ -339,7 +339,7 @@ def test_estimate_prompt_visible_history_tokens_uses_agno_message_limit_selectio
 def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_removes_all_runs() -> None:
     session = _session(
         "session-1",
-        summary=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+        summary=ScopeSummary(text="merged summary", updated_at=datetime.now(UTC)),
     )
     history_settings = ResolvedHistorySettings(
         policy=HistoryPolicy(mode="messages", limit=3),
@@ -362,7 +362,9 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
 def test_summary_tokens_without_a_summary_are_zero() -> None:
     assert _summary_tokens(_session("session-1")) == 0
     for text in ("", "   "):
-        assert _summary_tokens(_session("session-1", summary=SessionSummary(summary=text))) == 0
+        assert (
+            _summary_tokens(_session("session-1", summary=ScopeSummary(text=text, updated_at=datetime.now(UTC)))) == 0
+        )
 
 
 def _docs_toolkit() -> Toolkit:

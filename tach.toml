@@ -2584,17 +2584,17 @@ path = "mindroom.history.compaction"
 depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.background_tasks",
-    "mindroom.providers.claude_prompt_cache",
     "mindroom.error_handling",
     "mindroom.history.claude_replay_compat",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.summary_input",
-    "mindroom.history.summary_provider_compat",
     "mindroom.history.types",
     "mindroom.hooks",
+    "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.providers.registry",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -2616,11 +2616,11 @@ depends_on = [
 path = "mindroom.history.summary_call"
 depends_on = [
     "mindroom.cancellation",
-    "mindroom.providers.agno_compat_provider_errors",
-    "mindroom.history.summary_provider_compat",
     "mindroom.history.types",
+    "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.timing",
+    "mindroom.usage.storage",
 ]
 
 [[modules]]
@@ -2824,17 +2824,16 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
-    "mindroom.providers.model_loading",
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
+    "mindroom.history.summary_call",
     "mindroom.history.team_scope",
     "mindroom.history.types",
     "mindroom.model_usage",
-    "mindroom.providers.agno_compat_provider_errors",
 ]
 
 [[modules]]
@@ -5918,6 +5917,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials.sync",
     "mindroom.file_locks",
+    "mindroom.history.message_content",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
@@ -6216,8 +6216,7 @@ expose = [
 from = ["mindroom.memory._backend"]
 
 # Public seam for compaction summary calls, completion errors, and retry policy.
-# Provider configuration and completion classification belong to summary_provider_compat.
-# Tested in tests/test_compaction_invariants.py.
+# Tested in tests/test_compaction_invariants.py and tests/test_history_summary_call.py.
 [[interfaces]]
 expose = [
     "CompactionSummaryIncompleteError",
@@ -6226,6 +6225,7 @@ expose = [
     "SummaryRetryPolicy",
     "build_summary_request_messages",
     "generate_compaction_summary",
+    "is_summary_timeout",
 ]
 from = ["mindroom.history.summary_call"]
 
@@ -7735,6 +7735,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",
+    "mindroom.providers.openai",
     "mindroom.providers.openai_models",
     "mindroom.participation_hook",
 ]
@@ -7742,7 +7743,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.agno_compat_provider_errors"
 depends_on = ["mindroom.error_handling", "mindroom.providers.model_instance_checks"]
-visibility = ["mindroom.history.runtime", "mindroom.history.summary_call", "mindroom.providers.stream_retry", "mindroom.providers.media_fallback"]
+visibility = ["mindroom.providers.stream_retry", "mindroom.providers.media_fallback"]
 
 [[modules]]
 path = "mindroom.history.replay"
@@ -7826,11 +7827,6 @@ depends_on = [
     "mindroom.history.request_messages",
 ]
 visibility = ["mindroom.history.compaction"]
-
-[[modules]]
-path = "mindroom.history.summary_provider_compat"
-depends_on = ["mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models"]
-visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]
 path = "mindroom.participation"
@@ -9022,7 +9018,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = []
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
+visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_call", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"

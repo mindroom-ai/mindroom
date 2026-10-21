@@ -4,34 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from copy import deepcopy
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
-from agno.models.message import Message
-from agno.session.summary import SessionSummary
 
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.compaction import _summarize_chunk, _SummaryModel, compact_scope_history
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_before_reply,
     _run_scope_compaction_with_lifecycle,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, set_force_compaction_state
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.llm.messages import Message
+from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import seed_session
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
-    FakeModel,
     RecordingCompactionLifecycle,
     _agent,
     _completed_run,
@@ -41,6 +43,7 @@ from tests.history_helpers import (
     _summarizer,
     completed_outcome,
 )
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,14 +130,14 @@ async def test_history_sizing_allows_loop_progress(
         else:
             monkeypatch.setattr(
                 "mindroom.history.compaction.generate_compaction_summary",
-                AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
+                AsyncMock(return_value="Greeting received."),
             )
             outcome = await compact_scope_history(
                 storage=storage,
                 session=session,
                 scope=scope,
                 state=HistoryScopeState(force_compact_before_next_run=True),
-                summarizer=_summarizer(FakeModel(id="summary", provider="fake"), 1000, name="summary"),
+                summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
                 available_history_budget=1000,
                 before_tokens=0,
                 replay_window_tokens=2000,
@@ -162,7 +165,7 @@ async def test_history_storage_work_allows_loop_progress(
     stage: str,
 ) -> None:
     """A pending loop callback can run while compaction reads its basis or appends its summary row."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(storage, session)
@@ -191,14 +194,14 @@ async def test_history_storage_work_allows_loop_progress(
     try:
         monkeypatch.setattr(
             "mindroom.history.compaction.generate_compaction_summary",
-            AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
+            AsyncMock(return_value="Greeting received."),
         )
         outcome = await compact_scope_history(
             storage=storage,
             session=session,
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
-            summarizer=_summarizer(FakeModel(id="summary", provider="fake"), 1000, name="summary"),
+            summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
             available_history_budget=1000,
             before_tokens=0,
             replay_window_tokens=2000,
@@ -245,12 +248,12 @@ async def test_forced_compaction_reuses_canonical_history_count(
 
     monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", record_estimate)
     monkeypatch.setattr(
-        "mindroom.history.runtime._load_compaction_model",
-        lambda *_args: FakeModel(id="summary", provider="fake"),
+        "mindroom.history.compaction.build_model_provider",
+        lambda *_args: summary_model(model_id="summary"),
     )
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
-        AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
+        AsyncMock(return_value="Greeting received."),
     )
     lifecycle = RecordingCompactionLifecycle()
     prepared = await prepare_scope_history(
@@ -280,42 +283,43 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
 ) -> None:
     """Committed compaction completes its hooks and lifecycle before cancellation."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     storage = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     seed_session(storage, session)
-    original = session.to_dict()
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model, db=storage),
-        agent_name="test_agent",
+    original = deepcopy(session)
+    resolved = resolve_entity_preparation_inputs(
         config=config,
+        entity_name="test_agent",
         static_prompt_tokens=100,
+        active_model_name=None,
+        active_context_window=None,
     )
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
+    estimate = ResponsesAdapter.estimate_portable_replay_tokens
 
-    def controlled_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
+    def controlled_estimate(self: ResponsesAdapter, messages: list[Message]) -> int:
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(timeout=5)
         return estimate(self, messages)
 
-    async def generate(**_kwargs: object) -> SessionSummary:
+    async def generate(**_kwargs: object) -> str:
         if not after_persist:
             entered.set()
             await asyncio.Event().wait()
-        return SessionSummary(summary="Greeting received.")
+        return "Greeting received."
 
     lifecycle = AsyncMock()
     lifecycle.start.return_value = "notice"
     hook = AsyncMock()
-    monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", controlled_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "estimate_portable_replay_tokens", controlled_estimate)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
     monkeypatch.setattr(
-        "mindroom.history.runtime._load_compaction_model",
-        lambda *_args: FakeModel(id="summary", provider="fake"),
+        "mindroom.history.compaction.build_model_provider",
+        lambda *_args: summary_model(model_id="summary"),
     )
     task = asyncio.create_task(
         _run_scope_compaction_with_lifecycle(
@@ -357,7 +361,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
             persisted = storage.load_session("session", "agent")
             assert persisted is not None
             assert persisted.summary is not None
-            assert persisted.summary.summary == "Greeting received."
+            assert persisted.summary.text == "Greeting received."
             assert persisted.runs == []
             assert hook.await_args_list[-1].kwargs["event_name"] == "compaction:after"
             lifecycle.complete_success.assert_awaited_once()
@@ -366,7 +370,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
             assert outcome.lifecycle_notice_event_id == "notice"
             assert outcome.duration_ms >= 0
         else:
-            assert session.to_dict() == original
+            assert session == original
             lifecycle.complete_success.assert_not_awaited()
             lifecycle.complete_failure.assert_awaited_once()
     finally:
@@ -473,10 +477,10 @@ async def test_summary_retry_sizing_allows_loop_progress(
         )
 
     monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_estimate)
-    summary = SessionSummary(summary="Greeting received.")
-    responses = [summary]
+    summary = "Greeting received."
+    responses: list[object] = [summary]
     if retry == "fallback":
-        responses.insert(0, ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE))
+        responses.insert(0, ModelSafeguardRefusal(provider="fake"))
     elif retry == "shrink":
         responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
     generate = AsyncMock(side_effect=responses)
@@ -486,10 +490,10 @@ async def test_summary_retry_sizing_allows_loop_progress(
         "run",
         messages=[Message(role="user", content="Hello " * 8000 if retry == "shrink" else "Hello")],
     )
-    fallback = SummaryModel(FakeModel(id="fallback", provider="fake"), "fallback", 1000)
+    fallback = _SummaryModel(summary_model(model_id="fallback"), "fallback", 1000)
     result = await _summarize_chunk(
         _summarizer(
-            FakeModel(id="primary", provider="fake"),
+            summary_model(model_id="primary"),
             10000,
             name="primary",
             fallback=fallback if retry == "fallback" else None,
