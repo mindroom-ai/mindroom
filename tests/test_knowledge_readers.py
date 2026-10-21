@@ -15,8 +15,8 @@ reconfigures a copy. Delete that copy and the existing end-to-end suites still
 pass, because within one refresh every ``_build_reader`` call re-applies that
 manager's own chunking before the reader is used, so a sequential refresh stays
 internally consistent. The damage needs two bases' refreshes to interleave --
-a real possibility, since the source-root lock is per root and prefetch reads
-run on worker threads, but not something a deterministic end-to-end test can
+a real possibility, since the source-root lock is per root and file reads run
+on worker threads, but not something a deterministic end-to-end test can
 stage. Observing the constructed reader is the only way to hold the invariant.
 """
 
