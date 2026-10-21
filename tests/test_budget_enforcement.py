@@ -36,6 +36,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.fakes.scripted_model import answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
@@ -43,7 +44,7 @@ from tests.test_delegation_direct_audit import _identity
 from tests.test_dynamic_workflow_subagents import _config as _subagent_workflow_config
 from tests.test_dynamic_workflow_subagents import _spec as _subagent_workflow_spec
 from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
-from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context, _workflow_spec
+from tests.test_dynamic_workflows import _make_context, _make_multi_agent_context, _room_agent_model, _workflow_spec
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -397,18 +398,21 @@ def _budget_context_config(config: Config) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dynamic_workflow_room_agent_participant_uses_fallback(tmp_path: Path) -> None:
+async def test_dynamic_workflow_room_agent_participant_uses_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
     _budget_context_config(context.config)
+    _model, loaded = _room_agent_model(monkeypatch, answer("done"))
 
-    with patch("mindroom.agents.create_agent", return_value=_fake_stream_agent(content="done")) as create_agent:
-        await dynamic_workflow_module._aexecute_room_agent_participant(
-            context,
-            {"id": "writer", "kind": "room_agent", "agent": "specialist"},
-            "Write a report.",
-        )
+    await dynamic_workflow_module._aexecute_room_agent_participant(
+        context,
+        {"id": "writer", "kind": "room_agent", "agent": "specialist"},
+        "Write a report.",
+    )
 
-    assert create_agent.call_args.kwargs["active_model_name"] == "luna"
+    assert loaded == ["luna"]
 
 
 @pytest.mark.asyncio

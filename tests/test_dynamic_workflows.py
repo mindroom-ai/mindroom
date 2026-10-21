@@ -8,16 +8,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from inspect import isawaitable
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 import yaml
-from agno.run.agent import RunOutput, RunStatus
 
 import mindroom.tools  # noqa: F401
+from mindroom import agents
 from mindroom.api.credentials_target import RequestCredentialsTarget, save_credentials_for_target
 from mindroom.approval.tool_approval import _matching_tool_approval_rule
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -26,17 +25,23 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
-from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools
-from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError, ParticipantOutput, execute_workflow_spec
+from mindroom.custom_tools.dynamic_workflow import _MINIMAL_SPEC_EXAMPLE, DynamicWorkflowTools, _WorkflowRun
+from mindroom.dynamic_workflows.runner import (
+    DynamicWorkflowExecutionError,
+    ParticipantOutput,
+    async_execute_workflow_spec,
+    execute_workflow_spec,
+)
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -48,35 +53,26 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
+    from tests.fakes.scripted_model import ScriptStep
 
-def _fake_stream_agent(
-    *,
-    content: str,
-    status: RunStatus = RunStatus.completed,
-    on_run: Callable[..., None] | None = None,
-) -> SimpleNamespace:
-    """Build a fake Agent matching the streaming participant run contract.
 
-    ``_arun_agent`` calls ``agent.arun(..., stream=True, yield_run_output=True)`` (not awaited)
-    and consumes the event iterator, treating the final ``RunOutput`` as the result.
-    """
+def _room_agent_model(monkeypatch: pytest.MonkeyPatch, *turns: list[ScriptStep]) -> tuple[ScriptedModel, list[str]]:
+    """Answer every agent the test builds with one scripted model, and record the model names they load."""
+    model = ScriptedModel(list(turns))
+    loaded: list[str] = []
 
-    def arun(prompt: str, *, user_id: str, session_id: str, **_kwargs: object) -> AsyncIterator[RunOutput]:
-        if on_run is not None:
-            on_run(prompt, user_id=user_id, session_id=session_id)
+    def load(_config: Config, _runtime_paths: object, model_name: str, _identity: object) -> ScriptedModel:
+        loaded.append(model_name)
+        return model
 
-        async def _events() -> AsyncIterator[RunOutput]:
-            yield RunOutput(content=content, status=status)
-
-        return _events()
-
-    return SimpleNamespace(arun=arun)
+    monkeypatch.setattr(agents, "_build_agent_model_provider", load)
+    return model, loaded
 
 
 def _workflow_spec(**overrides: object) -> dict[str, object]:
@@ -1972,8 +1968,11 @@ def test_room_agent_participant_must_be_available_to_requester_in_room(tmp_path:
         )
 
 
-def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path: Path) -> None:
-    """Room-agent participants should execute as that agent without durable workflow side effects."""
+def test_room_agent_participant_runs_as_that_agent_without_durable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Room-agent participants run as that agent on its room model, with the prompt alone and nothing stored."""
     context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
     config = bind_runtime_paths(
         Config(
@@ -2003,19 +2002,11 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()
 
-    def assert_run(prompt: str, *, user_id: str, session_id: str) -> None:
-        runtime_context = get_tool_runtime_context()
-        assert runtime_context is not None
+    async def on_the_callers_loop() -> None:
         assert asyncio.get_running_loop() is parent_loop
-        assert runtime_context.agent_name == "specialist"
-        assert runtime_context.session_id == session_id
-        assert runtime_context.active_model_name == "large"
-        assert "competitor-research-report:run_1:writer_a" in session_id
-        assert prompt == "Write a report."
-        assert user_id == "@user:localhost"
 
-    fake_agent = _fake_stream_agent(content="done", on_run=assert_run)
-    with patch("mindroom.agents.create_agent", return_value=fake_agent) as create_agent_mock:
+    model, loaded = _room_agent_model(monkeypatch, [Await(on_the_callers_loop), *answer("done")])
+    with patch("mindroom.agents.create_agent", wraps=agents.create_agent) as create_agent_mock:
         asyncio.set_event_loop(parent_loop)
         try:
             result = parent_loop.run_until_complete(
@@ -2031,6 +2022,12 @@ def test_room_agent_participant_rebinds_context_and_uses_isolated_state(tmp_path
             parent_loop.close()
 
     assert result == "done"
+    assert loaded == ["large"]
+    [request] = model.requests
+    system, prompt = request.messages
+    assert "You are Specialist Agent" in system.get_content_string()
+    assert (prompt.role, prompt.content) == ("user", "Write a report.")
+    assert request.tools == ()
     create_kwargs = create_agent_mock.call_args.kwargs
     assert create_kwargs["execution_identity"].session_id.endswith(
         ":dynamic_workflow:competitor-research-report:run_1:writer_a",
@@ -2267,18 +2264,27 @@ def test_participant_run_config_preserves_operator_rule_precedence(tmp_path: Pat
     assert matched.action == "require_approval"
 
 
-def test_run_agent_raises_on_failed_agno_status(tmp_path: Path) -> None:
-    """Participant failures from Agno should become failed workflow steps, not normal content."""
-    context = _make_context(tmp_path)
+@pytest.mark.asyncio
+async def test_a_room_agent_whose_model_fails_fails_its_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A participant's provider error fails its workflow step with the provider's message, never as its content."""
+    context = _make_multi_agent_context(tmp_path, room_agents=["general", "specialist"])
 
-    def assert_run(_prompt: str, *, user_id: str, session_id: str) -> None:
-        assert user_id == "@user:localhost"
-        assert session_id == context.session_id
+    async def fail() -> None:
+        msg = "provider auth failed"
+        raise ProviderError(msg, provider="Synthetic")
 
-    fake_agent = _fake_stream_agent(content="provider auth failed", status=RunStatus.error, on_run=assert_run)
+    _room_agent_model(monkeypatch, [Await(fail)])
+    spec = _workflow_spec(participants=[{"id": "writer", "kind": "room_agent", "agent": "specialist"}])
 
-    with pytest.raises(dynamic_workflow_module.DynamicWorkflowExecutionError, match="provider auth failed"):
-        asyncio.run(dynamic_workflow_module._arun_agent(context, fake_agent, "Write."))
+    run = await async_execute_workflow_spec(
+        spec,
+        {"topic": "pricing"},
+        participant_executor=dynamic_workflow_module._aparticipant_executor(context, _WorkflowRun("run_1")),
+    )
+
+    assert run.status == "failed"
+    assert run.error == "Agent step 'write' participant 'writer' failed: provider auth failed"
+    assert [(step.status, step.content) for step in run.steps] == [("failed", "")]
 
 
 def test_validate_workflow_reports_all_spec_errors_in_one_call(tmp_path: Path) -> None:

@@ -1525,6 +1525,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.dynamic_workflow"
 depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.agent_loop.build",
     "mindroom.agents",
     "mindroom.authorization",
     "mindroom.credentials.manager",
@@ -1538,6 +1540,7 @@ depends_on = [
     "mindroom.dynamic_workflows",
     "mindroom.entity_resolution",
     "mindroom.helper_usage",
+    "mindroom.llm",
     "mindroom.response_turn",
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",

@@ -23,7 +23,6 @@ GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json"))
 PENDING = {
     "agent_minimal_mode": "F3 renders minimal mode's bootstrap prompt and Bash facade from the build's surface",
     "delegated_child_run": "S3 drives the delegate tool's externally executed children through the owned loop",
-    "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
     "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
     "voice_call_cascaded": "F4 builds voice calls on the owned loop",
     "voice_call_realtime": "F4 builds voice calls on the owned loop",

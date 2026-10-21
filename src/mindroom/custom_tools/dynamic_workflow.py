@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from agno.run.agent import RunOutput, RunStatus
 from agno.tools import Toolkit
 
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.budgets.monitor import budget_model
@@ -49,6 +52,8 @@ from mindroom.dynamic_workflows.validation import (
 )
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
 from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -58,15 +63,13 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
-    tool_runtime_context,
 )
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.agent import Agent
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.delegation.state import DelegationChild, SubagentPersona
@@ -573,7 +576,7 @@ async def _aexecute_room_agent_participant(
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import create_agent  # noqa: PLC0415
 
-    agent = create_agent(
+    build = create_agent(
         agent_name,
         context.config,
         context.runtime_paths,
@@ -585,7 +588,7 @@ async def _aexecute_room_agent_participant(
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
-    return await _arun_agent(participant_context, agent, prompt)
+    return await _arun_agent(participant_context, build, prompt)
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
@@ -955,42 +958,36 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
     return frozenset(tool.strip() for tool in raw_allowed if isinstance(tool, str) and tool.strip())
 
 
-async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) -> object:
-    # Stream the run: the room agent runs on its configured model within the workflow's runtime
-    # budget, and the Anthropic/Vertex SDK refuses a non-streaming request whose budget could
-    # exceed 10 minutes. Consuming the event stream drives tool calls; yield_run_output makes
-    # the final RunOutput the last streamed item, which works without a db.
-    final_output: RunOutput | None = None
+async def _arun_agent(context: ToolRuntimeContext, build: AgentBuild, prompt: str) -> object:
+    """Run one turn of a room agent on the prompt alone and return its answer.
+
+    Like every agent turn it streams, which the Anthropic and Vertex SDKs require of a request whose budget could
+    exceed 10 minutes. The participant keeps no history, so the usage of its turn, however the turn ends, counts
+    against the conversation that runs the workflow.
+    """
     usage_owner = get_helper_usage_owner()
     invocation_id = uuid4().hex
-    with tool_runtime_context(context):
-        event_stream = agent.arun(
-            prompt,
-            run_id=invocation_id,
-            user_id=context.requester_id,
-            session_id=context.session_id,
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        )
-        async for event in event_stream:
-            if isinstance(event, RunOutput):
-                final_output = event
-                if usage_owner is not None and agent.db is None:
-                    await record_helper_usage(
-                        event,
-                        owner=usage_owner,
-                        invocation_id=invocation_id,
-                        kind="dynamic_workflow",
-                        requester_id=context.requester_id,
-                    )
-    if final_output is None:
-        msg = "Dynamic Workflow participant run produced no output."
-        raise DynamicWorkflowExecutionError(msg)
-    content = final_output.content if final_output.content is not None else ""
-    if final_output.status != RunStatus.completed:
-        message = str(content) if content else f"Agent run ended with status {final_output.status.value}."
-        raise DynamicWorkflowExecutionError(message)
+    events = run_agent(
+        replace(build.spec, system_message=prompt_for_turn(build)),
+        [Message(role="user", content=prompt)],
+        ctx=RunContext(run_id=invocation_id, session_id=context.session_id, user_id=context.requester_id),
+        persist=(
+            None
+            if usage_owner is None
+            else partial(
+                record_helper_usage,
+                owner=usage_owner,
+                invocation_id=invocation_id,
+                kind="dynamic_workflow",
+                requester_id=context.requester_id,
+            )
+        ),
+        request_template=build.request_template,
+    )
+    content: object = ""
+    async for event in events:
+        if isinstance(event, RunFinished) and event.record.content is not None:
+            content = event.record.content
     return content
 
 
