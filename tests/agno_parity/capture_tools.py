@@ -153,7 +153,6 @@ NEVER_REGISTERED_FUNCTIONS = {
     "sql": ("run_sql",),
     "zoom": ("instructions",),
     # Registered only beside a knowledge base object, which the text `knowledge` config field cannot hold.
-    "website": ("add_website_to_knowledge",),
     "wikipedia": ("search_wikipedia_and_update_knowledge_base",),
 }
 

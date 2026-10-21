@@ -13,7 +13,6 @@ from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 import httpx
 from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document import Document
-from agno.knowledge.knowledge import Knowledge  # noqa: TC002 - metadata sync resolves runtime type hints.
 from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
@@ -419,29 +418,8 @@ class _MindRoomWebsiteReader:
 class WebsiteTools(Toolkit):
     """Agno-compatible website toolkit using MindRoom's fixed extractor."""
 
-    def __init__(
-        self,
-        knowledge: Knowledge | None = None,
-        **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
-    ) -> None:
-        self.knowledge = knowledge
-
-        tools: list[Any] = []
-        if self.knowledge is not None:
-            tools.append(self.add_website_to_knowledge)
-        else:
-            tools.append(self.read_url)
-
-        super().__init__(name="website_tools", tools=tools, **kwargs)
-
-    def add_website_to_knowledge(self, url: str) -> str:
-        """Add a website's content to the configured knowledge base."""
-        if self.knowledge is None:
-            return "Knowledge base not provided"
-
-        log_debug(f"Adding to knowledge base: {_safe_url_for_log(url)}")
-        self.knowledge.insert(url=url, reader=_MindRoomWebsiteReader())
-        return "Success"
+    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
+        super().__init__(name="website_tools", tools=[self.read_url], **kwargs)
 
     def read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""

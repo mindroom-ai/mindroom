@@ -6,7 +6,6 @@ import gzip
 import json
 import socket
 import threading
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -14,6 +13,7 @@ import httpx
 import pytest
 from bs4 import BeautifulSoup
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import website
 from mindroom.custom_tools.website import (
     _MAX_PAGE_BYTES,
@@ -24,6 +24,11 @@ from mindroom.custom_tools.website import (
     _safe_url_for_log,
 )
 from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.tool_system.metadata import (
+    ToolConfigOverrideError,
+    get_tool_by_name,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tools.website import website_tools
 
 
@@ -575,11 +580,6 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     </html>
     """
 
-    class FakeKnowledge:
-        def insert(self, *, url: str, reader: object) -> None:
-            assert url == full_url
-            assert isinstance(reader, _MindRoomWebsiteReader)
-
     def fake_log_debug(message: str) -> None:
         logged_messages.append(message)
 
@@ -599,13 +599,11 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
     WebsiteTools().read_url(full_url)
-    WebsiteTools(knowledge=FakeKnowledge()).add_website_to_knowledge(full_url)
 
     assert logged_messages == [
         "Reading website: https://example.test/docs",
         "Reading: https://example.test/docs",
         "Crawling: https://example.test/docs",
-        "Adding to knowledge base: https://example.test/docs",
     ]
     joined_messages = " ".join(logged_messages)
     assert full_url not in joined_messages
@@ -614,29 +612,15 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     assert "frag-secret" not in joined_messages
 
 
-def test_website_tool_adds_urls_to_knowledge_with_mindroom_reader() -> None:
-    """Knowledge ingestion should use the same fixed website reader as read_url."""
+def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
+    """A configured toolkit reads URLs; no authored option swaps read_url for a knowledge-base insert."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
 
-    @dataclass
-    class CapturedInsert:
-        url: str
-        reader: object
+    tool = get_tool_by_name("website", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
 
-    class FakeKnowledge:
-        def __init__(self) -> None:
-            self.captured: CapturedInsert | None = None
-
-        def insert(self, *, url: str, reader: object) -> None:
-            self.captured = CapturedInsert(url=url, reader=reader)
-
-    knowledge = FakeKnowledge()
-
-    result = WebsiteTools(knowledge=knowledge).add_website_to_knowledge("https://example.test")
-
-    assert result == "Success"
-    assert knowledge.captured is not None
-    assert knowledge.captured.url == "https://example.test"
-    assert isinstance(knowledge.captured.reader, _MindRoomWebsiteReader)
+    assert list(tool.functions) == ["read_url"]
+    with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
+        validate_authored_tool_entry_overrides("website", {"knowledge": "docs"})
 
 
 def test_website_tool_factory_uses_mindroom_reader() -> None:

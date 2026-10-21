@@ -162,7 +162,7 @@ The file maps each captured tool that has function switches to `{"overrides", "i
 `overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`); the dummy Slack credentials include a user token so `search_messages` registers.
 Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
 
-Every name in a tool's `ToolMetadata.function_names` appears in one of the two files, except the names in `NEVER_REGISTERED_FUNCTIONS`: async method names that Agno registers under their sync name, helper methods, and the knowledge-base functions of `website` and `wikipedia`, which need a knowledge base object that config cannot supply.
+Every name in a tool's `ToolMetadata.function_names` appears in one of the two files, except the names in `NEVER_REGISTERED_FUNCTIONS`: async method names that Agno registers under their sync name, helper methods, and `wikipedia`'s knowledge-base function, which needs a knowledge base object that config cannot supply.
 
 ### `tools/arguments.json`
 
