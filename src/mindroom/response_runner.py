@@ -131,7 +131,6 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
-from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
     PROGRESS_PLACEHOLDER,
@@ -2855,19 +2854,15 @@ class ResponseRunner:
             return
         if response_event_id:
             recorder.set_response_event_id(response_event_id)
-        storage = self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
-        try:
-            persist_interrupted_replay_snapshot(
-                storage=storage,
-                session=None,
-                session_id=session_id,
-                scope_id=session_scope.scope_id,
-                run_id=recorder.run_id or run_id or str(uuid4()),
-                snapshot=recorder.interrupted_snapshot(),
-                is_team=is_team,
-            )
-        finally:
-            storage.close()
+        persist_interrupted_replay_snapshot(
+            storage=self.deps.state_writer.create_storage(execution_identity, scope=session_scope),
+            session=None,
+            session_id=session_id,
+            scope_id=session_scope.scope_id,
+            run_id=recorder.run_id or run_id or str(uuid4()),
+            snapshot=recorder.interrupted_snapshot(),
+            is_team=is_team,
+        )
 
     def _ensure_recorder_interrupted(self, recorder: TurnRecorder) -> None:
         """Mark one recorder interrupted unless lower layers already captured richer state."""
@@ -3744,7 +3739,6 @@ class ResponseRunner:
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
     ) -> bool:
-        storage = None
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
             return has_queued_force_compaction(storage, session_id, scope)
@@ -3756,17 +3750,6 @@ class ResponseRunner:
                 exception_type=error.__class__.__name__,
             )
             return False
-        finally:
-            if storage is not None:
-                try:
-                    storage.close()
-                except Exception as error:
-                    self.deps.logger.warning(
-                        "forced_compaction_placeholder_storage_close_failed",
-                        session_id=session_id,
-                        scope=scope.key,
-                        exception_type=error.__class__.__name__,
-                    )
 
     async def _refresh_model_history_after_lock(
         self,
@@ -4802,8 +4785,6 @@ class ResponseRunner:
             )
 
         async def persist_interrupted_team_turn() -> None:
-            # Agno saves the stopped team run in the background; this turn's record must land after it.
-            await drain_cancelled_team_save(team_turn_recorder.run_id or response_run_id)
             await self._persist_interrupted_recorder_off_loop(
                 recorder=team_turn_recorder,
                 session_scope=session_scope,

@@ -61,11 +61,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
 from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import note_prepared_history_timing
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    close_agent_runtime_state_dbs,
-    open_resolved_scope_session_context,
-)
+from mindroom.history.session_context import ScopeSessionContext, open_resolved_scope_session_context
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
@@ -112,13 +108,12 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
-from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.skill_learning.capture import observe_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
-from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     AuditedToolExecution,
     CollectedStreamPresentation,
@@ -423,13 +418,9 @@ def _build_agent_turn_callbacks(
             entity_name=agent_name,
         )
 
-    def _close_runtime_dbs(scope_context: ScopeSessionContext | None) -> None:
-        if retain_agent_runtime_state:
-            return
-        close_agent_runtime_state_dbs(
-            holder.agent,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
+    def _close_runtime_dbs(_scope_context: ScopeSessionContext | None) -> None:
+        # The conversation store holds no connection, so a finished turn has nothing left to close.
+        return
 
     def _release_attempt_entity(scope_context: ScopeSessionContext | None) -> None:
         _retire_agent_turn_model(holder, retain_agent_runtime_state=retain_agent_runtime_state)
@@ -885,19 +876,17 @@ async def _run_cached_agent_attempt(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
-    async with drain_agent_cancellation(agent, run_id) as bind_owner:
-        with bind_owner():
-            return await ai_runtime.cached_agent_run(
-                agent,
-                run_input,
-                session_id,
-                user_id=user_id,
-                run_id=run_id,
-                run_id_callback=run_id_callback,
-                media=media,
-                metadata=metadata,
-                pipeline_timing=pipeline_timing,
-            )
+    return await ai_runtime.cached_agent_run(
+        agent,
+        run_input,
+        session_id,
+        user_id=user_id,
+        run_id=run_id,
+        run_id_callback=run_id_callback,
+        media=media,
+        metadata=metadata,
+        pipeline_timing=pipeline_timing,
+    )
 
 
 async def _run_non_streaming_agent_attempts(
@@ -1717,22 +1706,20 @@ async def ai_response(  # noqa: C901, PLR0915
         ):
             return skipped
         if supports_native_tool_approval:
-            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
-                with bind_owner():
-                    response = cast(
-                        "RunOutput",
-                        await drive_delegations(
-                            prepared_run.agent,
-                            response,
-                            run_child=run_delegated_child_response,
-                            agent_name=agent_name,
-                            config=config,
-                            runtime_paths=runtime_paths,
-                            execution_identity=execution_identity,
-                            delegation_depth=delegation_depth,
-                            refresh_scheduler=refresh_scheduler,
-                        ),
-                    )
+            response = cast(
+                "RunOutput",
+                await drive_delegations(
+                    prepared_run.agent,
+                    response,
+                    run_child=run_delegated_child_response,
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    delegation_depth=delegation_depth,
+                    refresh_scheduler=refresh_scheduler,
+                ),
+            )
 
         response_tool_trace = _extract_tool_trace(response)
         if tool_trace_collector is not None:
@@ -2294,14 +2281,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 model_name=prepared_run.runtime_model_name,
             ),
         ):
-            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
-                owned_stream = context_bound_async_stream(
-                    context_factory=bind_owner,
-                    stream_factory=attempt_stream.__aiter__,
-                )
-                async with closing_async_stream(owned_stream):
-                    async for stream_chunk in owned_stream:
-                        yield stream_chunk
+            async with closing_async_stream(attempt_stream):
+                async for stream_chunk in attempt_stream:
+                    yield stream_chunk
 
         run_error = state.user_error or state.stream_exception
         if run_error is not None:

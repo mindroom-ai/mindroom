@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from agno.db.base import SessionType
-
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.handled_turns import (
     HandledTurnLedger,
@@ -20,7 +18,6 @@ from mindroom.handled_turns import (
 from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
 from mindroom.legacy_revision_replay import summary_source_id
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
@@ -36,8 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal import RelationView
@@ -45,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.turn_policy import ResponseAction
 
@@ -897,29 +893,21 @@ class TurnStore:
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        session_type = self.deps.state_writer.session_type_for_scope(scope)
-        try:
-            session = await run_blocking_until_complete(
-                get_team_session if session_type is SessionType.TEAM else get_agent_session,
+        session = await run_blocking_until_complete(storage.load_session, target.session_id, scope.kind)
+        if session is not None:
+            await remove_history_of_redacted_events(
                 storage,
-                target.session_id,
-            )
-            if session is not None:
-                await remove_history_of_redacted_events(
-                    storage,
-                    session,
-                    scope,
-                    partial(self.redacted_history_events, target),
-                )
-            removed_any = await run_blocking_until_complete(
-                _remove_runs_for_sources,
-                storage,
-                target.session_id,
+                session,
                 scope,
-                turn_record.indexed_event_ids,
+                partial(self.redacted_history_events, target),
             )
-        finally:
-            storage.close()
+        removed_any = await run_blocking_until_complete(
+            _remove_runs_for_sources,
+            storage,
+            target.session_id,
+            scope,
+            turn_record.indexed_event_ids,
+        )
         if removed_any:
             self.deps.state_writer.deps.logger.info(
                 "Removed stale persisted history for handled turn",
@@ -932,7 +920,7 @@ class TurnStore:
 
 
 def _remove_runs_for_sources(
-    storage: BaseDb,
+    storage: ConversationStore,
     session_id: str,
     scope: HistoryScope,
     source_event_ids: tuple[str, ...],

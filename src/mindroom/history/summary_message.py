@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
-    from agno.models.message import Message as AgnoMessage
-
     from mindroom.llm.messages import Message
 
 _COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
@@ -43,32 +41,32 @@ def compaction_summary_fields(summary: str, *, run_local: bool) -> _CompactionSu
     }
 
 
-def compaction_summary_text(message: Message | AgnoMessage) -> str:
+def compaction_summary_text(message: Message) -> str:
     """Return the summary a rendered compaction summary message carries."""
     content = str(message.content)
     start = content.index("<compacted_history>\n") + len("<compacted_history>\n")
     return content[start : content.rindex("\n</compacted_history>")]
 
 
-def is_compaction_summary(message: Message | AgnoMessage) -> bool:
+def is_compaction_summary(message: Message) -> bool:
     """Return whether one message is a rendered compaction summary."""
     return _summary_kind(message) in {_SCOPE_SUMMARY, _RUN_LOCAL_SUMMARY}
 
 
-def is_scope_summary(message: Message | AgnoMessage) -> bool:
+def is_scope_summary(message: Message) -> bool:
     """Return whether one message is the scope's summary, as opposed to one run's own."""
     return _summary_kind(message) == _SCOPE_SUMMARY
 
 
-def mark_summary_follows(prompt: Message | AgnoMessage) -> None:
+def mark_summary_follows(prompt: Message) -> None:
     """Record that the scope's summary replays right after this prompt, where a mid-turn compaction placed it."""
     prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
 
 
-def summary_follows(message: Message | AgnoMessage) -> bool:
+def summary_follows(message: Message) -> bool:
     """Return whether the scope's summary replays right after this message."""
     return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
 
 
-def _summary_kind(message: Message | AgnoMessage) -> object:
+def _summary_kind(message: Message) -> object:
     return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None

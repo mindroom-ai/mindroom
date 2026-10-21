@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
-from pydantic import BaseModel
-
-from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, File, Image, Video
 from mindroom.token_budget import stable_serialize
 
 if TYPE_CHECKING:
-    from agno.media import Image
-    from agno.models.message import Message
-
-    from mindroom.llm.media import Image as OwnedImage
-    from mindroom.llm.messages import Message as OwnedMessage
+    from mindroom.llm.messages import Message
 
 
 _MAX_HISTORY_VIEWED_IMAGES = 4
@@ -24,31 +19,25 @@ HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS = 5_000
 
 
 def message_media_entries(message: Message) -> tuple[tuple[str, object | None], ...]:
-    """Return replayable input and output media fields in stable order."""
+    """Return the message's media fields in stable order."""
     return (
         ("images", message.images),
         ("audio", message.audio),
         ("videos", message.videos),
         ("files", message.files),
-        ("audio_output", message.audio_output),
-        ("image_output", message.image_output),
-        ("video_output", message.video_output),
-        ("file_output", message.file_output),
     )
 
 
 def media_payload_snapshot(media_value: object) -> object:
     """Serialize media metadata without embedding the binary content."""
-    if isinstance(media_value, BaseModel):
-        payload = cast("dict[str, object]", media_value.model_dump(exclude_none=True))
-        payload.pop("content", None)
-        return payload
+    if isinstance(media_value, (Image, Audio, Video, File)):
+        return media_value.to_dict(include_content=False)
     if isinstance(media_value, Sequence) and not isinstance(media_value, (str, bytes, bytearray)):
         return [media_payload_snapshot(item) for item in media_value]
     return media_value
 
 
-def retained_viewed_images(messages: Sequence[Message | OwnedMessage]) -> set[tuple[int, int]]:
+def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]:
     """Return ``(message, image)`` indexes of the newest viewed images replay keeps within its count and byte caps."""
     retained: set[tuple[int, int]] = set()
     retained_count = 0
@@ -58,7 +47,7 @@ def retained_viewed_images(messages: Sequence[Message | OwnedMessage]) -> set[tu
         for image_index in range(len(images) - 1, -1, -1):
             image = images[image_index]
             content = image.content
-            if not is_viewed_image(image) or not isinstance(content, bytes) or not content:
+            if not _is_viewed_image(image) or not content:
                 continue
             image_bytes = len(content)
             if (
@@ -73,39 +62,33 @@ def retained_viewed_images(messages: Sequence[Message | OwnedMessage]) -> set[tu
 
 
 def project_history_media_for_replay(messages: Sequence[Message]) -> list[Message]:
-    """Copy changed history messages and retain only bounded newest viewed images."""
-    retained = retained_viewed_images(messages)
+    """Drop the media of replayed history except the newest viewed images, noting the viewed images left out.
+
+    Attachments replay as the text that names them; only images ``view_file`` attached replay, within a count and a
+    byte cap. Messages without media are returned as they are; the others are copies, so stored runs never change.
+    """
+    retained = _retained_viewed_images(messages)
     projected: list[Message] = []
     for message_index, message in enumerate(messages):
-        source_images = message.images or []
-        replay_images = [
-            image for image_index, image in enumerate(source_images) if (message_index, image_index) in retained
-        ]
-        omitted_viewed = sum(
-            is_viewed_image(image) and (message_index, image_index) not in retained
-            for image_index, image in enumerate(source_images)
-        )
-        updates: dict[str, object] = {
-            "audio": None,
-            "images": replay_images or None,
-            "files": None,
-            "videos": None,
-        }
-        if omitted_viewed:
-            updates["content"] = content_with_viewed_image_omission(message, omitted_viewed)
-            updates["compressed_content"] = None
-        changed = bool(message.audio or message.images or message.files or message.videos or omitted_viewed)
-        projected.append(message.model_copy(update=updates) if changed else message)
+        if not (message.images or message.audio or message.videos or message.files):
+            projected.append(message)
+            continue
+        images = message.images or ()
+        kept = [image for image_index, image in enumerate(images) if (message_index, image_index) in retained]
+        omitted = sum(_is_viewed_image(image) for image in images) - len(kept)
+        copy = replace(message, images=kept or None, audio=None, videos=None, files=None)
+        if omitted:
+            copy = replace(copy, content=_content_with_viewed_image_omission(message, omitted), compressed_content=None)
+        projected.append(copy)
     return projected
 
 
-def is_viewed_image(image: Image | OwnedImage) -> bool:
+def _is_viewed_image(image: Image) -> bool:
     """Return whether an image is one ``view_file`` attached, the only historical media history replays."""
-    image_id = image.id
-    return isinstance(image_id, str) and image_id.startswith(VIEWED_IMAGE_ID_PREFIX)
+    return image.id.startswith(VIEWED_IMAGE_ID_PREFIX)
 
 
-def content_with_viewed_image_omission(message: Message | OwnedMessage, omitted: int) -> str:
+def _content_with_viewed_image_omission(message: Message, omitted: int) -> str:
     """Return the message's content followed by the notice that ``omitted`` of its viewed images do not replay."""
     noun = "image" if omitted == 1 else "images"
     notice = (
@@ -120,13 +103,13 @@ def content_with_viewed_image_omission(message: Message | OwnedMessage, omitted:
 def image_content_for_token_estimation(value: object) -> object:
     """Remove transport fields only from a typed image block, retaining its shape."""
     if isinstance(value, dict):
-        block = cast("dict[str, object]", value)
+        block = cast("dict[object, object]", value)
         if block.get("type") == "input_image":
             return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
     return value
 
 
-def render_message_content(message: Message | OwnedMessage) -> str:
+def render_message_content(message: Message) -> str:
     """Render one replayable string form of a message body."""
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):

@@ -5,18 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.agent_storage import (
-    create_state_storage,
-    run_session_storage_operation,
-    save_independent_usage,
-)
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_SESSION_TABLE,
@@ -26,13 +22,12 @@ from mindroom.usage.storage import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.usage.storage import IndependentUsageKind
 
 
@@ -40,9 +35,9 @@ if TYPE_CHECKING:
 class HelperUsageOwner:
     """Storage and grouping identity for independently recorded usage."""
 
-    storage_factory: Callable[[], BaseDb]
+    storage_factory: Callable[[], ConversationStore]
     session_id: str
-    initial_session: AgentSession | TeamSession | None = None
+    initial_session: ConversationSession | None = None
 
 
 _HELPER_USAGE_OWNER: ContextVar[HelperUsageOwner | None] = ContextVar("helper_usage_owner", default=None)
@@ -97,15 +92,15 @@ async def record_helper_usage(
     """Keep returned usage before output validation, without inventing request boundaries."""
     if response.metrics is None:
         return
+    run = response.to_dict()
     await run_session_storage_operation(
         owner.storage_factory,
-        partial(
-            save_independent_usage,
+        lambda storage: storage.save_independent_usage(
             session_id=owner.session_id,
             usage_id=f"{kind}:{invocation_id}",
             kind=kind,
             requester_id=requester_id,
-            run=response.to_dict(),
+            run=run,
             initial_session=owner.initial_session,
         ),
     )
@@ -125,9 +120,8 @@ async def record_system_usage(
         session_root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
         owner = HelperUsageOwner(
             storage_factory=lambda: create_state_storage(
-                storage_name=SYSTEM_USAGE_STORAGE_NAME,
-                state_root=session_root / SYSTEM_USAGE_STORAGE_NAME,
-                subdir="sessions",
+                SYSTEM_USAGE_STORAGE_NAME,
+                session_root / SYSTEM_USAGE_STORAGE_NAME,
                 session_table=SYSTEM_USAGE_SESSION_TABLE,
             ),
             session_id=kind,

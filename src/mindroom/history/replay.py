@@ -3,23 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
-from agno.models.message import Message
-from agno.utils.message import filter_tool_calls
-
-from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
     image_content_for_token_estimation,
     media_payload_snapshot,
     message_media_entries,
-    project_history_media_for_replay,
     render_message_content,
 )
+from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -28,13 +25,11 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from agno.agent import Agent
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
     from agno.team import Team
 
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.native_compaction import NativeCompactionModel
+    from mindroom.session_storage.types import ConversationSession
 
 
 logger = get_logger(__name__)
@@ -53,7 +48,7 @@ class HistorySummaryBudgetError(RuntimeError):
 
 def estimate_prompt_visible_history_tokens(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
@@ -141,7 +136,7 @@ def _without_attachments(message: Message) -> Message:
         for field, value in (("files", message.files), ("audio", message.audio), ("videos", message.videos))
         if value
     }
-    return message.model_copy(update=updates) if updates else message
+    return replace(message, **updates) if updates else message
 
 
 def _attachment_fallback_tokens(messages: list[Message]) -> int:
@@ -157,7 +152,7 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
         updates["content"] = [image_content_for_token_estimation(block) for block in message.content]
     if message.images:
         updates["images"] = None
-    return message.model_copy(update=updates) if updates else message
+    return replace(message, **updates) if updates else message
 
 
 def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
@@ -165,7 +160,7 @@ def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
     return Message(**compaction_summary_fields(summary, run_local=run_local))
 
 
-def _summary_tokens(session: AgentSession | TeamSession) -> int:
+def _summary_tokens(session: ConversationSession) -> int:
     """Estimate the tokens the scope's summary message adds to a request."""
     summary = current_summary_text(session)
     if summary is None:
@@ -180,69 +175,36 @@ def _estimate_history_messages_tokens(messages: list[Message]) -> int:
 
 def _history_messages_for_estimation(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    """Return the prompt-visible history messages for token estimation only.
+    """Return the history a request under ``history_settings`` replays, for token estimation.
 
-    No deepcopy: filter_tool_calls copies any message it modifies and only the
-    list itself is mutated. Stale Anthropic replay fields are left in place
-    because the char estimate never counts them.
+    The same selection a request sends, so the estimate counts exactly what the model will read. Stale Anthropic
+    replay fields are left in place because the char estimate never counts them.
     """
-    history_messages = list(
-        _session_history_messages(
-            session=session,
-            scope=scope,
-            history_settings=history_settings,
-        ),
-    )
-    if history_settings.max_tool_calls_from_history is not None and history_messages:
-        filter_tool_calls(history_messages, history_settings.max_tool_calls_from_history)
-    return project_history_media_for_replay(history_messages)
-
-
-def _session_history_messages(
-    *,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
     policy = history_settings.policy
-    skip_roles = history_skip_roles(history_settings)
-    if scope.kind == "team":
-        return cast("TeamSession", session).get_messages(
-            team_id=scope.scope_id,
-            last_n_runs=policy.num_history_runs,
-            limit=policy.num_history_messages,
-            skip_roles=skip_roles,
-        )
-    return cast("AgentSession", session).get_messages(
-        agent_id=scope.scope_id,
-        last_n_runs=policy.num_history_runs,
-        limit=policy.num_history_messages,
-        skip_roles=skip_roles,
+    return scope_history_messages(
+        session.runs,
+        scope=scope,
+        num_history_runs=policy.num_history_runs,
+        num_history_messages=policy.num_history_messages,
+        max_tool_calls_from_history=history_settings.max_tool_calls_from_history,
+        system_message_role=history_settings.system_message_role,
     )
 
 
-def history_skip_roles(history_settings: ResolvedHistorySettings) -> list[str]:
-    """Return prompt roles that should never be materialized as persisted history."""
-    return sorted(prompt_roles_for_history_storage(history_settings.system_message_role))
-
-
-def scope_visible_runs(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
+def scope_visible_runs(session: ConversationSession, scope: HistoryScope) -> list[AnyRunRecord]:
     """Return this scope's model-history-visible runs in stored order."""
-    return [run for run in session.runs or [] if is_model_history_visible_run(run) and run_in_scope(run, scope)]
+    return [run for run in session.runs if is_model_history_visible_run(run) and run_in_scope(run, scope)]
 
 
-def current_summary_text(session: AgentSession | TeamSession) -> str | None:
+def current_summary_text(session: ConversationSession) -> str | None:
     """Return a nonempty durable summary, normalized for replay."""
     if session.summary is None:
         return None
-    return session.summary.summary.strip() or None
+    return session.summary.text.strip() or None
 
 
 def _estimated_message_chars(message: Message) -> int:
@@ -268,7 +230,7 @@ def _image_fallback_tokens(messages: list[Message]) -> int:
 
 def plan_replay_that_fits(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
@@ -331,7 +293,7 @@ def apply_replay_plan(
 
 def _context_window_guard_limit_bounds(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
 ) -> tuple[Literal["runs", "messages"], int]:
@@ -347,7 +309,7 @@ def _context_window_guard_limit_bounds(
 
 def _find_fitting_history_limit_for_budget(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
@@ -428,7 +390,7 @@ def configured_replay_plan(
 
 def has_effective_persisted_replay(
     *,
-    session: AgentSession | TeamSession,
+    session: ConversationSession,
     scope: HistoryScope,
     replay_plan: ResolvedReplayPlan,
 ) -> bool:

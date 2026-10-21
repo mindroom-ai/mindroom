@@ -42,7 +42,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import ScopeSessionContext, close_agent_runtime_state_dbs, close_execution_storage
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -394,7 +394,7 @@ class AgentApprovalExecution:
     @owned_tool_execution(
         enabled=lambda self, *_args, **_kwargs: background_tool_jobs_enabled(self.config(), self.runtime_paths),
     )
-    async def continue_run(  # noqa: PLR0915 - native and CLI approvals share one reconstruction owner
+    async def continue_run(
         self,
         continuation: ApprovalContinuation,
         *,
@@ -433,61 +433,57 @@ class AgentApprovalExecution:
         )
         history_storage = await asyncio.to_thread(storage_factory)
         set_consumption_storage(storage_factory)
-        try:
-            session = await asyncio.to_thread(
-                history_storage.get_session,
-                session_id=continuation.session_id,
-                session_type=SessionType.AGENT,
-                user_id=continuation.requester_id,
+        session = await asyncio.to_thread(
+            history_storage.get_session,
+            session_id=continuation.session_id,
+            session_type=SessionType.AGENT,
+            user_id=continuation.requester_id,
+        )
+        persisted = session.get_run(continuation.run_id) if isinstance(session, AgentSession) else None
+        if not isinstance(persisted, RunOutput) or (cli_call is None and persisted.status != RunStatus.paused):
+            msg = f"Paused run {continuation.run_id!r} is no longer available"
+            raise RuntimeError(msg)
+        delegation = DelegationState.from_metadata(persisted.metadata)
+        local_calls = () if delegation.pending_child_id is not None else continuation.calls
+        approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+        # Generated CLI functions have no configured toolkit to restore.
+        # Their exact current binding is checked by continue_cli_approval
+        # and authorize_prepared_tool_call after this Agent is rebuilt.
+        toolkit_calls = tuple(
+            call
+            for call in approved_calls
+            if not (
+                cli_call is not None
+                and call.invoking_agent == continuation.entity_name
+                and call.toolkit_name == "agent"
             )
-            persisted = session.get_run(continuation.run_id) if isinstance(session, AgentSession) else None
-            if not isinstance(persisted, RunOutput) or (cli_call is None and persisted.status != RunStatus.paused):
-                msg = f"Paused run {continuation.run_id!r} is no longer available"
-                raise RuntimeError(msg)  # noqa: TRY301 - the preparation guard owns storage cleanup
-            delegation = DelegationState.from_metadata(persisted.metadata)
-            local_calls = () if delegation.pending_child_id is not None else continuation.calls
-            approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
-            # Generated CLI functions have no configured toolkit to restore.
-            # Their exact current binding is checked by continue_cli_approval
-            # and authorize_prepared_tool_call after this Agent is rebuilt.
-            toolkit_calls = tuple(
-                call
-                for call in approved_calls
-                if not (
-                    cli_call is not None
-                    and call.invoking_agent == continuation.entity_name
-                    and call.toolkit_name == "agent"
-                )
-            )
-            required_tool_names = await required_approval_tool_names(
-                continuation.entity_name,
-                toolkit_calls,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                execution_identity=execution_identity,
-            )
-            agent = await asyncio.to_thread(
-                create_agent,
-                continuation.entity_name,
-                config,
-                self.runtime_paths,
-                execution_identity,
-                history_storage=history_storage,
-                active_model_name=continuation.runtime_model_name,
-                knowledge=knowledge,
-                refresh_scheduler=self.refresh_scheduler(),
-                supports_native_tool_approval=True,
-                required_tool_names=required_tool_names,
-                agent_mode=(
-                    "minimal"
-                    if cli_call is not None or (persisted.metadata or {}).get("agent_mode") == "minimal"
-                    else "standard"
-                ),
-                delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
-            )
-        except BaseException:
-            history_storage.close()
-            raise
+        )
+        required_tool_names = await required_approval_tool_names(
+            continuation.entity_name,
+            toolkit_calls,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
+        )
+        agent = await asyncio.to_thread(
+            create_agent,
+            continuation.entity_name,
+            config,
+            self.runtime_paths,
+            execution_identity,
+            history_storage=history_storage,
+            active_model_name=continuation.runtime_model_name,
+            knowledge=knowledge,
+            refresh_scheduler=self.refresh_scheduler(),
+            supports_native_tool_approval=True,
+            required_tool_names=required_tool_names,
+            agent_mode=(
+                "minimal"
+                if cli_call is not None or (persisted.metadata or {}).get("agent_mode") == "minimal"
+                else "standard"
+            ),
+            delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
+        )
         try:
             if agent.model is not None:
                 ai_runtime.install_queued_message_notice_hook(
@@ -611,16 +607,10 @@ class AgentApprovalExecution:
             try:
                 await finalize_consumption()
             finally:
-                try:
-                    ai_runtime.register_queued_notice_storage(
-                        storage_factory=storage_factory,
-                        session_id=continuation.session_id,
-                        session_type=SessionType.AGENT,
-                        entity_name=continuation.entity_name,
-                    )
-                finally:
-                    try:
-                        close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
-                    finally:
-                        close_execution_storage(history_storage)
+                ai_runtime.register_queued_notice_storage(
+                    storage_factory=storage_factory,
+                    session_id=continuation.session_id,
+                    session_type=SessionType.AGENT,
+                    entity_name=continuation.entity_name,
+                )
         return result

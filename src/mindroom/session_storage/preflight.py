@@ -9,12 +9,11 @@ from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from agno.db.sqlite.schemas import get_table_schema_definition
-
 from mindroom.durable_write import fsync_directory_durable
 from mindroom.file_locks import wait_for_exclusive_lock
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
+from mindroom.session_storage.schema import SESSION_COLUMNS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -23,13 +22,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _RECOVERY_LOCK = ".sessions-recovery.lock"
-_REQUIRED_SESSION_COLUMNS = frozenset(
-    name for name in get_table_schema_definition("sessions") if not name.startswith("_")
-)
+_REQUIRED_SESSION_COLUMNS = frozenset(SESSION_COLUMNS)
 
 
 # LEGACY_COMPAT: Session databases missing required schema columns.
-# Legacy format: Owned Agno session databases may lack columns required by the installed schema.
+# Legacy format: Session databases may lack columns of the sessions table layout the store writes.
 # Last legacy release: schema-based boundary with no single release cutoff or safe row conversion.
 # Handling: Archive the sessions directory before creating a current store; preserve its bytes.
 # Coverage: tests/test_agent_session_storage_recovery.py::test_incompatible_session_schema_is_archived_before_real_session_use.

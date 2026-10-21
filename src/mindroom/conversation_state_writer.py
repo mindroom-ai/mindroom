@@ -6,32 +6,24 @@ from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
-from mindroom.session_storage.agent_storage import (
-    create_session_storage,
-    get_agent_session,
-    get_team_session,
-    run_session_storage_operation,
-    save_runs,
-)
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     import structlog
-    from agno.db.base import BaseDb
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import SessionKind
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -57,9 +49,9 @@ class ConversationStateWriter:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         return HistoryScope(kind="agent", scope_id=self.deps.agent_name)
 
-    def session_type_for_scope(self, scope: HistoryScope) -> SessionType:
-        """Return the Agno session type used by one persisted history scope."""
-        return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
+    def session_type_for_scope(self, scope: HistoryScope) -> SessionKind:
+        """Return the kind of session row one persisted history scope writes."""
+        return scope.kind
 
     def team_history_scope(
         self,
@@ -92,16 +84,13 @@ class ConversationStateWriter:
         execution_identity: ToolExecutionIdentity | None,
         *,
         scope: HistoryScope | None = None,
-    ) -> BaseDb:
-        """Create storage for one exact persisted history scope."""
+    ) -> ConversationStore:
+        """Open the conversation store of one exact persisted history scope."""
         config = self.deps.runtime.config
         normalized_scope = (
             self.history_scope() if scope is None else HistoryScope(kind=scope.kind, scope_id=scope.scope_id)
         )
-        if (
-            normalized_scope == self.history_scope()
-            and self.session_type_for_scope(normalized_scope) is SessionType.AGENT
-        ):
+        if normalized_scope == self.history_scope() and normalized_scope.kind == "agent":
             return create_session_storage(
                 agent_name=self.deps.agent_name,
                 config=config,
@@ -119,22 +108,18 @@ class ConversationStateWriter:
     def _persist_response_event_id_in_session_run(
         self,
         *,
-        storage: BaseDb,
+        storage: ConversationStore,
         session_id: str,
-        session_type: SessionType,
+        session_type: SessionKind,
         run_id: str,
         response_event_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it."""
-        session = (
-            get_team_session(storage, session_id)
-            if session_type is SessionType.TEAM
-            else get_agent_session(storage, session_id)
-        )
-        if session is None or not session.runs:
+        session = storage.load_session(session_id, session_type)
+        if session is None:
             return
         for run in session.runs:
-            if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
+            if run.run_id != run_id:
                 continue
             metadata = dict(run.metadata or {})
             if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
@@ -142,21 +127,21 @@ class ConversationStateWriter:
             metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
             linked_run = copy(run)
             linked_run.metadata = metadata
-            save_runs(storage, session, [linked_run])
+            storage.save_runs(session, [linked_run])
             return
 
     async def apersist_response_event_id_in_session_run(
         self,
         *,
-        create_storage: Callable[[], BaseDb],
+        create_storage: Callable[[], ConversationStore],
         session_id: str,
-        session_type: SessionType,
+        session_type: SessionKind,
         run_id: str,
         response_event_id: str,
     ) -> None:
         """Persist response linkage off-loop in the session target's FIFO lane."""
 
-        def persist(storage: BaseDb) -> None:
+        def persist(storage: ConversationStore) -> None:
             self._persist_response_event_id_in_session_run(
                 storage=storage,
                 session_id=session_id,

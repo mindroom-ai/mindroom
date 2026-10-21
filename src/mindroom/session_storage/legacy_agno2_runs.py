@@ -43,10 +43,8 @@ def decode_session_json(raw_value: object) -> object:
 # session's rows are renumbered in the order Agno's merge read them, and the blob is cleared, all in one write
 # transaction, so no read has to merge a blob. Entries without a string run id are dropped, as no read could address
 # them.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py,
-# tests/test_agent_storage_runs.py::test_agno_2_blob_runs_become_rows_once,
-# tests/test_agent_storage_runs.py::test_blob_runs_keep_the_order_agno_read_them_in, and
-# tests/test_agent_storage_runs.py::test_blob_entries_without_a_string_run_id_are_dropped.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py and
+# tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order.
 def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
     """Return whether the database may still hold Agno 2 run blobs, from its schema alone."""
     tables = {

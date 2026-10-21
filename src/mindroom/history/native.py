@@ -8,12 +8,9 @@ from mindroom.history.replay import compaction_summary_message, current_summary_
 from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings
 
 if TYPE_CHECKING:
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-
     from mindroom.history.types import ResolvedHistoryExecutionPlan, ResolvedHistorySettings
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 
 def configure_native_history(
@@ -21,7 +18,7 @@ def configure_native_history(
     *,
     plan: ResolvedHistoryExecutionPlan,
     history_settings: ResolvedHistorySettings,
-    session: AgentSession | TeamSession | None,
+    session: ConversationSession | None,
     allowed: bool,
 ) -> NativeCompactionModel | None:
     """Enable native requests only when they preserve the scope's authored semantics."""
@@ -53,13 +50,13 @@ def configure_native_history(
 def restore_native_history(
     model: object,
     *,
-    persisted_run: RunOutput | TeamRunOutput,
-    session: AgentSession | TeamSession | None,
+    persisted_run: AnyRunRecord,
+    session: ConversationSession | None,
 ) -> None:
     """Restore the paused request's policy only when its rebuilt route still matches."""
     if not isinstance(model, NativeCompactionModel):
         return
-    latest = next((message for message in reversed(persisted_run.messages or []) if message.role == "assistant"), None)
+    latest = next((message for message in reversed(persisted_run.messages) if message.role == "assistant"), None)
     model.restore_portable_replay(latest)
     saved = recorded_native_settings(latest) if latest is not None else None
     model.configure_native_compaction(
@@ -71,7 +68,7 @@ def restore_native_history(
         model.configure_native_compaction(threshold=None)
 
 
-def _history_generation(session: AgentSession | TeamSession | None) -> str:
+def _history_generation(session: ConversationSession | None) -> str:
     """Bind checkpoints to the exact summary message their requests carried."""
     summary = current_summary_text(session) if session is not None else None
     return str(compaction_summary_message(summary, run_local=False).content) if summary is not None else ""

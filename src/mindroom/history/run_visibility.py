@@ -1,35 +1,30 @@
-"""Shared Agno model-history run visibility policy."""
+"""Which stored runs and messages the model's history shows."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING
 
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
-
     from mindroom.history.types import HistoryScope
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
+# A paused, stopped, or failed run is not part of the conversation the model sees.
 NON_VISIBLE_RUN_STATUSES = frozenset({RunStatus.paused, RunStatus.cancelled, RunStatus.error})
 
 
-def is_model_history_visible_run(run: object) -> TypeGuard[RunOutput | TeamRunOutput]:
-    """Return whether one run is represented in Agno model history."""
-    return (
-        isinstance(run, (RunOutput, TeamRunOutput))
-        and run.parent_run_id is None
-        and run.status not in NON_VISIBLE_RUN_STATUSES
-    )
+def is_model_history_visible_run(run: AnyRunRecord) -> bool:
+    """Return whether one stored run replays as model history: a finished top-level run."""
+    return run.parent_run_id is None and run.status not in NON_VISIBLE_RUN_STATUSES
 
 
-def run_in_scope(run: RunOutput | TeamRunOutput, scope: HistoryScope) -> bool:
+def run_in_scope(run: AnyRunRecord, scope: HistoryScope) -> bool:
     """Return whether a run belongs to a history scope: a team run to its team's, an agent run to its agent's."""
     if scope.kind == "team":
-        return isinstance(run, TeamRunOutput) and run.team_id == scope.scope_id
-    return isinstance(run, RunOutput) and run.agent_id == scope.scope_id
+        return isinstance(run, TeamRunRecord) and run.team_id == scope.scope_id
+    return isinstance(run, RunRecord) and run.agent_id == scope.scope_id
 
 
 # A queued-message notice, MindRoom's instruction to pause for a newer message, is stored as a user message marked so.

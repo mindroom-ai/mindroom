@@ -7,17 +7,16 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
 
-from agno.utils.message import filter_tool_calls
-
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    prompt_roles_for_history_storage,
 )
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
-from mindroom.history.replay import history_skip_roles
+from mindroom.history.request_messages import filter_tool_calls
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_compaction_input_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
@@ -25,11 +24,9 @@ from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-
     from mindroom.history.types import ResolvedHistorySettings
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
 
 _WRAPPER_OVERHEAD_TOKENS = 200
@@ -70,11 +67,11 @@ class _ExcerptBlock:
 def build_summary_input(
     *,
     previous_summary: str | None,
-    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    compacted_runs: Sequence[AnyRunRecord],
     max_input_tokens: int,
     history_settings: ResolvedHistorySettings,
     token_estimator: Callable[[str], int] = estimate_compaction_input_tokens,
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+) -> tuple[str, list[AnyRunRecord]]:
     """Fit prior summary and ordered runs into one serialized summary request."""
     summary_block = _previous_summary_block(previous_summary)
 
@@ -90,7 +87,7 @@ def build_summary_input(
             token_estimator=token_estimator,
         )
 
-    included_runs: list[RunOutput | TeamRunOutput] = []
+    included_runs: list[AnyRunRecord] = []
     serialized_runs: list[str] = []
     for index, run in enumerate(compacted_runs):
         serialized_run = _serialize_run(run, index, history_settings)
@@ -119,11 +116,11 @@ def build_summary_input(
 def _build_oversized_summary_input(
     *,
     previous_summary: str | None,
-    compacted_runs: Sequence[RunOutput | TeamRunOutput],
+    compacted_runs: Sequence[AnyRunRecord],
     history_settings: ResolvedHistorySettings,
     max_input_tokens: int,
     token_estimator: Callable[[str], int],
-) -> tuple[str, list[RunOutput | TeamRunOutput]]:
+) -> tuple[str, list[AnyRunRecord]]:
     summary_block = _previous_summary_block(previous_summary)
     if not compacted_runs:
         return summary_block, []
@@ -143,7 +140,7 @@ def _build_oversized_summary_input(
 def minimum_summary_input_tokens(
     *,
     previous_summary: str | None,
-    first_run: RunOutput | TeamRunOutput,
+    first_run: AnyRunRecord,
     token_estimator: Callable[[str], int],
 ) -> int:
     """Return the smallest shrink budget preserving the prior summary and one run envelope.
@@ -161,7 +158,7 @@ def minimum_summary_input_tokens(
 
 
 def _serialize_oversized_run_excerpt(
-    run: RunOutput | TeamRunOutput,
+    run: AnyRunRecord,
     *,
     index: int,
     history_settings: ResolvedHistorySettings,
@@ -190,7 +187,7 @@ def _serialize_oversized_run_excerpt(
 
 
 def _serialize_run_excerpt(
-    run: RunOutput | TeamRunOutput,
+    run: AnyRunRecord,
     *,
     index: int,
     blocks: Sequence[_ExcerptBlock],
@@ -215,24 +212,22 @@ def _serialize_run_excerpt(
 
 
 def _compaction_replay_messages(
-    run: RunOutput | TeamRunOutput,
+    run: AnyRunRecord,
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    skip_roles = set(history_skip_roles(history_settings))
+    skip_roles = prompt_roles_for_history_storage(history_settings.system_message_role)
     # A stored run can hold copies of the history its request replayed; replay skips them, and the runs they came
     # from are summarized on their own.
     messages = [
-        deepcopy(message)
-        for message in run.messages or []
-        if message.role not in skip_roles and not message.from_history
+        deepcopy(message) for message in run.messages if message.role not in skip_roles and not message.from_history
     ]
-    if history_settings.max_tool_calls_from_history is not None and messages:
-        filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
+    if history_settings.max_tool_calls_from_history is not None:
+        messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     strip_stale_anthropic_replay_fields(messages)
     return messages
 
 
-def _excerpt_blocks(run: RunOutput | TeamRunOutput, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
+def _excerpt_blocks(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[_ExcerptBlock]:
     blocks: list[_ExcerptBlock] = []
     if run.metadata:
         metadata = _metadata_for_summary(run.metadata)
@@ -281,7 +276,7 @@ def _previous_summary_block(summary: str | None) -> str:
 
 
 def messages_for_runs(
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
     """Copy and sanitize conversation messages for portable compaction hooks."""
@@ -292,7 +287,7 @@ def messages_for_runs(
     return messages
 
 
-def _serialize_run(run: RunOutput | TeamRunOutput, index: int, history_settings: ResolvedHistorySettings) -> str:
+def _serialize_run(run: AnyRunRecord, index: int, history_settings: ResolvedHistorySettings) -> str:
     lines = [_run_open_tag(run, index)]
     if run.metadata:
         metadata = _metadata_for_summary(run.metadata)
@@ -318,12 +313,11 @@ def _serialize_message(message: Message) -> list[str]:
     return lines
 
 
-def _run_open_tag(run: RunOutput | TeamRunOutput, index: int) -> str:
+def _run_open_tag(run: AnyRunRecord, index: int) -> str:
     attrs = [f'index="{index}"']
     if run.run_id:
         attrs.append(f'run_id="{escape(str(run.run_id), quote=True)}"')
-    if run.status is not None:
-        attrs.append(f'status="{escape(str(run.status), quote=True)}"')
+    attrs.append(f'status="{escape(str(run.status), quote=True)}"')
     return f"<run {' '.join(attrs)}>"
 
 

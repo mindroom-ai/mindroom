@@ -1,4 +1,4 @@
-"""Canonical history scope resolution and ownership of session storage handles."""
+"""Canonical history scope resolution and the conversation store each scope opens."""
 
 from __future__ import annotations
 
@@ -12,30 +12,22 @@ from typing import TYPE_CHECKING
 
 from agno.team import Team
 
-from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
+from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import (
-    create_session_storage,
-    create_state_storage,
-    get_agent_runtime_state_db,
-    get_agent_session,
-    get_team_session,
-)
-from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -49,10 +41,10 @@ class ScopeSessionContext:
     """Resolved storage/session context for one logical history scope."""
 
     scope: HistoryScope
-    storage: BaseDb
-    session: AgentSession | TeamSession | None
+    storage: ConversationStore
+    session: ConversationSession | None
     session_id: str | None = None
-    storage_factory: Callable[[], BaseDb] | None = None
+    storage_factory: Callable[[], ConversationStore] | None = None
     session_exists: bool = True
 
 
@@ -150,22 +142,18 @@ def open_resolved_scope_session_context(
         execution_identity=execution_identity,
     )
     storage = storage_factory()
-    try:
-        is_team = scope.kind == "team"
-        session = get_team_session(storage, session_id) if is_team else get_agent_session(storage, session_id)
-        session_exists = session is not None
-        if session is None and create_session_if_missing:
-            session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=is_team)
-        yield ScopeSessionContext(
-            scope=scope,
-            storage=storage,
-            session=session,
-            session_id=session_id,
-            storage_factory=storage_factory,
-            session_exists=session_exists,
-        )
-    finally:
-        close_execution_storage(storage)
+    session = storage.load_session(session_id, scope.kind)
+    session_exists = session is not None
+    if session is None and create_session_if_missing:
+        session = new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
+    yield ScopeSessionContext(
+        scope=scope,
+        storage=storage,
+        session=session,
+        session_id=session_id,
+        storage_factory=storage_factory,
+        session_exists=session_exists,
+    )
 
 
 @contextmanager
@@ -212,75 +200,18 @@ def create_scope_session_storage(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> BaseDb:
-    """Create the canonical storage for one persisted history scope."""
+) -> ConversationStore:
+    """Open the canonical conversation store of one persisted history scope."""
     if scope.kind == "agent":
-        return create_session_storage(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-
+        return create_session_storage(agent_name, config, runtime_paths, execution_identity=execution_identity)
     storage_name = _scope_session_storage_name(scope)
     return create_state_storage(
-        storage_name=storage_name,
-        state_root=resolve_session_state_root(
+        storage_name,
+        resolve_session_state_root(
             _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
             runtime_paths,
         ),
-        subdir="sessions",
         session_table=f"{storage_name}_sessions",
-        prompt_roles=prompt_roles_for_history_storage(),
-    )
-
-
-def close_execution_storage(storage: BaseDb) -> None:
-    """Close a concrete DB handle after accepted tool users have settled."""
-
-    async def close() -> None:
-        storage.close()
-
-    if not defer_execution_cleanup(close, resource=storage):
-        storage.close()
-
-
-def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
-    """Close each distinct state DB handle at most once."""
-    seen: set[int] = set()
-    for storage in storages:
-        if storage is None:
-            continue
-        storage_id = id(storage)
-        if storage_id in seen:
-            continue
-        seen.add(storage_id)
-        close_execution_storage(storage)
-
-
-def close_agent_runtime_state_dbs(
-    agent: Agent | None,
-    *,
-    shared_scope_storage: BaseDb | None = None,
-) -> None:
-    """Close one agent's runtime-owned state DB handle unless it is a shared scope storage."""
-    if agent is None:
-        return
-    storage = get_agent_runtime_state_db(agent)
-    if storage is not None and storage is not shared_scope_storage:
-        close_execution_storage(storage)
-
-
-def close_team_runtime_state_dbs(
-    *,
-    agents: list[Agent],
-    team_db: BaseDb | None,
-    shared_scope_storage: BaseDb | None = None,
-) -> None:
-    """Close all runtime-owned state DB handles for one team request."""
-    _close_unique_state_dbs(
-        *(storage for agent in agents if (storage := get_agent_runtime_state_db(agent)) is not shared_scope_storage),
-        team_db if team_db is not shared_scope_storage else None,
     )
 
 

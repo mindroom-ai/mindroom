@@ -41,18 +41,13 @@ from mindroom.agents import create_agent
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import (
-    run_blocking_until_complete,
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
 from mindroom.budgets.monitor import budget_model
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.session_context import (
-    close_agent_runtime_state_dbs,
-    create_scope_session_storage,
-    open_resolved_scope_session_context,
-)
+from mindroom.history.session_context import create_scope_session_storage, open_resolved_scope_session_context
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -66,11 +61,8 @@ from mindroom.providers.claude_prompt_cache import (
     arefresh_session_backed_bedrock_async_client,
 )
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import (
-    create_session_storage,
-    run_session_storage_operation,
-    save_independent_usage,
-)
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -133,8 +125,7 @@ async def _save_call_usage(
     )
     await run_session_storage_operation(
         owner.storage_factory,
-        functools.partial(
-            save_independent_usage,
+        lambda storage: storage.save_independent_usage(
             session_id=owner.session_id,
             usage_id=f"{kind}:{usage_id}",
             kind=kind,
@@ -500,14 +491,7 @@ class _CallAgentCache:
     @staticmethod
     async def _close_agent(agent: AgnoAgent) -> None:
         """Release one cached agent's async client and runtime databases."""
-
-        async def release() -> None:
-            try:
-                await aclose_anthropic_async_client(agent.model)
-            finally:
-                await run_blocking_until_complete(close_agent_runtime_state_dbs, agent)
-
-        await run_coroutine_until_complete(release())
+        await run_coroutine_until_complete(aclose_anthropic_async_client(agent.model))
 
     async def _get_agent(
         self,
@@ -562,30 +546,24 @@ class _CallAgentCache:
             runtime_paths=self.runtime_paths,
             execution_identity=self.execution_identity,
         )
-        agent: AgnoAgent | None = None
-        try:
-            # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
-            # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
-            agent = create_agent(
-                self.agent_name,
-                self.config,
-                self.runtime_paths,
-                execution_identity=self.execution_identity,
-                hook_registry=self.context.hook_registry,
-                knowledge=knowledge,
-                history_storage=history_storage,
-                active_model_name=self.active_model_name,
-                refresh_scheduler=refresh_scheduler,
-                supports_native_tool_approval=True,
-                eager_deferred_tools=True,
-            )
-            _refuse_text_chat_functions(agent, self.config)
-            prewarm_agent_model_client(agent, history_storage)
-        except Exception:
-            history_storage.close()
-            raise
-        else:
-            return agent
+        # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
+        # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
+        agent = create_agent(
+            self.agent_name,
+            self.config,
+            self.runtime_paths,
+            execution_identity=self.execution_identity,
+            hook_registry=self.context.hook_registry,
+            knowledge=knowledge,
+            history_storage=history_storage,
+            active_model_name=self.active_model_name,
+            refresh_scheduler=refresh_scheduler,
+            supports_native_tool_approval=True,
+            eager_deferred_tools=True,
+        )
+        _refuse_text_chat_functions(agent, self.config)
+        prewarm_agent_model_client(agent, history_storage)
+        return agent
 
 
 async def build_call_tools(

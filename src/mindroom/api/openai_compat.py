@@ -84,11 +84,7 @@ from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    close_team_runtime_state_dbs,
-    open_bound_scope_session_context,
-)
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
@@ -123,7 +119,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
     from agno.agent import Agent
-    from agno.db.base import BaseDb
     from agno.knowledge.knowledge import Knowledge
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
@@ -1069,25 +1064,17 @@ def _build_team(
         reason_prefix=f"Team '{team_name}'",
         active_model_names=models.member_model_names,
     )
-    try:
-        team = build_materialized_team_instance(
-            requested_agent_names=team_members.requested_agent_names,
-            agents=team_members.agents,
-            mode=mode,
-            config=config,
-            runtime_paths=runtime_paths,
-            model_name=models.team_model_name,
-            configured_team_name=team_name,
-            scope_context=scope_context,
-            execution_identity=execution_identity,
-        )
-    except Exception:
-        close_team_runtime_state_dbs(
-            agents=team_members.agents,
-            team_db=None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
-        raise
+    team = build_materialized_team_instance(
+        requested_agent_names=team_members.requested_agent_names,
+        agents=team_members.agents,
+        mode=mode,
+        config=config,
+        runtime_paths=runtime_paths,
+        model_name=models.team_model_name,
+        configured_team_name=team_name,
+        scope_context=scope_context,
+        execution_identity=execution_identity,
+    )
     return team_members.agents, team, mode
 
 
@@ -1163,121 +1150,112 @@ async def _non_stream_team_completion(
     team: Team | None = None
     scope_context: ScopeSessionContext | None = None
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
-    try:
-        with open_bound_scope_session_context(
-            agents=[],
+    with open_bound_scope_session_context(
+        agents=[],
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=execution_identity,
+        team_name=team_name,
+    ) as opened_scope_context:
+        scope_context = opened_scope_context
+        try:
+            agents, team, mode = await asyncio.to_thread(
+                _build_team,
+                team_name,
+                config,
+                runtime_paths,
+                execution_identity,
+                scope_context,
+                unavailable_bases,
+                refresh_scheduler,
+                models=team_models,
+            )
+        except Exception:
+            logger.exception("Team build failed", team=team_name)
+            return _error_response(500, "Team execution failed", error_type="server_error")
+
+        logger.info(
+            "Team completion request",
+            team=team_name,
+            mode=mode.value,
+            members=len(agents),
             session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            team_name=team_name,
-        ) as opened_scope_context:
-            scope_context = opened_scope_context
-            try:
-                agents, team, mode = await asyncio.to_thread(
-                    _build_team,
-                    team_name,
-                    config,
-                    runtime_paths,
-                    execution_identity,
-                    scope_context,
-                    unavailable_bases,
-                    refresh_scheduler,
-                    models=team_models,
-                )
-            except Exception:
-                logger.exception("Team build failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            logger.info(
-                "Team completion request",
-                team=team_name,
-                mode=mode.value,
-                members=len(agents),
-                session_id=session_id,
-            )
-
-            try:
-                prompt = prepend_knowledge_availability_notice(
-                    prompt,
-                    unavailable_bases,
-                )
-                prepared_team_run = await _prepare_openai_team_prompt(
-                    scope_context=scope_context,
-                    team_name=team_name,
-                    agents=agents,
-                    team=team,
-                    prompt=prompt,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    thread_history=thread_history,
-                    team_model_name=team_models.team_model_name,
-                    execution_identity=execution_identity,
-                )
-            except Exception:
-                logger.exception("Team member preparation failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            try:
-                with (
-                    bind_llm_request_log_context(
-                        **_openai_team_request_log_context(
-                            team_name=team_name,
-                            session_id=session_id,
-                            requester_id=execution_identity.requester_id if execution_identity else None,
-                            prompt=prepared_team_run.prompt,
-                            metadata=prepared_team_run.run_metadata,
-                        ),
-                    ),
-                    # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
-                    helper_usage_context(scope_context),
-                ):
-                    response = await team.arun(
-                        prepared_team_run.prompt,
-                        session_id=session_id,
-                        user_id=execution_identity.requester_id if execution_identity else None,
-                        metadata=prepared_team_run.run_metadata,
-                    )
-            except Exception:
-                logger.exception("Team execution failed", team=team_name)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            if isinstance(response, (TeamRunOutput, RunOutput)) and _is_failed_team_output(response):
-                logger.warning(
-                    "Team response returned terminal failure",
-                    team=team_name,
-                    error=str(response.content or "Unknown team failure"),
-                )
-                return _error_response(500, "Team execution failed", error_type="server_error")
-            response_text = (
-                _format_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else str(response)
-            )
-
-            if _is_error_response(response_text):
-                logger.warning("Team response returned error", team=team_name, error=response_text)
-                return _error_response(500, "Team execution failed", error_type="server_error")
-
-            logger.info("Team completion sent", team=team_name, stream=False)
-            result = _ChatCompletionResponse(
-                id=new_completion_id(),
-                created=int(time.time()),
-                model=model_id,
-                choices=[
-                    _ChatCompletionChoice(
-                        message=_ChatMessage(role="assistant", content=response_text),
-                    ),
-                ],
-                usage=(
-                    _usage_from_team_output(response)
-                    if isinstance(response, (TeamRunOutput, RunOutput))
-                    else _UsageInfo()
-                ),
-            )
-            return _OpenAIJSONResponse(content=result.model_dump())
-    finally:
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
         )
+
+        try:
+            prompt = prepend_knowledge_availability_notice(
+                prompt,
+                unavailable_bases,
+            )
+            prepared_team_run = await _prepare_openai_team_prompt(
+                scope_context=scope_context,
+                team_name=team_name,
+                agents=agents,
+                team=team,
+                prompt=prompt,
+                config=config,
+                runtime_paths=runtime_paths,
+                thread_history=thread_history,
+                team_model_name=team_models.team_model_name,
+                execution_identity=execution_identity,
+            )
+        except Exception:
+            logger.exception("Team member preparation failed", team=team_name)
+            return _error_response(500, "Team execution failed", error_type="server_error")
+        try:
+            with (
+                bind_llm_request_log_context(
+                    **_openai_team_request_log_context(
+                        team_name=team_name,
+                        session_id=session_id,
+                        requester_id=execution_identity.requester_id if execution_identity else None,
+                        prompt=prepared_team_run.prompt,
+                        metadata=prepared_team_run.run_metadata,
+                    ),
+                ),
+                # Helper work during the run, such as a member's Claude Code session, belongs to this conversation.
+                helper_usage_context(scope_context),
+            ):
+                response = await team.arun(
+                    prepared_team_run.prompt,
+                    session_id=session_id,
+                    user_id=execution_identity.requester_id if execution_identity else None,
+                    metadata=prepared_team_run.run_metadata,
+                )
+        except Exception:
+            logger.exception("Team execution failed", team=team_name)
+            return _error_response(500, "Team execution failed", error_type="server_error")
+        if isinstance(response, (TeamRunOutput, RunOutput)) and _is_failed_team_output(response):
+            logger.warning(
+                "Team response returned terminal failure",
+                team=team_name,
+                error=str(response.content or "Unknown team failure"),
+            )
+            return _error_response(500, "Team execution failed", error_type="server_error")
+        response_text = (
+            _format_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else str(response)
+        )
+
+        if _is_error_response(response_text):
+            logger.warning("Team response returned error", team=team_name, error=response_text)
+            return _error_response(500, "Team execution failed", error_type="server_error")
+
+        logger.info("Team completion sent", team=team_name, stream=False)
+        result = _ChatCompletionResponse(
+            id=new_completion_id(),
+            created=int(time.time()),
+            model=model_id,
+            choices=[
+                _ChatCompletionChoice(
+                    message=_ChatMessage(role="assistant", content=response_text),
+                ),
+            ],
+            usage=(
+                _usage_from_team_output(response) if isinstance(response, (TeamRunOutput, RunOutput)) else _UsageInfo()
+            ),
+        )
+        return _OpenAIJSONResponse(content=result.model_dump())
 
 
 async def _stream_team_completion(  # noqa: C901, PLR0915
@@ -1304,11 +1282,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         if stream is not None:
             await stream.aclose()
         stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
 
     try:
         scope_context = stack.enter_context(
@@ -1446,11 +1419,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
         response.completion_predicate = lambda: stream_completed and not stream_failed
     except Exception:
         stack.close()
-        close_team_runtime_state_dbs(
-            agents=agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
         raise
     else:
         return response

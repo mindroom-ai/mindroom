@@ -78,10 +78,7 @@ def _response_replies(
     run_id: str,
 ) -> tuple[int, bool]:
     storage = create_session_storage(scope.agent, config, runtime_paths, execution_identity=scope.identity)
-    try:
-        run = storage.get_run(run_id)
-    finally:
-        storage.close()
+    run = storage.get_run(run_id)
     return count_model_replies(run if isinstance(run, RunOutput) else None)
 
 

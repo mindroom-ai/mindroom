@@ -8,16 +8,12 @@ from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import TYPE_CHECKING, Any
 
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.storage import new_scope_session, run_folded_tool_call_ids
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session, save_runs
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     format_tool_completed_event,
@@ -27,12 +23,10 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
-    from agno.db.base import BaseDb
-    from agno.models.response import ToolExecution
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-
     from mindroom.history.session_context import ScopeSessionContext
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
@@ -56,7 +50,7 @@ class InterruptedReplaySnapshot:
     original_status: RunStatus = RunStatus.cancelled
 
 
-def is_interrupted_replay_run(run: RunOutput | TeamRunOutput) -> bool:
+def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
     """Return whether a stored run replays a stopped or failed turn, whose answer is a rendered summary of it."""
     return (run.metadata or {}).get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
 
@@ -74,9 +68,9 @@ def split_interrupted_tool_trace(
 ) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
     """Split cancelled-run tools into completed and still-interrupted traces.
 
-    Prefer explicit terminal state when Agno provides it. Only fall back to
-    ``result is None`` when the provider omitted both a completion payload and any
-    explicit success/failure marker.
+    Prefer the explicit terminal state when the execution carries one. Only fall back to
+    ``result is None`` when it holds neither a completion payload nor an explicit
+    success/failure marker.
     """
     completed: list[ToolTraceEntry] = []
     interrupted: list[ToolTraceEntry] = []
@@ -232,7 +226,7 @@ def _build_interrupted_replay_run(
     scope_id: str,
     session_id: str,
     is_team: bool,
-) -> RunOutput | TeamRunOutput:
+) -> AnyRunRecord:
     """Build one canonical replayable run for an interrupted top-level turn."""
     content = _render_interrupted_replay_content(snapshot)
     messages = []
@@ -252,7 +246,7 @@ def _build_interrupted_replay_run(
     messages.append(Message(role="assistant", content=content))
     metadata = _interrupted_replay_metadata(snapshot)
     if is_team:
-        return TeamRunOutput(
+        return TeamRunRecord(
             run_id=run_id,
             team_id=scope_id,
             session_id=session_id,
@@ -261,7 +255,7 @@ def _build_interrupted_replay_run(
             metadata=metadata,
             status=RunStatus.completed,
         )
-    return RunOutput(
+    return RunRecord(
         run_id=run_id,
         agent_id=scope_id,
         session_id=session_id,
@@ -315,8 +309,8 @@ def _unfolded(tools: Sequence[ToolTraceEntry], folded_tool_call_ids: Collection[
 
 def persist_interrupted_replay_snapshot(
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession | None,
+    storage: ConversationStore,
+    session: ConversationSession | None,
     session_id: str,
     scope_id: str,
     run_id: str,
@@ -333,19 +327,11 @@ def persist_interrupted_replay_snapshot(
         completed_tools=_unfolded(snapshot.completed_tools, folded),
         interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
     )
-    persisted_session = _load_persisted_session(
-        storage=storage,
-        session_id=session_id,
-        is_team=is_team,
-    )
+    persisted_session = storage.load_session(session_id, "team" if is_team else "agent")
     if persisted_session is None:
         persisted_session = session
     if persisted_session is None:
-        persisted_session = new_scope_session(
-            session_id=session_id,
-            scope_id=scope_id,
-            is_team=is_team,
-        )
+        persisted_session = new_scope_session(session_id=session_id, scope_id=scope_id, is_team=is_team)
     persisted_run = _build_interrupted_replay_run(
         snapshot=snapshot,
         run_id=run_id,
@@ -353,8 +339,7 @@ def persist_interrupted_replay_snapshot(
         session_id=session_id,
         is_team=is_team,
     )
-    storage.upsert_session(persisted_session)
-    save_runs(storage, persisted_session, [persisted_run])
+    storage.save_runs(persisted_session, [persisted_run])
 
 
 def persist_interrupted_replay(
@@ -392,14 +377,3 @@ def persist_interrupted_replay(
         ),
         is_team=is_team,
     )
-
-
-def _load_persisted_session(
-    *,
-    storage: BaseDb,
-    session_id: str,
-    is_team: bool,
-) -> AgentSession | TeamSession | None:
-    if is_team:
-        return get_team_session(storage, session_id)
-    return get_agent_session(storage, session_id)

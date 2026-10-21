@@ -68,7 +68,6 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -312,63 +311,55 @@ async def _execute_child(
         runtime_paths,
         execution_identity=identity,
     )
-    try:
-        agent = await asyncio.to_thread(
-            create_agent,
-            child.child_agent_name,
-            config,
-            runtime_paths,
-            identity,
-            active_model_name=child.model_name,
-            knowledge=knowledge.knowledge,
-            history_storage=storage,
-            refresh_scheduler=refresh_scheduler,
-            delegation_depth=child.depth,
-            supports_native_tool_approval=True,
-            include_interactive_questions=False,
-            tool_function_filter=context.tool_function_filter,
-            required_tool_names=required_tool_names,
-            persona=child.persona,
-        )
-    except BaseException:
-        storage.close()
-        raise
-    try:
-        if agent.model is not None:
-            install_approval_receipt_hooks(agent.model, agent.fallback_config)
-        session = await agent.aget_session(session_id=child.session_id, user_id=identity.requester_id)
-        restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession | None", session))
-        requirements = apply_local_approval_decisions(
+    agent = await asyncio.to_thread(
+        create_agent,
+        child.child_agent_name,
+        config,
+        runtime_paths,
+        identity,
+        active_model_name=child.model_name,
+        knowledge=knowledge.knowledge,
+        history_storage=storage,
+        refresh_scheduler=refresh_scheduler,
+        delegation_depth=child.depth,
+        supports_native_tool_approval=True,
+        include_interactive_questions=False,
+        tool_function_filter=context.tool_function_filter,
+        required_tool_names=required_tool_names,
+        persona=child.persona,
+    )
+    if agent.model is not None:
+        install_approval_receipt_hooks(agent.model, agent.fallback_config)
+    session = await agent.aget_session(session_id=child.session_id, user_id=identity.requester_id)
+    restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession | None", session))
+    requirements = apply_local_approval_decisions(
+        persisted,
+        decisions=decisions,
+        denial_reasons=denial_reasons or {},
+    )
+    validate_approval_tool_owners([agent], approved_calls, requirements)
+    with (
+        tool_runtime_context(child_context),
+        approved_executions_context(agent, {child.run_id: approved_calls}),
+        approval_denial_context(
+            agent,
+            {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
+        ),
+    ):
+        response = await _continue_child(
+            agent,
+            run_child,
+            child,
             persisted,
+            config=config,
+            runtime_paths=runtime_paths,
+            identity=identity,
+            refresh_scheduler=refresh_scheduler,
             decisions=decisions,
-            denial_reasons=denial_reasons or {},
+            denial_reasons=denial_reasons,
+            approval_calls=approval_calls,
         )
-        validate_approval_tool_owners([agent], approved_calls, requirements)
-        with (
-            tool_runtime_context(child_context),
-            approved_executions_context(agent, {child.run_id: approved_calls}),
-            approval_denial_context(
-                agent,
-                {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
-            ),
-        ):
-            response = await _continue_child(
-                agent,
-                run_child,
-                child,
-                persisted,
-                config=config,
-                runtime_paths=runtime_paths,
-                identity=identity,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                approval_calls=approval_calls,
-            )
-        toolkit_owners = toolkit_owners_for_agents([agent])
-    finally:
-        close_agent_runtime_state_dbs(agent, shared_scope_storage=storage)
-        storage.close()
+    toolkit_owners = toolkit_owners_for_agents([agent])
 
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(response.tools, original_prompt=child.task, continuation_count=0)

@@ -8,7 +8,6 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
@@ -50,12 +49,9 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
 
 
 def prewarm_agent_model_client(agent: Agent, shared_scope_storage: BaseDb | None) -> None:
-    """Prewarm one built agent or reclaim its runtime state on failure."""
-    try:
-        prewarm_anthropic_async_client(agent.model)
-    except Exception:
-        close_agent_runtime_state_dbs(agent, shared_scope_storage=shared_scope_storage)
-        raise
+    """Prewarm one built agent's model client."""
+    del shared_scope_storage
+    prewarm_anthropic_async_client(agent.model)
 
 
 async def close_unreturned_agent(
@@ -67,15 +63,9 @@ async def close_unreturned_agent(
     if agent is caller_owned_agent:
         return
 
+    del shared_scope_storage
+
     async def close_resources() -> None:
-        try:
-            await asyncio.to_thread(
-                close_agent_runtime_state_dbs,
-                agent,
-                shared_scope_storage=shared_scope_storage,
-            )
-        except Exception:
-            logger.exception("Failed to close unreturned agent runtime state", agent=agent.id)
         try:
             await aclose_anthropic_async_client(agent.model)
         except Exception:

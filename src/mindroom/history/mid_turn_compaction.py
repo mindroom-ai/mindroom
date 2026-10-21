@@ -58,7 +58,8 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import NativeCompactionModel, checkpoint_items, native_replay_messages
 from mindroom.providers.claude_prompt_cache import claude_loaded_tool_names
-from mindroom.session_storage.agent_storage import run_session_storage_operation, save_compaction_usage
+from mindroom.session_storage.agent_storage import save_compaction_usage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
 

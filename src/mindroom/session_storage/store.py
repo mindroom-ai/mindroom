@@ -7,10 +7,11 @@ depend on, and a load reads the session row, its runs, and its summary from one 
 
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import time
 from typing import TYPE_CHECKING, Any, cast
@@ -21,16 +22,18 @@ from mindroom.history.summary_rows_schema import (
     loads_sql,
     owner_scope_key,
 )
+from mindroom.history.types import ScopeSummary
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics
 from mindroom.session_storage.codec import run_from_row, run_type
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
 from mindroom.session_storage.schema import run_log_sql, schema_sql
-from mindroom.session_storage.types import ConversationSession, ReplaySummary
+from mindroom.session_storage.types import ConversationSession, SessionFields
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
@@ -105,6 +108,14 @@ class ConversationStore:
                 raise
             connection.commit()
 
+    def read_session_fields(self, session_id: str) -> SessionFields | None:
+        """Read one session row's metadata and ``session_state`` without its runs, or None when the row is missing."""
+        with self.transaction(write=False) as connection:
+            row = self._session_row(connection, session_id)
+        if row is None:
+            return None
+        return SessionFields(metadata=_decoded_mapping(row[5]), session_state=_session_state(row[4]))
+
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
 
@@ -114,13 +125,7 @@ class ConversationStore:
         names = self.names
         with self.transaction(write=False) as connection:
             tables = _tables(connection)
-            if names.sessions not in tables:
-                return None
-            row = connection.execute(
-                "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
-                f"FROM {quote_identifier(names.sessions)} WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
+            row = self._session_row(connection, session_id)
             if row is None or row[0] != kind:
                 return None
             stored_kind, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at = row
@@ -141,19 +146,32 @@ class ConversationStore:
             if run_id in folded:
                 run.messages = [message for message in run.messages if message.id not in folded[run_id]]
             runs.append(run)
-        state = _decoded_mapping(session_data) or {}
         return ConversationSession(
             session_id=session_id,
             kind=kind,
             owner_id=(team_id if kind == "team" else agent_id) or "",
             user_id=user_id,
             metadata=_decoded_mapping(metadata),
-            session_state=state["session_state"] if isinstance(state.get("session_state"), dict) else {},
+            session_state=_session_state(session_data),
             runs=runs,
             summary=summary,
             created_at=created_at,
             updated_at=updated_at,
         )
+
+    def _session_row(self, connection: sqlite3.Connection, session_id: str) -> tuple[Any, ...] | None:
+        if self.names.sessions not in _tables(connection):
+            return None
+        return connection.execute(
+            "SELECT session_type, agent_id, team_id, user_id, session_data, metadata, created_at, updated_at "  # noqa: S608
+            f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+
+    def ensure_session_row(self, session: ConversationSession) -> None:
+        """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
+        with self.transaction(write=True) as connection:
+            _ensure_session_row(connection, self.names, session)
 
     def save_run(self, session: ConversationSession, run: AnyRunRecord, *, record_usage: bool) -> SaveOutcome:
         """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
@@ -165,9 +183,19 @@ class ConversationStore:
         which outlives removed runs, and the session totals change by the difference, in the same transaction.
         A frozen run's usage is final and changes neither.
         """
+        return self._save_run_dict(session, run.to_dict(), row_type=run_type(run), record_usage=record_usage)
+
+    def _save_run_dict(
+        self,
+        session: ConversationSession,
+        data: dict[str, Any],
+        *,
+        row_type: SessionKind,
+        record_usage: bool,
+    ) -> SaveOutcome:
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, self.names, session)
-            return self._save_run(connection, session.session_id, run, record_usage=record_usage)
+            return self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
 
     def save_runs(self, session: ConversationSession, runs: Iterable[AnyRunRecord]) -> None:
         """Write conversation-only changes to runs of ``session`` in one transaction and make them its copies.
@@ -186,7 +214,14 @@ class ConversationStore:
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, self.names, session)
             outcomes = {
-                run.run_id: self._save_run(connection, session.session_id, run, record_usage=False) for run in runs
+                run.run_id: self._save_run(
+                    connection,
+                    session.session_id,
+                    run.to_dict(),
+                    row_type=run_type(run),
+                    record_usage=False,
+                )
+                for run in runs
             }
         written = {run.run_id: run for run in runs if outcomes[run.run_id] == "written"}
         loaded_ids = {existing.run_id for existing in session.runs}
@@ -300,23 +335,48 @@ class ConversationStore:
         self,
         connection: sqlite3.Connection,
         session_id: str,
-        run: AnyRunRecord,
+        data: dict[str, Any],
         *,
+        row_type: SessionKind,
         record_usage: bool,
     ) -> SaveOutcome:
-        data = run.to_dict()
-        if run.status != RunStatus.paused and self.prompt_roles:
+        """Save one run from its stored dict (``record.to_dict()``), under the insertion rules."""
+        if data["status"] != RunStatus.paused.value and self.prompt_roles:
             # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
             data["messages"] = [message for message in data["messages"] if message["role"] not in self.prompt_roles]
-        stored = _write_run_row(connection, self.names, data, row_type=run_type(run), session_id=session_id)
+        stored = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
         outcome: SaveOutcome = stored if isinstance(stored, str) else "written"
         if not record_usage or outcome == "frozen":
             return outcome
         now = int(time())
         created_at, updated_at = stored if not isinstance(stored, str) else (data.get("created_at") or now, now)
         snapshot = project_usage({**data, "created_at": created_at, "updated_at": updated_at})
-        _record_run_usage(connection, self.names, session_id, run.run_id, snapshot)
+        _record_run_usage(connection, self.names, session_id, data["run_id"], snapshot)
         return outcome
+
+
+def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
+    """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
+
+    The record is serialized on the caller's task before the lane is awaited, so what lands is the record as it was
+    handed over. ``session.session_state``, which the run's tools change in place, is written back by field when it
+    differs from what the session held when this callback was made, after the record and in the same lane.
+    """
+    loaded_state = copy.deepcopy(session.session_state)
+
+    async def persist(record: AnyRunRecord) -> None:
+        data = record.to_dict()
+        row_type = run_type(record)
+        state = copy.deepcopy(session.session_state) if session.session_state != loaded_state else None
+
+        def operation(opened: ConversationStore) -> None:
+            opened._save_run_dict(session, data, row_type=row_type, record_usage=True)
+            if state is not None:
+                opened.save_session_fields(replace(session, session_state=state), "session_state")
+
+        await run_session_storage_operation(lambda: store, operation)
+
+    return persist
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -330,6 +390,12 @@ def _decoded_mapping(raw_value: object) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
+
+
+def _session_state(raw_session_data: object) -> dict[str, Any]:
+    """Return the ``session_state`` object inside a row's ``session_data``, or an empty one."""
+    state = (_decoded_mapping(raw_session_data) or {}).get("session_state")
+    return state if isinstance(state, dict) else {}
 
 
 def _json_or_null(value: object) -> str | None:
@@ -597,7 +663,7 @@ def _replay_summary(
     summaries: str | None,
     session_id: str,
     owner_scope: str | None,
-) -> ReplaySummary | None:
+) -> ScopeSummary | None:
     """Return the text of the owner scope's latest summary row, which the session replays."""
     if summaries is None or owner_scope is None:
         return None
@@ -608,11 +674,12 @@ def _replay_summary(
     ).fetchone()
     if latest is None or latest[0] is None:
         return None
-    return ReplaySummary(text=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
+    return ScopeSummary(text=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
 
 
 __all__ = [
     "ConversationStore",
     "delete_run_subtrees_in_transaction",
     "open_conversation_store",
+    "persist_to",
 ]

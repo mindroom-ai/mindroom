@@ -6,7 +6,6 @@ import asyncio
 from contextlib import ExitStack, aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -80,12 +79,11 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
-    close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
     resolve_bound_team_scope_context,
 )
-from mindroom.history.storage import update_scope_seen_event_ids
+from mindroom.history.storage import new_scope_session, update_scope_seen_event_ids
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
@@ -122,7 +120,6 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import get_team_session
 from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -152,7 +149,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     import nio
-    from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
@@ -1693,19 +1689,11 @@ def _persist_bound_seen_event_ids(
     """
     if not event_ids or scope_context is None or session_id is None:
         return
-    session = get_team_session(scope_context.storage, session_id)
+    session = scope_context.storage.load_session(session_id, "team")
     if session is None:
-        created_at = int(datetime.now(UTC).timestamp())
-        session = TeamSession(
-            session_id=session_id,
-            team_id=scope_context.scope.scope_id,
-            metadata={},
-            runs=[],
-            created_at=created_at,
-            updated_at=created_at,
-        )
+        session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
     if update_scope_seen_event_ids(session, scope_context.scope, event_ids):
-        scope_context.storage.upsert_session(session)
+        scope_context.storage.save_session_fields(session, "metadata")
 
 
 def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[str]:
@@ -2042,15 +2030,9 @@ def _build_team_runtime_db_callbacks(
     switched model.
     """
 
-    def _release_attempt_members(scope_context: ScopeSessionContext | None) -> None:
-        members = holder.team_members
-        if members is None:
+    def _release_attempt_members(_scope_context: ScopeSessionContext | None) -> None:
+        if holder.team_members is None:
             return
-        close_team_runtime_state_dbs(
-            agents=members.agents,
-            team_db=cast("BaseDb | None", holder.team.db) if holder.team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
         holder.team_members = None
         holder.team = None
         # Cancel snapshots taken between this release and the next attempt must
@@ -2059,13 +2041,9 @@ def _build_team_runtime_db_callbacks(
         holder.render_partial = _empty_partial_text
         holder.tool_tracker = StreamingToolTracker()
 
-    def _close_runtime_dbs(scope_context: ScopeSessionContext | None) -> None:
-        members = holder.team_members
-        close_team_runtime_state_dbs(
-            agents=members.agents if members is not None else [],
-            team_db=cast("BaseDb | None", holder.team.db) if holder.team is not None else None,
-            shared_scope_storage=scope_context.storage if scope_context is not None else None,
-        )
+    def _close_runtime_dbs(_scope_context: ScopeSessionContext | None) -> None:
+        # The conversation store holds no connection, so a finished team turn has nothing left to close.
+        return
 
     return _release_attempt_members, _close_runtime_dbs
 
@@ -2132,11 +2110,6 @@ def materialize_exact_team_members(
         build_member=_build_member,
     )
     if team_members.failed_agent_names:
-        close_team_runtime_state_dbs(
-            agents=team_members.agents,
-            team_db=None,
-            shared_scope_storage=None,
-        )
         raise ValueError(
             _not_materializable_team_agents_message(team_members.failed_agent_names, prefix=reason_prefix),
         )
@@ -2837,11 +2810,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                     scope_context=scope,
                     session_id=session_id,
                     entity_name=configured_team_name,
-                )
-                close_team_runtime_state_dbs(
-                    agents=members.agents if members is not None else [],
-                    team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                    shared_scope_storage=scope.storage if scope is not None else None,
                 )
 
 

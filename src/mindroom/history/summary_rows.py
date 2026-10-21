@@ -1,6 +1,6 @@
 """Summary rows of the conversation log: appending compaction chunks, reading what they cover, and cutting.
 
-A scope's history is Agno's runs table in ``run_index`` order with summary rows
+A scope's history is the runs table in ``run_index`` order with summary rows
 between its runs. A row's key is ``(after_run_index, id)``; a top-level run's key
 is ``(run_index, 0)``, and member runs follow their parent. Loading replays the
 scope's latest summary row and the runs after it, so compaction only appends
@@ -25,8 +25,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from agno.db.sqlite import SqliteDb
-
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
@@ -35,21 +33,16 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.summary_rows_schema import (
-    NON_VISIBLE_RUN_STATUS_VALUES,
-    loads_sql,
-    run_scope_key_sql,
-    summary_rows_schema_sql,
-    summary_rows_table_names,
-)
-from mindroom.session_storage import agno_compat_sqlite
+from mindroom.history.summary_rows_schema import NON_VISIBLE_RUN_STATUS_VALUES, loads_sql, run_scope_key_sql
+from mindroom.session_storage.store import delete_run_subtrees_in_transaction
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Collection, Iterator, Mapping, Sequence
 
-    from agno.db.base import BaseDb
-    from sqlalchemy import Connection
+    from mindroom.session_storage.schema import TableNames
+    from mindroom.session_storage.store import ConversationStore
 
 type _Key = tuple[int, int]
 
@@ -72,7 +65,7 @@ class Segment:
 
     ``metadata`` is the run's metadata at the fold, so the row counts the events the run read and
     answered even when the run never saves; the rest are the folded messages, the tool executions
-    they hold, and the member responses attached so far, as Agno serializes them.
+    they hold, and the member responses attached so far, in their stored dict shapes.
     """
 
     run_id: str
@@ -107,9 +100,21 @@ class CoveredRun:
 
 @dataclass(frozen=True)
 class _Tables:
-    runs: str
-    summaries: str
-    removed: str
+    """The log's quoted table names."""
+
+    names: TableNames
+
+    @property
+    def runs(self) -> str:
+        return quote_identifier(self.names.runs)
+
+    @property
+    def summaries(self) -> str:
+        return quote_identifier(self.names.summaries)
+
+    @property
+    def removed(self) -> str:
+        return quote_identifier(self.names.removed_runs)
 
 
 def source_event_ids(metadata: object) -> set[str]:
@@ -150,20 +155,24 @@ def seen_event_ids(metadata: object) -> set[str]:
     return event_ids
 
 
-def latest_row(storage: BaseDb, *, session_id: str, scope_key: str) -> _SummaryRow | None:
+def latest_row(storage: ConversationStore, *, session_id: str, scope_key: str) -> _SummaryRow | None:
     """Return the scope's latest summary row, whose text replays."""
-    with _transaction(storage) as (connection, tables):
+    with _read_transaction(storage) as (connection, tables):
+        if connection is None:
+            return None
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
     return rows[-1] if rows else None
 
 
-def covered_runs(storage: BaseDb, *, session_id: str, run_ids: Sequence[str]) -> list[CoveredRun]:
+def covered_runs(storage: ConversationStore, *, session_id: str, run_ids: Sequence[str]) -> list[CoveredRun]:
     """Return how the given runs are stored now, in log order, for a later append to check."""
     # Only positions and statuses: the run payloads stay unread until the append under the write lock.
-    with _transaction(storage) as (connection, tables):
+    with _read_transaction(storage) as (connection, tables):
+        if connection is None:
+            return []
         return [
             CoveredRun(run_id=run_id, run_index=run_index, status=status)
-            for run_id, run_index, status in connection.exec_driver_sql(
+            for run_id, run_index, status in connection.execute(
                 f"SELECT run_id, run_index, status FROM {tables.runs} "  # noqa: S608
                 "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_index",
                 (session_id, json.dumps(list(run_ids))),
@@ -172,7 +181,7 @@ def covered_runs(storage: BaseDb, *, session_id: str, run_ids: Sequence[str]) ->
 
 
 def append_summary(
-    storage: BaseDb,
+    storage: ConversationStore,
     *,
     session_id: str,
     scope_key: str,
@@ -190,7 +199,7 @@ def append_summary(
     metadata written during the summary call, such as a reply's response event id, counts. A segment's
     run, when stored, moves after the new row, since what it still holds follows what the row folded.
     """
-    with _transaction(storage, write=True) as (connection, tables):
+    with _write_transaction(storage) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key, latest_only=True)
         previous_index = rows[-1].after_run_index if rows else -1
         # A row never sorts behind the latest one: that would return what it folded to replay.
@@ -200,7 +209,7 @@ def append_summary(
             return None
         stored = {
             run_id: (run_index, status, json.loads(metadata) if metadata is not None else None)
-            for run_id, run_index, status, metadata in connection.exec_driver_sql(
+            for run_id, run_index, status, metadata in connection.execute(
                 f"SELECT run_id, run_index, status, json_extract(run_data, '$.metadata') FROM {tables.runs} "  # noqa: S608
                 "WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",
                 (session_id, json.dumps([run.run_id for run in covered])),
@@ -219,7 +228,7 @@ def append_summary(
             event_ids |= seen_event_ids(metadata) | source_event_ids(metadata)
         # With nothing covered, the row sorts where the latest one does.
         after_run_index = max((run.run_index for run in covered), default=previous_index)
-        row_id = connection.exec_driver_sql(
+        row_id = connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, summary, summary_model, "  # noqa: S608
             "event_ids, seen_event_ids, created_at, segment_run_id, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -237,7 +246,7 @@ def append_summary(
         ).lastrowid
         if segment is not None:
             # A resumed approval or a CLI checkpoint stored the run before this fold.
-            connection.exec_driver_sql(
+            connection.execute(
                 f"UPDATE {tables.runs} SET run_index = (SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {tables.runs} "  # noqa: S608
                 f"WHERE session_id = ?), -1), (SELECT MAX(after_run_index) FROM {tables.summaries} "
                 "WHERE session_id = ?)) + 1) WHERE session_id = ? AND run_id = ?",
@@ -246,10 +255,12 @@ def append_summary(
     return row_id
 
 
-def segment_tool_call_ids(storage: BaseDb, *, session_id: str, run_id: str) -> set[str]:
+def segment_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
     """Return the tool calls every mid-turn fold of ``run_id`` folded, from their summary rows."""
-    with _transaction(storage) as (connection, tables):
-        segments = connection.exec_driver_sql(
+    with _read_transaction(storage) as (connection, tables):
+        if connection is None:
+            return set()
+        segments = connection.execute(
             f"SELECT segment FROM {tables.summaries} WHERE session_id = ? AND segment_run_id = ?",  # noqa: S608
             (session_id, run_id),
         ).fetchall()
@@ -281,7 +292,7 @@ def folded_tool_call_ids(segment: Mapping[str, Any]) -> set[str]:
 
 
 def history_event_ids(
-    storage: BaseDb,
+    storage: ConversationStore,
     *,
     session_id: str,
     scope_key: str,
@@ -289,8 +300,10 @@ def history_event_ids(
 ) -> set[str]:
     """Return the event ids the scope's summary rows after its latest barrier fold, as seen or as redaction matches them."""
     column = "seen_event_ids" if kind == "seen" else "event_ids"
-    with _transaction(storage) as (connection, tables):
-        rows = connection.exec_driver_sql(
+    with _read_transaction(storage) as (connection, tables):
+        if connection is None:
+            return set()
+        rows = connection.execute(
             f"SELECT value FROM {tables.summaries} AS row, json_each(row.{column}) "  # noqa: S608
             "WHERE row.session_id = ? AND row.scope_key = ? AND row.id > COALESCE("
             f"(SELECT MAX(id) FROM {tables.summaries} WHERE session_id = ? AND scope_key = ? AND summary IS NULL), 0)",
@@ -300,7 +313,7 @@ def history_event_ids(
 
 
 def cut_at_event(
-    storage: BaseDb,
+    storage: ConversationStore,
     *,
     session_id: str,
     scope_key: str,
@@ -312,7 +325,7 @@ def cut_at_event(
     An edit matches what a run answered; a redaction (``"any"``) also what it read or wrote. Returns
     whether any element held the event.
     """
-    with _transaction(storage, write=True) as (connection, tables):
+    with _write_transaction(storage) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         boundary = rows[-1].after_run_index if rows else None
         loaded_holder = next(
@@ -353,43 +366,45 @@ def cut_at_event(
 # Coverage: tests/test_compaction_redaction.py::test_redacting_legacy_provenance_clears_summary_and_folded_runs,
 # tests/test_compaction_redaction.py::test_removing_a_loaded_run_retires_a_legacy_summary, and
 # tests/test_compaction_redaction.py::test_retirement_survives_a_later_cut.
-def legacy_event_ids(storage: BaseDb, *, session_id: str, scope_key: str) -> frozenset[str] | None:
+def legacy_event_ids(storage: ConversationStore, *, session_id: str, scope_key: str) -> frozenset[str] | None:
     """Return the event ids a legacy summary in force may contain, or ``None`` when none is in force."""
-    with _transaction(storage) as (connection, tables):
+    with _read_transaction(storage) as (connection, tables):
+        if connection is None:
+            return None
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
     in_force = [row for row in _after_latest_barrier(rows) if row.legacy and row.summary is not None]
     return frozenset().union(*(row.event_ids for row in in_force)) if in_force else None
 
 
-def cut_at_legacy_row(storage: BaseDb, *, session_id: str, scope_key: str) -> None:
+def cut_at_legacy_row(storage: ConversationStore, *, session_id: str, scope_key: str) -> None:
     """Delete the legacy summary in force and everything after it: every run and later row of the scope."""
-    with _transaction(storage, write=True) as (connection, tables):
+    with _write_transaction(storage) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
         legacy = [row for row in _after_latest_barrier(rows) if row.legacy and row.summary is not None]
         if legacy:
             _cut(connection, tables, session_id, scope_key, rows, (legacy[0].after_run_index, legacy[0].id))
 
 
-def retire(storage: BaseDb, *, session_id: str, scope_key: str) -> None:
+def retire(storage: ConversationStore, *, session_id: str, scope_key: str) -> None:
     """Stop every summary of the scope from replaying or counting as seen, keeping the runs stored.
 
     A run that folded mid-turn goes with its descendants, since its stored part would replay without
     what it built on.
     """
-    with _transaction(storage, write=True) as (connection, tables):
+    with _write_transaction(storage) as (connection, tables):
         rows = _rows(connection, tables, session_id=session_id, scope_key=scope_key)
-        connection.exec_driver_sql(
+        connection.execute(
             f"INSERT INTO {tables.summaries} (session_id, scope_key, after_run_index, created_at) "  # noqa: S608
             "VALUES (?, ?, ?, ?)",
             (session_id, scope_key, rows[-1].after_run_index if rows else -1, int(time.time())),
         )
         owners = {row.segment_run_id for row in rows if row.segment_run_id is not None}
-        removed = agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, owners, session_id=session_id)
+        removed = delete_run_subtrees_in_transaction(connection, tables.names, owners, session_id=session_id)
         _record_removed(connection, tables, session_id, owners | removed)
 
 
 def _cut(
-    connection: Connection,
+    connection: sqlite3.Connection,
     tables: _Tables,
     session_id: str,
     scope_key: str,
@@ -414,36 +429,42 @@ def _cut(
         if not earlier:
             break
         cut = min(earlier)
-    removed = agno_compat_sqlite.delete_run_subtrees(connection, tables.runs, top_level, session_id=session_id)
+    removed = delete_run_subtrees_in_transaction(connection, tables.names, top_level, session_id=session_id)
     _record_removed(connection, tables, session_id, removed | owners)
-    connection.exec_driver_sql(
+    connection.execute(
         f"DELETE FROM {tables.summaries} WHERE id IN (SELECT value FROM json_each(?))",  # noqa: S608
         (json.dumps([row.id for row in deleted_rows]),),
     )
 
 
-def _record_removed(connection: Connection, tables: _Tables, session_id: str, run_ids: Collection[str]) -> None:
-    connection.exec_driver_sql(
+def _record_removed(connection: sqlite3.Connection, tables: _Tables, session_id: str, run_ids: Collection[str]) -> None:
+    connection.execute(
         f"INSERT OR IGNORE INTO {tables.removed} (run_id, session_id) SELECT value, ? FROM json_each(?)",  # noqa: S608
         (session_id, json.dumps(sorted(run_ids))),
     )
 
 
-def _is_removed(connection: Connection, tables: _Tables, run_id: str) -> bool:
+def _is_removed(connection: sqlite3.Connection, tables: _Tables, run_id: str) -> bool:
     return (
-        connection.exec_driver_sql(f"SELECT 1 FROM {tables.removed} WHERE run_id = ?", (run_id,)).first()  # noqa: S608
+        connection.execute(f"SELECT 1 FROM {tables.removed} WHERE run_id = ?", (run_id,)).fetchone()  # noqa: S608
         is not None
     )
 
 
-def _top_level_from(connection: Connection, tables: _Tables, session_id: str, scope_key: str, cut: _Key) -> list[str]:
+def _top_level_from(
+    connection: sqlite3.Connection,
+    tables: _Tables,
+    session_id: str,
+    scope_key: str,
+    cut: _Key,
+) -> list[str]:
     """Return the scope's top-level runs whose key is at or after ``cut``."""
     run_index, row_id = cut
     # A run sorts before a summary row at its own index, so a cut at a row starts after that index.
     first_index = run_index if row_id == 0 else run_index + 1
     return [
         run_id
-        for (run_id,) in connection.exec_driver_sql(
+        for (run_id,) in connection.execute(
             f"SELECT run.run_id FROM {tables.runs} AS run WHERE run.session_id = ? AND run.parent_run_id IS NULL "  # noqa: S608
             f"AND {run_scope_key_sql('run')} = ? AND run.run_index >= ?",
             (session_id, scope_key, first_index),
@@ -452,7 +473,7 @@ def _top_level_from(connection: Connection, tables: _Tables, session_id: str, sc
 
 
 def _folded_holder(
-    connection: Connection,
+    connection: sqlite3.Connection,
     tables: _Tables,
     session_id: str,
     scope_key: str,
@@ -487,16 +508,16 @@ def _folded_holder(
     return None
 
 
-def _segment_metadata(connection: Connection, tables: _Tables, row_id: int) -> Mapping[str, Any] | None:
-    (metadata,) = connection.exec_driver_sql(
+def _segment_metadata(connection: sqlite3.Connection, tables: _Tables, row_id: int) -> Mapping[str, Any] | None:
+    (metadata,) = connection.execute(
         f"SELECT json_extract(segment, '$.metadata') FROM {tables.summaries} WHERE id = ?",  # noqa: S608
         (row_id,),
-    ).one()
+    ).fetchone()
     return json.loads(metadata) if metadata is not None else None
 
 
 def _top_level_runs(
-    connection: Connection,
+    connection: sqlite3.Connection,
     tables: _Tables,
     session_id: str,
     scope_key: str,
@@ -506,7 +527,7 @@ def _top_level_runs(
     """Return the index and metadata of the scope's top-level runs meeting ``condition``, in log order."""
     return [
         (run_index, json.loads(metadata) if metadata is not None else None)
-        for run_index, metadata in connection.exec_driver_sql(
+        for run_index, metadata in connection.execute(
             f"SELECT run.run_index, json_extract(run.run_data, '$.metadata') FROM {tables.runs} AS run "  # noqa: S608
             f"WHERE run.session_id = ? AND run.parent_run_id IS NULL AND {run_scope_key_sql('run')} = ? "
             f"AND {condition} ORDER BY run.run_index",
@@ -522,7 +543,7 @@ def _holds(metadata: Mapping[str, Any] | None, event_id: str, match: Literal["an
 
 
 def _rows(
-    connection: Connection,
+    connection: sqlite3.Connection,
     tables: _Tables,
     *,
     session_id: str,
@@ -539,7 +560,7 @@ def _rows(
             event_ids=frozenset(json.loads(event_ids)),
             segment_run_id=segment_run_id,
         )
-        for row_id, after_run_index, summary, legacy, event_ids, segment_run_id in connection.exec_driver_sql(
+        for row_id, after_run_index, summary, legacy, event_ids, segment_run_id in connection.execute(
             f"SELECT id, after_run_index, summary, legacy, event_ids, segment_run_id FROM {tables.summaries} "  # noqa: S608
             f"WHERE session_id = ? AND scope_key = ? ORDER BY id DESC{' LIMIT 1' if latest_only else ''}",
             (session_id, scope_key),
@@ -553,31 +574,20 @@ def _after_latest_barrier(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
     return [row for row in rows if row.id > barrier]
 
 
-def _sqlite(storage: BaseDb) -> SqliteDb:
-    if not isinstance(storage, SqliteDb):
-        msg = "Summary rows require SQLite session storage"
-        raise TypeError(msg)
-    return storage
-
-
-def _tables(db: SqliteDb) -> _Tables:
-    """Return the log's table names, creating Agno's runs table first, as a session that never saved a run lacks it."""
-    summaries, removed = summary_rows_table_names(db.session_table_name)
-    return _Tables(
-        runs=quote_identifier(agno_compat_sqlite.owned_table(db, "runs").name),
-        summaries=quote_identifier(summaries),
-        removed=quote_identifier(removed),
-    )
+@contextmanager
+def _write_transaction(storage: ConversationStore) -> Iterator[tuple[sqlite3.Connection, _Tables]]:
+    """Run one write transaction on the log; it creates the log's tables and takes the write lock up front."""
+    with storage.transaction(write=True) as connection:
+        yield connection, _Tables(storage.names)
 
 
 @contextmanager
-def _transaction(storage: BaseDb, *, write: bool = False) -> Iterator[tuple[Connection, _Tables]]:
-    """Run one transaction on the log, creating its tables first; a write takes the write lock up front."""
-    db = _sqlite(storage)
-    tables = _tables(db)
-    with db.db_engine.connect() as connection:
-        connection.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
-        for statement in summary_rows_schema_sql(db.session_table_name):
-            connection.exec_driver_sql(statement)
-        yield connection, tables
-        connection.commit()
+def _read_transaction(storage: ConversationStore) -> Iterator[tuple[sqlite3.Connection | None, _Tables]]:
+    """Run one read of the log in a snapshot; a database without a log yet, as before its first write, yields none."""
+    with storage.transaction(write=False) as connection:
+        yield (connection if _has_log(connection, storage.names) else None), _Tables(storage.names)
+
+
+def _has_log(connection: sqlite3.Connection, names: TableNames) -> bool:
+    stored = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    return {names.runs, names.summaries, names.removed_runs} <= stored

@@ -12,6 +12,28 @@ from dataclasses import dataclass
 from mindroom.history.summary_rows_schema import summary_rows_schema_sql, summary_rows_table_names
 from mindroom.usage.storage import quote_identifier, usage_table_sql
 
+# The columns of Agno 3's sessions table, which the schema preflight requires of an existing database.
+SESSION_COLUMNS = (
+    "session_id",
+    "session_type",
+    "agent_id",
+    "team_id",
+    "workflow_id",
+    "user_id",
+    "session_data",
+    "agent_data",
+    "team_data",
+    "workflow_data",
+    "metadata",
+    "summary",
+    "created_at",
+    "updated_at",
+)
+_SESSION_COLUMN_SQL = (
+    "session_id VARCHAR NOT NULL, session_type VARCHAR NOT NULL, agent_id VARCHAR, team_id VARCHAR, "
+    "workflow_id VARCHAR, user_id VARCHAR, session_data JSON, agent_data JSON, team_data JSON, workflow_data JSON, "
+    "metadata JSON, summary JSON, created_at BIGINT NOT NULL, updated_at BIGINT"
+)
 _RUNS_INDEXED_COLUMNS = (
     "session_id",
     "run_type",
@@ -64,10 +86,7 @@ def run_log_sql(names: TableNames) -> tuple[str, ...]:
     """
     sessions, runs = quote_identifier(names.sessions), quote_identifier(names.runs)
     return (
-        f"CREATE TABLE IF NOT EXISTS {sessions} (session_id VARCHAR NOT NULL, session_type VARCHAR NOT NULL, "
-        "agent_id VARCHAR, team_id VARCHAR, workflow_id VARCHAR, user_id VARCHAR, session_data JSON, "
-        "agent_data JSON, team_data JSON, workflow_data JSON, metadata JSON, summary JSON, "
-        "created_at BIGINT NOT NULL, updated_at BIGINT, PRIMARY KEY (session_id))",
+        f"CREATE TABLE IF NOT EXISTS {sessions} ({_SESSION_COLUMN_SQL}, PRIMARY KEY (session_id))",
         _index_sql(names.sessions, "session_type"),
         _index_sql(names.sessions, "created_at"),
         f"CREATE TABLE IF NOT EXISTS {runs} (run_id VARCHAR NOT NULL, session_id VARCHAR NOT NULL, "
@@ -86,6 +105,7 @@ def _index_sql(table: str, *columns: str) -> str:
 
 
 __all__ = [
+    "SESSION_COLUMNS",
     "TableNames",
     "run_log_sql",
     "schema_sql",

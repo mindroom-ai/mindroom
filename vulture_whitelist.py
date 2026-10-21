@@ -338,9 +338,6 @@ _._validate_connection  # Pydantic validator (src/mindroom/config/voice.py)
 # vulture does not resolve.
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
-_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
-_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/session_storage/agno_compat_run_messages.py)
-_enable_foreign_keys  # SQLAlchemy connect listener (src/mindroom/session_storage/agent_storage.py)
 
 export_threads  # FastAPI endpoint (src/mindroom/api/thread_exports.py)
 
@@ -415,9 +412,6 @@ _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/scrip
 _.prompt_cache_breakpoints  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
 _.child_run_id  # Stored tool-execution field read by the owned team runtime when it lands (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
-_.load_session  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
-_.save_session_fields  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
-_.list_updated_sessions  # Store method called by the owned background readers when they are wired (src/mindroom/session_storage/store.py)
-_.prompt_id  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
-_.loop_start_ids  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
 _.native_compaction_settings  # Claude adapter method the history replay planner calls once it is wired (src/mindroom/providers/anthropic/messages.py)
+_.delete_run_subtrees  # Store method the runtime cutover calls in place of Agno's delete_runs (src/mindroom/session_storage/store.py)
+_.loop_start_ids  # Loop state read by mid-turn compaction when the owned agent loop lands (src/mindroom/agent_loop/model_loop.py)

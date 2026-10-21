@@ -20,9 +20,8 @@ from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
 
 @dataclass(frozen=True)
@@ -46,7 +45,7 @@ def one_line(text: str) -> str:
     return " ".join(text.split())
 
 
-def run_requester(run: RunOutput | TeamRunOutput) -> str | None:
+def run_requester(run: AnyRunRecord) -> str | None:
     """Return the person a stored turn answered."""
     requester = (run.metadata or {}).get("requester_id") or run.user_id
     return requester if isinstance(requester, str) else None
@@ -66,7 +65,7 @@ def _prompt_utterances(message: Message, content: str, requester: str, *, mindro
     return found
 
 
-def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> list[Utterance]:
+def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance]:
     """Return what was said in one stored turn, oldest first.
 
     Only turns the agent's own history shows count, never copies of earlier turns. A prompt MindRoom wrote is nobody's
@@ -84,7 +83,7 @@ def utterances(run: RunOutput | TeamRunOutput, *, agent_work: bool = False) -> l
     keeps_reply = agent_work or not is_interrupted_replay_run(run)
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
-    for message in run.messages or []:
+    for message in run.messages:
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue

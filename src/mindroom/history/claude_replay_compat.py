@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mindroom.history.run_visibility import is_queued_notice_message
 
 if TYPE_CHECKING:
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
 
 
 def strip_stale_anthropic_replay_fields(messages: list[Message]) -> int:

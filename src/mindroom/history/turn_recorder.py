@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from agno.run.base import RunStatus
-
 from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
+from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -42,7 +41,7 @@ class TurnRecorder:
         self.folded_tool_call_ids.update(tool_call_ids)
 
     def set_run_id(self, run_id: str | None) -> None:
-        """Replace the current top-level Agno run identifier."""
+        """Replace the current top-level run identifier."""
         self.run_id = run_id or None
 
     def set_response_event_id(self, response_event_id: str | None) -> None:

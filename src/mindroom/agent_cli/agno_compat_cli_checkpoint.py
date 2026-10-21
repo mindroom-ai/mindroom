@@ -15,7 +15,7 @@ from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.tools.function import FunctionExecutionResult, ToolResult
 
-from mindroom.session_storage.agent_storage import run_session_storage_operation, save_runs
+from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -248,7 +248,7 @@ class ProviderBatchCheckpoint:
             self.catalog.agent,
             self.catalog.session,
             self.catalog.run_context.session_state,
-            lambda database, session: save_runs(database, session, [run]),
+            lambda database, session: database.save_runs(session, [run]),
         )
 
 

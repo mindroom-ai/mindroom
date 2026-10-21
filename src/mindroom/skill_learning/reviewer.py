@@ -30,7 +30,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.providers import model_loading
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
-from mindroom.session_storage.agent_storage import create_session_storage, load_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.tool_call_budget import install_model_call_cap
@@ -248,12 +248,10 @@ async def _replay(
     """
     model_name = _replay_model_name(config, runtime_paths, agent_name, identity, captured)
     session = await asyncio.to_thread(
-        load_agent_session,
-        agent_name,
-        config,
-        runtime_paths,
-        session_id,
-        execution_identity=identity,
+        lambda: create_session_storage(agent_name, config, runtime_paths, execution_identity=identity).load_session(
+            session_id,
+            "agent",
+        ),
     )
     if session is None:
         return None

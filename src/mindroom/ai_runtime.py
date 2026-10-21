@@ -29,7 +29,7 @@ from mindroom.history.run_visibility import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.agent_storage import runs_without, save_runs
+from mindroom.session_storage.agent_storage import runs_without
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -571,24 +571,21 @@ def _finalize_queued_notice_in_new_session_storage(
 ) -> None:
     """Finalize one response in a worker-owned session storage handle."""
     storage = target.storage_factory()
-    try:
-        raw_session = storage.get_session(target.session_id, target.session_type)
-        if raw_session is None:
-            return
-        session = _load_queued_notice_session(
-            cast("AgentSession | TeamSession | dict[str, object]", raw_session),
-            session_type=target.session_type,
-        )
-        if session is None:
-            return
-        changed_runs = _finalize_queued_notice_in_runs(
-            _session_run_outputs(session),
-            response_turn_id=response_turn_id,
-        )
-        if changed_runs:
-            save_runs(storage, session, changed_runs)
-    finally:
-        storage.close()
+    raw_session = storage.get_session(target.session_id, target.session_type)
+    if raw_session is None:
+        return
+    session = _load_queued_notice_session(
+        cast("AgentSession | TeamSession | dict[str, object]", raw_session),
+        session_type=target.session_type,
+    )
+    if session is None:
+        return
+    changed_runs = _finalize_queued_notice_in_runs(
+        _session_run_outputs(session),
+        response_turn_id=response_turn_id,
+    )
+    if changed_runs:
+        storage.save_runs(session, changed_runs)
 
 
 def register_queued_notice_storage(
@@ -747,7 +744,7 @@ def scrub_queued_notice_session_context(
             active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
         )
         if changed_runs:
-            save_runs(scope_context.storage, scope_context.session, changed_runs)
+            scope_context.storage.save_runs(scope_context.session, changed_runs)
     except Exception:
         logger.exception(
             "Failed to recover queued-message notice in loaded session history",
