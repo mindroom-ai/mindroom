@@ -7,12 +7,12 @@ import { useDarkMode } from '@/hooks/useDarkMode'
 // The films are GitHub attachments so the video files stay out of Git history; next.config's media-src allows their hosts.
 const FILMS = {
   light: {
-    src: 'https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564',
-    poster: 'https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751',
+    src: 'https://github.com/user-attachments/assets/fcc38c9c-61ba-4db4-b026-4f947c931381',
+    poster: 'https://github.com/user-attachments/assets/1e6ecd17-024a-497d-8c12-041dbeaf5438',
   },
   dark: {
-    src: 'https://github.com/user-attachments/assets/f99556da-f289-49fe-a365-7c2a8bb93c77',
-    poster: 'https://github.com/user-attachments/assets/7c8011bd-22b7-4795-8d4d-ab2864c7b118',
+    src: 'https://github.com/user-attachments/assets/67ca35c1-e66c-40c7-8295-740d57ceec92',
+    poster: 'https://github.com/user-attachments/assets/320881ba-a36d-4c00-949d-f4f56dc3d15c',
   },
 }
 // Both films run 49 seconds; update this with them.

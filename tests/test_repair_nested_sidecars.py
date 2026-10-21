@@ -158,7 +158,7 @@ async def test_repair_flattens_history_for_a_fresh_database(journal_store: Event
     )
     reader = await SidecarTests._reader(fresh_store, fresh_client)
     page = await reader.read_strict(room_id=ROOM, thread_id="$thread", limit=10)
-    assert [message.content["m.new_content"]["body"] for message in page.messages] == ["Complete original answer"]
+    assert [message.content for message in page.messages] == [{"msgtype": "m.text", "body": "Complete original answer"}]
     assert page.refresh_pending == ()
     assert fresh_client.downloads == ["mxc://example.org/inner"]
 

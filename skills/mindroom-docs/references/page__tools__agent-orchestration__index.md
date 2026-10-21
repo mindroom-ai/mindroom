@@ -503,6 +503,7 @@ If the dashboard frontend and the Python backend sit behind separate upstreams, 
 
 `config_manager` is the full configuration control plane: it reads and patches any authored config field and creates or updates agents and teams.
 It can change every agent and team, so give it only to agents that administrators drive; use [`self_config`](#self_config) for narrow self-tuning.
+The starter configuration from `mindroom config init` or a new hosted instance gives it to Mind, with [tool approval](https://docs.mindroom.chat/tool-approval/) rules that make each `manage_config` patch, `manage_agent` create or update, and `manage_team` call wait for the requester's approval.
 
 ```yaml
 agents:
