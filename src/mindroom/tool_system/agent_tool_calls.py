@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutputEvent
     from agno.session.agent import AgentSession
 
+    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -54,13 +55,12 @@ if TYPE_CHECKING:
 class DeferredAgentToolkit:
     """Metadata and the owning turn's normal factory; listing never calls it.
 
-    Factory includes normal configuration, filtering, hooks and connection.
-    Materialized toolkits join Agent.tools and use its normal cleanup.
+    Factory includes normal configuration, filtering, approval policy, and adaptation to the tools the loop runs.
     """
 
     name: str
     description: str
-    materialize: Callable[[], Awaitable[Toolkit]]
+    materialize: Callable[[], Awaitable[AdaptedToolkit]]
 
 
 @dataclass(frozen=True, slots=True)

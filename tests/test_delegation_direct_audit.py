@@ -27,9 +27,10 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     get_tool_execution_identity,
@@ -216,15 +217,13 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
 
 @pytest.mark.asyncio
 async def test_real_parent_tool_call_records_direct_provenance_without_schema_fields(tmp_path: Path) -> None:
-    """A real Agno parent call must bind its run and call IDs without exposing them in the tool schema."""
+    """A parent's call binds its run and call IDs to the child without exposing them in the tool schema."""
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
-    function = tools.async_functions["run_subagent"]
-    schema = cached_processed_schema(function, strict=False)
-    assert schema is not None
+    function = adapt_function(tools.async_functions["run_subagent"])
     # Minimal mode is hidden here because no allowed subagent can run it.
-    assert set(schema.parameters["properties"]) == {"agent_name", "task", "model"}
+    assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 
     async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
         callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
@@ -241,33 +240,22 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
         )
         return "child result"
 
-    parent = Agent(
-        name="leader",
-        model=_ToolThenErrorModel(
-            id="parent-model",
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        _tool_call("run_subagent", "parent-delegate-call", agent_name="child", task="Do the work"),
-                    ],
-                ),
-                ModelResponse(content="parent complete"),
-            ],
-        ),
-        tools=[tools],
-    )
     with (
         tool_runtime_context(context),
         patch("mindroom.ai.ai_response", side_effect=complete_child),
     ):
-        response = await parent.arun(
-            "delegate",
-            session_id="parent-session",
-            run_id="parent-run",
-            user_id=_identity().requester_id,
+        outcome = await execute_tool_call(
+            function,
+            {"agent_name": "child", "task": "Do the work"},
+            ToolCallContext(
+                run_id="parent-run",
+                session_id="parent-session",
+                user_id=_identity().requester_id,
+                call_id="parent-delegate-call",
+            ),
         )
 
-    assert response.status == RunStatus.completed
+    assert not outcome.is_error
     run = _only_run(tmp_path)
     assert run["parent_run_id"] == "parent-run"
     assert run["parent_tool_call_id"] == "parent-delegate-call"

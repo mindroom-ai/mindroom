@@ -15,7 +15,6 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 from agno.team import Team
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -38,6 +37,7 @@ from tests.delegation_helpers import (
 )
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
@@ -89,10 +89,9 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             if name == "run_subagent":
                 return await toolkit.run_subagent(task=str(args["task"]), model=model)
             return await toolkit.continue_subagent(subagent_id=str(args["subagent_id"]), message=str(args["message"]))
-        apply_tool_approval_capability(
+        with_agno_approval_flags(
             toolkit,
             config,
-            supports_native_tool_approval=True,
             registered_tool_name="delegate",
         )
         storage = create_session_storage("leader", config, paths, identity)

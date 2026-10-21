@@ -13,7 +13,7 @@ from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.team import Team
 
-from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
+from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
@@ -35,6 +35,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
 )
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -95,10 +96,9 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
         )
         assert toolkit is not None
         bind_toolkit_authority(toolkit, authored_name="delegate")
-        apply_tool_approval_capability(
+        with_agno_approval_flags(
             toolkit,
             config,
-            supports_native_tool_approval=True,
             registered_tool_name="delegate",
         )
         arguments = {"agent_name": "code", "task": "Research"}

@@ -17,7 +17,7 @@ from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.agent_loop.tools import prepare_run_tools
-from mindroom.agents import apply_tool_approval_capability, create_agent
+from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
@@ -72,6 +72,7 @@ from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2173,24 +2174,12 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
         """Plugin function that shares the runner's name."""
         return "plugin"
 
-    scheduler = apply_tool_approval_capability(
-        SchedulerTools(),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="scheduler",
-    )
-    plugin = apply_tool_approval_capability(
-        Toolkit(name="plugin", tools=[run_scheduled_call]),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="plugin",
-    )
+    scheduler = gated_functions(SchedulerTools(), config, registered_tool_name="scheduler")
+    plugin = gated_functions(Toolkit(name="plugin", tools=[run_scheduled_call]), config, registered_tool_name="plugin")
 
-    assert scheduler is not None
-    assert plugin is not None
-    assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
-    assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
-    assert plugin.functions["run_scheduled_call"].requires_confirmation is True
+    assert scheduler["run_scheduled_call"].requires_confirmation is not True
+    assert scheduler["schedule_tool_call"].requires_confirmation is True
+    assert plugin["run_scheduled_call"].requires_confirmation is True
 
 
 def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:

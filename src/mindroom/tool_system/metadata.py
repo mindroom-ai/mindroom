@@ -58,12 +58,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from types import ModuleType
 
-    from agno.tools import Toolkit
-
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.agno_toolkits import Toolkit
 
 logger = get_logger(__name__)
 

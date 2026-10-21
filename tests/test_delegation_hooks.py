@@ -12,7 +12,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -43,6 +42,7 @@ from tests.delegation_helpers import (
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity, _only_run
 from tests.test_tool_hooks import _plugin
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -135,7 +135,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
 
         monkeypatch.setattr("mindroom.delegation.execution._execute_child", cancelled)
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",
@@ -233,7 +233,7 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
     child_model = DelegationModel(id="test-child", responses=[ModelResponse(content="Child done")])
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: child_model)
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",

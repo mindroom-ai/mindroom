@@ -19,7 +19,6 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
@@ -42,6 +41,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import lookup, run_journal_statements_inline, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -180,10 +180,9 @@ class DelegationFuzzRunner:
         pin_background_tool_jobs(self.config, self.paths)
         self.runtime: ProcessRuntime
         self.toolkit = DelegateTools("leader", ["code"], self.paths, self.config, execution_identity=self.identity)
-        apply_tool_approval_capability(
+        with_agno_approval_flags(
             self.toolkit,
             self.config,
-            supports_native_tool_approval=True,
             registered_tool_name="delegate",
         )
         bind_toolkit_authority(self.toolkit, authored_name="delegate")

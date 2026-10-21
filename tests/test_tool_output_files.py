@@ -9,12 +9,11 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
 from agno.media import Image
-from agno.models.openai.chat import OpenAIChat
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 from pydantic import BaseModel
@@ -30,6 +29,7 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -47,6 +47,8 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from mindroom.tool_system.tool_function import ToolFunction
+
 
 def _policy(tmp_path: Path, *, max_bytes: int = 1024 * 1024) -> ToolOutputFilePolicy:
     return ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=max_bytes)
@@ -62,23 +64,7 @@ def _processed(function: Function) -> Function:
     return copied
 
 
-def _processed_strict(function: Function) -> Function:
-    copied = function.model_copy(deep=True)
-    copied.process_entrypoint(strict=True)
-    return copied
-
-
-def _openai_tool_payload(function: Function, *, strict: bool) -> dict[str, object]:
-    copied = function.model_copy(deep=True)
-    effective_strict = strict if copied.strict is None else copied.strict
-    copied.process_entrypoint(strict=effective_strict)
-    formatted_tools = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([copied])
-    payload = formatted_tools[0]["function"]
-    assert isinstance(payload, dict)
-    return payload
-
-
-def _assert_output_path_schema_is_optional(function: Function) -> None:
+def _assert_output_path_schema_is_optional(function: Function | ToolFunction) -> None:
     output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
     assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert output_schema["default"] is None
@@ -229,34 +215,54 @@ def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) ->
     toolkit = _EchoToolkit()
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
 
-    function = _processed(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
+    assert list(function.parameters["properties"]) == ["text", OUTPUT_PATH_ARGUMENT]
+    assert function.parameters["required"] == ["text"]
     _assert_output_path_schema_is_optional(function)
 
 
-def test_schema_keeps_output_path_optional_after_strict_processing(tmp_path: Path) -> None:
+def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_path: Path) -> None:
+    """A strict schema would require the output path, so a wrapped function is offered non-strict."""
     toolkit = _EchoToolkit()
+    _first_function(toolkit).strict = True
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
 
-    function = _processed_strict(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
-    assert "text" in function.parameters["required"]
+    assert function.strict is False
+    assert function.definition().strict is False
+    assert function.parameters["required"] == ["text"]
     _assert_output_path_schema_is_optional(function)
 
 
-def test_openai_payload_opts_wrapped_tool_out_of_strict_mode(tmp_path: Path) -> None:
+def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path) -> None:
+    """The argument takes the position the wrapper's signature gives it, ahead of ``**kwargs``."""
+
+    def tagged(name: str, **kwargs: object) -> str:
+        return f"{name}{kwargs}"
+
+    function = Function(name="tagged", entrypoint=tagged)
+    wrap_function_for_output_files(function, _policy(tmp_path))
+
+    adapted = adapt_function(function)
+
+    assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT, "kwargs"]
+    _assert_output_path_schema_is_optional(adapted)
+
+
+def test_adapting_a_toolkit_completes_only_the_wrapped_functions(tmp_path: Path) -> None:
+    def plain(text: str) -> str:
+        return text
+
     toolkit = _EchoToolkit()
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    toolkit.register(plain)
 
-    payload = _openai_tool_payload(_first_function(toolkit), strict=True)
+    echo, plain_function = adapt_toolkit(toolkit).functions
 
-    parameters = payload["parameters"]
-    assert isinstance(parameters, dict)
-    output_schema = parameters["properties"][OUTPUT_PATH_ARGUMENT]
-    assert payload["strict"] is False
-    assert output_schema["default"] is None
-    assert output_schema["description"].startswith("Optional")
-    assert OUTPUT_PATH_ARGUMENT not in parameters["required"]
+    _assert_output_path_schema_is_optional(echo)
+    assert list(plain_function.parameters["properties"]) == ["text"]
 
 
 def test_schema_handles_strict_or_additional_properties_false_function(tmp_path: Path) -> None:
@@ -307,7 +313,7 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
     _assert_output_path_schema_is_optional(function)
 
 
-def test_schema_handles_skip_entrypoint_processing_function_in_strict_mode(tmp_path: Path) -> None:
+def test_skip_entrypoint_processing_function_keeps_its_schema_and_an_optional_output_path(tmp_path: Path) -> None:
     def decorated_style_tool(**kwargs: object) -> object:
         return kwargs["text"]
 
@@ -320,27 +326,15 @@ def test_schema_handles_skip_entrypoint_processing_function_in_strict_mode(tmp_p
             "required": ["text"],
         },
         skip_entrypoint_processing=True,
+        strict=True,
     )
     wrap_function_for_output_files(function, _policy(tmp_path))
 
-    function = _processed_strict(function)
+    adapted = adapt_function(function)
 
-    assert "text" in function.parameters["required"]
-    _assert_output_path_schema_is_optional(function)
-
-
-def test_model_copy_update_preserves_output_path_schema_postprocessor(tmp_path: Path) -> None:
-    toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-
-    copied = cast("Any", _first_function(toolkit).model_copy)(
-        update={"description": "Updated description"},
-        deep=True,
-    )
-    copied.process_entrypoint()
-
-    assert copied.description == "Updated description"
-    _assert_output_path_schema_is_optional(copied)
+    assert adapted.strict is False
+    assert adapted.parameters["required"] == ["text"]
+    _assert_output_path_schema_is_optional(adapted)
 
 
 def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -> None:
@@ -378,7 +372,7 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
     toolkit = _EchoToolkit()
     wrap_toolkit_for_output_files(toolkit, None)
 
-    function = _processed(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
     assert OUTPUT_PATH_ARGUMENT not in inspect.signature(function.entrypoint).parameters
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]

@@ -11,7 +11,6 @@ from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 from agno.team import Team
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,6 +29,7 @@ from tests.delegation_helpers import (
 )
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,10 +76,9 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
             if not expect_child:
                 assert "Cannot delegate" in result
         else:
-            apply_tool_approval_capability(
+            with_agno_approval_flags(
                 toolkit,
                 config,
-                supports_native_tool_approval=True,
                 registered_tool_name="delegate",
             )
             storage = create_session_storage("leader", config, paths, identity)

@@ -42,7 +42,6 @@ from google.genai import _api_client as genai_api_client
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, Field
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -59,6 +58,7 @@ from mindroom.session_storage import agno_compat_run_messages
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 from mindroom.tool_jobs import agno_compat_execution
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1327,10 +1327,9 @@ def _approval_gated(toolkit: Toolkit) -> dict[str, dict[str, Any]]:
     config = Config.model_validate(
         {"tool_approval": {"rules": [{"match": "send_invoice", "action": "require_approval"}]}},
     )
-    gated = apply_tool_approval_capability(
+    gated = with_agno_approval_flags(
         toolkit,
         config,
-        supports_native_tool_approval=True,
         registered_tool_name=toolkit.name,
     )
     assert gated is not None

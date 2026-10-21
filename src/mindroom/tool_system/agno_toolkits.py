@@ -5,6 +5,7 @@ derives each schema and wraps each entrypoint in pydantic coercion.
 This module is where the owned loop meets those objects, in both directions: it turns a toolkit's functions into
 ``ToolFunction`` values once, and at call time it builds the Agno-shaped arguments an entrypoint declares and reads
 the Agno ``ToolResult`` it returns back into owned values.
+It is also the one place MindRoom modules outside the tool and toolkit packages import Agno's tool types from.
 """
 
 from __future__ import annotations
@@ -14,8 +15,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, get_type_hints
 
-from agno import media as agno_media
+from agno.media import Audio as AgnoAudio
+from agno.media import File as AgnoFile
+from agno.media import Image as AgnoImage
+from agno.media import Video as AgnoVideo
 from agno.run import RunContext
+from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 from agno.utils.schema import (
     AGNO_INJECTED_PARAMS,
@@ -28,12 +33,11 @@ from agno.utils.schema import (
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import finished_tool_schema
 from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    from agno.tools import Toolkit
 
     from mindroom.tool_system.invocation import ToolCallContext
 
@@ -68,10 +72,11 @@ def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolki
 
 
 def adapt_function(function: Function) -> ToolFunction:
-    """Process one Agno function once, on a copy, and return it as a ``ToolFunction``.
+    """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
 
     ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
-    wrapper, so the shared ``Function`` stays untouched for whoever else holds it.
+    wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A MindRoom wrapper that forges its
+    entrypoint's signature declares how the schema Agno derives from it is completed.
     """
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
@@ -84,7 +89,7 @@ def adapt_function(function: Function) -> ToolFunction:
     return ToolFunction(
         name=prepared.name,
         description=prepared.description,
-        parameters=prepared.parameters,
+        parameters=finished_tool_schema(function.entrypoint, prepared.parameters),
         strict=prepared.strict,
         requires_confirmation=prepared.requires_confirmation,
         approval_type=prepared.approval_type,
@@ -125,9 +130,10 @@ def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
 
 # AGNO_COMPAT: Agno toolkits take the calling agent as a parameter.
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
-# with those types, and the owned loop has no Agno agent to inject. Of Agno's toolkits only DaytonaTools reads the
-# parameter, and it reads and writes ``agent.session_state``; MindRoom's own tools that read more are ported to
-# ``run_context``.
+# with those types, and the owned loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
+# DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
+# SuperserveTools also do. MindRoom's own tools read their caller from the tool runtime context, except the
+# scheduler, whose scheduled-call lookup still reads the Agno agent's tools.
 # Upstream issue: Tracking gap; Agno defines no contract for what a toolkit may read from the injected agent, so a
 # toolkit can depend on any Agent attribute.
 # Upstream PR: None identified.
@@ -182,6 +188,12 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
         elif annotation_binds(hint, (RunContext,)):
             arguments[name] = run_context
     return arguments
+
+
+def warm_agno_tool_imports() -> None:
+    """Import the agent and team types Agno resolves while it builds tool schemas, so later builds skip the cost."""
+    from agno.agent import Agent  # noqa: PLC0415, F401 - Imported for its side effect of loading the module.
+    from agno.team import Team  # noqa: PLC0415, F401
 
 
 def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dict[str, Any]:
@@ -263,8 +275,8 @@ def tool_value(result: object) -> ToolValue:
     )
 
 
-def _agno_image(image: Image) -> agno_media.Image:
-    return agno_media.Image(
+def _agno_image(image: Image) -> AgnoImage:
+    return AgnoImage(
         id=image.id,
         url=image.url,
         filepath=image.filepath,
@@ -279,8 +291,8 @@ def _agno_image(image: Image) -> agno_media.Image:
     )
 
 
-def _agno_audio(audio: Audio) -> agno_media.Audio:
-    return agno_media.Audio(
+def _agno_audio(audio: Audio) -> AgnoAudio:
+    return AgnoAudio(
         id=audio.id,
         url=audio.url,
         filepath=audio.filepath,
@@ -296,8 +308,8 @@ def _agno_audio(audio: Audio) -> agno_media.Audio:
     )
 
 
-def _agno_video(video: Video) -> agno_media.Video:
-    return agno_media.Video(
+def _agno_video(video: Video) -> AgnoVideo:
+    return AgnoVideo(
         id=video.id,
         url=video.url,
         filepath=video.filepath,
@@ -315,10 +327,10 @@ def _agno_video(video: Video) -> agno_media.Video:
     )
 
 
-def _agno_file(file: File) -> agno_media.File:
+def _agno_file(file: File) -> AgnoFile:
     # Agno's File accepts only its MIME allow-list; an owned file keeps any value, so an unlisted one is not passed.
-    mime_type = file.mime_type if file.mime_type in agno_media.File.valid_mime_types() else None
-    return agno_media.File(
+    mime_type = file.mime_type if file.mime_type in AgnoFile.valid_mime_types() else None
+    return AgnoFile(
         id=file.id,
         url=file.url,
         filepath=file.filepath,
@@ -342,7 +354,7 @@ def _filepath(filepath: object) -> str | None:
     return None if filepath is None else str(filepath)
 
 
-def _owned_image(image: agno_media.Image) -> Image:
+def _owned_image(image: AgnoImage) -> Image:
     return Image(
         **_media_id(image.id),
         url=image.url,
@@ -358,7 +370,7 @@ def _owned_image(image: agno_media.Image) -> Image:
     )
 
 
-def _owned_audio(audio: agno_media.Audio) -> Audio:
+def _owned_audio(audio: AgnoAudio) -> Audio:
     return Audio(
         **_media_id(audio.id),
         url=audio.url,
@@ -375,7 +387,7 @@ def _owned_audio(audio: agno_media.Audio) -> Audio:
     )
 
 
-def _owned_video(video: agno_media.Video) -> Video:
+def _owned_video(video: AgnoVideo) -> Video:
     return Video(
         **_media_id(video.id),
         url=video.url,
@@ -394,7 +406,7 @@ def _owned_video(video: agno_media.Video) -> Video:
     )
 
 
-def _owned_file(file: agno_media.File) -> File:
+def _owned_file(file: AgnoFile) -> File:
     content = file.content if isinstance(file.content, bytes | str) else None
     return File(
         **_media_id(file.id),
@@ -413,13 +425,21 @@ def _owned_file(file: agno_media.File) -> File:
 
 __all__ = [
     "AdaptedToolkit",
+    "AgnoAudio",
+    "AgnoFile",
+    "AgnoImage",
+    "AgnoVideo",
+    "Function",
     "StreamCollector",
     "ToolCallActor",
+    "ToolResult",
     "ToolValue",
+    "Toolkit",
     "adapt_function",
     "adapt_toolkit",
     "framework_arguments",
     "injected_parameter_names",
     "model_arguments",
     "tool_value",
+    "warm_agno_tool_imports",
 ]

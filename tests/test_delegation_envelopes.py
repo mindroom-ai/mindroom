@@ -14,7 +14,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, ToolCallCompletedEvent
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -35,6 +34,7 @@ from tests.delegation_helpers import (
 )
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity, _only_run
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,12 +122,8 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     paths = _runtime_paths(tmp_path)
     identity = _identity()
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=native,
-        registered_tool_name="delegate",
-    )
+    if native:
+        with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",
@@ -306,7 +302,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
     identity = _identity()
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",

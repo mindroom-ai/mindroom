@@ -17,7 +17,6 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
@@ -66,6 +65,7 @@ from tests.delegation_helpers import (
     _delegate_runtime_context,
     _runtime_paths,
 )
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     SpanRecorder,
@@ -129,10 +129,9 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     bind_toolkit_construction(delegate, ToolConstruction("delegate", None))
     bind_toolkit_authority(delegate, authored_name="delegate")
-    apply_tool_approval_capability(
+    with_agno_approval_flags(
         delegate,
         config,
-        supports_native_tool_approval=True,
         registered_tool_name="delegate",
     )
     jobs = JobTools(paths, owner)
@@ -218,7 +217,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, owner)
     parent = Agent(
         name="leader",
@@ -354,7 +353,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     bind_toolkit_authority(toolkit, authored_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     release = asyncio.Event()
@@ -585,7 +584,7 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     bind_toolkit_authority(toolkit, authored_name="delegate")
     storages = [create_session_storage("leader", config, paths, identity)]
     side_effects: list[str] = []
@@ -702,7 +701,7 @@ async def test_a_resumed_child_runs_under_the_policy_current_when_it_resumes(  #
     cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     toolkit = DelegateTools("leader", ["code"], paths, start, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, start, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, start, registered_tool_name="delegate")
     bind_toolkit_authority(toolkit, authored_name="delegate")
     storages = [create_session_storage("leader", start, paths, identity)]
     side_effects: list[str] = []
@@ -893,7 +892,7 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     agent = Agent(
         name="leader",
@@ -1028,7 +1027,7 @@ async def test_inline_child_failure_retains_liveness_through_settlement(
     storage = create_session_storage("leader", config, paths, owner)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     bind_toolkit_authority(toolkit, authored_name="delegate")
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     model = DelegationModel(
         id="test",
         responses=[
@@ -1110,7 +1109,7 @@ async def _drive_background_child(
     storage = create_session_storage("leader", config, paths, _BACKGROUND_PARENT)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_BACKGROUND_PARENT)
     bind_toolkit_authority(toolkit, authored_name="delegate")
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     model = DelegationModel(
         id="test",
         responses=[

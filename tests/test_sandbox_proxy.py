@@ -59,6 +59,7 @@ from mindroom.credentials.manager import CredentialsManager, get_runtime_credent
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -870,8 +871,7 @@ def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.Mon
         tool_output_workspace_root=tmp_path,
         worker_target=None,
     )
-    function = tool.functions["add"].model_copy(deep=True)
-    function.process_entrypoint()
+    function = adapt_function(tool.functions["add"])
 
     output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
     assert output_schema["description"].startswith("Optional")

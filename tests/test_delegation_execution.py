@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agents import apply_tool_approval_capability
+from mindroom.agents import _hide_unresumable_approval_functions, apply_tool_approval_capability
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -49,6 +49,7 @@ from tests.delegation_helpers import (
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -431,13 +432,8 @@ def test_native_delegate_uses_external_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    apply_tool_approval_capability(
-        toolkit,
-        Config(),
-        supports_native_tool_approval=True,
-        registered_tool_name="delegate",
-    )
-    assert toolkit.async_functions["run_subagent"].external_execution is True
+    functions = gated_functions(toolkit, Config(), registered_tool_name="delegate")
+    assert functions["run_subagent"].external_execution is True
 
 
 def test_detached_delegate_retains_inline_execution() -> None:
@@ -448,12 +444,7 @@ def test_detached_delegate_retains_inline_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    apply_tool_approval_capability(
-        toolkit,
-        Config(),
-        supports_native_tool_approval=False,
-        registered_tool_name="delegate",
-    )
+    assert _hide_unresumable_approval_functions(toolkit, Config(), registered_tool_name="delegate") is toolkit
     assert not toolkit.async_functions["run_subagent"].external_execution
 
 
@@ -781,14 +772,13 @@ def test_workflow_grant_runs_for_requester_the_caller_already_serves(
     assert delegate == "Cannot delegate to 'leader': that agent is not allowed to reply to you."
 
 
-def test_delegate_toolkit_flags_survive_adaptation(tmp_path: Path) -> None:
-    """The adapted delegate functions keep the external-execution flags the approval capability set."""
+def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path: Path) -> None:
+    """The adapted delegate functions carry the external-execution flags the approval capability sets."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
 
-    adapted = adapt_toolkit(toolkit)
+    adapted = apply_tool_approval_capability(adapt_toolkit(toolkit), toolkit, config, registered_tool_name="delegate")
 
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)

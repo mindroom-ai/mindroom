@@ -25,7 +25,6 @@ from mindroom.tool_system.registry_state import (
     synchronize_plugin_tools,
 )
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from mindroom.tool_system.tool_schema_cache import clear_tool_schema_cache
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -232,7 +231,6 @@ def isolated_plugin_runtime(
             plugin_imports._PLUGIN_CACHE.update(previous_manifest_cache)
             _clear_configured_plugin_roots_cache()
             _clear_oauth_provider_cache_after_plugin_change()
-            clear_tool_schema_cache()
 
 
 def get_configured_plugin_roots(
@@ -388,7 +386,6 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
 
 def _clear_plugin_reload_caches() -> None:
     """Drop cached plugin manifests and imported plugin modules before one rebuild."""
-    clear_tool_schema_cache()
     _clear_configured_plugin_roots_cache()
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._MODULE_IMPORT_CACHE.clear()
