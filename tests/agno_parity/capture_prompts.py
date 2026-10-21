@@ -44,6 +44,7 @@ from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.message_target import MessageTarget
 from mindroom.providers import model_loading
+from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -109,6 +110,7 @@ _VERTEX_CLAUDE = {
     "id": "claude-sonnet-5-5",
     "extra_kwargs": {"project_id": "test-project", "region": "us-east5"},
 }
+_CEREBRAS = {"provider": "cerebras", "id": "qwen-3.8-27b", "extra_kwargs": {"api_key": "test-key"}}
 _SUMMARY = "Travel policy question answered."
 _TAG_VOCABULARY = "travel, budget, onboarding"
 _HANDBOOK_DESCRIPTION = "The team handbook and its policies."
@@ -140,6 +142,8 @@ class ModelCall:
     tools: list[dict[str, Any]] | None
     tool_choice: str | dict[str, Any] | None
     response_format: dict[str, Any] | type[BaseModel] | None
+    # Claude's request hook sends these tools with defer_loading below the recorder, so the record names them.
+    deferred_tool_names: list[str]
 
 
 type Responder = Callable[[ModelCall], ModelResponse]
@@ -183,6 +187,7 @@ class Recorder:
             tools=deepcopy(kwargs.get("tools")),
             tool_choice=deepcopy(kwargs.get("tool_choice")),
             response_format=kwargs.get("response_format"),
+            deferred_tool_names=sorted(claude_deferred_tool_names(model)),
         )
         self.calls.append(call)
         return self.responder(call)
@@ -251,6 +256,7 @@ def _call_dict(call: ModelCall) -> dict[str, Any]:
         "tools": call.tools,
         "tool_choice": call.tool_choice,
         "response_format": _response_format_dict(call.response_format),
+        "deferred_tool_names": call.deferred_tool_names,
     }
 
 
@@ -739,13 +745,15 @@ def _helper(entry_point: str, call: HelperCall, answer: str, *, model: dict[str,
 
 
 def _structured_helper(name: str, entry_point: str, call: HelperCall, answer: str) -> dict[str, Scenario]:
-    """Capture a structured-output helper on models with and without native structured outputs.
+    """Capture a structured-output helper on each of Agno's three structured-output paths.
 
-    Agno passes the schema as the response format to Claude, and asks Vertex Claude for JSON in its system message.
+    Agno passes the schema as the response format to Claude, asks Vertex Claude for JSON in its system message, and
+    sends Cerebras a JSON-schema response format without the JSON prompt.
     """
     return {
         f"helper_{name}_anthropic": _helper(entry_point, call, answer),
         f"helper_{name}_vertexai_claude": _helper(entry_point, call, answer, model=_VERTEX_CLAUDE),
+        f"helper_{name}_cerebras": _helper(entry_point, call, answer, model=_CEREBRAS),
     }
 
 

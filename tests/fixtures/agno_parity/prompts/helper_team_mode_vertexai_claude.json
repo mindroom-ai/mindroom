@@ -47,6 +47,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nDetermine team mode\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"mode\", \"reasoning\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"mode\": {\n    \"description\": \"coordinate for delegation and synthesis, collaborate for all working on same task\",\n    \"enum\": [\n      \"coordinate\",\n      \"collaborate\"\n    ],\n    \"type\": \"string\"\n  },\n  \"reasoning\": {\n    \"description\": \"Brief explanation of why this mode was chosen\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",

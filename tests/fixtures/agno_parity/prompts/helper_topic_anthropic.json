@@ -46,6 +46,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nGenerate contextual room topics\n</your_role>",

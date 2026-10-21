@@ -46,6 +46,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nRoute messages to appropriate agents or teams\n</your_role>",

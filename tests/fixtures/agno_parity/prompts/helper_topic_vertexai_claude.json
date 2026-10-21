@@ -47,6 +47,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nGenerate contextual room topics\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"topic\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"topic\": {\n    \"description\": \"The room topic - concise, informative, with emoji\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",

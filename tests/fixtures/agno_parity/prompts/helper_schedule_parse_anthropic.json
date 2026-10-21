@@ -46,6 +46,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nParse scheduling requests into structured workflows\n</your_role>",

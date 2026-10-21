@@ -46,6 +46,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nExtract durable memory statements for long-term memory storage.\n</your_role>",

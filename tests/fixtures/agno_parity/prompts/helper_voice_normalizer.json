@@ -46,6 +46,7 @@
   },
   "requests": [
     {
+      "deferred_tool_names": [],
       "messages": [
         {
           "content": "<your_role>\nNormalize voice transcriptions while preserving natural language and mention intent\n</your_role>",

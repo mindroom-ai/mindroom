@@ -13,12 +13,14 @@ Each file has these keys:
 
 - `scenario` and `description` name what the file pins.
 - `input` records what the scenario ran: the authored `config.yaml` mapping, workspace files, the turn's prompt and thread history, and the entry point.
-- `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, and its `response_format`.
+- `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, its `response_format`, and its `deferred_tool_names`.
 - `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
 
 The capture replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
 Messages are `Message.to_dict()` without the volatile `id`, `created_at`, and `metrics` keys, plus `"add_to_agent_memory": false` on transient context messages that are never stored.
-`tools` holds the formatted tool definitions in the order the request carried them.
+`tools` holds the formatted tool definitions in the order the request loop passed them to the provider call.
+`deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the capture, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
+It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.
 A pydantic `response_format` is recorded as `{"pydantic_model": <class name>, "json_schema": <model_json_schema()>}`; a dict format is recorded as passed.
 
 Normalization:
@@ -30,5 +32,5 @@ Normalization:
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
 
 Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
-Structured-output helpers are captured twice: on `anthropic`, which receives the schema as `response_format`, and on `vertexai_claude`, which Agno asks for JSON in the system message with `{"type": "json_object"}`.
+Structured-output helpers are captured on each of Agno's three structured-output paths: on `anthropic`, which receives the schema as `response_format`; on `vertexai_claude`, which Agno asks for JSON in the system message with `{"type": "json_object"}`; and on `cerebras`, which receives `{"type": "json_schema", "json_schema": {"name", "schema"}}` and no JSON prompt.
 Agent scenarios set `learning: false`, because Agno Learning is retired with Agno and its prompt block and tools have no owned equivalent.
