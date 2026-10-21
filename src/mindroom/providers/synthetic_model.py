@@ -1,11 +1,8 @@
-"""Built-in synthetic model for local conversations and load generation."""
+"""Built-in synthetic model for the Agno-backed runtime; the plan itself lives in ``synthetic_adapter``."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
-import random
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,32 +11,10 @@ from typing import TYPE_CHECKING, Any
 from agno.models.base import Model
 from agno.models.response import ModelResponse
 
+from mindroom.providers.synthetic_adapter import SHELL_TOOL, ResponsePlan, SyntheticSettings, plan_response, shell_call
+
 if TYPE_CHECKING:
     from agno.models.message import Message
-
-_LOREM = (
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et "
-    "dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex "
-    "ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat "
-    "nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim "
-    "id est laborum. "
-)
-_SHELL_TOOL = "run_shell_command"
-
-
-@dataclass(frozen=True, slots=True)
-class _ResponsePlan:
-    body: str
-    split_at: int | None
-    tool_call_id: str | None
-
-    @property
-    def prefix(self) -> str:
-        return self.body if self.split_at is None else self.body[: self.split_at]
-
-    @property
-    def suffix(self) -> str:
-        return "" if self.split_at is None else self.body[self.split_at :]
 
 
 @dataclass
@@ -56,23 +31,16 @@ class SyntheticModel(Model):
     tool_call_probability: float = 0.2
 
     def __post_init__(self) -> None:
-        """Validate configured response generation settings."""
+        """Validate the configured response generation settings through the owned settings type."""
         super().__post_init__()
-        if self.min_response_chars < 2:
-            msg = "min_response_chars must be at least 2"
-            raise ValueError(msg)
-        if self.max_response_chars < self.min_response_chars:
-            msg = "max_response_chars must be greater than or equal to min_response_chars"
-            raise ValueError(msg)
-        if self.chunk_chars < 1:
-            msg = "chunk_chars must be positive"
-            raise ValueError(msg)
-        if self.chars_per_second < 0:
-            msg = "chars_per_second must be non-negative"
-            raise ValueError(msg)
-        if not 0 <= self.tool_call_probability <= 1:
-            msg = "tool_call_probability must be between 0 and 1"
-            raise ValueError(msg)
+        self._settings = SyntheticSettings(
+            seed=self.seed,
+            min_response_chars=self.min_response_chars,
+            max_response_chars=self.max_response_chars,
+            chunk_chars=self.chunk_chars,
+            chars_per_second=self.chars_per_second,
+            tool_call_probability=self.tool_call_probability,
+        )
 
     def invoke(
         self,
@@ -159,8 +127,10 @@ class SyntheticModel(Model):
         messages: Sequence[Message],
         tools: Sequence[Mapping[str, Any]] | None,
         tool_choice: str | Mapping[str, Any] | None,
-    ) -> tuple[_ResponsePlan, bool]:
-        plan = self._plan(messages, shell_available=tool_choice != "none" and self._tool_available(tools))
+    ) -> tuple[ResponsePlan, bool]:
+        user_history = [message.get_content_string() for message in messages if message.role == "user"]
+        shell_available = tool_choice != "none" and self._tool_available(tools)
+        plan = plan_response(self._settings, user_history, shell_available=shell_available)
         last_message = messages[-1] if messages else None
         continuation = (
             plan.tool_call_id is not None
@@ -170,44 +140,19 @@ class SyntheticModel(Model):
         )
         return plan, continuation
 
-    def _plan(self, messages: Sequence[Message], *, shell_available: bool) -> _ResponsePlan:
-        user_history = "\0".join(message.get_content_string() for message in messages if message.role == "user")
-        digest = hashlib.sha256(f"{self.seed}\0{user_history}".encode()).digest()
-        randomizer = random.Random(int.from_bytes(digest))  # noqa: S311 - replayable synthetic behavior
-        response_chars = randomizer.randint(self.min_response_chars, self.max_response_chars)
-        body = (_LOREM * ((response_chars // len(_LOREM)) + 1))[:response_chars]
-        if not shell_available or randomizer.random() >= self.tool_call_probability:
-            return _ResponsePlan(body=body, split_at=None, tool_call_id=None)
-        return _ResponsePlan(
-            body=body,
-            split_at=randomizer.randint(1, response_chars - 1),
-            tool_call_id=f"synthetic-{digest.hex()[:16]}",
-        )
-
     @staticmethod
     def _tool_available(tools: Sequence[Mapping[str, Any]] | None) -> bool:
         for tool in tools or ():
             function = tool.get("function")
-            if isinstance(function, Mapping) and function.get("name") == _SHELL_TOOL:
+            if isinstance(function, Mapping) and function.get("name") == SHELL_TOOL:
                 return True
-            if tool.get("name") == _SHELL_TOOL:
+            if tool.get("name") == SHELL_TOOL:
                 return True
         return False
 
     @staticmethod
-    def _tool_calls(plan: _ResponsePlan, continuation: bool) -> list[dict[str, Any]]:
-        if continuation or plan.tool_call_id is None:
-            return []
-        return [
-            {
-                "id": plan.tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": _SHELL_TOOL,
-                    "arguments": json.dumps({"args": ["echo", "hi"]}, separators=(",", ":")),
-                },
-            },
-        ]
+    def _tool_calls(plan: ResponsePlan, continuation: bool) -> list[dict[str, Any]]:
+        return [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
 
     def _chunks(self, content: str) -> Iterator[str]:
         for start in range(0, len(content), self.chunk_chars):
