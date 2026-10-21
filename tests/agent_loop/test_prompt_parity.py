@@ -7,14 +7,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
-from tests.agent_loop.prompt_parity_support import (
-    FIXTURE_DIR,
-    SCENARIOS,
-    load_golden,
-    normalize,
-    rendered,
-    run_scenario,
-)
+from tests.agent_loop.prompt_parity_support import rendered, run_scenario
+from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, load_golden, normalize
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,7 +32,7 @@ def _golden_system_messages(name: str, golden: dict[str, Any]) -> list[str]:
 
 def test_every_golden_but_the_team_leaders_has_a_scenario() -> None:
     """Each prompt golden this module compares runs through a scenario."""
-    assert sorted(SCENARIOS) == GOLDENS
+    assert sorted(name for name in SCENARIOS if not name.startswith("team_")) == GOLDENS
 
 
 @pytest.mark.asyncio

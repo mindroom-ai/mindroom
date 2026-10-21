@@ -26,13 +26,13 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics
-from tests.agent_loop.prompt_parity_support import (
+from tests.agent_loop.prompt_parity_support import run_scenario
+from tests.agno_parity.prompt_scenarios import (
     SCENARIOS,
     load_golden,
     message_dict,
     normalize,
     response_format_dict,
-    run_scenario,
 )
 
 if TYPE_CHECKING:

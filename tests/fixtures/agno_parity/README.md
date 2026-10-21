@@ -110,7 +110,7 @@ Skipped where the route has nothing to pin:
 ## Prompt goldens (`prompts/`)
 
 `prompts/<scenario>.json` holds every model request one scenario sends, as the provider adapter receives it from the request loop.
-`tests/agno_parity/capture_prompts.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site), and `tests/agno_parity/test_prompt_goldens_current.py` proves the Agno-backed code still reproduces every file.
+`tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site), `tests/agno_parity/capture_prompts.py` writes the files, and `tests/agno_parity/test_prompt_goldens_current.py` proves the Agno-backed code still reproduces every file.
 Rewrite the fixtures with `.venv/bin/python -m tests.agno_parity.capture_prompts [scenario ...]` from the repository root.
 
 Each file has these keys:

@@ -18,7 +18,7 @@ from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.teams import _TeamModeDecision
 from mindroom.thread_summary import _ThreadEnrichment, _ThreadSummary
 from mindroom.topic_generator import _RoomTopic
-from tests.agent_loop.prompt_parity_support import load_golden, response_format_dict
+from tests.agno_parity.prompt_scenarios import load_golden, response_format_dict
 
 HELPER_SCHEMAS: dict[str, type[BaseModel]] = {
     "knowledge_graph": ExtractedEntities,
