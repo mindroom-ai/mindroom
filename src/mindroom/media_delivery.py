@@ -16,6 +16,7 @@ from uuid import uuid4
 from agno.media import Image
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.file_access import AuthorizedFile
 
-VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_PIXELS = 40_000_000

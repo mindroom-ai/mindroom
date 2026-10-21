@@ -14,9 +14,9 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import INCOMPLETE_STREAM, MALFORMED_TOOL_CALL, ContextWindowExceeded, ProviderError
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
-from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream

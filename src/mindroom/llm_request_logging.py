@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -15,10 +14,15 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from agno.models.message import Message
-from pydantic import BaseModel
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
+from mindroom.llm.request_context import (
+    JSONValue,
+    bind_llm_request_log_context,
+    current_llm_request_log_context,
+    json_safe,
+)
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_data
@@ -66,9 +70,6 @@ _NON_API_MESSAGE_FIELDS = {
     "references",
     "temporary",
 }
-type _JSONScalar = str | int | float | bool | None
-type _JSONValue = _JSONScalar | list["_JSONValue"] | dict[str, "_JSONValue"]
-_REQUEST_CONTEXT = ContextVar[dict[str, _JSONValue] | None]("mindroom_llm_request_log_context", default=None)
 _ACTIVE_MODEL_CALLS = ContextVar[frozenset[int]]("mindroom_llm_observability_active_models", default=frozenset())
 
 
@@ -78,7 +79,7 @@ class _WireToolsCapture:
 
     enabled: bool
     observed: bool = False
-    tools: list[dict[str, _JSONValue]] | None = None
+    tools: list[dict[str, JSONValue]] | None = None
 
 
 _WIRE_TOOLS_CAPTURE = ContextVar[_WireToolsCapture | None]("mindroom_llm_wire_tools_capture", default=None)
@@ -96,10 +97,10 @@ def _system_prompt(messages: Sequence[Message], model: Model) -> str:
     return model.system_prompt or ""
 
 
-def _model_params(model: Model) -> dict[str, _JSONValue]:
+def _model_params(model: Model) -> dict[str, JSONValue]:
     if not is_dataclass(model):
         return {}
-    payload: dict[str, _JSONValue] = {}
+    payload: dict[str, JSONValue] = {}
     for field in fields(model):
         if field.name in _SKIP_MODEL_PARAM_NAMES:
             continue
@@ -114,45 +115,22 @@ def _model_params(model: Model) -> dict[str, _JSONValue]:
     return payload
 
 
-def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
+def _write_jsonl_line(path: Path, payload: dict[str, JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(redact_sensitive_data(payload)))
         handle.write("\n")
 
 
-def _json_safe(value: object) -> _JSONValue:
-    normalized: object = value
-    if isinstance(normalized, BaseModel):
-        normalized = normalized.model_dump(mode="python", exclude_none=True)
-    elif not isinstance(normalized, type) and is_dataclass(normalized):
-        normalized = asdict(normalized)
-
-    if isinstance(normalized, dict):
-        return {str(key): _json_safe(item) for key, item in normalized.items()}
-    if isinstance(normalized, (list, tuple, set)):
-        return [_json_safe(item) for item in normalized]
-    if isinstance(normalized, bytes):
-        return {
-            "__type__": "bytes",
-            "base64": base64.b64encode(normalized).decode("ascii"),
-        }
-    if isinstance(normalized, Path):
-        return str(normalized)
-    if isinstance(normalized, str | int | float | bool) or normalized is None:
-        return normalized
-    return repr(normalized)
-
-
-def _request_message_payloads(messages: Sequence[Message]) -> list[dict[str, _JSONValue]]:
-    payloads: list[dict[str, _JSONValue]] = []
+def _request_message_payloads(messages: Sequence[Message]) -> list[dict[str, JSONValue]]:
+    payloads: list[dict[str, JSONValue]] = []
     for message in messages:
         payload = message.model_dump(
             mode="python",
             exclude_none=True,
             exclude=_NON_API_MESSAGE_FIELDS,
         )
-        payloads.append(cast("dict[str, _JSONValue]", _json_safe(payload)))
+        payloads.append(cast("dict[str, JSONValue]", json_safe(payload)))
     return payloads
 
 
@@ -162,9 +140,9 @@ def _request_messages(value: object) -> list[Message] | None:
     return None
 
 
-def _request_tools(value: object) -> list[dict[str, _JSONValue]] | None:
+def _request_tools(value: object) -> list[dict[str, JSONValue]] | None:
     if isinstance(value, list) and all(isinstance(tool, dict) for tool in value):
-        return cast("list[dict[str, _JSONValue]]", value)
+        return cast("list[dict[str, JSONValue]]", value)
     return None
 
 
@@ -174,7 +152,7 @@ def record_llm_request_tools(tools: object) -> None:
     if capture is None or not capture.enabled:
         return
     capture.observed = True
-    normalized_tools = _json_safe(tools)
+    normalized_tools = json_safe(tools)
     capture.tools = _request_tools(normalized_tools)
 
 
@@ -188,17 +166,7 @@ def _normalized_string_list(values: object) -> list[str]:
     return normalized
 
 
-def _snapshot_request_log_context() -> dict[str, _JSONValue]:
-    """Return one detached copy of the currently bound request log context."""
-    return cast("dict[str, _JSONValue]", _json_safe(_REQUEST_CONTEXT.get() or {}))
-
-
-def current_llm_request_log_context() -> dict[str, _JSONValue]:
-    """Return the current detached request-log context for cross-sink correlation."""
-    return _snapshot_request_log_context()
-
-
-def model_params_payload(model: Model) -> dict[str, _JSONValue]:
+def model_params_payload(model: Model) -> dict[str, JSONValue]:
     """Return JSON-safe model parameters suitable for durable request metadata."""
     return _model_params(model)
 
@@ -261,22 +229,6 @@ def build_llm_request_log_context(
 
 
 @contextmanager
-def bind_llm_request_log_context(**context: object) -> Iterator[None]:
-    """Bind per-run request metadata so log entries can be attributed later."""
-    existing_context = _REQUEST_CONTEXT.get() or {}
-    bound_context = dict(existing_context)
-    for key, value in context.items():
-        if value is None:
-            continue
-        bound_context[str(key)] = _json_safe(value)
-    token = _REQUEST_CONTEXT.set(bound_context or None)
-    try:
-        yield
-    finally:
-        _REQUEST_CONTEXT.reset(token)
-
-
-@contextmanager
 def _model_call_scope(model: Model) -> Iterator[None]:
     """Prevent one model method delegating to another from double-counting a request."""
     active_model_calls = _ACTIVE_MODEL_CALLS.get()
@@ -328,14 +280,14 @@ async def _write_llm_request_log(
     model: Model,
     agent_name: str,
     messages: Sequence[Message],
-    tools: list[dict[str, _JSONValue]] | None,
+    tools: list[dict[str, JSONValue]] | None,
     log_path: Path,
-    request_context: dict[str, _JSONValue] | None = None,
+    request_context: dict[str, JSONValue] | None = None,
     request_log_id: str,
 ) -> None:
     """Persist one request record for an LLM invocation."""
     now = datetime.now().astimezone()
-    resolved_request_context = request_context if request_context is not None else _snapshot_request_log_context()
+    resolved_request_context = request_context if request_context is not None else current_llm_request_log_context()
     await asyncio.to_thread(
         _write_jsonl_line,
         log_path,
@@ -348,14 +300,14 @@ async def _write_llm_request_log(
             "system_prompt": _system_prompt(messages, model),
             "messages": _request_message_payloads(messages),
             "message_count": len(messages),
-            "tools": _json_safe(tools),
+            "tools": json_safe(tools),
             "tool_count": len(tools or []),
             "model_params": model_params_payload(model),
         },
     )
 
 
-def _usage_payload(usage: MessageMetrics) -> dict[str, _JSONValue]:
+def _usage_payload(usage: MessageMetrics) -> dict[str, JSONValue]:
     """Return the token counts of one provider response as a JSON payload."""
     return {
         "input_tokens": usage.input_tokens,
@@ -379,10 +331,10 @@ def _log_llm_usage(
     configured_provider: str | None,
     served_provider: str | None,
     usage: MessageMetrics | None,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
 ) -> None:
     """Emit privacy-safe token and cache telemetry for one provider response."""
-    payload: dict[str, _JSONValue] = {
+    payload: dict[str, JSONValue] = {
         "model_name": model_name,
         "model_id": model.id,
         "provider": model.provider or configured_provider,
@@ -433,7 +385,7 @@ async def _write_llm_response_log(
     served_provider: str | None = None,
     request_log_ref: _RequestLogRef | None,
     usage: MessageMetrics | None,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
 ) -> None:
     """Emit usage telemetry and optionally persist the provider-reported usage.
 
@@ -450,7 +402,7 @@ async def _write_llm_response_log(
     if request_log_ref is None or usage is None:
         return
     now = datetime.now().astimezone()
-    payload: dict[str, _JSONValue] = {
+    payload: dict[str, JSONValue] = {
         "timestamp": now.isoformat(),
         "record": "response",
         "request_log_id": request_log_ref.request_log_id,
@@ -471,7 +423,7 @@ async def _write_llm_request_log_if_present(
     kwargs: dict[str, object],
     log_dir: str | None,
     default_log_dir: Path,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
     wire_tools_capture: _WireToolsCapture,
 ) -> _RequestLogRef | None:
     """Write one request log entry when provider kwargs include API request messages.
@@ -505,7 +457,7 @@ async def _write_llm_request_log_if_enabled(
     kwargs: dict[str, object],
     debug_config: DebugConfig,
     default_log_dir: Path,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
     wire_tools_capture: _WireToolsCapture,
 ) -> _RequestLogRef | None:
     """Write the sensitive request record only when explicitly enabled."""
@@ -529,7 +481,7 @@ async def _write_llm_request_log_best_effort(
     kwargs: dict[str, object],
     debug_config: DebugConfig,
     default_log_dir: Path,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
     wire_tools_capture: _WireToolsCapture,
 ) -> _RequestLogRef | None:
     """Persist an optional request record without changing model-call behavior."""
@@ -560,7 +512,7 @@ async def _write_llm_response_log_best_effort(
     served_provider: str | None,
     request_log_ref: _RequestLogRef | None,
     usage: MessageMetrics | None,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
 ) -> None:
     """Emit usage and optional response records without affecting the model call."""
     try:
@@ -591,7 +543,7 @@ async def _invoke_with_llm_request_logging(
     debug_config: DebugConfig,
     default_log_dir: Path,
     configured_provider: str | None,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
 ) -> ModelResponse:
     """Invoke one model and persist the request after wire tools are known."""
     wire_tools_capture = _WireToolsCapture(enabled=debug_config.log_llm_requests)
@@ -630,7 +582,7 @@ def _stream_with_llm_request_logging(
     debug_config: DebugConfig,
     default_log_dir: Path,
     configured_provider: str | None,
-    request_context: dict[str, _JSONValue],
+    request_context: dict[str, JSONValue],
 ) -> AsyncIterator[ModelResponse]:
     """Stream one model response and persist its final wire tools once."""
 
@@ -712,7 +664,7 @@ def install_llm_request_logging(
             debug_config=debug_config,
             default_log_dir=default_log_dir,
             configured_provider=configured_provider,
-            request_context=_snapshot_request_log_context(),
+            request_context=current_llm_request_log_context(),
         )
 
     def _logged_ainvoke_stream(
@@ -731,7 +683,7 @@ def install_llm_request_logging(
             debug_config=debug_config,
             default_log_dir=default_log_dir,
             configured_provider=configured_provider,
-            request_context=_snapshot_request_log_context(),
+            request_context=current_llm_request_log_context(),
         )
 
     install_async_invocation_hooks(

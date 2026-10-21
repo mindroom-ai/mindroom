@@ -67,7 +67,7 @@ from mindroom.providers.anthropic.native_compaction import (
     request_uses_native_checkpoint,
     uses_compaction_edit,
 )
-from mindroom.providers.anthropic.prompt_cache import prepare_request_body
+from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
 from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, parse_claude_settings
 from mindroom.providers.anthropic.wire import (
     OUTPUT_LIMIT_STOP_REASONS,
@@ -83,7 +83,6 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.assistant_turn import one_message_per_result, stamp_finished_turn
-from mindroom.providers.claude_prompt_cache import native_tool_search_supported
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT

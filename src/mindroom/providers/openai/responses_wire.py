@@ -27,9 +27,9 @@ from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, s
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
+from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.openai_prompt_cache import formatted_input_with_shared_system_prefix
 from mindroom.providers.openai_response_replay import formatted_input_with_provider_items
-from mindroom.providers.openai_tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
 
 if TYPE_CHECKING:

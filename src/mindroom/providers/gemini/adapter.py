@@ -35,6 +35,7 @@ from mindroom.providers.gemini.wire import (
     response_schema,
     stop_reason,
     tool_config,
+    without_tool_selection,
 )
 from mindroom.providers.tool_policy import provider_tools_disabled
 
@@ -242,14 +243,11 @@ class GeminiProvider:
         """Keep function schemas but disable function calling and native tools for a decision request."""
         from google.genai.types import HttpOptions  # noqa: PLC0415 - provider SDK loads on first request
 
-        # The policy lives with the Agno-backed Gemini model until that model is removed; it imports Agno.
-        from mindroom.providers.google_gemini import _without_tool_selection  # noqa: PLC0415  # privata: ignore
-
         client_http_options = (self.settings.client_params or {}).get("http_options")
         if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
-        return _without_tool_selection(config, vertexai=self.vertexai) if config else config
+        return without_tool_selection(config, vertexai=self.vertexai) if config else config
 
     def _media_route(self) -> MediaRoute:
         provider = self.identity.provider_name

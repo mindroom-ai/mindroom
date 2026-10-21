@@ -8,7 +8,6 @@ to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by ``request_log_id``.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
@@ -16,10 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pydantic import BaseModel
-
 from mindroom.llm.provider import TurnCompleted, UsageReported
-from mindroom.llm_request_logging import current_llm_request_log_context
+from mindroom.llm.request_context import current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_data
@@ -62,24 +59,6 @@ class RequestLog:
     settings: object | None = None
 
 
-def _json_safe(value: object) -> Any:  # noqa: ANN401 - arbitrary JSON
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="python", exclude_none=True)
-    elif not isinstance(value, type) and is_dataclass(value):
-        value = asdict(value)
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list | tuple | set | frozenset):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, bytes):
-        return {"__type__": "bytes", "base64": base64.b64encode(value).decode("ascii")}
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return repr(value)
-
-
 def _model_params(settings: object) -> dict[str, Any]:
     if settings is None or isinstance(settings, type) or not is_dataclass(settings):
         return {}
@@ -111,7 +90,7 @@ def _request_record(
         {key: value for key, value in message.to_dict().items() if key not in _NON_API_MESSAGE_FIELDS}
         for message in request.messages
     ]
-    tools = [*(_json_safe(tool) for tool in request.native_tools), *(_json_safe(tool) for tool in request.tools)]
+    tools = [*(json_safe(tool) for tool in request.native_tools), *(json_safe(tool) for tool in request.tools)]
     return {
         "timestamp": datetime.now().astimezone().isoformat(),
         "request_log_id": request_log_id,
@@ -119,7 +98,7 @@ def _request_record(
         **context,
         "model_id": model_id,
         "system_prompt": _system_prompt(request.messages),
-        "messages": _json_safe(messages),
+        "messages": json_safe(messages),
         "message_count": len(messages),
         "tools": tools,
         "tool_count": len(tools),

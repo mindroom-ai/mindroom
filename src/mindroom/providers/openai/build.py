@@ -48,7 +48,7 @@ from mindroom.providers.openai.settings import (
     ChatSettings,
     ResponsesSettings,
 )
-from mindroom.providers.openai_tool_search import openai_native_tool_search_supported
+from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, derive_session_routing_key
 from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 

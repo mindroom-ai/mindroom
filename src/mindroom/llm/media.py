@@ -17,6 +17,10 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# Images that ``get_attachment(view=True)`` produced carry ids with this prefix, so a route that rejects image
+# input can mark their tool receipts as unsupported.
+VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
+
 
 def _new_id() -> str:
     return str(uuid4())
@@ -324,6 +328,7 @@ class File:
 
 
 __all__ = [
+    "VIEWED_IMAGE_ID_PREFIX",
     "Audio",
     "File",
     "Image",
