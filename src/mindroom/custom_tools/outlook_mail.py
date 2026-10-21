@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import html
 import json
 import mimetypes
 import re
@@ -26,6 +25,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_path,
     path_segment,
     read_upload_source,
+    text_to_html,
 )
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 
@@ -170,11 +170,6 @@ def _recipients(value: object, field_name: str) -> list[dict[str, dict[str, str]
         email = {"name": name, "address": address} if name else {"address": address}
         recipients.append({"emailAddress": email})
     return recipients
-
-
-def _comment(body: str) -> str:
-    """Return plain text as the HTML Graph inserts above the quoted message, keeping its characters and line breaks."""
-    return html.escape("\n".join(body.splitlines())).replace("\n", "<br>")
 
 
 def _check_request_size(size: int) -> None:
@@ -592,7 +587,7 @@ class OutlookMailTools(Toolkit):
         def operation(session: GraphSession) -> Mapping[str, object]:
             action = "replyAll" if reply_all else "reply"
             path = f"/me/messages/{path_segment(message_id, 'message_id')}/{action}"
-            session.request("POST", path, json={"comment": _comment(body)})
+            session.request("POST", path, json={"comment": text_to_html(body)})
             return {"message_id": message_id, "reply_all": reply_all, "sent": True}
 
         return self._call(operation, validate=validate)

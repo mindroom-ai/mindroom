@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +18,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_teams_oauth_provider
 
@@ -95,7 +95,7 @@ def _text_body(text: object) -> dict[str, object]:
     """Return text as an escaped HTML message body, so model text is never rendered as markup and keeps its lines."""
     if not isinstance(text, str) or not text.strip():
         raise MicrosoftGraphError(code="invalid_argument", message="text must not be empty.")
-    content = html.escape("\n".join(text.splitlines())).replace("\n", "<br>")
+    content = text_to_html(text)
     size = len(content.encode("utf-8"))
     if size > _MAX_MESSAGE_BYTES:
         msg = f"text is {size} bytes in UTF-8 once HTML-escaped; a Teams message holds at most {_MAX_MESSAGE_BYTES}."

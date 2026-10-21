@@ -11,6 +11,7 @@ import base64
 import os
 import re
 from contextlib import ExitStack, contextmanager
+from html import escape
 from html.parser import HTMLParser
 from pathlib import PureWindowsPath
 from typing import TYPE_CHECKING, Any
@@ -228,6 +229,11 @@ def html_to_text(html: str) -> str:
     parser.close()
     lines = "".join(parser.parts).split("\n")
     return "\n".join(" ".join(line.replace(_HTML_CELL_BREAK, " | ").split()) for line in lines).strip("\n")
+
+
+def text_to_html(text: str) -> str:
+    """Return plain text as an HTML body that shows it as typed, with each line break as `<br>`."""
+    return escape("\n".join(text.splitlines())).replace("\n", "<br>")
 
 
 def _unsafe_filename(name: str) -> bool:

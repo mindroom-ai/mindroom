@@ -23,6 +23,7 @@ from mindroom.custom_tools.microsoft_graph import (
     path_segment,
     read_upload_source,
     share_id,
+    text_to_html,
     time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
@@ -675,3 +676,25 @@ def test_page_paths_refuse_tokens_that_can_leave_the_collection(page_token: str)
 )
 def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:
     assert html_to_text(html) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "html"),
+    [
+        ("Plain notes", "Plain notes"),
+        (
+            'Ship <b>today</b> & tell "everyone" it\'s done',
+            "Ship &lt;b&gt;today&lt;/b&gt; &amp; tell &quot;everyone&quot; it&#x27;s done",
+        ),
+        ("one\ntwo\r\nthree\rfour", "one<br>two<br>three<br>four"),
+        ("blank\n\nline\n", "blank<br><br>line"),
+    ],
+)
+def test_text_to_html_escapes_markup_and_keeps_line_breaks(text: str, html: str) -> None:
+    assert text_to_html(text) == html
+
+
+def test_text_to_html_reads_back_as_the_same_text() -> None:
+    text = "Tom <tom@contoso.com> wrote:\n1 < 2 & 3 > 2\n\nThanks"
+
+    assert html_to_text(text_to_html(text)) == text

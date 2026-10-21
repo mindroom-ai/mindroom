@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -21,6 +20,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    text_to_html,
     time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
@@ -109,7 +109,7 @@ def _notes(value: object) -> dict[str, str]:
     """Return plain-text notes as the HTML body To Do shows, keeping their text and line breaks."""
     if not isinstance(value, str):
         raise MicrosoftGraphError(code="invalid_argument", message="notes must be text.")
-    return {"content": html.escape("\n".join(value.splitlines())).replace("\n", "<br>"), "contentType": "html"}
+    return {"content": text_to_html(value), "contentType": "html"}
 
 
 def _importance(value: object) -> str:
