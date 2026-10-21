@@ -5402,6 +5402,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.agent_loop.prompt"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.agent_loop.structured"
+depends_on = []
+
+[[modules]]
+path = "mindroom.agent_loop.helper"
+depends_on = ["mindroom.agent_loop.structured", "mindroom.llm", "mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.agent_cli.shell_contract",

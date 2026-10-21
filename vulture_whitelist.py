@@ -422,7 +422,6 @@ _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/scrip
 _.omitted_media  # Capability read by the owned media fallback when it lands (src/mindroom/llm/provider.py)
 _.native_tool_search  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
 _.prompt_cache_breakpoints  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
-_.claude_family  # Capability read by the owned compaction fallback when it lands (src/mindroom/llm/provider.py)
 _.format_tool_results  # Protocol method called by the owned agent loop when it lands (src/mindroom/llm/provider.py)
 _.child_run_id  # Stored tool-execution field read by the owned team runtime when it lands (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
