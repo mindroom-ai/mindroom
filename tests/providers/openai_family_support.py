@@ -20,9 +20,10 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from tests.providers.golden_support import PacedBytes, Replay, pipeline_provider, replay_through_pipeline
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
 
 OPENAI_FAMILIES = (
     "openai_chat",
@@ -152,7 +153,7 @@ def golden_provider(
     )
 
 
-def _native_compaction_settings(adapter: ModelProvider) -> Any:  # noqa: ANN401 - bound method or None
+def _native_compaction_settings(adapter: ModelProvider) -> Callable[..., NativeCompactionReplay | None] | None:
     """Return the adapter's replay-settings method where the route has one (Responses and Codex)."""
     return adapter.native_compaction_settings if isinstance(adapter, ResponsesAdapter) else None
 

@@ -25,6 +25,7 @@ from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
+    ReasoningDelta,
     StreamProgress,
     TextDelta,
     ToolCallReady,
@@ -130,9 +131,7 @@ class OllamaProvider:
                     **chat_kwargs,
                 )
                 first_output_at = time.monotonic()
-                events = _read_chunk(reply, cast("ChatResponse", response))
-                reply.reasoning, reply.content = split_thinking(reply.content)
-                for event in events:
+                for event in _whole_reply_events(reply, cast("ChatResponse", response)):
                     yield event
         except ResponseError as error:
             # The SDK reports an error the server streams after a 200 response with status -1.
@@ -280,6 +279,18 @@ def _read_image(path: Path, provider: str) -> bytes:
         logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
         msg = "The image attachment could not be read"
         raise InvalidRequest(msg, provider=provider) from error
+
+
+def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[StreamEvent]:
+    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text."""
+    calls = [event for event in _read_chunk(reply, response) if isinstance(event, ToolCallReady)]
+    reply.reasoning, reply.content = split_thinking(reply.content)
+    events: list[StreamEvent] = []
+    if reply.reasoning:
+        events.append(ReasoningDelta(reply.reasoning))
+    if reply.content:
+        events.append(TextDelta(reply.content))
+    return [*events, *calls]
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

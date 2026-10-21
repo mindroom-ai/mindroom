@@ -355,10 +355,11 @@ def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     return {"function_declarations": declarations} if declarations else None
 
 
-def without_tool_selection(config: dict[str, Any], *, vertexai: bool) -> GenerateContentConfig:
+def without_tool_selection(config: object, *, vertexai: bool) -> GenerateContentConfig:
     """Return the config of a decision request: function schemas kept, native tools gone, JSON output requested.
 
-    JSON output is requested except on Vertex AI when the request keeps function declarations.
+    ``config`` is the request dict this adapter builds, or the typed config the Agno path built. JSON output is
+    requested except on Vertex AI when the request keeps function declarations.
     """
     from google.genai.types import (  # noqa: PLC0415 - provider SDK loads on first request
         FunctionCallingConfig,

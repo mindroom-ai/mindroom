@@ -60,8 +60,6 @@ def with_overrides(
         body[output_limit_key] = overrides.max_output_tokens
     if body:
         kwargs["extra_body"] = body
-    elif overrides.max_output_tokens is not None:
-        kwargs.pop("extra_body", None)
     if overrides.timeout_seconds is not None:
         kwargs["timeout"] = overrides.timeout_seconds
     return kwargs

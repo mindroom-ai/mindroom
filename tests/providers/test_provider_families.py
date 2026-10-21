@@ -18,7 +18,7 @@ import pytest
 
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import INCOMPLETE_STREAM, MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, complete
@@ -545,6 +545,26 @@ async def test_failure_after_a_server_tool_started_is_final(
 
     assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (INCOMPLETE_STREAM, False, 1)
     assert type(raised.value) is ProviderError
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_path: Path) -> None:
+    """Gemini's MALFORMED_FUNCTION_CALL is the model's failure, not the media's: no media-free retry, one request."""
+    spec = FAMILIES["gemini"]
+    malformed = {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}]}
+    wire = _Wire(lambda: _sse([malformed]))
+    provider = _pipeline(spec.adapter(tmp_path, wire))
+    image = Image(content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
+    request = ModelRequest(
+        messages=[Message(role="user", content="Look", images=[image])],
+        tools=[_tool("get_weather")],
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, request)
+
+    assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (MALFORMED_TOOL_CALL, False, 1)
+    assert "inlineData" in json.dumps(wire.body())
 
 
 @pytest.mark.asyncio

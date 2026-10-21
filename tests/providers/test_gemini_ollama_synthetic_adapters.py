@@ -968,7 +968,13 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     assert request["body"]["stream"] is False
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
-    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == [
+        "ReasoningDelta",
+        "TextDelta",
+        "UsageReported",
+        "TurnCompleted",
+    ]
+    assert events[1] == TextDelta("Hi there")
     assert completed.message.metrics.input_tokens == 7
 
 
