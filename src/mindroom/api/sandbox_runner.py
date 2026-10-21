@@ -108,10 +108,9 @@ from mindroom.workers.backends.local import get_local_worker_manager
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.worker_computer.protocol import BrowserSession
 
@@ -1740,14 +1739,13 @@ def _run_forkserver_template() -> int:
     socket_path = sys.argv[sys.argv.index(sandbox_forkserver.TEMPLATE_ARG) + 1]
     # Pre-warm the full tool import graph once so fork children skip it; this
     # belongs to template startup, not to importing this module.
-    # Agno resolves these types while building tool schemas. Import them in the
+    # Agno resolves its agent and team types while building tool schemas. Import them in the
     # single-threaded template, not afresh in every isolated request child.
-    from agno.agent import Agent  # noqa: F401, PLC0415
-    from agno.team import Team  # noqa: F401, PLC0415
-
     from mindroom.mcp import registry as mcp_registry  # noqa: PLC0415
     from mindroom.tool_system import plugins as tool_system_plugins  # noqa: PLC0415
+    from mindroom.tool_system.agno_toolkits import warm_agno_tool_imports  # noqa: PLC0415
 
+    warm_agno_tool_imports()
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 

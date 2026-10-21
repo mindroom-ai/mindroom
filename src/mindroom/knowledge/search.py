@@ -6,9 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from agno.tools.function import Function
-
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.agno_toolkits import Function
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

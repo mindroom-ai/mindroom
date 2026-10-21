@@ -16,11 +16,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
-from agno.knowledge.document.base import Document
-from agno.knowledge.reader import ReaderFactory
-from agno.knowledge.reader.json_reader import JSONReader
-from agno.knowledge.reader.markdown_reader import MarkdownReader
-from agno.knowledge.reader.text_reader import TextReader
 from chromadb.errors import InternalError
 
 from mindroom.constants import (
@@ -86,6 +81,7 @@ from mindroom.knowledge.indexing_config import (
     knowledge_git_dir,
     storage_key_for_base,
 )
+from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
@@ -94,7 +90,6 @@ from mindroom.path_confinement import MAX_READ_BYTES
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 
-    from agno.knowledge.reader.base import Reader
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.main import Config

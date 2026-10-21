@@ -32,8 +32,12 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.knowledge.chunking"
+path = "mindroom.knowledge.readers"
 depends_on = []
+
+[[modules]]
+path = "mindroom.knowledge.chunking"
+depends_on = ["mindroom.knowledge.readers"]
 
 [[modules]]
 path = "mindroom.bounded_bytes"
@@ -935,7 +939,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.knowledge.search"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.tool_system.agno_toolkits"]
 
 [[modules]]
 path = "mindroom.session_storage.agent_storage"
@@ -2074,6 +2078,7 @@ depends_on = [
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
     "mindroom.worker_computer.protocol",
+    "mindroom.tool_system.agno_toolkits",
 ]
 visibility = ["mindroom.api.sandbox_runner"]
 
@@ -2120,6 +2125,7 @@ depends_on = [
     "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.progress",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
@@ -5297,12 +5303,13 @@ path = "mindroom.tool_system.registry_state"
 depends_on = ["mindroom.tool_system.plugin_imports"]
 
 [[modules]]
-path = "mindroom.tool_system.worker_arguments"
-depends_on = []
-
-[[modules]]
 path = "mindroom.tool_system.worker_media"
-depends_on = ["mindroom.server_fetch_url", "mindroom.tool_system.media_transport", "mindroom.tool_system.worker_proxy_client"]
+depends_on = [
+    "mindroom.server_fetch_url",
+    "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.agno_toolkits",
+]
 
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
@@ -5452,9 +5459,9 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_system.worker_arguments",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.egress_broker",
+    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
@@ -5539,15 +5546,19 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = ["mindroom.tool_system.runtime_context", "mindroom.providers.media_fallback"]
+depends_on = [
+    "mindroom.tool_system.runtime_context",
+    "mindroom.providers.media_fallback",
+    "mindroom.tool_system.agno_toolkits",
+]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"
-depends_on = []
+depends_on = ["mindroom.tool_system.agno_toolkits"]
 
 [[modules]]
 path = "mindroom.media_delivery"
-depends_on = ["mindroom.file_access", "mindroom.llm", "mindroom.path_confinement"]
+depends_on = ["mindroom.file_access", "mindroom.llm", "mindroom.path_confinement", "mindroom.tool_system.agno_toolkits"]
 visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.custom_tools.attachments",
@@ -6113,6 +6124,7 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
+    "mindroom.knowledge.readers",
 ]
 
 [[modules]]

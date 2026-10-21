@@ -27,9 +27,8 @@ __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "registe
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.tools import Toolkit
-
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 _GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"]

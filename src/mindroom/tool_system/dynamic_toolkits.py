@@ -12,9 +12,8 @@ from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from agno.tools import Toolkit
-
     from mindroom.config.main import Config
+    from mindroom.tool_system.agno_toolkits import Toolkit
 
 
 @dataclass(frozen=True)
