@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from agno.models.message import Message
 
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelOutputLimitError, ModelSafeguardRefusalError
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.logging_config import get_logger
 from mindroom.providers.agno_compat_claude import (
     OUTPUT_LIMIT_STOP_REASONS,

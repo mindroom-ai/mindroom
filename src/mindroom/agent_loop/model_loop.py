@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PlannedCall, PreparedTools, ToolBatch
-    from mindroom.llm.provider import ModelIdentity, ModelProvider, ToolSpec
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -76,6 +76,7 @@ class EndRun:
 type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
+type AnswerToolCalls = Callable[[Message, StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[list[Message], Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[None]]
 type ResumeEntryHook = Callable[[list[Message]], Awaitable[None]]
@@ -89,6 +90,8 @@ class LoopHooks:
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), end the loop (participation, the skill review's budget),
       or send a projected message list for this request only (the approval receipt); the last projection wins.
+    - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
+      when it returns result messages, they answer the batch in place of running it (the output-limit policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the live messages and the planned calls before any call of a batch runs
@@ -104,6 +107,7 @@ class LoopHooks:
     """
 
     before_request: tuple[BeforeRequestHook, ...] = ()
+    answer_tool_calls: AnswerToolCalls | None = None
     rewrite_tool_calls: RewriteToolCalls | None = None
     before_dispatch: BeforeDispatchHook | None = None
     tool_middleware: tuple[ToolMiddleware, ...] = ()
@@ -136,7 +140,7 @@ class _Progress:
     stopped: bool = False
 
 
-async def run_model_loop(
+async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each hook stage a branch
     model: ModelProvider,
     messages: list[Message],
     tools: PreparedTools,
@@ -188,6 +192,10 @@ async def run_model_loop(
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
+        answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, turn.stop_reason)
+        if answers is not None:
+            await append_tool_results(model, state.messages, answers, hooks.after_tool_batch)
+            continue
         async for event in _run_tool_batch(model, message, state, tools, progress, hooks, tool_call_limit):
             yield event
         if progress.stopped or progress.paused:
@@ -323,7 +331,10 @@ async def _stream_turn(
     """
     identity = model.identity
     turn: TurnCompleted | None = None
-    received: MessageMetrics | None = None
+    # Final reports of attempts that ended are summed; a partial report stands in for its attempt until the
+    # attempt's final report replaces it, so a cut-off request settles exactly what was billed.
+    settled: MessageMetrics | None = None
+    partial: MessageMetrics | None = None
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
@@ -333,14 +344,19 @@ async def _stream_turn(
                 elif isinstance(event, ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
-                    received = event.usage
+                    if event.final:
+                        settled = event.usage if settled is None else settled + event.usage
+                        partial = None
+                    else:
+                        partial = event.usage
                 elif isinstance(event, TurnCompleted):
                     turn = event
     finally:
+        received = settled if partial is None else (partial if settled is None else settled + partial)
         if turn is None and received is not None and received.to_dict():
-            settled = Message(role="assistant", metrics=received)
-            _stamp_model(settled, identity)
-            messages.append(settled)
+            cut_off = Message(role="assistant", metrics=received)
+            _stamp_model(cut_off, identity)
+            messages.append(cut_off)
             _count_request(metrics, received, identity)
     if turn is None:
         msg = "The provider stream ended without completing the turn"
@@ -378,6 +394,7 @@ __all__ = [
     "EMPTY_REQUEST",
     "NO_HOOKS",
     "AfterToolBatchHook",
+    "AnswerToolCalls",
     "BeforeDispatchHook",
     "BeforeRequestHook",
     "EndRun",

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+    from mindroom.tool_system.invocation import ToolMiddleware
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -47,7 +48,8 @@ class AgentBuild:
     ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
     ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
-    authored toolkit it came from, which approvals check.
+    authored toolkit it came from, which approvals check. ``tool_middleware`` is the tool-call policy the loop runs
+    around every call, outermost first: plugin before and after hooks, call recording, and the computer announcement.
     """
 
     spec: AgentSpec
@@ -57,6 +59,7 @@ class AgentBuild:
     store: ConversationStore | None
     tool_owners: Mapping[str, str]
     surface: AgentSurface
+    tool_middleware: tuple[ToolMiddleware, ...] = ()
 
 
 def prompt_for_turn(build: AgentBuild, *context: str) -> Message:

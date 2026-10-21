@@ -56,10 +56,11 @@ def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
     """Flatten the agent's toolkits into the functions a run offers.
 
     The filter runs first; among the functions it keeps, the first of a repeated name wins and the rest are logged
-    and dropped, as Agno did. A toolkit's instructions are kept whenever Agno would have added them to the prompt.
+    and dropped, as Agno did. A toolkit's instructions are kept whenever Agno would have added them to the prompt,
+    once per toolkit identity, which Agno keyed by name, instructions, and function surface.
     """
     functions: dict[str, ToolFunction] = {}
-    instructions: list[str] = []
+    instructions: dict[tuple[str, str, frozenset[str]], str] = {}
     for toolkit in spec.toolkits:
         for function in toolkit.functions:
             if spec.tool_filter is not None and not spec.tool_filter(function):
@@ -69,8 +70,9 @@ def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
                 continue
             functions[function.name] = function
         if toolkit.instructions is not None:
-            instructions.append(toolkit.instructions)
-    return PreparedTools(functions=functions, instructions=tuple(instructions))
+            key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
+            instructions.setdefault(key, toolkit.instructions)
+    return PreparedTools(functions=functions, instructions=tuple(instructions.values()))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -19,10 +19,11 @@ from contextlib import aclosing
 from functools import partial
 from typing import TYPE_CHECKING, Any, Final, cast
 
+from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks, install_tool_call_rewrite
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Container, Coroutine
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 
     from agno.models.base import Model
     from agno.models.message import Message
@@ -127,15 +128,6 @@ def project_portable_request(
     return [_projected_message(message, deferred) for message in messages], wire_tools
 
 
-def resolve_call_tool_calls(tool_calls: list[dict[str, Any]], callable_names: Container[str]) -> list[dict[str, Any]]:
-    """Rewrite each resolvable ``call_tool`` call to the function it names.
-
-    A call naming an unknown function or carrying non-object arguments stays a ``call_tool`` call, whose
-    fallback function tells the model how to retry.
-    """
-    return [_resolved_call(call, callable_names) for call in tool_calls]
-
-
 def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
     if message.tool_calls:
         calls = [_wrapped_call(call, deferred) for call in message.tool_calls]
@@ -164,28 +156,6 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
     arguments = _json_object(function.get("arguments") or "{}") or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
     return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
-
-
-def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict[str, Any]:
-    function = call.get("function")
-    if not isinstance(function, dict) or function.get("name") != _CALL_TOOL_NAME:
-        return call
-    payload = _json_object(function.get("arguments") or "{}")
-    if payload is None:
-        return call
-    name = payload.get("name")
-    if not isinstance(name, str) or name == _CALL_TOOL_NAME or name not in callable_names:
-        return call
-    # Weaker models sometimes send the nested arguments as a JSON string.
-    raw_arguments = payload.get("arguments")
-    arguments = {} if raw_arguments in (None, "") else _json_object(raw_arguments)
-    if arguments is None:
-        return call
-    # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
-    # the call too; nested arguments win a conflict, and a null extra means the key was omitted.
-    extras = {key: value for key, value in payload.items() if key not in {"name", "arguments"} and value is not None}
-    resolved_arguments = json.dumps({**extras, **arguments}, ensure_ascii=False)
-    return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
 def _json_object(value: object) -> dict[str, Any] | None:

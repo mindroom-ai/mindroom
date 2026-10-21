@@ -77,6 +77,10 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
         super().__init__(message, provider=provider, status_code=status_code, code=code, retryable=retryable)
 
 
+class ModelOutputLimitError(RuntimeError):
+    """A run's model responses kept stopping at the output limit before their tool calls were complete."""
+
+
 class ModelSafeguardRefusal(ProviderError):  # noqa: N818
     """The model's safeguards stopped the response; final, so it is never retried or resent without media."""
 
@@ -91,6 +95,7 @@ __all__ = [
     "SAFEGUARD_REFUSAL",
     "ContextWindowExceeded",
     "InvalidRequest",
+    "ModelOutputLimitError",
     "ModelSafeguardRefusal",
     "ProviderError",
     "ProviderUnavailable",

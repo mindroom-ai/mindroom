@@ -7,6 +7,8 @@ reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
+``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
+its own call id reads it there instead of taking it as a parameter.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -92,6 +95,13 @@ class ToolOutcome(ToolValue):
 type ToolNext = Callable[[dict[str, Any]], Awaitable[object]]
 type ToolMiddleware = Callable[[ToolCall, ToolNext], Awaitable[object]]
 
+_CURRENT_CALL: ContextVar[ToolCall | None] = ContextVar("mindroom_current_tool_call", default=None)
+
+
+def current_tool_call() -> ToolCall | None:
+    """Return the tool call ``execute_tool_call`` is running in this task, with the arguments it was entered with."""
+    return _CURRENT_CALL.get()
+
 
 def _literal_strings_to_values(value: object) -> object:
     # Agno reads the strings "none", "null", "true", and "false" (any case, padded) at the top level as values.
@@ -148,12 +158,15 @@ async def execute_tool_call(
     running from its stored arguments is as clean as a freshly parsed one.
     """
     call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
+    token = _CURRENT_CALL.set(call)
     try:
         value = tool_value(await _run_chain(call, middleware))
     except asyncio.CancelledError:
         raise
     except Exception as error:
         return ToolOutcome(content=str(error), stop_after_call=function.stop_after_tool_call, is_error=True)
+    finally:
+        _CURRENT_CALL.reset(token)
     return ToolOutcome(
         content=value.content,
         images=value.images,
@@ -230,6 +243,7 @@ __all__ = [
     "ToolMiddleware",
     "ToolNext",
     "ToolOutcome",
+    "current_tool_call",
     "execute_tool_call",
     "parse_tool_arguments",
 ]

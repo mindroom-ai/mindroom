@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from typing import TYPE_CHECKING, Any
 
 from mindroom.custom_tools.chat_ui import show_computer_once
@@ -14,49 +13,44 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from agno.tools import Toolkit
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
 logger = get_logger(__name__)
 
 
-def attach_computer_announcement(
+def computer_announcement_middleware(
     toolkit: Toolkit,
     tool_name: str,
     *,
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> Toolkit:
-    """Announce the computer before calls of the browser tool that gives a chat_ui agent its worker computer.
+) -> ToolMiddleware | None:
+    """Return the middleware announcing the computer before the browser tool that gives a chat_ui agent its computer.
 
-    The hook goes after the existing hooks, so it runs inside the tool hook bridge and only for
-    calls that plugin before-call hooks let through.
+    None for any other toolkit or agent. The loop runs it after the tool hook bridge, so it announces only calls that
+    plugin before-call hooks let through.
     """
     if (
         tool_name not in {"browser", "browser_mcp"}
         or not runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
         or "chat_ui" not in config.resolve_entity(agent_name).available_tools
     ):
-        return toolkit
+        return None
     try:
         if computer_browser_provider(agent_name, config, runtime_paths) != tool_name:
-            return toolkit
+            return None
     except ComputerError:
-        return toolkit
-    announce = _announcement_hook(
+        return None
+    return _announcement_middleware(
         agent_name,
+        frozenset((*toolkit.functions, *toolkit.async_functions)),
         toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
-    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-        hooks = list(function.tool_hooks or [])
-        if announce not in hooks:
-            function.tool_hooks = [*hooks, announce]
-    return toolkit
 
 
 def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
@@ -77,17 +71,19 @@ def _runs_as(agent_name: str) -> bool:
     return context is None or context.agent_name == agent_name
 
 
-def _announcement_hook(
+def _announcement_middleware(
     agent_name: str,
+    function_names: frozenset[str],
     placement: SupportsPrimaryCallPlacement | None,
-) -> Callable[..., Awaitable[object]]:
-    async def announce_computer(name: str, func: Callable[..., object], args: dict[str, Any]) -> object:
-        try:
-            if _runs_as(agent_name) and _uses_computer(name, args, placement):
-                await show_computer_once()
-        except Exception:
-            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
-        result = func(**args)
-        return await result if inspect.isawaitable(result) else result
+) -> ToolMiddleware:
+    async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
+        name = call.function.name
+        if name in function_names:
+            try:
+                if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
+                    await show_computer_once()
+            except Exception:
+                logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
+        return await call_next(call.arguments)
 
     return announce_computer

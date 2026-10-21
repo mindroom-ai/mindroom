@@ -22,7 +22,7 @@ from mindroom.approval.tool_approval import (
     tool_may_require_approval,
 )
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.custom_tools.computer_announcement import attach_computer_announcement
+from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
@@ -79,7 +79,7 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, build_tool_hook_middleware, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -156,7 +157,9 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
-    tool_hook_bridge: Callable[..., Any] | None
+    # The tool-call policy the loop runs around every call: the hook bridge, then each browser toolkit's
+    # computer announcement.
+    tool_middleware: tuple[ToolMiddleware, ...]
 
     @property
     def deferred_tool_names(self) -> tuple[str, ...]:
@@ -1099,9 +1102,31 @@ def _build_agent_tool_hook_bridge(
     dispatch_context: ToolDispatchContext | None,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-) -> Callable[..., Any] | None:
+) -> Callable[..., Any]:
+    """Return the tool-call policy as the Agno tool hook the team path still prepends to its job controls."""
     active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
     return build_tool_hook_bridge(
+        active_hook_registry,
+        agent_name=agent_name,
+        dispatch_context=dispatch_context,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+
+@timed("system_prompt_assembly.agent_create.hook_bridge")
+def _build_agent_tool_middleware(
+    *,
+    hook_registry: HookRegistry | None,
+    plugins: list[HookRegistryPlugin],
+    agent_name: str,
+    dispatch_context: ToolDispatchContext | None,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> ToolMiddleware:
+    """Return the tool-call policy as the middleware the owned loop runs around every call of this agent."""
+    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
+    return build_tool_hook_middleware(
         active_hook_registry,
         agent_name=agent_name,
         dispatch_context=dispatch_context,
@@ -1333,16 +1358,18 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     persona_tools = persona.tools if persona is not None else None
     plugins = _load_agent_plugins(config, runtime_paths)
     _sync_agent_tool_registry(config, runtime_paths)
-    tool_hook_bridge = _build_agent_tool_hook_bridge(
-        hook_registry=hook_registry,
-        plugins=plugins,
-        agent_name=agent_name,
-        dispatch_context=(
-            ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
+    tool_middleware: list[ToolMiddleware] = [
+        _build_agent_tool_middleware(
+            hook_registry=hook_registry,
+            plugins=plugins,
+            agent_name=agent_name,
+            dispatch_context=(
+                ToolDispatchContext(execution_identity=execution_identity) if execution_identity is not None else None
+            ),
+            config=config,
+            runtime_paths=runtime_paths,
         ),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    ]
     include_matrix_room_runtime_tools = (
         execution_identity is not None
         and execution_identity.channel == "matrix"
@@ -1442,14 +1469,15 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
         if toolkit:
-            toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
-            toolkit = attach_computer_announcement(
+            announcement = computer_announcement_middleware(
                 toolkit,
                 tool_name,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=runtime_paths,
             )
+            if announcement is not None:
+                tool_middleware.append(announcement)
             bind_toolkit_authority(toolkit, authored_name=tool_entry.authored_name or tool_name)
         return toolkit
 
@@ -1518,7 +1546,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
-        tool_hook_bridge=tool_hook_bridge,
+        # The owned loop runs the hook bridge as middleware around every call, job controls included.
+        tool_hook_bridge=None,
         output_file_policy=_agent_tool_output_file_policy(
             agent_runtime,
             runtime_paths,
@@ -1537,7 +1566,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
-        tool_hook_bridge=tool_hook_bridge,
+        tool_middleware=tuple(tool_middleware),
     )
 
 
@@ -2092,6 +2121,7 @@ def create_agent(
         history_settings=entity_view.history_settings,
         store=store,
         tool_owners=_tool_owners(tool_assembly.tools),
+        tool_middleware=tool_assembly.tool_middleware,
         surface=AgentSurface(
             mode=agent_mode,
             cli_shell=cli_shell,

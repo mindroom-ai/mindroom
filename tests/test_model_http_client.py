@@ -27,7 +27,6 @@ from mindroom.providers.model_http_client import (
     closing_model_connections,
 )
 from mindroom.providers.model_loading import _SHARED_HTTP_CLIENT_PROVIDERS, get_model_instance
-from mindroom.tool_system.tool_hooks import _run_coroutine_from_sync
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -149,15 +148,6 @@ async def test_one_model_sends_from_the_runtime_loop_and_a_finishing_thread_loop
     await asyncio.wait_for(server.closed.wait(), timeout=5)
     await client.models.list()
     assert server.connections == 2
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_hook_bridge_closes_its_loop_pool(tmp_path: Path, server: _ModelsServer) -> None:
-    """Hook work run on its own loop from a worker thread closes that loop's model connections when it ends."""
-    config, runtime_paths = _model_config(tmp_path, "openai", server.url)
-    client = get_model_instance(config, runtime_paths).get_async_client()
-    await asyncio.to_thread(_run_coroutine_from_sync, _list_models(client))
-    await asyncio.wait_for(server.closed.wait(), timeout=5)
 
 
 @pytest.mark.asyncio
