@@ -32,6 +32,7 @@ from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import DelegationModel, _call
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
@@ -41,7 +42,6 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 )
 from tests.test_delegate_tools import _delegate_runtime_context
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
 
 if TYPE_CHECKING:

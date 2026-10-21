@@ -36,6 +36,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_config_lifecycle import _make_lifecycle
 from tests.tool_job_helpers import (
     completed_delegation_job,
+    job_owner,
     tool_job_journal,
 )
 
@@ -232,13 +233,29 @@ def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: 
     assert bool(vars(agent.model).get("_mindroom_tool_jobs")) is enabled
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
-def test_team_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
-    """A team's model, like an agent's, follows the effective feature setting."""
+async def test_a_team_leader_gets_job_controls_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
+    """A team leader's job controls, like an agent's, follow the effective feature setting while the runtime runs."""
+    paths = test_runtime_paths(tmp_path)
     config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled))
-    model = DelegationModel(id="team")
-    assert team_background_jobs(model, config, test_runtime_paths(tmp_path), None) is None
-    assert bool(vars(model).get("_mindroom_tool_jobs")) is enabled
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+    try:
+        await coordinator.sync()
+        jobs = team_background_jobs(config, paths, job_owner())
+        assert (jobs is not None) is enabled
+        if jobs is not None:
+            assert "job" in {function.name for function in jobs.controls.functions}
+        # A team without a Matrix owner has no jobs to collect.
+        assert team_background_jobs(config, paths, None) is None
+    finally:
+        await coordinator.stop()
 
 
 @pytest.mark.parametrize(

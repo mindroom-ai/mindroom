@@ -63,11 +63,11 @@ from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths
+from tests.delegation_helpers import DelegationModel, _call
 from tests.minimal_agent_fixtures import cli_window
 from tests.test_agent_tool_calls import _catalog
 from tests.test_compact_context import _make_config
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
 
 
 @pytest.mark.asyncio

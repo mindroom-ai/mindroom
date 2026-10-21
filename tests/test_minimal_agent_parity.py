@@ -59,6 +59,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
+from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     PLUGIN,
@@ -69,7 +70,6 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
-from tests.test_delegation_execution import DelegationModel
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "agent_cli_api")
 

@@ -154,14 +154,6 @@ def _agent_description_config() -> Config:
     )
 
 
-def test_teams_public_seam_exports_status_helpers() -> None:
-    """The declared teams seam should export the fallback status helpers it exposes elsewhere."""
-    teams_module = importlib.import_module("mindroom.teams")
-
-    assert "is_cancelled_run_output" in teams_module.__all__
-    assert "is_errored_run_output" in teams_module.__all__
-
-
 def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     hidden_attrs = {

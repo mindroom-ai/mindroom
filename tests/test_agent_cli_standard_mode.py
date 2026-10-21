@@ -30,11 +30,11 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.conftest import test_runtime_paths
+from tests.delegation_helpers import DelegationModel
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 from tests.test_agent_cli_shell_access import running_api  # noqa: F401 - pytest fixture
-from tests.test_delegation_execution import DelegationModel
 from tests.tool_job_helpers import job_owner
 
 if TYPE_CHECKING:
