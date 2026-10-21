@@ -163,7 +163,8 @@ async def interrupt_child(
                 scope_id=child.child_agent_name,
                 is_team=False,
             )
-            storage.save_run(session, response, record_usage=True)
+            # The run exists; this rewrites its row without touching the usage ledger.
+            storage.save_runs(session, [response])
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
@@ -238,4 +239,5 @@ async def cancel_approval_delegations(
                 scope_id=scope.scope_id,
                 is_team=scope.kind == "team",
             )
-        await asyncio.to_thread(storage.save_run, session, response, record_usage=True)
+        # The run exists; this rewrites its row without touching the usage ledger.
+        await asyncio.to_thread(storage.save_runs, session, [response])
