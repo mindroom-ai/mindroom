@@ -1267,6 +1267,22 @@ def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str],
     return {(agent_name, name): toolkit for name, toolkit in build.tool_owners.items()}
 
 
+def _unresumable_pause(record: AnyRunRecord) -> RuntimeError:
+    """Return the error for a pause with no approval to ask for: only externally executed calls wait.
+
+    Resuming a run paused on an externally executed call (a delegation) is the resume driver's job; until it runs
+    on this path, the pause fails the reply loudly instead of being recorded as an ordinary stop over the stored
+    ``PAUSED`` row.
+    """
+    pending = [
+        requirement.tool_execution.tool_name
+        for requirement in record.requirements or ()
+        if not requirement.is_resolved()
+    ]
+    msg = f"agent run {record.run_id!r} paused on {pending} without an approval to ask for; resuming it is not wired"
+    return RuntimeError(msg)
+
+
 async def run_delegated_child_response(
     child: DelegationChild,
     *,
@@ -1530,7 +1546,7 @@ async def ai_response(  # noqa: C901
             prepared_history=prepared_run.prepared_history,
         )
 
-    async def _run_blocking_attempt(  # noqa: PLR0911
+    async def _run_blocking_attempt(
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> BlockingAttemptResolution:
@@ -1641,26 +1657,15 @@ async def ai_response(  # noqa: C901
                 fallback_run_id=attempt.run_id,
                 toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
             )
-            if paused_attempt is not None:
-                return replace(
-                    _attach_blocking_pause_presentation(
-                        paused_attempt,
-                        record,
-                        show_tool_calls=show_tool_calls,
-                    ),
-                    runtime_model_name=prepared_run.runtime_model_name,
-                )
-            completed_tools, interrupted_tools = split_interrupted_tool_trace(record.tools)
-            return ExcludedAttempt(
-                original_status=RunStatus.paused,
-                response_text=_extract_response_content(record, show_tool_calls=show_tool_calls),
-                reason=str(record.content) if record.content is not None else None,
-                partial_text=_own_assistant_text(record),
-                completed_tools=tuple(completed_tools),
-                interrupted_tools=tuple(interrupted_tools),
-                session_id=record.session_id,
-                run_id=record.run_id,
-                metadata_content=metadata_content,
+            if paused_attempt is None:
+                raise _unresumable_pause(record)
+            return replace(
+                _attach_blocking_pause_presentation(
+                    paused_attempt,
+                    record,
+                    show_tool_calls=show_tool_calls,
+                ),
+                runtime_model_name=prepared_run.runtime_model_name,
             )
         return CompletedAttempt(
             status=record.status,
@@ -2121,41 +2126,23 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 fallback_run_id=attempt.run_id,
                 toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
             )
-            if paused_attempt is not None:
-                for tool_event in _materialize_paused_agent_tool_events(
-                    state,
-                    paused_attempt.tools,
-                    show_tool_calls=show_tool_calls,
-                ):
-                    _sync_live_turn_recorder()
-                    yield tool_event
-                yield AttemptResolved(
-                    replace(
-                        paused_attempt,
-                        runtime_model_name=prepared_run.runtime_model_name,
-                        tool_trace=(
-                            paused_attempt.tool_trace
-                            if show_tool_calls
-                            else tuple(pending.trace_entry for pending in state.pending_tools)
-                        ),
-                    ),
-                )
-                return
-            paused_text = str(record.content or "")
+            if paused_attempt is None:
+                raise _unresumable_pause(record)
+            for tool_event in _materialize_paused_agent_tool_events(
+                state,
+                paused_attempt.tools,
+                show_tool_calls=show_tool_calls,
+            ):
+                _sync_live_turn_recorder()
+                yield tool_event
             yield AttemptResolved(
-                ExcludedAttempt(
-                    original_status=RunStatus.paused,
-                    response_text=paused_text,
-                    partial_text=state.assistant_text or paused_text,
-                    completed_tools=tuple(state.completed_tools),
-                    interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
-                    session_id=record.session_id,
-                    run_id=record.run_id,
-                    metadata_content=_attempt_metadata(
-                        state,
-                        RunStatus.paused,
-                        run_id=record.run_id,
-                        event_session_id=record.session_id,
+                replace(
+                    paused_attempt,
+                    runtime_model_name=prepared_run.runtime_model_name,
+                    tool_trace=(
+                        paused_attempt.tool_trace
+                        if show_tool_calls
+                        else tuple(pending.trace_entry for pending in state.pending_tools)
                     ),
                 ),
             )

@@ -80,6 +80,7 @@ REQUESTER_ID = "@user:localhost"
 EVENT_ID = "$current:localhost"
 SESSION_ID = f"{ROOM_ID}:{THREAD_ID}"
 PROBE_TOOL = "agent_turn_probe"
+EXTERNAL_PROBE_TOOL = "agent_turn_external_probe"
 
 
 class _ProbeToolkit(Toolkit):
@@ -113,6 +114,13 @@ class _ProbeToolkit(Toolkit):
         return "remembered"
 
 
+class _ExternalProbeToolkit(_ProbeToolkit):
+    """The probe whose ``touch`` runs outside the loop, as a delegation's ``run_subagent`` does."""
+
+    def __init__(self) -> None:
+        Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
+
+
 @pytest.fixture
 def probe() -> Iterator[type[_ProbeToolkit]]:
     """Register the probe toolkit for the test and restore the registries afterwards."""
@@ -128,6 +136,16 @@ def probe() -> Iterator[type[_ProbeToolkit]]:
     )
     def probe_factory() -> type[_ProbeToolkit]:
         return _ProbeToolkit
+
+    @register_tool_with_metadata(
+        name=EXTERNAL_PROBE_TOOL,
+        file_access=ToolFileAccess.NONE,
+        display_name="Agent Turn External Probe",
+        description="Pauses an agent turn for execution outside the loop.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def external_probe_factory() -> type[_ExternalProbeToolkit]:
+        return _ExternalProbeToolkit
 
     _ProbeToolkit.calls.clear()
     try:
@@ -426,6 +444,38 @@ async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
     assert record.status is RunStatus.paused
     assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
     assert reply.recorder.outcome == "suspended"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply_and_leaves_the_paused_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    streaming: bool,
+) -> None:
+    """A run paused only on an externally executed call cannot be resumed here yet, so the reply fails loudly.
+
+    The stored ``PAUSED`` row stays as the loop wrote it; the failure is the turn's, recorded as an error on its
+    recorder, not an ordinary stop written over the pause.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="outside"))],
+        tools=(EXTERNAL_PROBE_TOOL,),
+    )
+
+    run = _stream(reply) if streaming else _respond(reply)
+    with pytest.raises(RuntimeError, match="without an approval to ask for"):
+        await run
+
+    assert probe.calls == []
+    record = _stored(reply)
+    assert record.status is RunStatus.paused
+    assert [requirement.needs_external_execution for requirement in record.requirements or []] == [True]
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.original_status is RunStatus.error
 
 
 @pytest.mark.asyncio
