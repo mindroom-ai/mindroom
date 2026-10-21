@@ -89,6 +89,7 @@ def adapt_function(function: Function) -> ToolFunction:
         requires_confirmation=prepared.requires_confirmation,
         approval_type=prepared.approval_type,
         external_execution=prepared.external_execution,
+        external_execution_silent=prepared.external_execution_silent,
         stop_after_tool_call=prepared.stop_after_tool_call,
         show_result=prepared.show_result,
         entrypoint=prepared.entrypoint,

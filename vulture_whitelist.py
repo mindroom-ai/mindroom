@@ -421,5 +421,4 @@ _.save_session_fields  # Store method called by the owned runtime when it is wir
 _.list_updated_sessions  # Store method called by the owned background readers when they are wired (src/mindroom/session_storage/store.py)
 _.prompt_id  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
 _.loop_start_ids  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
-_.stop_after_call  # ToolOutcome field the owned loop reads (src/mindroom/tool_system/invocation.py)
 _.native_compaction_settings  # Claude adapter method the history replay planner calls once it is wired (src/mindroom/providers/anthropic/messages.py)
