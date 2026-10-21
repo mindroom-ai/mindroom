@@ -453,22 +453,31 @@ def _record_run_usage(
         f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
         (session_id,),
     ).fetchone()
-    session_data = _decoded_mapping(raw_session_data)
-    if session_data is None and raw_session_data is not None:
-        # An unreadable row keeps its bytes; the ledger alone records this run.
-        return
-    session_data = session_data or {}
-    stored_totals = session_data.get("session_metrics")
-    totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
-    totals.count_run(
-        _counted_usage(snapshot),
-        replacing=None if previous is None else _counted_usage(_decoded_mapping(previous[0]) or {}),
-    )
-    session_data["session_metrics"] = totals.to_dict()
+    session_data = _rewritable_session_data(raw_session_data)
+    if session_data is not None:
+        stored_totals = session_data.get("session_metrics")
+        totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
+        totals.count_run(
+            _counted_usage(snapshot),
+            replacing=None if previous is None else _counted_usage(_decoded_mapping(previous[0]) or {}),
+        )
+        session_data["session_metrics"] = totals.to_dict()
+    # An unreadable row keeps its bytes, so the ledger alone records this run; its update time moves either way.
     connection.execute(
-        f"UPDATE {sessions} SET session_data = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
-        (json.dumps(session_data), int(time()), session_id),
+        f"UPDATE {sessions} SET session_data = COALESCE(?, session_data), updated_at = ? WHERE session_id = ?",  # noqa: S608
+        (None if session_data is None else json.dumps(session_data), int(time()), session_id),
     )
+
+
+def _rewritable_session_data(raw_value: object) -> dict[str, Any] | None:
+    """Return a row's ``session_data`` object, empty for SQL or JSON null, or None when unreadable or not an object."""
+    try:
+        value = decode_session_json(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value is None:
+        return {}
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
 def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:

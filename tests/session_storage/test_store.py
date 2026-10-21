@@ -724,16 +724,34 @@ def test_double_encoded_session_columns_load_and_are_rewritten_once(store: Conve
 
 
 def test_unreadable_session_columns_load_as_empty(store: ConversationStore) -> None:
-    """One odd session row never fails a load, and a usage save leaves its bytes alone."""
+    """One odd session row never fails a load, and a usage save leaves its bytes alone but moves its update time."""
     store.save_session_fields(_session())
-    _execute(store, "UPDATE code_sessions SET session_data = 'not json', metadata = '[1]' WHERE session_id = 's1'")
+    _execute(
+        store,
+        "UPDATE code_sessions SET session_data = 'not json', metadata = '[1]', updated_at = 5 WHERE session_id = 's1'",
+    )
 
     session = _loaded(store)
     assert (session.session_state, session.metadata) == ({}, None)
 
     _seed(store, [_run("r1", metrics=_usage(3))])
-    assert _query(store, "SELECT session_data FROM code_sessions") == [("not json",)]
+    [(session_data, updated_at)] = _query(store, "SELECT session_data, updated_at FROM code_sessions")
+    assert (session_data, updated_at > 5) == ("not json", True)
     assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
+
+
+def test_json_null_session_data_counts_usage_like_an_empty_row(store: ConversationStore) -> None:
+    """Agno wrote ``null`` for a session without data; its runs count in the totals and move its update time."""
+    store.save_session_fields(_session())
+    _execute(store, "UPDATE code_sessions SET session_data = 'null', updated_at = 5 WHERE session_id = 's1'")
+
+    store.save_run(_session(), _run("r1", RunStatus.paused, metrics=_usage(3)), record_usage=True)
+    [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
+    assert updated_at > 5
+    assert _totals(store)["input_tokens"] == 3
+
+    store.save_run(_session(), _run("r1", metrics=_usage(7)), record_usage=True)
+    assert _totals(store)["input_tokens"] == 7
 
 
 # --- usage ------------------------------------------------------------------------------------------------------
