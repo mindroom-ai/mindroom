@@ -361,7 +361,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which needs trusted upstream auth and is not served here. Give such agents a shared worker scope to set their keys here.",
+      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
     );
     expect(within(note).queryByRole("link")).toBeNull();
   });

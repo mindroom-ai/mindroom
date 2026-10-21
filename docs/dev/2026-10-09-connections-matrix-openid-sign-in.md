@@ -29,6 +29,7 @@ Unset, it allows MindRoom's hosted Chat, which MindRoom operates, plus any Chat 
 The local rule never applies to a portal on a public address, and `[]` still turns sign-in from Chat off.
 The default list also waits for a homeserver that binds tokens: without binding, any backend a user opens from Chat could replay their token to every deployment it can reach, a risk the old opt-in left to operators who set the list.
 Rejected: waiving binding for a portal on a local address, because without `MINDROOM_PUBLIC_URL` the address comes from the `Host` header, which a replaying backend sets to `localhost`.
+Rejected: deciding locality from the TCP peer address instead, because Docker's userland proxy and Docker Desktop hide client addresses.
 
 ### Allow plain HTTP on local addresses
 
@@ -61,7 +62,8 @@ MindRoom's Tuwunel fork (mindroom-ai/mindroom-tuwunel#105, behind its `mindroom_
 
 Chat requests a bound token by posting `{"io.mindroom.audience": "<backend origin>"}` to `request_token`.
 MindRoom takes the audience from `MINDROOM_PUBLIC_URL`, never from the request, because a replaying backend controls the `Host` header.
-Unset, it uses `http://localhost:<MINDROOM_PORT>`, a fixed value that is the origin Chat opens for a backend on the same machine, so `mindroom run` beside hosted Chat keeps working once its homeserver binds tokens; only Chat on that machine requests tokens for it.
+Unset, it uses `http://localhost:<MINDROOM_PORT>`, a fixed value that is the origin Chat opens for a backend on the same machine, so `mindroom run` beside hosted Chat keeps working once its homeserver binds tokens.
+Every deployment without `MINDROOM_PUBLIC_URL` shares that audience, so a token Chat requested for one of them can be replayed to another that the holder reaches; setting `MINDROOM_PUBLIC_URL` gives a deployment its own audience.
 Unbound tokens keep working for Element Call, LiveKit, provisioning pairing, and stock homeservers.
 MindRoom sends the audience on every verification instead of first checking the homeserver's `io.mindroom.openid_audience` capability, because the fork ignores it while binding is off and Synapse and upstream Tuwunel ignore unknown userinfo parameters.
 Rejected: probing `/versions` and caching the answer, the first version, which needed a retry for a stale cache and guarded only against a homeserver that refuses unknown parameters.

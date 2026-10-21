@@ -324,7 +324,7 @@ async def _egress_services(
 async def me(request: Request, response: Response) -> ConnectionsIdentity:
     """Return the signed-in identity for the Connections pages' header.
 
-    Any signed user gets an answer, with or without agents or the portal agent setting, so both pages can show
+    Any signed user gets an answer, with or without agents, so both pages can show
     "Signed in as", link the dashboard to administrators, and link the Agent Keys page while the broker is on.
     """
     response.headers.update(CONNECTIONS_HEADERS)

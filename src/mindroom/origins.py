@@ -68,9 +68,9 @@ def local_api_origin(paths: RuntimePaths) -> str:
     return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
 
 
-def deployment_origin(public_url: str | None, request_url: str) -> str | None:
-    """Return the browser origin of this deployment: the configured `MINDROOM_PUBLIC_URL` when set, else the request's."""
-    return normalized_origin((public_url or "").strip() or request_url)
+def deployment_origin(public_url: str | None, fallback_url: str) -> str | None:
+    """Return the browser origin of this deployment: the configured `MINDROOM_PUBLIC_URL` when set, else the fallback's."""
+    return normalized_origin((public_url or "").strip() or fallback_url)
 
 
 def parse_browser_origin(value: str) -> str:

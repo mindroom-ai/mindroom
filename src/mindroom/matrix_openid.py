@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
-from mindroom.origins import local_api_origin, normalized_origin
+from mindroom.origins import deployment_origin, local_api_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
 # MindRoom's Tuwunel fork binds tokens to this audience (`io.mindroom.openid_audience`); other homeservers ignore it.
@@ -46,8 +46,7 @@ def _openid_audience(paths: RuntimePaths) -> str | None:
     It is the normalized origin of `MINDROOM_PUBLIC_URL`, or MindRoom's own local origin when that is unset, which is
     the address MindRoom Chat opens for a backend on the same machine.
     """
-    public_url = (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
-    return normalized_origin(public_url or local_api_origin(paths))
+    return deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), local_api_origin(paths))
 
 
 async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
