@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.models.ollama import Ollama
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
@@ -48,6 +47,7 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
+    FakeModel,
     bind_runtime_paths,
     drain_coalescing,
     install_runtime_journal_support,
@@ -1791,7 +1791,7 @@ class TestRoutingRegression:
         mock_news_agent.user_id = f"@mindroom_news:{domain}"
 
         # Mock get_model_instance to return a mock model
-        mock_model = Ollama(id="test-model")
+        mock_model = FakeModel(id="test-model", provider="fake")
         mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         fake_member = MagicMock()

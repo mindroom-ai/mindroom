@@ -37,12 +37,14 @@ class TestRoutingIntegration:
     """Integration tests for routing behavior with multiple agents."""
 
     @pytest.mark.asyncio
+    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_responder: AsyncMock,
         mock_stream_agent_response: AsyncMock,
+        mock_ai_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
         """Test the exact scenario reported: MindRoomResearch mentioned in research channel.
@@ -56,6 +58,7 @@ class TestRoutingIntegration:
             yield "I am MindRoomResearch and I can help with research tasks"
 
         mock_stream_agent_response.return_value = streaming_generator()
+        mock_ai_response.return_value = "I am MindRoomResearch and I can help with research tasks"
 
         # Create agents
         research_agent = AgentMatrixUser(

@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import ipaddress
 import os
 import re
 import shutil
@@ -33,6 +34,8 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
+import httpcore
+import httpcore2
 import httpx
 import nio
 import pytest
@@ -43,6 +46,7 @@ from agno.models.base import Model
 from agno.models.response import ModelResponse
 from agno.utils import log as agno_log
 from aioresponses import aioresponses
+from openai import AsyncOpenAI, OpenAI
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
@@ -76,6 +80,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
@@ -135,6 +140,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers.media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
@@ -3042,6 +3048,148 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         raise httpx.ConnectError(message, request=httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+def _refuse_connection(request: httpx.Request) -> httpx.Response:
+    message = "network disabled in tests"
+    raise httpx.ConnectError(message, request=request)
+
+
+def _offline_sdk_client_params(embedder: MindRoomOpenAIEmbedder) -> dict[str, Any]:
+    # Without retries, because the SDK would back off for seconds before reporting the refusal.
+    return {
+        **(embedder.client_params or {}),
+        "api_key": embedder.api_key,
+        "organization": embedder.organization,
+        "base_url": embedder.base_url,
+        "max_retries": 0,
+    }
+
+
+def _offline_sync_client(embedder: MindRoomOpenAIEmbedder) -> OpenAI:
+    if embedder.openai_client is None:
+        embedder.openai_client = OpenAI(
+            **_offline_sdk_client_params(embedder),
+            http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
+        )
+    return embedder.openai_client
+
+
+def _offline_async_client(embedder: MindRoomOpenAIEmbedder) -> AsyncOpenAI:
+    if embedder.async_client is None:
+        embedder.async_client = AsyncOpenAI(
+            **_offline_sdk_client_params(embedder),
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
+        )
+    return embedder.async_client
+
+
+@pytest.fixture
+def real_embedder_clients() -> None:
+    """Keep the real OpenAI embedder SDK clients for tests that exercise how they are built."""
+
+
+@pytest.fixture(autouse=True)
+def _offline_openai_embedders(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep OpenAI-compatible embedders from sending real embedding requests.
+
+    The default config pairs mem0 memory with the OpenAI embedder, so any test that searches memory
+    or probes embedder health builds one. Its requests would go to `OPENAI_BASE_URL` or
+    api.openai.com with the keyless placeholder key. Here an embedder without an injected SDK client
+    gets clients that fail every request the way an unreachable endpoint does, with the configured
+    key and base URL. Tests that need vectors inject a client or their own embedder.
+    """
+    if "real_embedder_clients" in request.fixturenames:
+        return
+    monkeypatch.setattr(MindRoomOpenAIEmbedder, "client", property(_offline_sync_client))
+    monkeypatch.setattr(MindRoomOpenAIEmbedder, "aclient", property(_offline_async_client))
+
+
+_OLLAMA_DEFAULT_PORT = urlsplit(OLLAMA_HOST_DEFAULT).port
+
+
+def _dial_leaves_the_test(host: str, port: int) -> bool:
+    """Return whether dialing ``host:port`` reaches another machine or a real local Ollama."""
+    if host == "localhost" or host.endswith(".localhost"):
+        on_this_machine = True
+    else:
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            on_this_machine = False
+        else:
+            on_this_machine = address.is_loopback or address.is_unspecified
+    # Test servers listen on ephemeral ports, so only a real Ollama answers on its default port.
+    return not on_this_machine or port == _OLLAMA_DEFAULT_PORT
+
+
+def _refuse_dial_off_the_test(host: str, port: int, connect_error: type[Exception], attempts: list[str]) -> None:
+    if _dial_leaves_the_test(host, port):
+        attempts.append(f"{host}:{port}")
+        message = f"network disabled in tests: {host}:{port}"
+        raise connect_error(message)
+
+
+def _refusing_sync_connect[R](
+    connect_tcp: Callable[..., R],
+    connect_error: type[Exception],
+    attempts: list[str],
+) -> Callable[..., R]:
+    def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
+        _refuse_dial_off_the_test(host, port, connect_error, attempts)
+        return connect_tcp(backend, host, port, *args, **kwargs)
+
+    return refusing_connect_tcp
+
+
+def _refusing_async_connect[R](
+    connect_tcp: Callable[..., Awaitable[R]],
+    connect_error: type[Exception],
+    attempts: list[str],
+) -> Callable[..., Awaitable[R]]:
+    async def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
+        _refuse_dial_off_the_test(host, port, connect_error, attempts)
+        return await connect_tcp(backend, host, port, *args, **kwargs)
+
+    return refusing_connect_tcp
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _refused_network_attempts() -> Generator[list[str], None, None]:
+    """Refuse every HTTP client connection that would leave this machine, for the whole session.
+
+    The patch outlives each test so that a background thread or task finishing after its test is still refused.
+    """
+    attempts: list[str] = []
+    with pytest.MonkeyPatch.context() as patcher:
+        for core in (httpcore, httpcore2):
+            patcher.setattr(
+                core.SyncBackend,
+                "connect_tcp",
+                _refusing_sync_connect(core.SyncBackend.connect_tcp, core.ConnectError, attempts),
+            )
+            patcher.setattr(
+                core.AnyIOBackend,
+                "connect_tcp",
+                _refusing_async_connect(core.AnyIOBackend.connect_tcp, core.ConnectError, attempts),
+            )
+        yield attempts
+
+
+@pytest.fixture(autouse=True)
+def _fail_tests_that_reach_the_network(_refused_network_attempts: list[str]) -> Generator[None, None, None]:
+    """Fail a test whose HTTP client dialed another machine or a real local Ollama.
+
+    The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
+    is recorded and checked here. This covers clients built on httpx and httpx2, which include the
+    model and embedder SDKs. Raw sockets, aiohttp and requests are not covered; tiktoken, for one,
+    downloads its encodings through requests when its cache is cold.
+    """
+    _refused_network_attempts.clear()
+    yield
+    if _refused_network_attempts:
+        attempts = ", ".join(sorted(set(_refused_network_attempts)))
+        pytest.fail(f"test tried to reach the network: {attempts}", pytrace=False)
 
 
 @pytest.fixture(autouse=True)
