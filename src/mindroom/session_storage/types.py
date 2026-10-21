@@ -1,0 +1,57 @@
+"""Values the owned conversation store reads and writes."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from time import time
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from mindroom.llm.runs import AnyRunRecord
+
+type SessionKind = Literal["agent", "team"]
+# What a run save did: wrote the row, refused it because a cut removed the run, or refused it because the run
+# is folded behind its scope's latest summary row.
+type SaveOutcome = Literal["written", "removed", "frozen"]
+type SessionField = Literal["metadata", "session_state"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplaySummary:
+    """The summary a session replays: the text of its owner scope's latest summary row."""
+
+    text: str
+    updated_at: datetime
+
+
+@dataclass(kw_only=True)
+class ConversationSession:
+    """One conversation's session row and the runs a load returns.
+
+    ``owner_id`` is the agent or team the session belongs to (the row's ``agent_id`` or ``team_id``).
+    ``runs`` holds the runs after the owner scope's latest summary row, every paused, cancelled, or errored
+    run, and their member runs, in log order. ``summary`` is derived from the summary rows on load and is
+    never written back.
+    """
+
+    session_id: str
+    kind: SessionKind
+    owner_id: str
+    user_id: str | None = None
+    metadata: dict[str, Any] | None = None
+    session_state: dict[str, Any] = field(default_factory=dict)
+    runs: list[AnyRunRecord] = field(default_factory=list)
+    summary: ReplaySummary | None = None
+    created_at: int = field(default_factory=lambda: int(time()))
+    updated_at: int | None = None
+
+
+__all__ = [
+    "ConversationSession",
+    "ReplaySummary",
+    "SaveOutcome",
+    "SessionField",
+    "SessionKind",
+]

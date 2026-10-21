@@ -54,12 +54,12 @@ def test_media_requires_exactly_one_source(kind: type[Image | Audio | Video]) ->
     assert kind(content=b"x").content == b"x"
 
 
-def test_file_requires_at_least_one_source_and_allows_several() -> None:
-    with pytest.raises(ValueError, match="At least one of"):
-        File(mime_type="text/plain")
-
+def test_file_needs_no_source_and_allows_several() -> None:
+    # Agno accepted a file known only by its id or a provider-side object, and stored runs hold such files.
+    bare = File(id="provider-file", mime_type="application/pdf")
     both = File(url="https://example.invalid/f", filepath="/data/f")
 
+    assert bare.to_dict() == {"id": "provider-file", "mime_type": "application/pdf"}
     assert (both.url, both.filepath) == ("https://example.invalid/f", "/data/f")
 
 
@@ -221,8 +221,7 @@ def test_run_record_defaults_and_status() -> None:
     assert record.to_dict()["status"] == "RUNNING"
     assert RunStatus("PAUSED") is RunStatus.paused
     assert RunStatus.cancelled.name == "cancelled"
-    with pytest.raises(ValueError, match="REGENERATED"):
-        RunStatus("REGENERATED")
+    assert RunRecord.from_dict({"run_id": "r", "status": "REGENERATED"}).status is RunStatus.regenerated
 
 
 def test_team_run_record_defaults() -> None:
