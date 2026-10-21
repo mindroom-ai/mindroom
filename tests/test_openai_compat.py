@@ -66,6 +66,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -142,15 +143,21 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
     )
 
 
+def _knowledge_indexes(knowledge: object) -> list[object]:
+    """Return the published index readers behind the knowledge handle an agent received."""
+    assert isinstance(knowledge, StrictSearchKnowledge)
+    return [source.index for source in knowledge.agent_knowledge.sources]
+
+
 def _knowledge_lookup(
-    knowledge: object | None,
+    reader: object | None,
     *,
     base_id: str = "docs",
     availability: KnowledgeAvailability = KnowledgeAvailability.READY,
 ) -> SimpleNamespace:
     index = (
         SimpleNamespace(
-            knowledge=knowledge,
+            reader=reader,
             state=SimpleNamespace(
                 source_signature=hashlib.sha256().hexdigest(),
                 last_published_at="2999-01-01T00:00:00+00:00",
@@ -158,7 +165,7 @@ def _knowledge_lookup(
                 last_error=None,
             ),
         )
-        if knowledge is not None
+        if reader is not None
         else None
     )
     key = SimpleNamespace(
@@ -5528,13 +5535,13 @@ class TestKnowledgeIntegration:
 
     def test_knowledge_passed_when_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed to ai_response when agent has knowledge_bases."""
-        mock_knowledge = MagicMock()
+        mock_reader = MagicMock()
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_knowledge),
+                return_value=_knowledge_lookup(mock_reader),
             ),
         ):
             mock_ai.return_value = "Response with knowledge"
@@ -5548,7 +5555,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
 
     def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
         """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
@@ -5561,7 +5568,7 @@ class TestKnowledgeIntegration:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        mock_knowledge = MagicMock()
+        mock_reader = MagicMock()
         observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
 
         def fake_lookup_knowledge_for_base(
@@ -5575,7 +5582,7 @@ class TestKnowledgeIntegration:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
                 return None
-            return _knowledge_lookup(mock_knowledge, base_id=base_id)
+            return _knowledge_lookup(mock_reader, base_id=base_id)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
@@ -5593,7 +5600,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+        assert _knowledge_indexes(mock_ai.call_args.kwargs["knowledge"]) == [mock_reader]
         assert observed_calls == [("docs", knowledge_config, runtime_paths)]
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
@@ -5681,7 +5688,7 @@ class TestKnowledgeIntegration:
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""
-        mock_knowledge = MagicMock()
+        mock_reader = MagicMock()
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Streamed!")
@@ -5690,7 +5697,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_knowledge),
+                return_value=_knowledge_lookup(mock_reader),
             ),
         ):
             response = knowledge_app_client.post(
@@ -5703,7 +5710,7 @@ class TestKnowledgeIntegration:
             )
 
         assert response.status_code == 200
-        assert mock_stream_fn.call_args.kwargs["knowledge"] is mock_knowledge
+        assert _knowledge_indexes(mock_stream_fn.call_args.kwargs["knowledge"]) == [mock_reader]
 
     def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
         """Agent with multiple knowledge_bases gets a merged Knowledge object."""
@@ -5721,13 +5728,8 @@ class TestKnowledgeIntegration:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        mock_knowledge_docs = MagicMock()
-        mock_knowledge_docs.vector_db = MagicMock()
-        mock_knowledge_docs.max_results = 5
-
-        mock_knowledge_wiki = MagicMock()
-        mock_knowledge_wiki.vector_db = MagicMock()
-        mock_knowledge_wiki.max_results = 10
+        mock_reader_docs = MagicMock()
+        mock_reader_wiki = MagicMock()
 
         def fake_lookup_knowledge_for_base(
             base_id: str,
@@ -5737,8 +5739,8 @@ class TestKnowledgeIntegration:
             execution_identity: object | None = None,  # noqa: ARG001
             on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
         ) -> SimpleNamespace | None:
-            knowledge = {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
-            return _knowledge_lookup(knowledge, base_id=base_id) if knowledge is not None else None
+            reader = {"docs": mock_reader_docs, "wiki": mock_reader_wiki}.get(base_id)
+            return _knowledge_lookup(reader, base_id=base_id) if reader is not None else None
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
@@ -5757,12 +5759,9 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
-        assert knowledge_arg is not None
-        # Should be a merged Knowledge with MultiKnowledgeVectorDb
-        from mindroom.knowledge.utils import _MultiKnowledgeVectorDb  # noqa: PLC0415
-
-        assert isinstance(knowledge_arg.vector_db, _MultiKnowledgeVectorDb)
-        assert knowledge_arg.max_results == 10  # max(5, 10)
+        assert _knowledge_indexes(knowledge_arg) == [mock_reader_docs, mock_reader_wiki]
+        assert [source.description.base_id for source in knowledge_arg.agent_knowledge.sources] == ["docs", "wiki"]
+        assert knowledge_arg.max_results == 10
 
     def test_knowledge_resolution_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:
         """When knowledge resolution fails, request proceeds with knowledge=None."""

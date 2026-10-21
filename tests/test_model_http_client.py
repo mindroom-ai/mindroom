@@ -15,7 +15,9 @@ import pytest_asyncio
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
+from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph.store import _GraphLoop, run_on_loop
 from mindroom.orchestrator import _finish_runtime_shutdown
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client
@@ -210,8 +212,16 @@ async def test_openai_embedder_reuses_the_model_connection(tmp_path: Path, serve
     """Async embedding requests go through the same pooled connection as the models."""
     config, runtime_paths = _model_config(tmp_path, "openai", server.url)
     await get_model_instance(config, runtime_paths).get_async_client().models.list()
-    embedder = MindRoomOpenAIEmbedder(id="test-embedding", api_key="test", base_url=f"{server.url}/v1")
-    await embedder.aclient.models.list()
+    embedder = OpenAIEmbedder(
+        model="test-embedding",
+        api_key="test",
+        base_url=f"{server.url}/v1",
+        # A recorder from a retired generation, so the failure below leaves process-wide health alone.
+        health_recorder=EmbedderHealthRecorder(generation=-1),
+    )
+    # The server answers with an empty list, which the embedder rejects after the request went out.
+    with pytest.raises(EmbedderRequestError, match="0 embeddings for 1 inputs"):
+        await embedder.aembed(["hello"], purpose="query")
     assert server.connections == 1
 
 

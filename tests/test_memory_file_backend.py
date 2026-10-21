@@ -18,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
@@ -290,16 +291,10 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     runtime_paths = runtime_paths_for(config)
 
     class FakeKnowledge:
-        async def asearch(self, *, query: str, max_results: int) -> list[object]:
+        async def asearch(self, query: str, limit: int) -> list[SearchHit]:
             assert query == "semantic memory"
-            assert max_results == 5
-            return [
-                SimpleNamespace(
-                    content="Published semantic memory.",
-                    meta_data={"source_path": "memory/2026-06-02.md"},
-                    reranking_score=0.8,
-                ),
-            ]
+            assert limit == 5
+            return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
 
     access_base_ids: list[str] = []
 
@@ -348,16 +343,10 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
 
 class _FakeSemanticTimingKnowledge:
-    async def asearch(self, *, query: str, max_results: int) -> list[object]:
+    async def asearch(self, query: str, limit: int) -> list[SearchHit]:
         assert query == "semantic memory"
-        assert max_results == 5
-        return [
-            SimpleNamespace(
-                content="Published semantic memory.",
-                meta_data={"source_path": "memory/2026-06-02.md"},
-                reranking_score=0.8,
-            ),
-        ]
+        assert limit == 5
+        return [SearchHit(content="Published semantic memory.", meta_data={"source_path": "memory/2026-06-02.md"})]
 
 
 @pytest.mark.asyncio

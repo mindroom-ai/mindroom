@@ -28,7 +28,7 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.memory.config import (
     _get_memory_config,
     _Mem0StrictOpenAIEmbedder,
@@ -497,7 +497,7 @@ class TestMemoryConfig:
                 router=RouterConfig(model="default"),
             )
 
-        embedder = cast("MindRoomOpenAIEmbedder", create_configured_embedder(config_with("q: "), runtime_paths))
+        embedder = cast("OpenAIEmbedder", create_configured_embedder(config_with("q: "), runtime_paths))
 
         assert (embedder.query_prefix, embedder.document_prefix) == ("q: ", "d: ")
         assert (
@@ -535,7 +535,7 @@ class TestMemoryConfig:
 
         knowledge_embedder = create_configured_embedder(config, runtime_paths)
         assert knowledge_embedder.api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-        assert knowledge_embedder.client.api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
+        assert knowledge_embedder._sdk_client().api_key == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 
         mem0_embedder_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]
         assert mem0_embedder_config["api_key"] == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
@@ -589,7 +589,7 @@ class TestMemoryConfig:
 
         assert config.memory.embedder.config.host is None
         embedder = create_configured_embedder(config, runtime_paths)
-        assert str(embedder.client.base_url) == "https://api.openai.com/v1/"
+        assert str(embedder._sdk_client().base_url) == "https://api.openai.com/v1/"
         mem0_embedder_config = _get_memory_config(tmp_path / "memory", config, runtime_paths)["embedder"]["config"]
         assert "openai_base_url" not in mem0_embedder_config
 
@@ -647,8 +647,8 @@ class TestMemoryConfig:
         }
         embedder = create_configured_embedder(config, runtime_paths)
         assert embedder.api_key == "openrouter-key"
-        assert str(embedder.client.base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
-        assert embedder.embedding_request_parameters("hi", query=True)["dimensions"] == 1536
+        assert str(embedder._sdk_client().base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
+        assert embedder._request_parameters(["hi"], purpose="query")["dimensions"] == 1536
 
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""
@@ -907,11 +907,7 @@ class TestMemoryConfig:
         )
         client = MagicMock()
         client.embeddings.create.return_value = SimpleNamespace(data=[], usage=None)
-        strict_embedder = MindRoomOpenAIEmbedder(
-            id="text-embedding-3-small",
-            api_key="sk-test",
-            openai_client=client,
-        )
+        strict_embedder = OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-test", client=client)
         memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
 
         with (
@@ -929,11 +925,16 @@ class TestMemoryConfig:
         failure_detail = "embedder authentication failed (HTTP 401)"
 
         class BatchFailingEmbedder:
-            def get_embedding(self, _text: str) -> list[float]:
-                return [0.1, 0.2]
+            sends_batches = True
 
-            def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
-                raise EmbedderRequestError(failure_detail)
+            def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+                del purpose
+                if len(texts) > 1:
+                    raise EmbedderRequestError(failure_detail)
+                return [[0.1, 0.2]]
+
+            async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+                return self.embed(texts, purpose=purpose)
 
         adapter = _Mem0StrictOpenAIEmbedder(BatchFailingEmbedder())
         adapter.begin_operation()
@@ -956,11 +957,11 @@ class TestMemoryConfig:
             usage=None,
         )
         adapter = _Mem0StrictOpenAIEmbedder(
-            MindRoomOpenAIEmbedder(
-                id="embeddinggemma-2",
+            OpenAIEmbedder(
+                model="embeddinggemma-2",
                 api_key="sk-test",
                 base_url="http://local/v1",
-                openai_client=client,
+                client=client,
                 query_prefix="q: ",
                 document_prefix="d: ",
             ),

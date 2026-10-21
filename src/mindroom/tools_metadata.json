@@ -13871,20 +13871,7 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "research",
-      "config_fields": [
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Knowledge",
-          "name": "knowledge",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        }
-      ],
+      "config_fields": null,
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [
@@ -13897,7 +13884,6 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add_website_to_knowledge",
         "read_url"
       ],
       "helper_text": null,

@@ -725,7 +725,7 @@ def test_knowledge_read_worker_logs_like_its_parent(
     capfd: pytest.CaptureFixture[str],
     level: str,
 ) -> None:
-    """The read worker renders Agno's search logs and its own failures in the parent's format and level."""
+    """The read worker renders its failures in the parent's format and logs nothing for a search at any level."""
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
     setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
     index = tmp_path / "index"
@@ -733,17 +733,18 @@ def test_knowledge_read_worker_logs_like_its_parent(
         client.create_collection("docs").add(ids=["a"], embeddings=[[1.0, 0.0]], documents=["alpha"])
     capfd.readouterr()
 
-    assert len(read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0])).documents) == 1
-    invalid_filter = {"team": {"$invalid": "https://reader:synthetic-secret@example.test"}}
-    with pytest.raises(RuntimeError, match="ValueError"):
-        read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0], filters=invalid_filter))
+    assert len(read_chroma(ReadRequest(str(index), "docs", "alpha", [1.0, 0.0])).hits) == 1
+    # Chroma names a missing collection in its error, so the name carries the URL credentials.
+    missing = "https://reader:synthetic-secret@example.test docs"
+    with pytest.raises(RuntimeError, match="NotFoundError"):
+        read_chroma(ReadRequest(str(index), missing, "alpha", [1.0, 0.0]))
 
     stderr = capfd.readouterr().err
     records = _stderr_records(stderr.encode())
-    expected = [("Found 1 documents", "info", "agno")] if level == "INFO" else []
-    expected.append(("Knowledge read failed", "error", "mindroom.knowledge.read_worker"))
-    assert [(record["event"], record["level"], record["logger"]) for record in records] == expected
-    assert "$invalid" in str(records[-1]["exception"])
+    assert [(record["event"], record["level"], record["logger"]) for record in records] == [
+        ("Knowledge read failed", "error", "mindroom.knowledge.read_worker"),
+    ]
+    assert "does not exist" in str(records[-1]["exception"])
     assert "synthetic-secret" not in stderr
 
 

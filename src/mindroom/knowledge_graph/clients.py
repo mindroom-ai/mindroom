@@ -22,7 +22,6 @@ from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, ModelSize
 from pydantic import BaseModel
 
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
@@ -32,12 +31,12 @@ from mindroom.session_storage.agent_storage import create_session_storage
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from agno.knowledge.embedder.base import Embedder
     from graphiti_core.driver.driver import GraphDriver
     from graphiti_core.prompts.models import Message
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder
 
 # Requests in flight at once for an embedder that embeds one text per request.
 _EMBED_CONCURRENCY = 8
@@ -156,14 +155,14 @@ class MindRoomEmbedder(EmbedderClient):
     def __init__(self, embedder: Embedder) -> None:
         self._embedder = embedder
         # Cleared once the server answers a batch with the wrong number of vectors.
-        self._batches = isinstance(embedder, MindRoomOpenAIEmbedder)
+        self._batches = embedder.sends_batches
 
     # Graphiti embeds node names, facts and search queries through the same two calls, so it cannot say which a text
     # is. Every graph text is embedded as a query, which keeps names, facts and searches comparable with each other.
     async def create(self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]) -> list[float]:
         """Embed one text, which Graphiti passes as a one-element list."""
         if isinstance(input_data, list) and input_data and isinstance(input_data[0], str):
-            return await self._embedder.async_get_embedding(input_data[0])
+            return (await self._embedder.aembed([input_data[0]], purpose="query"))[0]
         msg = "The knowledge graph embeds text only"
         raise TypeError(msg)
 
@@ -173,12 +172,9 @@ class MindRoomEmbedder(EmbedderClient):
         Graphiti passes every node name or fact of an episode at once, and one request per text then opened so many
         connections at the same moment that they timed out connecting.
         """
-        if self._batches and isinstance(self._embedder, MindRoomOpenAIEmbedder):
+        if self._batches:
             try:
-                embeddings, _usage = await self._embedder.async_get_embeddings_batch_and_usage(
-                    input_data_list,
-                    query=True,
-                )
+                embeddings = await self._embedder.aembed(input_data_list, purpose="query")
             except EmbedderRequestError as exc:
                 # Some OpenAI-compatible servers accept an array but answer with one vector.
                 if not embedder_batch_cardinality_mismatch(exc):
@@ -190,7 +186,7 @@ class MindRoomEmbedder(EmbedderClient):
 
         async def embed_one(text: str) -> list[float]:
             async with slots:
-                return await self._embedder.async_get_embedding(text)
+                return (await self._embedder.aembed([text], purpose="query"))[0]
 
         return list(await asyncio.gather(*(embed_one(text) for text in input_data_list)))
 

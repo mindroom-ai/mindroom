@@ -1,0 +1,563 @@
+{
+  "ollama": {
+    "calls": [
+      {
+        "agno_method": "get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 4096,
+              "input": "Which hotels are allowed?",
+              "model": "nomic-embed-text"
+            },
+            "method": "POST",
+            "url": "http://ollama.local:11434/api/embed"
+          }
+        ],
+        "texts": [
+          "Which hotels are allowed?"
+        ]
+      },
+      {
+        "agno_method": "get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 4096,
+              "input": "files/report.md is a path, not a file reference",
+              "model": "nomic-embed-text"
+            },
+            "method": "POST",
+            "url": "http://ollama.local:11434/api/embed"
+          }
+        ],
+        "texts": [
+          "files/report.md is a path, not a file reference"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 4096,
+              "input": "async query",
+              "model": "nomic-embed-text"
+            },
+            "method": "POST",
+            "url": "http://ollama.local:11434/api/embed"
+          }
+        ],
+        "texts": [
+          "async query"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 4096,
+              "input": "async document",
+              "model": "nomic-embed-text"
+            },
+            "method": "POST",
+            "url": "http://ollama.local:11434/api/embed"
+          }
+        ],
+        "texts": [
+          "async document"
+        ]
+      }
+    ],
+    "embedder": {
+      "config": {
+        "dimensions": 768,
+        "host": "http://ollama.local:11434",
+        "model": "nomic-embed-text"
+      },
+      "provider": "ollama"
+    }
+  },
+  "openai_compatible_prefixes": {
+    "calls": [
+      {
+        "agno_method": "get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": "task: search result | query: Which hotels are allowed?",
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "Which hotels are allowed?"
+        ]
+      },
+      {
+        "agno_method": "get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": "title: none | text: files/report.md is a path, not a file reference",
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "files/report.md is a path, not a file reference"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": "task: search result | query: async query",
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async query"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": "title: none | text: async document",
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async document"
+        ]
+      },
+      {
+        "agno_method": "get_embeddings_batch",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": [
+                "title: none | text: first chunk",
+                "title: none | text: files/second chunk"
+              ],
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "first chunk",
+          "files/second chunk"
+        ]
+      },
+      {
+        "agno_method": "async_get_embeddings_batch_and_usage",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "encoding_format": "float",
+              "input": [
+                "task: search result | query: graph name",
+                "task: search result | query: graph fact",
+                "task: search result | query: graph search"
+              ],
+              "model": "embeddinggemma-2"
+            },
+            "method": "POST",
+            "url": "http://embeddings.local:8080/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "graph name",
+          "graph fact",
+          "graph search"
+        ]
+      }
+    ],
+    "embedder": {
+      "config": {
+        "api_key": "sk-parity",
+        "document_prefix": "title: none | text: ",
+        "host": "http://embeddings.local:8080/v1",
+        "model": "embeddinggemma-2",
+        "query_prefix": "task: search result | query: "
+      },
+      "provider": "openai"
+    }
+  },
+  "openai_default_dimensions": {
+    "calls": [
+      {
+        "agno_method": "get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": "Which hotels are allowed?",
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "Which hotels are allowed?"
+        ]
+      },
+      {
+        "agno_method": "get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": " files/report.md is a path, not a file reference",
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "files/report.md is a path, not a file reference"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": "async query",
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async query"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": "async document",
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async document"
+        ]
+      },
+      {
+        "agno_method": "get_embeddings_batch",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": [
+                "first chunk",
+                " files/second chunk"
+              ],
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "first chunk",
+          "files/second chunk"
+        ]
+      },
+      {
+        "agno_method": "async_get_embeddings_batch_and_usage",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 1536,
+              "encoding_format": "float",
+              "input": [
+                "graph name",
+                "graph fact",
+                "graph search"
+              ],
+              "model": "text-embedding-3-small"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "graph name",
+          "graph fact",
+          "graph search"
+        ]
+      }
+    ],
+    "embedder": {
+      "config": {
+        "api_key": "sk-parity",
+        "model": "text-embedding-3-small"
+      },
+      "provider": "openai"
+    }
+  },
+  "openai_explicit_dimensions": {
+    "calls": [
+      {
+        "agno_method": "get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": "Which hotels are allowed?",
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "Which hotels are allowed?"
+        ]
+      },
+      {
+        "agno_method": "get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": " files/report.md is a path, not a file reference",
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "files/report.md is a path, not a file reference"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": "async query",
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async query"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding_and_usage",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": "async document",
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "async document"
+        ]
+      },
+      {
+        "agno_method": "get_embeddings_batch",
+        "purpose": "document",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": [
+                "first chunk",
+                " files/second chunk"
+              ],
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "first chunk",
+          "files/second chunk"
+        ]
+      },
+      {
+        "agno_method": "async_get_embeddings_batch_and_usage",
+        "purpose": "query",
+        "requests": [
+          {
+            "body": {
+              "dimensions": 256,
+              "encoding_format": "float",
+              "input": [
+                "graph name",
+                "graph fact",
+                "graph search"
+              ],
+              "model": "text-embedding-3-large"
+            },
+            "method": "POST",
+            "url": "https://api.openai.com/v1/embeddings"
+          }
+        ],
+        "texts": [
+          "graph name",
+          "graph fact",
+          "graph search"
+        ]
+      }
+    ],
+    "embedder": {
+      "config": {
+        "api_key": "sk-parity",
+        "dimensions": 256,
+        "model": "text-embedding-3-large"
+      },
+      "provider": "openai"
+    }
+  },
+  "sentence_transformers": {
+    "calls": [
+      {
+        "agno_method": "get_embedding",
+        "model_calls": [
+          {
+            "input": "Which hotels are allowed?",
+            "kwargs": {
+              "normalize_embeddings": false
+            },
+            "method": "encode_query"
+          }
+        ],
+        "purpose": "query",
+        "texts": [
+          "Which hotels are allowed?"
+        ]
+      },
+      {
+        "agno_method": "get_embedding_and_usage",
+        "model_calls": [
+          {
+            "input": "files/report.md is a path, not a file reference",
+            "kwargs": {
+              "normalize_embeddings": false
+            },
+            "method": "encode_document"
+          }
+        ],
+        "purpose": "document",
+        "texts": [
+          "files/report.md is a path, not a file reference"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding",
+        "model_calls": [
+          {
+            "input": "async query",
+            "kwargs": {
+              "normalize_embeddings": false
+            },
+            "method": "encode_query"
+          }
+        ],
+        "purpose": "query",
+        "texts": [
+          "async query"
+        ]
+      },
+      {
+        "agno_method": "async_get_embedding_and_usage",
+        "model_calls": [
+          {
+            "input": "async document",
+            "kwargs": {
+              "normalize_embeddings": false
+            },
+            "method": "encode_document"
+          }
+        ],
+        "purpose": "document",
+        "texts": [
+          "async document"
+        ]
+      }
+    ],
+    "embedder": {
+      "config": {
+        "model": "google/embeddinggemma-2-300m"
+      },
+      "provider": "sentence_transformers"
+    }
+  }
+}

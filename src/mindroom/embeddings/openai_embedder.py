@@ -1,16 +1,16 @@
 """OpenAI-compatible embedder used for semantic indexes.
 
 Lives apart from the light helpers in ``mindroom.embeddings.signatures`` because
-subclassing agno's ``OpenAIEmbedder`` imports the openai SDK; the embedding
-factory imports this module only when the openai provider is configured
-(#1436).
+it imports the openai SDK; the embedding factory imports this module only when
+the openai provider is configured (#1436).
 
-Every sync/async/batch method validates complete non-empty responses and applies
-MindRoom's classified failure and health policy: a silent ``[]`` turns an auth
-failure into fake-empty search results and unpublished indexes (ISSUE-237). Failures raise ``EmbedderRequestError``
-carrying only the classified detail (never the raw provider exception, whose
-text can echo the rejected key), and each path records process-wide embedder
-health so recovery is visible the moment a real request succeeds again.
+Every request validates a complete non-empty response and applies MindRoom's
+classified failure and health policy: a silent ``[]`` turns an auth failure
+into fake-empty search results and unpublished indexes (ISSUE-237). Failures
+raise ``EmbedderRequestError`` carrying only the classified detail (never the
+raw provider exception, whose text can echo the rejected key), and each request
+records process-wide embedder health so recovery is visible the moment a real
+request succeeds again.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.embeddings.agno_compat_openai_embedder import OpenAIEmbedderWithHooks
+from openai import AsyncOpenAI, OpenAI
+
 from mindroom.embeddings.embedder_health import EmbedderHealthRecorder, capture_embedder_health_recorder
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
@@ -27,9 +28,14 @@ from mindroom.embeddings.errors import (
     embedder_retry_after_seconds,
 )
 from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
     from openai.types.create_embedding_response import CreateEmbeddingResponse
+
+    from mindroom.embeddings.base import EmbeddingPurpose
 
 
 def _classified_request_error(exc: Exception, health_recorder: EmbedderHealthRecorder) -> EmbedderRequestError:
@@ -65,64 +71,103 @@ def _validated_embeddings(
 
 
 @dataclass
-class MindRoomOpenAIEmbedder(OpenAIEmbedderWithHooks):
-    """Avoid forcing OpenAI defaults onto arbitrary OpenAI-compatible hosts."""
+class OpenAIEmbedder:
+    """Embed through an OpenAI-compatible ``/embeddings`` endpoint without forcing OpenAI defaults onto other hosts.
 
+    A request carrying one text sends it as a bare string, and one carrying several sends a list of at most
+    ``batch_size`` texts, exactly as the vectors in existing indexes were requested.
+    """
+
+    model: str
+    api_key: str | None = field(default=None, repr=False)
+    base_url: str | None = None
+    #: Explicitly configured width; OpenAI's own models fall back to ``OPENAI_EMBEDDING_DIMENSIONS``.
+    dimensions: int | None = None
     query_prefix: str | None = None
     document_prefix: str | None = None
-    _dimensions_explicit: bool = field(init=False, default=False, repr=False)
+    #: SDK client limits; health probes shorten them so a stalled endpoint fails fast.
+    timeout: float | None = None
+    max_retries: int | None = None
+    batch_size: int = 100
+    client: OpenAI | None = field(default=None, repr=False)
+    async_client: AsyncOpenAI | None = field(default=None, repr=False)
     health_recorder: EmbedderHealthRecorder = field(default_factory=capture_embedder_health_recorder, repr=False)
 
-    def __post_init__(self) -> None:
-        """Track whether dimensions came from explicit config."""
-        self._dimensions_explicit = self.dimensions is not None
-        if self.dimensions is None:
-            self.dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(self.id)
+    @property
+    def sends_batches(self) -> bool:
+        """Return true: one request carries every text of a batch."""
+        return True
 
-    def _should_send_dimensions(self) -> bool:
-        return self.dimensions is not None and (self._dimensions_explicit or self.id in OPENAI_EMBEDDING_DIMENSIONS)
+    def _client_kwargs(self) -> dict[str, Any]:
+        settings = {
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+        }
+        return {name: value for name, value in settings.items() if value is not None}
 
-    def _request_text(self, text: str, *, query: bool) -> str:
-        prefix = self.query_prefix if query else self.document_prefix
+    def _sdk_client(self) -> OpenAI:
+        """Return the sync SDK client, building it on first use."""
+        if self.client is None:
+            self.client = OpenAI(**self._client_kwargs())
+        return self.client
+
+    def _async_sdk_client(self) -> AsyncOpenAI:
+        """Return the async SDK client, building it on first use."""
+        if self.async_client is None:
+            # The shared model HTTP client keeps one connection pool for every async provider call.
+            self.async_client = AsyncOpenAI(http_client=MODEL_HTTP_CLIENT, **self._client_kwargs())
+        return self.async_client
+
+    def _request_text(self, text: str, *, purpose: EmbeddingPurpose) -> str:
+        prefix = self.query_prefix if purpose == "query" else self.document_prefix
         text = f"{prefix}{text}" if prefix else text
         # LiteLLM reserves files/... for Gemini file references; MindRoom inputs are text.
         return f" {text}" if text.startswith("files/") else text
 
-    def embedding_request_parameters(self, input_value: str | list[str], *, query: bool) -> dict[str, Any]:
-        """Build a text-only request with the configured prefix, dimensions and overrides."""
-        if isinstance(input_value, str):
-            request_input: str | list[str] = self._request_text(input_value, query=query)
-        else:
-            request_input = [self._request_text(text, query=query) for text in input_value]
+    def _request_parameters(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> dict[str, Any]:
+        """Build one text-only request with the configured prefix and dimensions."""
+        inputs = [self._request_text(text, purpose=purpose) for text in texts]
         request: dict[str, Any] = {
-            "input": request_input,
-            "model": self.id,
-            "encoding_format": self.encoding_format,
+            "input": inputs[0] if len(inputs) == 1 else inputs,
+            "model": self.model,
+            "encoding_format": "float",
         }
-        if self.user is not None:
-            request["user"] = self.user
-        if self._should_send_dimensions():
-            request["dimensions"] = self.dimensions
-        if self.request_params:
-            request.update(self.request_params)
+        dimensions = self.dimensions if self.dimensions is not None else OPENAI_EMBEDDING_DIMENSIONS.get(self.model)
+        if dimensions is not None:
+            request["dimensions"] = dimensions
         return request
 
-    def embedding_request_error(self, error: Exception) -> EmbedderRequestError:
-        """Record a safe classified provider failure under this owner's health state."""
-        return _classified_request_error(error, self.health_recorder)
+    def _batches(self, texts: Sequence[str]) -> Iterator[Sequence[str]]:
+        for start in range(0, len(texts), self.batch_size):
+            yield texts[start : start + self.batch_size]
 
-    def validate_embedding_response(
-        self,
-        response: CreateEmbeddingResponse,
-        expected_count: int,
-    ) -> list[list[float]]:
-        """Require exactly one non-empty vector per input and record health recovery."""
-        return _validated_embeddings(response, expected_count, self.health_recorder)
+    def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
+        """Return one vector per text; raise a classified error on failure."""
+        vectors: list[list[float]] = []
+        for batch in self._batches(texts):
+            try:
+                response = self._sdk_client().embeddings.create(**self._request_parameters(batch, purpose=purpose))
+            except Exception as exc:
+                raise _classified_request_error(exc, self.health_recorder) from None
+            vectors.extend(_validated_embeddings(response, len(batch), self.health_recorder))
+        return vectors
 
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Request a synchronous batch of document embeddings for adapters that support batch embedding."""
-        try:
-            response = self.client.embeddings.create(**self.embedding_request_parameters(texts, query=False))
-        except Exception as exc:
-            raise self.embedding_request_error(exc) from None
-        return self.validate_embedding_response(response, len(texts))
+    async def aembed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
+        """Return one vector per text asynchronously; raise a classified error on failure.
+
+        A failing batch fails the whole call instead of retrying per item:
+        after a batch-wide auth failure every retry repeats the same rejected
+        credential and obscures the root cause.
+        """
+        vectors: list[list[float]] = []
+        for batch in self._batches(texts):
+            try:
+                response = await self._async_sdk_client().embeddings.create(
+                    **self._request_parameters(batch, purpose=purpose),
+                )
+            except Exception as exc:
+                raise _classified_request_error(exc, self.health_recorder) from None
+            vectors.extend(_validated_embeddings(response, len(batch), self.health_recorder))
+        return vectors

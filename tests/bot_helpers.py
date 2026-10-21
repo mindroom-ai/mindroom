@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -67,13 +67,12 @@ from tests.journal_helpers import admit_dispatch_event
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 
-    from agno.knowledge.document import Document
-
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.inbound_turn_normalizer import DispatchPayload
+    from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.media_inputs import MediaInputs
     from mindroom.orchestrator import (
         _MultiAgentOrchestrator,
@@ -843,56 +842,32 @@ def make_mock_agent_user() -> AgentMatrixUser:
 
 
 @dataclass
-class _SyncStubVectorDb:
-    documents: list[Document]
+class _StubIndex:
+    """Published knowledge index stub that returns fixed hits and records each search."""
 
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        _ = (query, filters)
-        return self.documents[:limit]
+    hits: list[SearchHit]
+    calls: list[tuple[str, int]] = field(default_factory=list)
 
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        self.calls.append((query, limit))
+        return self.hits[:limit]
 
-@dataclass
-class _AsyncStubVectorDb(_SyncStubVectorDb):
-    async def async_search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        _ = (query, filters)
-        return self.documents[:limit]
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 @dataclass
-class _FailingStubVectorDb:
+class _FailingStubIndex:
+    """Published knowledge index stub whose every search fails."""
+
     error_message: str = "search failed"
 
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        _ = (query, limit, filters)
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        _ = (query, limit)
         raise RuntimeError(self.error_message)
 
-    async def async_search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        _ = (query, limit, filters)
-        raise RuntimeError(self.error_message)
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 class AgentBotTestBase:

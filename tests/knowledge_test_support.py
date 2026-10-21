@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from itertools import count
-from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
-from agno.knowledge.document.base import Document
-from agno.knowledge.embedder.base import Embedder
+from chromadb.errors import NotFoundError
 
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
@@ -18,12 +15,15 @@ import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.knowledge.read_protocol import SearchHit
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
 
 
@@ -98,12 +98,13 @@ def chroma_get_result(
     return {"ids": ids, **{name: (values if name in include else None) for name, values in available.items()}}
 
 
-_vector_row_ids = count()
-
-
 class _Collection:
     def __init__(self, name: str) -> None:
         self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     def get(
         self,
@@ -156,7 +157,22 @@ class _Collection:
                 )
             )
 
+    def upsert(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, object]],
+    ) -> None:
+        with _VectorDb.lock:
+            rows = _VectorDb.collections.setdefault(self._name, [])
+            replaced = set(ids)
+            rows[:] = [row for row in rows if row["id"] not in replaced]
+        self.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+
     def delete(self, *, where: dict[str, object]) -> None:
+        validate_where_operands(where)
         key, condition = next(iter(where.items()))
         with _VectorDb.lock:
             _VectorDb.collections[self._name] = [
@@ -167,58 +183,60 @@ class _Collection:
 
 
 class _Client:
+    """In-memory stand-in for the persistent Chroma client one knowledge base opens."""
+
     def get_collection(self, name: str) -> _Collection:
+        with _VectorDb.lock:
+            if name not in _VectorDb.collections:
+                message = f"Collection {name!r} does not exist"
+                raise NotFoundError(message)
         return _Collection(name)
+
+    def create_collection(self, name: str, metadata: dict[str, object] | None = None) -> _Collection:
+        _ = metadata
+        with _VectorDb.lock:
+            _VectorDb.collections.setdefault(name, [])
+        return _Collection(name)
+
+    def delete_collection(self, name: str) -> None:
+        with _VectorDb.lock:
+            if name not in _VectorDb.collections:
+                message = f"Collection {name!r} does not exist"
+                raise NotFoundError(message)
+            del _VectorDb.collections[name]
 
     def list_collections(self) -> list[str]:
         with _VectorDb.lock:
             return sorted(_VectorDb.collections)
 
+    def get_max_batch_size(self) -> int:
+        return 5461
+
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
+
 
 class _VectorDb:
+    """The in-memory store every fake collection reads and writes, and a published index reader over it."""
+
     collections: ClassVar[dict[str, list[dict[str, object]]]] = {}
     lock: ClassVar[Lock] = Lock()
 
     def __init__(self, *, collection: str, **_: object) -> None:
         self.collection_name = collection
-        self.client = _Client()
-
-    def close(self) -> None:
-        """The in-memory fake has no external resources to release."""
-
-    def delete(self) -> bool:
-        with self.lock:
-            self.collections.pop(self.collection_name, None)
-        return True
-
-    def create(self) -> None:
-        with self.lock:
-            self.collections[self.collection_name] = []
 
     def exists(self) -> bool:
         with self.lock:
             return self.collection_name in self.collections
 
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        _ = (query, filters)
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        _ = query
         with self.lock:
             items = list(self.collections.get(self.collection_name, []))
-        return [Document(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
+        return [SearchHit(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
 
-    async def async_search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        return self.search(query=query, limit=limit, filters=filters)
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 class _ReadProxy(_VectorDb):
@@ -234,75 +252,24 @@ class _ReadProxy(_VectorDb):
         super().__init__(collection=collection_name, path=path, embedder=embedder)
 
 
-class _Knowledge:
-    def __init__(self, vector_db: _VectorDb | None = None) -> None:
-        self.vector_db = vector_db
+class _FakeEmbedder:
+    """Typed stand-in for the configured embedder; every chunk embeds to the same one-dimension vector."""
 
-    def insert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, object],
-        upsert: bool,
-        reader: object | None = None,
-    ) -> None:
-        _ = (upsert, reader)
-        with _VectorDb.lock:
-            _VectorDb.collections.setdefault(self.vector_db.collection_name, []).append(
-                {
-                    "id": f"row-{next(_vector_row_ids)}",
-                    "content": Path(path).read_text(encoding="utf-8"),
-                    "embedding": [1.0],
-                    "metadata": dict(metadata),
-                },
-            )
+    sends_batches = False
 
-    async def ainsert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, object],
-        upsert: bool,
-        reader: object | None = None,
-    ) -> None:
-        # Match the real Knowledge surface: ainsert delegates to insert.
-        self.insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        _ = purpose
+        return [[1.0] for _text in texts]
 
-    def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
-        with _VectorDb.lock:
-            items = _VectorDb.collections.get(self.vector_db.collection_name, [])
-            filtered = [
-                item for item in items if not all(item["metadata"].get(key) == value for key, value in metadata.items())
-            ]
-            _VectorDb.collections[self.vector_db.collection_name] = filtered
-        return len(filtered) != len(items)
-
-    def search(self, query: str, max_results: int | None = None) -> list[Document]:
-        return self.vector_db.search(query=query, limit=max_results or 5)
-
-
-class _FakeEmbedder(Embedder):
-    """Typed stand-in for the configured embedder; never issues requests."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "fake embedder must not be asked for vectors"
-        raise AssertionError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "fake embedder must not be asked for vectors"
-        raise AssertionError(msg)
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture
 def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Use an in-memory vector store for published knowledge index tests."""
     _VectorDb.collections = {}
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.collections.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _Knowledge)
+    monkeypatch.setattr("mindroom.knowledge.chroma_client._persistent_client", lambda _path: _Client())
     monkeypatch.setattr(
         "mindroom.knowledge.manager.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),
@@ -313,7 +280,6 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "collection_exists",
         lambda _path, collection: _VectorDb(collection=collection).exists(),
     )
-    monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
     monkeypatch.setattr(
         "mindroom.knowledge.registry.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),

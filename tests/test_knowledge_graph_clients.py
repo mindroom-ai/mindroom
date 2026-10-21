@@ -19,7 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph import clients
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
 from mindroom.knowledge_graph.store import UnusableExtractionError
@@ -198,8 +198,11 @@ async def test_unusable_extraction_crosses_back_to_the_caller(tmp_path: Path) ->
 
 
 class _Embedder:
-    async def async_get_embedding(self, text: str) -> list[float]:
-        return [float(len(text)), 1.0]
+    sends_batches = False
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        assert purpose == "query"
+        return [[float(len(text)), 1.0] for text in texts]
 
 
 @pytest.mark.asyncio
@@ -221,7 +224,7 @@ async def test_embedder_sends_an_openai_batch_as_batch_requests() -> None:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-test", async_client=async_client),
+        OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-test", async_client=async_client),
     )
 
     texts = ["x" * (index % 7 + 1) for index in range(150)]
@@ -241,8 +244,8 @@ async def test_embedder_embeds_every_graph_text_as_a_query() -> None:
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(
-            id="embeddinggemma-2",
+        OpenAIEmbedder(
+            model="embeddinggemma-2",
             api_key="sk-test",
             base_url="http://local/v1",
             async_client=async_client,
@@ -270,8 +273,8 @@ async def test_embedder_embeds_one_text_per_request_when_a_server_answers_a_batc
     async_client = MagicMock()
     async_client.embeddings.create = AsyncMock(side_effect=create)
     embedder = MindRoomEmbedder(
-        MindRoomOpenAIEmbedder(
-            id="local-embed",
+        OpenAIEmbedder(
+            model="local-embed",
             api_key="sk-test",
             base_url="http://local/v1",
             async_client=async_client,
@@ -290,13 +293,16 @@ async def test_embedder_bounds_concurrent_requests_without_batch_support() -> No
     active = peak = 0
 
     class _Counting:
-        async def async_get_embedding(self, text: str) -> list[float]:
+        sends_batches = False
+
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
             nonlocal active, peak
+            del purpose
             active += 1
             peak = max(peak, active)
             await asyncio.sleep(0)
             active -= 1
-            return [float(len(text))]
+            return [[float(len(text))] for text in texts]
 
     texts = ["x" * (index % 5 + 1) for index in range(60)]
     assert await MindRoomEmbedder(_Counting()).create_batch(texts) == [[float(len(text))] for text in texts]

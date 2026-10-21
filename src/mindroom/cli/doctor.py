@@ -18,7 +18,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_p
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
-from mindroom.embeddings.signatures import create_sentence_transformers_embedder
+from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -706,11 +706,11 @@ def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model:
     """Validate a local sentence-transformers model with a tiny embedding request."""
     try:
         embedder = create_sentence_transformers_embedder(runtime_paths, model)
-        embedding = embedder.get_embedding("mindroom doctor embedder check")
+        embedding = embedder.embed(["mindroom doctor embedder check"], purpose="query")[0]
     except Exception as exc:
         return False, str(exc)
 
-    if not isinstance(embedding, list) or not embedding:
+    if not embedding:
         return False, "empty embedding vector"
     return True, ""
 

@@ -28,7 +28,7 @@ from mindroom.embeddings.errors import (
     describe_embedder_error,
     is_embedder_auth_failure_detail,
 )
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -80,18 +80,21 @@ def _config(
 
 
 class _HealthyEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
-        return [0.1, 0.2]
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        assert purpose == "query"
+        return [[0.1, 0.2]]
 
 
 class _AuthFailingEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
         raise _status_error(401)
 
 
 class _EmptyVectorEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
-        return []
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        return [[]]
 
 
 def test_authentication_error_maps_to_fixed_401_detail() -> None:
@@ -277,14 +280,14 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
         data=[SimpleNamespace(embedding=[0.1, 0.2])],
         usage=None,
     )
-    embedder = MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-x", openai_client=client)
+    embedder = OpenAIEmbedder(model="text-embedding-3-small", api_key="sk-x", client=client)
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
         lambda *_args: embedder,
     )
 
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
-    assert embedder.client_params == {"timeout": 10.0, "max_retries": 0}
+    assert (embedder.timeout, embedder.max_retries) == (10.0, 0)
 
 
 @pytest.mark.asyncio

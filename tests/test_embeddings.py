@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
-from agno.exceptions import EmbeddingError
 
-import mindroom.embeddings.signatures as embedding_helpers
+import mindroom.embeddings.sentence_transformers_embedder as local_embedder
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
+from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.embeddings.signatures import (
-    create_sentence_transformers_embedder,
     effective_knowledge_embedder_signature,
     effective_mem0_embedder_signature,
 )
@@ -30,140 +29,67 @@ TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml
 
 @pytest.fixture(autouse=True)
 def _isolate_sentence_transformer_client_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", None)
+    monkeypatch.setattr(local_embedder, "_SENTENCE_TRANSFORMER_CLIENT", None)
+    monkeypatch.setattr(local_embedder, "ensure_sentence_transformers_dependencies", lambda _paths: None)
 
 
-def _mock_openai_client() -> MagicMock:
-    client = MagicMock()
-    client.embeddings.create.return_value = MagicMock()
-    return client
+def _request_dimensions(model: str, *, base_url: str | None = None, dimensions: int | None = None) -> int | None:
+    embedder = OpenAIEmbedder(model=model, api_key="sk-test", base_url=base_url, dimensions=dimensions)
+    return embedder._request_parameters(["hello"], purpose="query").get("dimensions")
 
 
 def test_custom_host_non_openai_model_omits_dimensions() -> None:
     """OpenAI-compatible custom models should not inherit OpenAI's 1536-d fallback."""
-    client = _mock_openai_client()
-    embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-2",
-        api_key="sk-test",
-        base_url="http://example.com/v1",
-        openai_client=client,
-    )
-
-    embedder.response("hello")
-
-    _, kwargs = client.embeddings.create.call_args
-    assert "dimensions" not in kwargs
+    assert _request_dimensions("gemini-embedding-2", base_url="http://example.com/v1") is None
 
 
 def test_custom_host_official_openai_model_keeps_dimensions() -> None:
     """Known OpenAI embedding models should keep their explicit dimensionality."""
-    client = _mock_openai_client()
-    embedder = MindRoomOpenAIEmbedder(
-        id="text-embedding-3-small",
-        api_key="sk-test",
-        base_url="http://example.com/v1",
-        openai_client=client,
-    )
-
-    embedder.response("hello")
-
-    _, kwargs = client.embeddings.create.call_args
-    assert kwargs["dimensions"] == 1536
+    assert _request_dimensions("text-embedding-3-small", base_url="http://example.com/v1") == 1536
 
 
 def test_official_openai_ada_omits_dimensions() -> None:
     """Legacy OpenAI ada requests should not include the newer dimensions parameter."""
-    client = _mock_openai_client()
-    embedder = MindRoomOpenAIEmbedder(
-        id="text-embedding-ada-002",
-        api_key="sk-test",
-        openai_client=client,
-    )
-
-    embedder.response("hello")
-
-    _, kwargs = client.embeddings.create.call_args
-    assert "dimensions" not in kwargs
+    assert _request_dimensions("text-embedding-ada-002") is None
 
 
 def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
     """Explicit dimensions should still be forwarded for custom-host models."""
-    client = _mock_openai_client()
-    embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-2",
-        api_key="sk-test",
-        base_url="http://example.com/v1",
-        dimensions=3072,
-        openai_client=client,
-    )
-
-    embedder.response("hello")
-
-    _, kwargs = client.embeddings.create.call_args
-    assert kwargs["dimensions"] == 3072
+    assert _request_dimensions("gemini-embedding-2", base_url="http://example.com/v1", dimensions=3072) == 3072
 
 
-@pytest.mark.asyncio
-async def test_custom_host_batch_embedding_omits_dimensions() -> None:
-    """Async batch requests should use the same custom-host dimension rules as single requests."""
-    async_client = MagicMock()
-    async_client.embeddings.create = AsyncMock(
-        return_value=SimpleNamespace(
-            data=[
-                SimpleNamespace(embedding=[1.0, 2.0]),
-                SimpleNamespace(embedding=[3.0, 4.0]),
-            ],
-            usage=SimpleNamespace(model_dump=lambda: {"total_tokens": 2}),
-        ),
-    )
-    embedder = MindRoomOpenAIEmbedder(
-        id="gemini-embedding-2",
-        api_key="sk-test",
-        base_url="http://example.com/v1",
-        async_client=async_client,
-    )
+def test_batch_requests_use_the_single_request_dimension_rules() -> None:
+    """A batch request uses the same custom-host dimension rules as a single request."""
+    embedder = OpenAIEmbedder(model="gemini-embedding-2", api_key="sk-test", base_url="http://example.com/v1")
 
-    embeddings, usage = await embedder.async_get_embeddings_batch_and_usage(["hello", "world"])
+    request = embedder._request_parameters(["hello", "world"], purpose="document")
 
-    assert embeddings == [[1.0, 2.0], [3.0, 4.0]]
-    assert usage == [{"total_tokens": 2}, {"total_tokens": 2}]
-    _, kwargs = async_client.embeddings.create.call_args
-    assert kwargs["input"] == ["hello", "world"]
-    assert "dimensions" not in kwargs
+    assert request == {"input": ["hello", "world"], "model": "gemini-embedding-2", "encoding_format": "float"}
 
 
 def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Local embedder creation should ensure the optional runtime and pass through config."""
+    """Local embedder creation should ensure the optional runtime and load the configured model."""
     captured: dict[str, object] = {}
-
-    class DummyEmbedder:
-        def __init__(self, **kwargs: object) -> None:
-            self.kwargs = kwargs
-            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", object())
+    loaded = object()
 
     def _ensure(runtime_paths: object) -> None:
         captured["installed"] = runtime_paths
 
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder) if name else None,
-    )
+    def _load(model: str) -> object:
+        captured["model"] = model
+        return loaded
 
-    embedder = create_sentence_transformers_embedder(
-        TEST_RUNTIME_PATHS,
-        SENTENCE_TRANSFORMERS_DEFAULT,
-        dimensions=384,
-    )
+    monkeypatch.setattr(local_embedder, "ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", _load)
 
-    assert captured["installed"] == TEST_RUNTIME_PATHS
-    assert isinstance(embedder, DummyEmbedder)
-    assert embedder.kwargs == {
-        "id": SENTENCE_TRANSFORMERS_DEFAULT,
-        "dimensions": 384,
-    }
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+
+    assert captured == {"installed": TEST_RUNTIME_PATHS, "model": SENTENCE_TRANSFORMERS_DEFAULT}
+    assert embedder.model == SENTENCE_TRANSFORMERS_DEFAULT
+    assert embedder.client is loaded
+    assert embedder.sends_batches is False
 
 
 def test_sentence_transformers_embedder_reuses_one_model_client_across_concurrent_construction(
@@ -173,31 +99,14 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
     construction_lock = threading.Lock()
     model_constructions = 0
 
-    def _ensure(_runtime_paths: object) -> None:
-        pass
+    def _load(_model: str) -> object:
+        nonlocal model_constructions
+        with construction_lock:
+            model_constructions += 1
+        time.sleep(0.02)
+        return object()
 
-    class DummyEmbedder:
-        def __init__(
-            self,
-            *,
-            sentence_transformer_client: object | None = None,
-            **kwargs: object,
-        ) -> None:
-            nonlocal model_constructions
-            self.id = kwargs["id"]
-            self.dimensions = kwargs.get("dimensions")
-            if sentence_transformer_client is None:
-                with construction_lock:
-                    model_constructions += 1
-                time.sleep(0.02)
-                sentence_transformer_client = object()
-            self.sentence_transformer_client = sentence_transformer_client
-
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", _ensure)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
-    )
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", _load)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         embedders = list(
@@ -205,7 +114,6 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
                 lambda _index: create_sentence_transformers_embedder(
                     TEST_RUNTIME_PATHS,
                     "sentence-transformers/cache-regression-test",
-                    dimensions=384 if _index % 2 == 0 else 768,
                 ),
                 range(8),
             ),
@@ -213,8 +121,7 @@ def test_sentence_transformers_embedder_reuses_one_model_client_across_concurren
 
     assert model_constructions == 1
     assert len({id(embedder) for embedder in embedders}) == 8
-    assert len({id(embedder.sentence_transformer_client) for embedder in embedders}) == 1
-    assert {embedder.dimensions for embedder in embedders} == {384, 768}
+    assert len({id(embedder.client) for embedder in embedders}) == 1
 
 
 def test_sentence_transformers_embedder_releases_retired_cached_model(
@@ -225,28 +132,15 @@ def test_sentence_transformers_embedder_releases_retired_cached_model(
     class ModelClient:
         pass
 
-    class DummyEmbedder:
-        def __init__(
-            self,
-            *,
-            sentence_transformer_client: object | None = None,
-            **_kwargs: object,
-        ) -> None:
-            self.sentence_transformer_client = sentence_transformer_client or ModelClient()
-
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
-    )
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", lambda _model: ModelClient())
 
     old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
-    old_client = old_embedder.sentence_transformer_client
+    old_client = old_embedder.client
     old_client_ref = weakref.ref(old_client)
 
     new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
 
-    assert new_embedder.sentence_transformer_client is not old_client
+    assert new_embedder.client is not old_client
     del old_embedder, old_client
     gc.collect()
     assert old_client_ref() is None
@@ -258,23 +152,13 @@ def test_sentence_transformers_embedder_retries_failed_model_replacement(
     """A failed replacement should preserve the old client and allow retry."""
     reject_new_model = True
 
-    class DummyEmbedder:
-        def __init__(
-            self,
-            *,
-            sentence_transformer_client: object | None = None,
-            **kwargs: object,
-        ) -> None:
-            if kwargs["id"] == "sentence-transformers/new" and reject_new_model:
-                error_message = "model load failed"
-                raise RuntimeError(error_message)
-            self.sentence_transformer_client = sentence_transformer_client or object()
+    def _load(model: str) -> object:
+        if model == "sentence-transformers/new" and reject_new_model:
+            error_message = "model load failed"
+            raise RuntimeError(error_message)
+        return object()
 
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
-    )
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", _load)
 
     old_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/old")
 
@@ -285,11 +169,11 @@ def test_sentence_transformers_embedder_retries_failed_model_replacement(
         TEST_RUNTIME_PATHS,
         "sentence-transformers/old",
     )
-    assert old_embedder_after_failure.sentence_transformer_client is old_embedder.sentence_transformer_client
+    assert old_embedder_after_failure.client is old_embedder.client
 
     reject_new_model = False
     new_embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "sentence-transformers/new")
-    assert new_embedder.sentence_transformer_client is not old_embedder.sentence_transformer_client
+    assert new_embedder.client is not old_embedder.client
 
 
 class _ConcurrencyProbe:
@@ -325,52 +209,24 @@ class _ProbedModelClient:
         return np.array([float(len(text))])
 
 
-def _probed_local_embedder(monkeypatch: pytest.MonkeyPatch, probe: _ConcurrencyProbe) -> object:
-    class DummyEmbedder:
-        def __init__(self, **kwargs: object) -> None:
-            self.id = kwargs["id"]
-            self.normalize_embeddings = False
-            self.sentence_transformer_client = kwargs.get("sentence_transformer_client", _ProbedModelClient(probe))
-
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(
-        "mindroom.embeddings.signatures.importlib.import_module",
-        lambda _name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder),
-    )
-    return create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
-
-
-def test_sentence_transformers_embedder_serializes_mixed_entry_points(
+def test_sentence_transformers_embedder_serializes_queries_and_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both local embedding entry points share one process-wide serialization boundary."""
+    """Query and document embedding share one process-wide serialization boundary."""
     probe = _ConcurrencyProbe()
-    embedder = _probed_local_embedder(monkeypatch, probe)
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", lambda _model: _ProbedModelClient(probe))
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, SENTENCE_TRANSFORMERS_DEFAULT)
+    texts = ["one", "two", "three", "four", "five", "six", "seven", "eight"]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [
-            pool.submit(embedder.get_embedding, "one"),
-            pool.submit(embedder.get_embedding_and_usage, "two"),
-            pool.submit(embedder.get_embedding, "three"),
-            pool.submit(embedder.get_embedding_and_usage, "four"),
-            pool.submit(embedder.get_embedding, "five"),
-            pool.submit(embedder.get_embedding_and_usage, "six"),
-            pool.submit(embedder.get_embedding, "seven"),
-            pool.submit(embedder.get_embedding_and_usage, "eight"),
+            pool.submit(embedder.embed, [text], purpose="query" if index % 2 == 0 else "document")
+            for index, text in enumerate(texts)
         ]
         results = [future.result() for future in futures]
 
     assert probe.max_active == 1
-    assert results == [
-        [3.0],
-        ([3.0], None),
-        [5.0],
-        ([4.0], None),
-        [4.0],
-        ([3.0], None),
-        [5.0],
-        ([5.0], None),
-    ]
+    assert results == [[[float(len(text))]] for text in texts]
 
 
 class _PromptRecordingModelClient:
@@ -392,29 +248,28 @@ class _PromptRecordingModelClient:
 async def test_sentence_transformers_embedder_embeds_queries_and_documents_with_their_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Agno's query path uses the model's query prompt, and its document path the document prompt."""
-    model = "google/embeddinggemma-2"
+    """Queries use the model's query prompt and documents its document prompt, one text per model call."""
     client = _PromptRecordingModelClient()
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", (model, client))
-    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, model)
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", lambda _model: client)
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "google/embeddinggemma-2")
 
-    assert embedder.get_embedding("search") == [1.0, 0.0]
-    assert await embedder.async_get_embedding("async search") == [1.0, 0.0]
-    assert embedder.get_embedding_and_usage("chunk") == ([0.0, 1.0], None)
-    assert await embedder.async_get_embedding_and_usage("async chunk") == ([0.0, 1.0], None)
+    assert embedder.embed(["search"], purpose="query") == [[1.0, 0.0]]
+    assert await embedder.aembed(["async search"], purpose="query") == [[1.0, 0.0]]
+    assert embedder.embed(["chunk", "other chunk"], purpose="document") == [[0.0, 1.0], [0.0, 1.0]]
+    assert await embedder.aembed(["async chunk"], purpose="document") == [[0.0, 1.0]]
     assert client.calls == [
         ("query", "search", False),
         ("query", "async search", False),
         ("document", "chunk", False),
+        ("document", "other chunk", False),
         ("document", "async chunk", False),
     ]
 
 
-def test_sentence_transformers_embedder_reports_model_failures_as_embedding_errors(
+def test_sentence_transformers_embedder_reports_model_failures_as_classified_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A local model failure surfaces as Agno's typed embedding error, like other providers."""
+    """A local model failure surfaces as the classified embedder error, keeping the model's error as its cause."""
 
     class FailingModelClient:
         def encode_query(self, text: str, *, normalize_embeddings: bool) -> np.ndarray:
@@ -422,13 +277,12 @@ def test_sentence_transformers_embedder_reports_model_failures_as_embedding_erro
             msg = "out of memory"
             raise RuntimeError(msg)
 
-    model = "google/embeddinggemma-2"
-    monkeypatch.setattr("mindroom.embeddings.signatures.ensure_sentence_transformers_dependencies", lambda _paths: None)
-    monkeypatch.setattr(embedding_helpers, "_SENTENCE_TRANSFORMER_CLIENT", (model, FailingModelClient()))
-    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, model)
+    monkeypatch.setattr(local_embedder, "_load_sentence_transformer", lambda _model: FailingModelClient())
+    embedder = create_sentence_transformers_embedder(TEST_RUNTIME_PATHS, "google/embeddinggemma-2")
 
-    with pytest.raises(EmbeddingError, match="out of memory"):
-        embedder.get_embedding("search")
+    with pytest.raises(EmbedderRequestError, match=r"^embedder request failed \(RuntimeError\)$") as excinfo:
+        asyncio.run(embedder.aembed(["search"], purpose="query"))
+    assert str(excinfo.value.__cause__) == "out of memory"
 
 
 def test_mem0_and_knowledge_signatures_use_openai_model_defaults() -> None:

@@ -8,7 +8,12 @@ from agno.agent import Agent
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.knowledge.source_descriptions import KnowledgeSourceDescription, KnowledgeWithSourceDescriptions
+from mindroom.knowledge.search import (
+    KNOWLEDGE_SEARCH_TOOL_NAME,
+    KnowledgeSourceDescription,
+    knowledge_search_tool_description,
+)
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.tool_system.tool_hooks import prepend_function_tool_hook
 
 if TYPE_CHECKING:
@@ -19,7 +24,6 @@ if TYPE_CHECKING:
     from agno.run.agent import RunOutput
     from agno.session import AgentSession
 
-KNOWLEDGE_SEARCH_TOOL_NAME = "search_knowledge_base"
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
 
 
@@ -29,8 +33,8 @@ def _normalize_description(value: str) -> str:
 
 def knowledge_source_descriptions(knowledge: Knowledge) -> tuple[KnowledgeSourceDescription, ...]:
     """Return the resolved queryable knowledge sources one agent can search."""
-    if isinstance(knowledge, KnowledgeWithSourceDescriptions):
-        return knowledge.source_descriptions
+    if isinstance(knowledge, StrictSearchKnowledge):
+        return knowledge.agent_knowledge.source_descriptions()
 
     if knowledge.name is None:
         return ()
@@ -41,28 +45,6 @@ def knowledge_source_descriptions(knowledge: Knowledge) -> tuple[KnowledgeSource
             description=_normalize_description(knowledge.description or ""),
         ),
     )
-
-
-def _knowledge_search_tool_description(
-    sources: tuple[KnowledgeSourceDescription, ...],
-    *,
-    memory_search_available: bool,
-) -> str:
-    """Build the description shown to the model for the knowledge-search tool."""
-    if not sources:
-        return "Search this agent's configured knowledge bases for information about a query."
-
-    lines = [
-        "Search this agent's configured knowledge bases for information about a query.",
-        "Available sources:",
-    ]
-    for source in sources:
-        description = source.description or "No description configured."
-        lines.append(f"- {source.base_id}: {description}")
-    lines.append("This list only describes sources available through search_knowledge_base.")
-    if memory_search_available:
-        lines.append("For resilient memory search, team-visible memory, and memory IDs, use search_memories.")
-    return "\n".join(lines)
 
 
 def _tool_function_available(tools: list[Any], function_name: str, *, async_mode: bool) -> bool:
@@ -83,7 +65,7 @@ def _annotate_knowledge_search_tool(
     async_mode: bool,
 ) -> None:
     """Attach MindRoom source descriptions to Agno's generated knowledge-search tool."""
-    description = _knowledge_search_tool_description(
+    description = knowledge_search_tool_description(
         sources,
         memory_search_available=_tool_function_available(tools, _MEMORY_SEARCH_TOOL_NAME, async_mode=async_mode),
     )

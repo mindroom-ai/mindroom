@@ -1,27 +1,21 @@
-"""Published knowledge handle with parent embeddings and isolated native reads."""
+"""Published knowledge index handle with parent embeddings and isolated native reads."""
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-from agno.knowledge.document import Document
+from typing import TYPE_CHECKING
 
 from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_process import read_chroma, read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
-from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
-
+    from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
-
-logger = get_logger(__name__)
+    from mindroom.knowledge.read_protocol import SearchHit
 
 
 def collection_exists(path: str, collection: str) -> bool:
@@ -52,13 +46,6 @@ def collection_exists(path: str, collection: str) -> bool:
         raise RuntimeError(message) from exc
 
 
-def _dict_filters(filters: dict[str, Any] | list[Any] | None) -> dict[str, Any] | None:
-    if isinstance(filters, list):
-        logger.warning("Filter expressions are not supported by Chroma; no filters applied")
-        return None
-    return filters
-
-
 @dataclass
 class ChromaReadProxy:
     """A scoped read descriptor; the worker selects and holds its current publication."""
@@ -78,58 +65,26 @@ class ChromaReadProxy:
         with read_collection(request) as collection_name:
             return collection_exists(self.path, collection_name)
 
-    def create(self) -> None:
-        """Never recreate a vanished published collection during Agno initialization."""
-        message = "Published knowledge collection is unavailable"
-        raise RuntimeError(message)
-
-    def search(
-        self,
-        query: str,
-        limit: int = 5,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        """Embed under the caller's credentials, then query outside this process."""
-        embedding = self.embedder.get_embedding(query)
-        result = read_chroma(
-            ReadRequest(
-                path=self.path,
-                collection=self.collection_name,
-                query=query,
-                embedding=embedding,
-                limit=limit,
-                filters=_dict_filters(filters),
-                published_settings=self.published_settings.to_metadata()
-                if self.published_settings is not None
-                else None,
-            ),
+    def _request(self, query: str, embedding: list[float], limit: int) -> ReadRequest:
+        return ReadRequest(
+            path=self.path,
+            collection=self.collection_name,
+            query=query,
+            embedding=embedding,
+            limit=limit,
+            published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
         )
-        return [Document(**asdict(document)) for document in result.documents]
 
-    async def async_search(
-        self,
-        query: str,
-        limit: int = 5,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        """Embed under the caller's credentials, then query outside this process."""
+        embedding = self.embedder.embed([query], purpose="query")[0]
+        return read_chroma(self._request(query, embedding, limit)).hits
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         """Start native imports while the parent obtains the query embedding."""
 
         async def prepare_request() -> ReadRequest:
-            try:
-                embedding = await self.embedder.async_get_embedding(query)
-            except NotImplementedError:
-                embedding = await asyncio.to_thread(self.embedder.get_embedding, query)
-            return ReadRequest(
-                path=self.path,
-                collection=self.collection_name,
-                query=query,
-                embedding=embedding,
-                limit=limit,
-                filters=_dict_filters(filters),
-                published_settings=self.published_settings.to_metadata()
-                if self.published_settings is not None
-                else None,
-            )
+            embedding = (await self.embedder.aembed([query], purpose="query"))[0]
+            return self._request(query, embedding, limit)
 
-        result = await read_chroma_async(prepare_request)
-        return [Document(**asdict(document)) for document in result.documents]
+        return (await read_chroma_async(prepare_request)).hits

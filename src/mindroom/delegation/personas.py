@@ -12,8 +12,8 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
-from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.delegation.state import SubagentPersona
+from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.catalog import TOOL_METADATA

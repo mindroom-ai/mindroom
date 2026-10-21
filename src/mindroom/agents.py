@@ -21,8 +21,8 @@ from mindroom.agent_cli.cli_shell_agent import (
 )
 from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_descriptions import describe_agent
-from mindroom.agent_knowledge_descriptions import KNOWLEDGE_SEARCH_TOOL_NAME, knowledge_source_descriptions
 from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent as Agent
+from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.approval.tool_approval import (
     JOB_APPROVAL_TYPE,
     POLICY_CONFIRMATION_APPROVAL_TYPE,
@@ -42,6 +42,7 @@ from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_fa
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.history.mid_turn_compaction import install_mid_turn_compaction
 from mindroom.hooks import HookRegistry
+from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import hide_mcp_function_collisions
@@ -114,7 +115,6 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.agent_knowledge_descriptions import KnowledgeSourceDescription
     from mindroom.agent_modes import AgentMode
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import KnowledgeSourceDescription
     from mindroom.tool_system.skills import RefusedWorkspaceSkill
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 

@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_host
-from mindroom.embeddings.signatures import create_sentence_transformers_embedder
+from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
+from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder
     from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
 
 
@@ -92,41 +92,27 @@ def create_configured_embedder(
     """Create the configured embedding provider used for semantic indexes."""
     settings = resolve_embedder_settings(config, runtime_paths)
 
+    # Provider SDK modules are imported at first construction so only the configured provider's SDK loads (#1436).
     if settings.provider == "openai":
-        # Imported at first construction so only the configured embedder
-        # provider's SDK loads (#1436).
-        from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
+        from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 
-        if health_recorder is None:
-            return MindRoomOpenAIEmbedder(
-                id=settings.model,
-                api_key=settings.api_key,
-                base_url=settings.host,
-                dimensions=settings.dimensions,
-                query_prefix=settings.query_prefix,
-                document_prefix=settings.document_prefix,
-            )
-        return MindRoomOpenAIEmbedder(
-            id=settings.model,
+        return OpenAIEmbedder(
+            model=settings.model,
             api_key=settings.api_key,
             base_url=settings.host,
             dimensions=settings.dimensions,
             query_prefix=settings.query_prefix,
             document_prefix=settings.document_prefix,
-            health_recorder=health_recorder,
+            health_recorder=capture_embedder_health_recorder() if health_recorder is None else health_recorder,
         )
 
     if settings.provider == "ollama":
-        from agno.knowledge.embedder.ollama import OllamaEmbedder  # noqa: PLC0415
+        from mindroom.embeddings.ollama_embedder import OllamaEmbedder  # noqa: PLC0415
 
-        return OllamaEmbedder(id=settings.model, host=settings.host)
+        return OllamaEmbedder(model=settings.model, host=settings.host)
 
     if settings.provider == "sentence_transformers":
-        return create_sentence_transformers_embedder(
-            runtime_paths,
-            settings.model,
-            dimensions=settings.dimensions,
-        )
+        return create_sentence_transformers_embedder(runtime_paths, settings.model)
 
     msg = (
         f"Unsupported semantic-search embedder provider: {settings.provider}. "

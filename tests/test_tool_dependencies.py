@@ -625,20 +625,19 @@ def install(extras, *, quiet):
 
 dependencies._install_via_uv_tool = install
 if mode == 'reader':
-    from mindroom.embeddings import signatures
+    from mindroom.embeddings import sentence_transformers_embedder as local_embedder
     from mindroom.constants import resolve_primary_runtime_paths
 
-    class Embedder:
-        def __init__(self, **kwargs):
-            for name in importlib.metadata.packages_distributions()['transient_embedding']:
-                assert importlib.metadata.version(name) == '1'
-            self.sentence_transformer_client = object()
+    def load(model):
+        for name in importlib.metadata.packages_distributions()['transient_embedding']:
+            assert importlib.metadata.version(name) == '1'
+        return object()
 
-    signatures.ensure_sentence_transformers_dependencies = lambda paths: None
-    signatures._serialized_sentence_transformers_class = lambda: Embedder
+    local_embedder.ensure_sentence_transformers_dependencies = lambda paths: None
+    local_embedder._load_sentence_transformer = load
     paths = resolve_primary_runtime_paths(config_path=root / 'other-runtime' / 'config.yaml', process_env={})
     print('ready', flush=True)
-    signatures.create_sentence_transformers_embedder(paths)
+    local_embedder.create_sentence_transformers_embedder(paths)
     print('imported complete metadata', flush=True)
 elif mode == 'mem0_reader':
     import asyncio

@@ -47,9 +47,29 @@ depends_on = []
 path = "mindroom.embeddings.factory"
 depends_on = [
     "mindroom.credentials.sync",
+    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.ollama_embedder",
+    "mindroom.embeddings.openai_embedder",
+    "mindroom.embeddings.sentence_transformers_embedder",
+    "mindroom.model_defaults",
+]
+
+[[modules]]
+path = "mindroom.embeddings.base"
+depends_on = []
+
+[[modules]]
+path = "mindroom.embeddings.ollama_embedder"
+depends_on = ["mindroom.embeddings.errors"]
+visibility = ["mindroom.embeddings.factory"]
+
+[[modules]]
+path = "mindroom.embeddings.sentence_transformers_embedder"
+depends_on = [
+    "mindroom.embeddings.errors",
     "mindroom.embeddings.signatures",
     "mindroom.model_defaults",
-    "mindroom.embeddings.openai_embedder",
+    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -74,10 +94,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.embeddings.openai_embedder"
 depends_on = [
-    "mindroom.embeddings.agno_compat_openai_embedder",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
     "mindroom.model_defaults",
+    "mindroom.providers.model_http_client",
 ]
 
 [[modules]]
@@ -855,6 +875,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.knowledge.search",
     "mindroom.mcp.registry",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.delegation.personas",
@@ -923,30 +944,27 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = ["mindroom.knowledge.source_descriptions", "mindroom.tool_system.tool_hooks"]
+depends_on = [
+    "mindroom.knowledge.search",
+    "mindroom.knowledge.strict_knowledge",
+    "mindroom.tool_system.tool_hooks",
+]
 visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agents",
     "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.delegation.personas",
 ]
 
 [[modules]]
-path = "mindroom.knowledge.source_descriptions"
-depends_on = ["mindroom.knowledge.strict_knowledge"]
-visibility = [
-    "mindroom.agent_knowledge_descriptions",
-    "mindroom.knowledge.utils",
-]
+path = "mindroom.knowledge.search"
+depends_on = ["mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.knowledge.strict_knowledge"
-depends_on = ["mindroom.knowledge.agno_compat_knowledge", ]
+depends_on = []
 visibility = [
-    "mindroom.knowledge.collections",
-    "mindroom.knowledge.manager",
-    "mindroom.knowledge.registry",
-    "mindroom.knowledge.source_descriptions",
+    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.utils",
 ]
 
 [[modules]]
@@ -4780,7 +4798,7 @@ depends_on = [
     "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
-    "mindroom.embeddings.signatures",
+    "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.providers.google_adc",
     "mindroom.matrix.client_session",
     "mindroom.matrix.health",
@@ -5932,12 +5950,11 @@ depends_on = [
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
     "mindroom.logging_config",
-    "mindroom.knowledge.strict_knowledge",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
-path = "mindroom.knowledge.embedding_batch"
+path = "mindroom.embeddings.batching"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
@@ -5983,7 +6000,6 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
-    "mindroom.knowledge.strict_knowledge",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -6012,10 +6028,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
+    "mindroom.embeddings.batching",
     "mindroom.knowledge.candidate_checkpoint",
-    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.collections",
-    "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.index_metadata",
@@ -6023,7 +6038,6 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
-    "mindroom.knowledge.strict_knowledge",
 ]
 
 [[modules]]
@@ -6106,7 +6120,8 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
-    "mindroom.knowledge.source_descriptions",
+    "mindroom.knowledge.search",
+    "mindroom.knowledge.strict_knowledge",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
@@ -7415,7 +7430,6 @@ depends_on = [
     "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.read_process",
     "mindroom.knowledge.read_protocol",
-    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -7556,7 +7570,7 @@ depends_on = [
 path = "mindroom.delegation.personas"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.search",
     "mindroom.knowledge.utils",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
@@ -8205,26 +8219,6 @@ expose = [
 
 
 [[modules]]
-path = "mindroom.knowledge.agno_compat_knowledge"
-depends_on = []
-visibility = ["mindroom.knowledge.strict_knowledge"]
-
-[[interfaces]]
-from = ["mindroom.knowledge.agno_compat_knowledge"]
-expose = ["search", "asearch", "insert_documents"]
-
-
-[[modules]]
-path = "mindroom.embeddings.agno_compat_openai_embedder"
-depends_on = []
-visibility = ["mindroom.embeddings.openai_embedder"]
-
-[[interfaces]]
-from = ["mindroom.embeddings.agno_compat_openai_embedder"]
-expose = ["OpenAIEmbedderWithHooks"]
-
-
-[[modules]]
 path = "mindroom.tool_system.agno_compat_function_schema"
 depends_on = []
 visibility = ["mindroom.tool_system.output_files"]
@@ -8308,15 +8302,6 @@ visibility = ["mindroom.tools.agentql"]
 [[interfaces]]
 from = ["mindroom.custom_tools.agno_compat_agentql"]
 expose = ["MindRoomAgentQLTools"]
-
-[[modules]]
-path = "mindroom.custom_tools.agno_compat_website_reader"
-depends_on = []
-visibility = ["mindroom.custom_tools.website"]
-
-[[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_website_reader"]
-expose = ["queue_crawl_url", "crawl_with_callbacks"]
 
 [[modules]]
 path = "mindroom.tools.replicate"
@@ -9302,7 +9287,6 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
-    "mindroom.embeddings.openai_embedder",
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

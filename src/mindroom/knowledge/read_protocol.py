@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import TypeAdapter
-
-if TYPE_CHECKING:
-    from agno.knowledge.document import Document
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
@@ -22,48 +19,27 @@ class ReadRequest:
     query: str | None = None
     embedding: list[float] | None = None
     limit: int = 5
-    filters: dict[str, Any] | None = None
     published_settings: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
-class ReadDocument:
-    """Complete search result without an executable embedder reference."""
+class SearchHit:
+    """One stored chunk a search found, as the knowledge search tool shows it to the model."""
 
     content: str
-    id: str | None = None
+    #: The source file's basename the chunk was stored under.
     name: str | None = None
+    #: Every stored key except ``name`` and ``content_id``, then the hit's cosine distance as ``distances`` and
+    #: ``similarity_score``.
     meta_data: dict[str, Any] = field(default_factory=dict)
-    embedding: list[float] | None = None
-    usage: dict[str, Any] | None = None
-    reranking_score: float | None = None
-    content_id: str | None = None
-    content_origin: str | None = None
-    size: int | None = None
-
-    @classmethod
-    def from_document(cls, document: Document) -> ReadDocument:
-        """Preserve Agno fields, normalizing native vectors to Python numbers."""
-        return cls(
-            content=document.content,
-            id=document.id,
-            name=document.name,
-            meta_data=document.meta_data,
-            embedding=[float(value) for value in document.embedding] if document.embedding is not None else None,
-            usage=document.usage,
-            reranking_score=document.reranking_score,
-            content_id=document.content_id,
-            content_origin=document.content_origin,
-            size=document.size,
-        )
 
 
 @dataclass(frozen=True)
 class ReadResult:
-    """Existence or documents, with an explicit native failure classification."""
+    """Existence or search hits, with an explicit native failure classification."""
 
     exists: bool = False
-    documents: list[ReadDocument] = field(default_factory=list)
+    hits: list[SearchHit] = field(default_factory=list)
     error_type: str | None = None
 
 
