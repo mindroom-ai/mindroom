@@ -18,6 +18,7 @@ from uuid import uuid4
 from pydantic import validate_call
 
 from mindroom.agent_loop.model_loop import EndRun, LoopHooks, SendRequest, run_model_loop
+from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
@@ -314,7 +315,11 @@ def _context_tokens(config: Config, model: ModelProvider, model_name: str, metri
 
 
 def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -> LoopHooks:
-    """Return the hooks of one review's loop: its input budget, then the tool definitions it offers."""
+    """Return the hooks of one review's loop: its input budget, the tool definitions it offers, and its output limit.
+
+    Like an agent's reply on Claude, a review answers the tool calls of a response the output limit cut off instead
+    of running them, so a truncated skill_manage call never writes a truncated skill.
+    """
     budget_tokens = _review_input_budget_tokens(config, review.model_name)
 
     async def within_budget(_state: LoopState) -> RequestDecision:
@@ -329,7 +334,10 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
         state.tools = review.definitions
         return SendRequest()
 
-    return LoopHooks(before_request=(within_budget, offer_definitions))
+    return LoopHooks(
+        before_request=(within_budget, offer_definitions),
+        answer_tool_calls=output_limit_policy() if review.model.capabilities.claude_family else None,
+    )
 
 
 async def review_conversation(

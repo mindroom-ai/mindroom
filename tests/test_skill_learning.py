@@ -19,6 +19,7 @@ import structlog
 from agno.tools import Toolkit
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.ai_runtime import queued_message_signal_context
@@ -110,6 +111,8 @@ class _ScriptedModel:
     # Requests after this many wait for ``release``, announcing themselves in ``blocked`` first.
     released_requests: int = 0
     blocked: asyncio.Queue[None] = field(default_factory=asyncio.Queue)
+    # The requests, counted from 1, whose tool calls the output limit cuts off.
+    cut_off_requests: frozenset[int] = frozenset()
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Answer with the script's next tool calls, or with "Done." once it ran out."""
@@ -140,7 +143,8 @@ class _ScriptedModel:
             for index, (name, arguments) in enumerate(step if isinstance(step, list) else [step])
         ]
         message = Message(role="assistant", content="", tool_calls=calls, metrics=usage)
-        yield TurnCompleted(message=message, stop_reason="tool_use")
+        cut_off = len(self.requests) in self.cut_off_requests
+        yield TurnCompleted(message=message, stop_reason="output_limit" if cut_off else "tool_use")
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append each result as its own tool message."""
@@ -988,6 +992,37 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
     assert model.script, "the review should have stopped before its script ran out"
     assert sum(model.input_tokens[:-1]) < 9_000 <= sum(model.input_tokens)
     assert (root / "handwritten/SKILL.md").read_text() == HANDWRITTEN
+
+
+@pytest.mark.asyncio
+async def test_a_claude_review_never_runs_a_call_the_output_limit_cut_off(tmp_path: Path) -> None:
+    """A cut-off skill_manage call is answered instead of run, so only the complete retry writes the skill."""
+    config, paths = _learner(tmp_path)
+    _seed(config, paths, _tool_turn("r1"))
+    model = _model(
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED.removesuffix("test.\n")}),
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
+    )
+    model.capabilities = Capabilities(claude_family=True)
+    model.cut_off_requests = frozenset({1})
+    progress = ReviewProgress()
+    with (
+        patch(_REVIEW_MODEL, return_value=model),
+        patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
+    ):
+        await review_conversation(
+            config=config,
+            runtime_paths=paths,
+            agent_name="mind",
+            session_id="session",
+            identity=None,
+            skills_root=_skills_root(config, paths),
+            captured=None,
+            progress=progress,
+        )
+    assert model.requests[1][-1] == CUT_OFF_TOOL_CALL_RESULT
+    assert progress.changes == {"deploy-checks": "created"}
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").read_text() == LEARNED
 
 
 @pytest.mark.asyncio
