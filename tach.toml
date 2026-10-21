@@ -5112,6 +5112,7 @@ depends_on = [
     "mindroom.background_tasks",
 ]
 visibility = [
+    "mindroom.agent_loop",
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.turn",
@@ -5876,6 +5877,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.llm"
 depends_on = []
+
+[[modules]]
+path = "mindroom.agent_loop"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.invocation",
+]
 
 [[modules]]
 path = "mindroom.knowledge"

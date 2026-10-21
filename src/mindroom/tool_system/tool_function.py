@@ -18,6 +18,7 @@ class ToolFunction:
     ``parameters`` is the final JSON schema the model receives; readers must not mutate it.
     ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` keep Agno's tri-state: None
     means the tool never set the value, which the loop reads as False and the wire omits.
+    ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
     """
@@ -29,6 +30,7 @@ class ToolFunction:
     requires_confirmation: bool | None = None
     approval_type: str | None = None
     external_execution: bool | None = None
+    external_execution_silent: bool | None = None
     stop_after_tool_call: bool = False
     show_result: bool = False
     entrypoint: Callable[..., Any]

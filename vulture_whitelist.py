@@ -423,7 +423,6 @@ _.omitted_media  # Capability read by the owned media fallback when it lands (sr
 _.native_tool_search  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
 _.prompt_cache_breakpoints  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
 _.claude_family  # Capability read by the owned compaction fallback when it lands (src/mindroom/llm/provider.py)
-_.format_tool_results  # Protocol method called by the owned agent loop when it lands (src/mindroom/llm/provider.py)
 _.child_run_id  # Stored tool-execution field read by the owned team runtime when it lands (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
 _.load_session  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
@@ -431,5 +430,4 @@ _.save_session_fields  # Store method called by the owned runtime when it is wir
 _.list_updated_sessions  # Store method called by the owned background readers when they are wired (src/mindroom/session_storage/store.py)
 _.prompt_id  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
 _.loop_start_ids  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
-_.stop_after_call  # ToolOutcome field the owned loop reads (src/mindroom/tool_system/invocation.py)
 _.native_compaction_settings  # Claude adapter method the history replay planner calls once it is wired (src/mindroom/providers/anthropic/messages.py)

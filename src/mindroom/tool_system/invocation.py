@@ -56,12 +56,14 @@ class ToolCallContext:
     """The run a tool call belongs to, in owned terms.
 
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
+    ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
     The media are the run's input media, offered to entrypoints that declare the reserved media parameters.
     """
 
     run_id: str
     session_id: str
     user_id: str | None = None
+    call_id: str | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     images: Sequence[Image] = ()
@@ -142,8 +144,10 @@ async def execute_tool_call(
     """Run one tool call through ``middleware`` to its entrypoint and return what the model should read.
 
     Any exception other than cancellation becomes a failed outcome whose content is the exception's text.
+    Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
+    running from its stored arguments is as clean as a freshly parsed one.
     """
-    call = ToolCall(function=function, arguments=dict(arguments or {}), context=context)
+    call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
     try:
         value = tool_value(await _run_chain(call, middleware))
     except asyncio.CancelledError:
