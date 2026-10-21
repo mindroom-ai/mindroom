@@ -5022,6 +5022,7 @@ visibility = [
     "mindroom.response_turn",
     "mindroom.api.openai_compat",
     "mindroom.llm_request_logging",
+    "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.agno_execution",
@@ -5277,6 +5278,26 @@ depends_on = [
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_jobs.execution_authority",
+]
+
+[[modules]]
+path = "mindroom.tool_system.tool_function"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.tool_system.agno_toolkits"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.tool_system.tool_function",
+]
+
+[[modules]]
+path = "mindroom.tool_system.invocation"
+depends_on = [
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
