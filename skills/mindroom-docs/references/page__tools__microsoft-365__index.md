@@ -72,7 +72,7 @@ agents:
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
