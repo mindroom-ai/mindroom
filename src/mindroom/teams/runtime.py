@@ -44,8 +44,9 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import TeamMember, TeamSpec
 
 logger = get_logger(__name__)
@@ -117,7 +118,7 @@ def run_team(
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members)
+        leader = _leader_spec(spec, record, members.run)
         await _forward(
             drive_run(
                 leader,
@@ -179,7 +180,7 @@ def continue_team(
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members)
+        leader = _leader_spec(spec, record, members.run)
         prepared = prepare_run_tools(leader)
 
         async def entry() -> AsyncIterator[RunEvent]:
@@ -383,11 +384,25 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
     )
 
 
-def _leader_spec(spec: TeamSpec, record: TeamRunRecord, members: _MemberRuns) -> AgentSpec:
+def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner) -> AgentSpec:
     """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run."""
     base = _base_leader_spec(spec)
-    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=members.run)
+    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member)
     return replace(base, toolkits=(*base.toolkits, delegation))
+
+
+def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
+    """Return the tool definitions every leader request offers: the team's own tools, then the delegation tool.
+
+    The definitions do not depend on a run; a run binds the delegation tool to its own record and members.
+    """
+
+    async def no_member_runs(member: TeamMember, task: str) -> RunRecord:
+        msg = f"the tool definitions of team {spec.id!r} run no member; {member.spec.id!r} was asked {task!r}"
+        raise RuntimeError(msg)
+
+    unbound = TeamRunRecord(run_id="", team_id=spec.id, team_name=spec.name)
+    return prepare_run_tools(_leader_spec(spec, unbound, no_member_runs)).specs()
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +523,7 @@ __all__ = [
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",
+    "leader_tool_specs",
     "run_team",
     "team_paused_content",
     "team_usage",

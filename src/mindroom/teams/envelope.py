@@ -106,6 +106,7 @@ from mindroom.teams.runtime import (
     MemberEvent,
     MemberRunEnded,
     continue_team,
+    leader_tool_specs,
     run_team,
     team_usage,
 )
@@ -413,7 +414,7 @@ async def prepare_materialized_team_execution(
         scope_context=scope_context,
         member_names=[member.spec.id for member in spec.members],
         leader_system_message=spec.system_message,
-        leader_tools=prepare_run_tools(_leader_spec(spec)).specs(),
+        leader_tools=leader_tool_specs(spec),
         model=spec.model,
         prompt=message,
         transient_context_messages=(
@@ -465,18 +466,6 @@ async def prepare_materialized_team_execution(
         unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
-    )
-
-
-def _leader_spec(spec: TeamSpec) -> AgentSpec:
-    """Return the leader's own tools as a spec, for sizing the prompt; the run adds the delegation tool itself."""
-    return AgentSpec(
-        id=spec.id,
-        name=spec.name,
-        model=spec.model,
-        system_message=spec.system_message,
-        toolkits=spec.toolkits,
-        tool_call_limit=spec.tool_call_limit,
     )
 
 

@@ -5,12 +5,13 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom import agents
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom import agents, execution_preparation
+from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -28,14 +29,17 @@ from mindroom.history.types import (
     HistoryScope,
     PreparedHistoryState,
 )
+from mindroom.llm.messages import Message
 from mindroom.teams import envelope
-from mindroom.teams.envelope import BuiltTeam, _leader_spec, build_team_spec
+from mindroom.teams.envelope import BuiltTeam, build_team_spec, prepare_materialized_team_execution
 from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths
-from tests.fakes.scripted_model import ScriptedModel
+from tests.conftest import bind_runtime_paths, make_turn_context
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import _runtime_paths
 
 _PAIR = TeamConfig(
@@ -71,10 +75,11 @@ def _build_pair(
     *,
     configured_team_name: str | None,
     scope_context: ScopeSessionContext | None = None,
+    leader: ScriptedModel | None = None,
 ) -> BuiltTeam:
-    """Build the alpha+zeta team on scripted providers, as a reply builds it."""
+    """Build the alpha+zeta team on scripted providers, as a reply builds it; ``leader`` scripts the leader's turns."""
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: leader or ScriptedModel([]))
     members = materialize_exact_team_members(
         ["zeta", "alpha"],
         config=config,
@@ -99,7 +104,7 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
     """Return the estimate a request of ``prompt`` costs before its history: the prompt, the leader's prompt, its tools."""
     payloads = [
         {key: value for key, value in asdict(tool).items() if value is not None}
-        for tool in prepare_run_tools(_leader_spec(built.spec)).specs()
+        for tool in leader_tool_specs(built.spec)
     ]
     system_content = built.spec.system_message.content
     assert isinstance(system_content, str)
@@ -114,11 +119,7 @@ async def test_prepare_bound_scope_history_prepares_the_owner_s_team_scope_once(
     """The ad hoc team's scope is prepared once, owned by the first member by name, sized by the leader's prompt."""
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    estimator = build_static_token_estimator(
-        built.spec.system_message,
-        prepare_run_tools(_leader_spec(built.spec)).specs(),
-        frozenset(),
-    )
+    estimator = build_static_token_estimator(built.spec.system_message, leader_tool_specs(built.spec), frozenset())
     expected_static_prompt_tokens = _expected_static_tokens(built, "Current prompt")
 
     with (
@@ -166,22 +167,59 @@ async def test_prepare_bound_scope_history_prepares_the_owner_s_team_scope_once(
     )
 
 
-def test_the_team_build_sizes_its_static_tokens_from_the_leader_prompt_and_tools(
+@pytest.mark.asyncio
+async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_every_tool_it_offers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The static estimate is the leader's rendered prompt plus the definitions of the tools it offers, nothing else."""
+    """The static estimate counts the leader's rendered prompt and the tools its requests offer, the delegation tool among them."""
     config, runtime_paths = _pair_config(tmp_path, teams={"pair": _PAIR})
-    built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name="pair")
-    tools = prepare_run_tools(_leader_spec(built.spec)).specs()
+    leader = ScriptedModel([answer("ok")])
+    built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name="pair", leader=leader)
+    sized: dict[str, Any] = {}
+    real_estimator = execution_preparation.build_static_token_estimator
 
-    estimator = build_static_token_estimator(built.spec.system_message, tools, frozenset())
+    def capture_estimator(system_message: Message, tools: Any, deferred_tool_names: frozenset[str]) -> Any:  # noqa: ANN401
+        sized["system_message"], sized["tools"] = system_message, list(tools)
+        return real_estimator(system_message, tools, deferred_tool_names)
 
-    assert estimator.estimate("Current prompt") == _expected_static_tokens(built, "Current prompt")
-    assert estimator.non_prompt_tokens() == _expected_static_tokens(built, "")
-    # The leader's prompt names each member; its own tools are only the job controls, when those are on.
-    assert '<member id="alpha" name="Alpha">' in str(built.spec.system_message.content)
-    assert [tool.name for tool in tools] == sorted(f.name for kit in built.spec.toolkits for f in kit.functions)
+    monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
+
+    with open_bound_scope_session_context(
+        member_names=["zeta", "alpha"],
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        team_name="pair",
+    ) as scope_context:
+        await prepare_materialized_team_execution(
+            make_turn_context("pair", session_id="session-1"),
+            scope_context=scope_context,
+            spec=built.spec,
+            message="Current prompt",
+            thread_history=None,
+            config=config,
+            runtime_paths=runtime_paths,
+            runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
+            response_sender_id=None,
+            current_sender_id=None,
+            configured_team_name="pair",
+        )
+    events = run_team(
+        built.spec,
+        [Message(role="user", content="Current prompt")],
+        ctx=RunContext(run_id="run-1", session_id="session-1"),
+    )
+    async with closing_async_stream(events):
+        async for _event in events:
+            pass
+
+    assert sized["system_message"] is built.spec.system_message
+    offered = [tool.name for tool in leader.requests[0].tools]
+    assert [tool.name for tool in sized["tools"]] == offered
+    assert "delegate_task_to_member" in offered
+    assert set(offered) > {function.name for kit in built.spec.toolkits for function in kit.functions}
 
 
 def test_the_team_build_takes_the_configured_team_s_call_limit_and_members(
