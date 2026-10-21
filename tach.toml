@@ -1225,6 +1225,7 @@ path = "mindroom.providers.google_adc"
 depends_on = ["mindroom.startup_errors"]
 visibility = [
     "mindroom.cli.doctor",
+    "mindroom.providers.anthropic.messages",
     "mindroom.providers.model_loading",
 ]
 
@@ -2654,6 +2655,7 @@ visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindro
 path = "mindroom.native_compaction"
 depends_on = ["mindroom.logging_config"]
 visibility = [
+    "mindroom.providers.anthropic.native_compaction",
     "mindroom.providers.claude_native_compaction",
     "mindroom.history.replay",
     "mindroom.history.native",
@@ -2677,6 +2679,59 @@ visibility = ["mindroom.providers.openai_models"]
 path = "mindroom.providers.claude_native_compaction"
 depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
 visibility = ["mindroom.providers.claude_compat"]
+
+[[modules]]
+path = "mindroom.providers.anthropic"
+depends_on = []
+
+[[modules]]
+path = "mindroom.providers.anthropic.settings"
+depends_on = []
+
+[[modules]]
+path = "mindroom.providers.anthropic.repairs"
+depends_on = ["mindroom.providers.claude_wire_blocks"]
+visibility = ["mindroom.providers.anthropic.prompt_cache"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.wire"
+depends_on = ["mindroom.llm", "mindroom.logging_config", "mindroom.providers.claude_wire_blocks"]
+visibility = ["mindroom.providers.anthropic.messages"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.prompt_cache"
+depends_on = [
+    "mindroom.llm_request_logging",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.messages"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.native_compaction"
+depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
+visibility = ["mindroom.providers.anthropic.messages"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.messages"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.sync",
+    "mindroom.error_handling",
+    "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.model_defaults",
+    "mindroom.providers.anthropic.native_compaction",
+    "mindroom.providers.anthropic.prompt_cache",
+    "mindroom.providers.anthropic.settings",
+    "mindroom.providers.anthropic.wire",
+    "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.google_adc",
+    "mindroom.providers.model_http_client",
+    "mindroom.runtime_env_policy",
+    "mindroom.tool_system.dependencies",
+]
 
 [[modules]]
 path = "mindroom.history.summary_rows"

@@ -212,6 +212,12 @@ Matrix sync callback
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `providers/model_loading.py` | Model instantiation and provider-specific loader selection |
+| `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
+| `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
+| `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
+| `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
+| `providers/anthropic/prompt_cache.py` | Composition of the Claude prompt-cache ladder, deferred tool search, and history repairs for one request body |
+| `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
