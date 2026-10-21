@@ -94,8 +94,12 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
     """Return whether the configured homeserver binds OpenID tokens to the audience they were requested for.
 
     While it does, a token that `verify_matrix_openid` accepts was requested for this deployment's origin. Anything
-    other than a small, direct JSON answer listing the feature as `true` counts as no binding.
+    other than a small, direct JSON answer listing the feature as `true` counts as no binding, and so does having no
+    audience to send, as with `MINDROOM_PORT=tcp://<ip>:8765` from Kubernetes service links: a binding homeserver
+    accepts any token checked without one.
     """
+    if _openid_audience(paths) is None:
+        return False
     url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/client/versions"
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:  # noqa: SIM117 - own the client until response cleanup completes

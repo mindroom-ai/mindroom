@@ -598,6 +598,12 @@ def test_runtime_chart_native_bootstrap_runs_in_main_container() -> None:
     )
 
 
+def test_runtime_chart_primary_pod_gets_no_service_link_environment() -> None:
+    """A Service named `mindroom` would otherwise inject `MINDROOM_PORT=tcp://<ip>:<port>`, which MindRoom reads as its port."""
+    docs = _render_chart(Path("cluster/k8s/runtime"), "fullnameOverride=mindroom", release_name="mindroom-runtime")
+    assert _resource(docs, "Deployment", "mindroom")["spec"]["template"]["spec"]["enableServiceLinks"] is False
+
+
 def test_runtime_chart_passes_bootstrap_revision_to_main_container() -> None:
     """The runtime command receives the declared chart revision."""
     docs = _render_chart(

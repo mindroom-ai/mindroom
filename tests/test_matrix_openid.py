@@ -210,6 +210,23 @@ async def test_binding_probe_true_when_versions_advertises_the_flag(versions_ser
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "env",
+    [{"MINDROOM_PORT": "tcp://10.0.0.1:8765"}, {"MINDROOM_PUBLIC_URL": "https://portal.example.org:bad"}],
+    ids=["kubernetes-service-link-port", "unusable-public-url"],
+)
+async def test_binding_probe_false_without_an_audience_to_send(
+    versions_server: _VersionsServer,
+    env: dict[str, str],
+) -> None:
+    """A binding homeserver accepts any token checked without an audience, so no audience counts as no binding."""
+    paths = await versions_server(
+        web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}}),
+    )
+    assert await homeserver_binds_openid_audience(replace(paths, process_env={**paths.process_env, **env})) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "unstable_features",
     [{"io.mindroom.openid_audience": False}, {}, ["io.mindroom.openid_audience"]],
     ids=["flag-false", "flag-absent", "not-an-object"],
