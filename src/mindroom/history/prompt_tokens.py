@@ -1,15 +1,13 @@
 """Static prompt-token estimation: what the model sees before any history replay.
 
-Estimates the non-history cost of one prepared agent or team request — system
-message, tool schemas, tool instructions, and the current prompt text — by
-reusing Agno's own prompt-preparation paths. Nothing here touches history
-scopes, sessions, or summaries; compaction consumes these numbers through the
-resolved execution plan.
+Estimates the non-history cost of one prepared request — system message, tool schemas, tool instructions, and the
+current prompt text. ``build_static_token_estimator`` sizes an owned build's rendered prompt and tool definitions;
+``agent_static_token_estimator`` sizes a live Agno agent through Agno's own prompt-preparation paths for the
+history fixtures that still build one. Nothing here touches history scopes, sessions, or summaries; compaction
+consumes these numbers through the resolved execution plan.
 
-The prompt-only tool surface (model-visible payloads plus tool instructions)
-is prepared once per agent or team instance and reused by static token
-budgeting within that turn. Agent and team instances
-are rebuilt per response, so the surface never outlives one turn's tool state.
+The prompt-only tool surface (model-visible payloads plus tool instructions) of an Agno agent is prepared once per
+instance and reused by static token budgeting within that turn.
 """
 
 from __future__ import annotations
@@ -24,13 +22,11 @@ from weakref import ref
 
 from agno.run import RunContext
 from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.agno_compat_prepared_tools import prepare_team_prompt_tools, temporary_tool_instructions
+from mindroom.agno_compat_prepared_tools import temporary_tool_instructions
 from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
 from mindroom.providers.openai_tool_search import model_deferred_tool_names
 from mindroom.providers.portable_tool_search import portable_deferred_tool_names
@@ -44,7 +40,6 @@ from mindroom.tool_system.tool_schema_cache import (
 
 if TYPE_CHECKING:
     from agno.agent import Agent
-    from agno.team import Team
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ToolSpec
@@ -65,7 +60,7 @@ class _PromptToolSurface:
     definition_tokens: int
 
 
-# Keyed by entity id because Agno Agent/Team instances are unhashable; each
+# Keyed by agent id because Agno Agent instances are unhashable; each
 # entry holds a weakref whose eviction callback removes the entry on GC.
 _TOOL_SURFACE_CACHE: dict[int, tuple[ref[object], _PromptToolSurface]] = {}
 # Allocations under the lock can trigger GC and re-enter it through _evict.
@@ -116,12 +111,7 @@ def build_static_token_estimator(
     return _StaticTokenEstimator(non_prompt_tokens)
 
 
-def team_static_token_estimator(team: Team) -> _StaticTokenEstimator:
-    """Return a request-local static-token estimator for one prepared team response."""
-    return _StaticTokenEstimator(partial(_estimate_team_non_prompt_static_tokens, team))
-
-
-def deferred_wire_tool_names(model: object) -> frozenset[str]:
+def _deferred_wire_tool_names(model: object) -> frozenset[str]:
     """Return the function names a model's tool search keeps off the provider request until it finds them."""
     return claude_deferred_tool_names(model) | model_deferred_tool_names(model) | portable_deferred_tool_names(model)
 
@@ -129,7 +119,7 @@ def deferred_wire_tool_names(model: object) -> frozenset[str]:
 def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     """Estimate system-message and tool tokens that do not depend on the prompt text."""
     surface = _agent_prompt_tool_surface(agent)
-    deferred = deferred_wire_tool_names(agent.model)
+    deferred = _deferred_wire_tool_names(agent.model)
     payloads = [payload for payload in surface.payloads if payload["name"] not in deferred]
     session, _run_response, run_context = _agent_prompt_estimation_inputs(agent)
     with temporary_tool_instructions(agent, surface.tool_instructions):
@@ -146,23 +136,7 @@ def _estimate_agent_non_prompt_static_tokens(agent: Agent) -> int:
     return static_tokens + definition_tokens
 
 
-def _estimate_team_non_prompt_static_tokens(team: Team) -> int:
-    """Estimate team system-message and tool tokens that do not depend on prompt text."""
-    surface = _team_prompt_tool_surface(team)
-    session, _run_response, _run_context = _team_prompt_estimation_inputs(team)
-    with temporary_tool_instructions(team, surface.tool_instructions):
-        system_message = team.get_system_message(
-            session=session,
-            tools=cast("list[Function | dict]", list(surface.payloads)) or None,
-            add_session_state_to_context=False,
-        )
-    static_tokens = 0
-    if system_message is not None and system_message.content is not None:
-        static_tokens += estimate_text_tokens(str(system_message.content))
-    return static_tokens + surface.definition_tokens
-
-
-def _cached_tool_surface(entity: Agent | Team) -> _PromptToolSurface | None:
+def _cached_tool_surface(entity: Agent) -> _PromptToolSurface | None:
     with _TOOL_SURFACE_CACHE_LOCK:
         entry = _TOOL_SURFACE_CACHE.get(id(entity))
     if entry is None:
@@ -173,7 +147,7 @@ def _cached_tool_surface(entity: Agent | Team) -> _PromptToolSurface | None:
     return surface
 
 
-def _store_tool_surface(entity: Agent | Team, surface: _PromptToolSurface) -> None:
+def _store_tool_surface(entity: Agent, surface: _PromptToolSurface) -> None:
     entity_key = id(entity)
 
     def _evict(entity_ref: ref[object]) -> None:
@@ -208,38 +182,6 @@ def _agent_prompt_tool_surface(agent: Agent) -> _PromptToolSurface:
     with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.tool_schema_prepare"):
         surface = _prompt_tool_surface_for_tools(processed_tools)
     _store_tool_surface(agent, surface)
-    return surface
-
-
-def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
-    """Prepare (or reuse) the SDK's prompt-only tool surface for one team instance."""
-    cached_surface = _cached_tool_surface(team)
-    if cached_surface is not None:
-        return cached_surface
-    with timed_block("system_prompt_assembly.history_prepare.static_token_estimate.agno_determine_tools"):
-        session, run_response, run_context = _team_prompt_estimation_inputs(team)
-        prepared = prepare_team_prompt_tools(
-            team,
-            session=session,
-            run_response=run_response,
-            run_context=run_context,
-        )
-        payloads_by_name: dict[str, _ToolDefinition] = {}
-        for tool in prepared.tools:
-            if isinstance(tool, Function):
-                payload = live_function_definition(tool)
-            elif _is_tool_definition_dict(tool):
-                payload = _dict_tool_payload(tool)
-            else:
-                continue
-            tool_name = payload["name"]
-            if isinstance(tool_name, str) and tool_name:
-                payloads_by_name[tool_name] = payload
-        surface = _build_prompt_tool_surface(
-            list(payloads_by_name.values()),
-            list(prepared.tool_instructions),
-        )
-    _store_tool_surface(team, surface)
     return surface
 
 
@@ -320,23 +262,6 @@ def _dict_tool_payload(tool: _ToolDefinition) -> _ToolDefinition:
         "description": str(tool.get("description", "")),
         "parameters": deepcopy(parameters) if isinstance(parameters, dict) else default_function_parameters(),
     }
-
-
-def _team_prompt_estimation_inputs(team: Team) -> tuple[TeamSession, TeamRunOutput, RunContext]:
-    budget_session_id = "history-budget"
-    session = TeamSession(session_id=budget_session_id, team_id=team.id)
-    run_response = TeamRunOutput(
-        run_id=budget_session_id,
-        team_id=team.id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    run_context = RunContext(
-        run_id=budget_session_id,
-        session_id=budget_session_id,
-        session_state={},
-    )
-    return session, run_response, run_context
 
 
 def _agent_prompt_estimation_inputs(agent: Agent) -> tuple[AgentSession, RunOutput, RunContext]:

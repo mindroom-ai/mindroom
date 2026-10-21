@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.team_exact_members import resolve_live_shared_agent_names
-from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.teams.formation import TeamOutcome, resolve_configured_team, resolve_live_shared_agent_names
+from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

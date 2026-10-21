@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,8 +22,8 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.team_runtime.runtime import MemberRunEnded
-from mindroom.team_runtime.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.runtime import MemberRunEnded
+from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.llm.agno_dict_helpers import expected_run_dict
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.llm.runs import AnyRunRecord, RunRecord
-    from mindroom.team_runtime.runtime import TeamRunEvent
+    from mindroom.teams.runtime import TeamRunEvent
     from mindroom.tool_system.agno_toolkits import AdaptedToolkit
 
 STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
@@ -55,15 +56,16 @@ def golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
 
 def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
     """Return the run rows of one C6 pre-resume dump by run id, as the resume read them."""
-    connection = sqlite3.connect(":memory:")
-    connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
-    [table] = [
-        name
-        for (name,) in connection.execute(
-            "select name from sqlite_master where type = 'table' and name like '%_sessions_runs'",
-        )
-    ]
-    return {run_id: json.loads(data) for run_id, data in connection.execute(f"select run_id, run_data from {table}")}  # noqa: S608
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
+        [table] = [
+            name
+            for (name,) in connection.execute(
+                "select name from sqlite_master where type = 'table' and name like '%_sessions_runs'",
+            )
+        ]
+        rows = connection.execute(f"select run_id, run_data from {table}")  # noqa: S608 - the dump's own table name
+        return {run_id: json.loads(data) for run_id, data in rows}
 
 
 def scripted(model_id: str, *turns: list[Any]) -> ScriptedModel:
@@ -115,9 +117,11 @@ def squad(
     system: str = "You lead the squad.",
     checker_system: str | None = None,
     leader_toolkits: Sequence[AdaptedToolkit] = (),
+    writer_toolkits: Sequence[AdaptedToolkit] | None = None,
     checker_toolkits: Sequence[AdaptedToolkit] | None = None,
 ) -> TeamSpec:
     """Return the capture's team: the writer with the calculator, the checker with the gated calculator."""
+    writer_tools = (calculator(gate_multiply=False),) if writer_toolkits is None else tuple(writer_toolkits)
     checker_tools = (calculator(gate_multiply=True),) if checker_toolkits is None else tuple(checker_toolkits)
     return TeamSpec(
         id=team_id,
@@ -127,7 +131,7 @@ def squad(
         system_message=Message(role="system", content=system),
         toolkits=tuple(leader_toolkits),
         members=(
-            member("writer", "Writer", writer, calculator(gate_multiply=False)),
+            member("writer", "Writer", writer, *writer_tools),
             member("checker", "Checker", checker, *checker_tools, system=checker_system),
         ),
     )
@@ -193,16 +197,17 @@ def member_records(events: Sequence[TeamRunEvent]) -> list[RunRecord]:
 
 
 def comparable(run: dict[str, Any]) -> dict[str, Any]:
-    """Return a stored run dict as one comparison sees it: Agno-only keys and volatile values out, ids renumbered.
+    """Return a stored run dict as one comparison sees it: Agno-only keys out, ids renumbered, clocks as sentinels.
 
     Prompt-role messages leave completed rows, as the store strips them; random ids become ``<id-n>`` in
-    first-appearance order; timestamps, clock readings, and metadata go; a tool's timing keeps only which keys it
-    recorded.
+    first-appearance order; every timestamp and duration becomes a sentinel, so its presence is compared but not its
+    value; a tool's timing keeps only which keys it recorded; the run metadata MindRoom adds after the turn
+    (``io.mindroom.ai_run``) goes, the rest of the metadata is compared.
     """
     text = json.dumps(_stored_shape(expected_run_dict(run)), sort_keys=True)
     ids: dict[str, str] = {}
     text = _UUID.sub(lambda match: ids.setdefault(match.group(), f"<id-{len(ids) + 1}>"), text)
-    return _without_clocks(json.loads(text))
+    return _with_clock_sentinels(json.loads(text))
 
 
 def _stored_shape(run: dict[str, Any]) -> dict[str, Any]:
@@ -214,33 +219,44 @@ def _stored_shape(run: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _without_clocks(run: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in run.items() if key not in {"created_at", "metadata"}}
-    result["messages"] = [
-        {key: value for key, value in message.items() if key not in {"id", "created_at"}} for message in run["messages"]
-    ]
-    if "metrics" in result:
-        # Durations and the first-token time are clock readings: Agno's timer stamped the run's first-token time
-        # even for a tool-call-only request whose message carries none.
-        result["metrics"] = {
-            key: value for key, value in result["metrics"].items() if key not in {"duration", "time_to_first_token"}
+_CLOCK = "<clock>"
+_METADATA_ADDED_AFTER_THE_TURN = frozenset({"io.mindroom.ai_run"})
+
+
+def _clocked(values: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
+    """Return ``values`` with every clock reading among ``keys`` replaced by the sentinel, presence kept."""
+    return {key: (_CLOCK if key in keys and value is not None else value) for key, value in values.items()}
+
+
+def _with_clock_sentinels(run: dict[str, Any]) -> dict[str, Any]:
+    result = _clocked(run, frozenset({"created_at"}))
+    if result.get("metadata") is not None:
+        result["metadata"] = {
+            key: value for key, value in result["metadata"].items() if key not in _METADATA_ADDED_AFTER_THE_TURN
         }
-    if "tools" in result:
-        result["tools"] = [_tool_without_clocks(tool) for tool in result["tools"]]
-    if "requirements" in result:
+    result["messages"] = [_clocked(message, frozenset({"id", "created_at"})) for message in run["messages"]]
+    if "metrics" in result and result["metrics"] is not None:
+        # The duration is a clock reading. The first-token time is left out altogether: Agno's own timer stamped it
+        # even on a tool-call-only request whose message carried none, where the owned loop records only what the
+        # provider reported, so even its presence differs.
+        metrics = _clocked(result["metrics"], frozenset({"duration"}))
+        result["metrics"] = {key: value for key, value in metrics.items() if key != "time_to_first_token"}
+    if "tools" in result and result["tools"] is not None:
+        result["tools"] = [_tool_with_clock_sentinels(tool) for tool in result["tools"]]
+    if "requirements" in result and result["requirements"] is not None:
         result["requirements"] = [
             {
-                **{key: value for key, value in item.items() if key != "created_at"},
-                "tool_execution": _tool_without_clocks(item["tool_execution"]),
+                **_clocked(item, frozenset({"created_at"})),
+                "tool_execution": _tool_with_clock_sentinels(item["tool_execution"]),
             }
             for item in result["requirements"]
         ]
     if "member_responses" in result:
-        result["member_responses"] = [_without_clocks(item) for item in result["member_responses"]]
+        result["member_responses"] = [_with_clock_sentinels(item) for item in result["member_responses"]]
     return result
 
 
-def _tool_without_clocks(tool: dict[str, Any]) -> dict[str, Any]:
-    result = {key: value for key, value in tool.items() if key != "created_at"}
+def _tool_with_clock_sentinels(tool: dict[str, Any]) -> dict[str, Any]:
+    result = _clocked(tool, frozenset({"created_at"}))
     result["metrics"] = None if tool["metrics"] is None else sorted(tool["metrics"])
     return result

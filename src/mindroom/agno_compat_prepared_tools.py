@@ -11,11 +11,9 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import Future
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agno.agent._tools import determine_tools_for_model, parse_tools
-from agno.team._tools import _determine_tools_for_model
 from agno.tools.function import Function, FunctionCall
 from pydantic import PrivateAttr
 
@@ -27,10 +25,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.run import RunContext
     from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-    from agno.team import Team
     from agno.tools.function import FunctionExecutionResult
     from agno.tools.toolkit import Toolkit
 
@@ -41,12 +36,11 @@ if TYPE_CHECKING:
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807
 # Remove when: Public prepared-request inspection supplies the actual messages, tools,
 # and tool instructions without persisting a run or mutating live instruction state.
-# Coverage: tests/test_agno_compat_prompt.py::test_prompt_builder_failure_restores_original_instruction_list;
-# tests/test_history_prompt_tokens.py.
+# Coverage: tests/test_history_prompt_tokens.py.
 
 
 @contextmanager
-def temporary_tool_instructions(entity: Agent | Team, instructions: Sequence[str]) -> Iterator[None]:
+def temporary_tool_instructions(entity: Agent, instructions: Sequence[str]) -> Iterator[None]:
     """Restore the exact original instruction list, including when prompt building fails."""
     previous = entity._tool_instructions
     entity._tool_instructions = list(instructions)
@@ -54,37 +48,6 @@ def temporary_tool_instructions(entity: Agent | Team, instructions: Sequence[str
         yield
     finally:
         entity._tool_instructions = previous
-
-
-@dataclass(frozen=True)
-class _PreparedTeamPromptTools:
-    """SDK-prepared tools and instructions before restoring the team's live state."""
-
-    tools: tuple[Function | dict, ...]
-    tool_instructions: tuple[str, ...]
-
-
-def prepare_team_prompt_tools(
-    team: Team,
-    *,
-    session: TeamSession,
-    run_response: TeamRunOutput,
-    run_context: RunContext,
-) -> _PreparedTeamPromptTools:
-    """Use Agno's actual tool preparation without retaining its instruction mutation."""
-    model = team.model
-    assert model is not None
-    with temporary_tool_instructions(team, team._tool_instructions or ()):
-        tools = _determine_tools_for_model(
-            team=team,
-            model=model,
-            run_response=run_response,
-            run_context=run_context,
-            team_run_context={},
-            session=session,
-            check_mcp_tools=False,
-        )
-        return _PreparedTeamPromptTools(tuple(tools), tuple(team._tool_instructions or ()))
 
 
 # AGNO_COMPAT: Executable tool preparation lacks public run-context and media bindings.

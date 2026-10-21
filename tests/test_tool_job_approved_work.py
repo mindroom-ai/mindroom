@@ -32,12 +32,10 @@ from mindroom.response_turn import (
     PausedAnswer,
     ResponseTurnContext,
 )
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import (
-    TeamMode,
-    _TeamStreamPresentation,
-    continue_paused_team_run,
-)
+from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.members import ResolvedExactTeamMembers
+from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -245,9 +243,12 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PL
                     storage_factory=lambda: SqliteDb(db_file=db_file),
                 )
                 with (
-                    patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
                     patch(
-                        "mindroom.teams.materialize_exact_team_members",
+                        "mindroom.teams.envelope.open_resolved_scope_session_context",
+                        return_value=nullcontext(scope),
+                    ),
+                    patch(
+                        "mindroom.teams.members.materialize_exact_team_members",
                         return_value=ResolvedExactTeamMembers(["leader"], [member], ["Leader"], {"leader"}, []),
                     ),
                     patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
@@ -268,7 +269,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PL
                         denial_reasons={"approved-call": None},
                         refresh_scheduler=None,
                         history_scope=scope.scope,
-                        prior_presentation_state=_TeamStreamPresentation.new(
+                        prior_presentation_state=TeamStreamPresentation.new(
                             ["leader"],
                             ["Leader"],
                             show_tool_calls=True,

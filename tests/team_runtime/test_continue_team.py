@@ -7,6 +7,7 @@ member's approval and compared with the ``team-approved`` rows Agno stored after
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -14,17 +15,19 @@ import pytest
 
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.provider import TextDelta
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.team_runtime.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
-from mindroom.team_runtime.runtime import MemberEvent, continue_team, run_team
-from mindroom.team_runtime.spec import TeamMode
+from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
+from mindroom.teams.runtime import MemberEvent, continue_team, run_team
+from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated
-from tests.fakes.scripted_model import answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.team_runtime.squad import (
     SQUAD,
     SQUAD_APPROVED,
     Store,
     approval,
+    calculator,
     collect,
     comparable,
     golden_metadata,
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 TIMED = ["duration", "end_time", "start_time"]
+APPROVED_CALL = "call-checker-multiply-approved"
 
 
 def _paused_team_approved() -> TeamRunRecord:
@@ -69,7 +73,9 @@ async def test_an_approved_member_call_resumes_into_agno_s_team_approved_rows() 
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
-            approved=[approval("call-checker-multiply-approved", "multiply", {"a": 6, "b": 7}, agent="checker")],
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
             ctx=run_context("team-approved", SQUAD_APPROVED, golden_metadata(team_row)),
             persist=store,
         ),
@@ -113,7 +119,9 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
-            approved=[approval("call-checker-multiply-approved", "multiply", {"a": 6, "b": 7}, agent="checker")],
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
             ctx=run_context("team-approved", SQUAD_APPROVED),
             persist=store,
         ),
@@ -147,7 +155,7 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
             squad(leader, scripted("writer-model"), checker),
             paused,
             _resume_request(paused),
-            denied={"call-checker-multiply-approved": "Alice declined."},
+            denied={("checker", APPROVED_CALL): "Alice declined."},
             ctx=run_context("team-approved", SQUAD_APPROVED),
         ),
     )
@@ -159,7 +167,10 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     )
     [member] = member_records(events)
     assert member.requirements is not None
-    assert (member.requirements[0].confirmation, member.requirements[0].confirmation_note) == (False, "Alice declined.")
+    assert (member.requirements[0].confirmation, member.requirements[0].confirmation_note) == (
+        False,
+        "Alice declined.",
+    )
     [checker_request] = checker.requests
     assert checker_request.messages[-1].content == "Alice declined."
 
@@ -169,8 +180,7 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
 
     A collaborate delegation returns every member's text joined; when one member pauses, Agno's resume rewrote that
     result as the heading plus the members resumed in this call, so the text of a member that had completed earlier
-    (the writer's here) no longer reaches the leader. The owned runtime keeps that request body for parity; see the
-    B5 report's concerns for the ruling B6 may apply.
+    (the writer's here) no longer reaches the leader. The owned runtime keeps that request body for parity.
     """
     leader = scripted(
         "leader-model",
@@ -195,7 +205,7 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
             team,
             paused,
             _resume_request(paused),
-            approved=[approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")],
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -233,7 +243,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
             team,
             paused,
             _resume_request(paused),
-            approved=[approval("call-echo", "echo", {"text": "hello"}, agent="squad")],
+            approved={(None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad")},
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -285,7 +295,7 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it() -> None
             team,
             paused,
             _resume_request(paused),
-            external_results={"call-sub": "Helper says 42"},
+            external_results={("checker", "call-sub"): "Helper says 42"},
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -306,27 +316,228 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
     leader, writer, checker = scripted("leader-model"), scripted("writer-model"), scripted("checker-model")
     team = squad(leader, writer, checker)
     ctx = run_context("team-approved", SQUAD_APPROVED)
-    decision = approval("call-checker-multiply-approved", "multiply", {"a": 6, "b": 7}, agent="checker")
+    decision = approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker")
 
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
         continue_team(team, paused, _resume_request(paused), ctx=ctx)
+    with pytest.raises(ValueError, match="name calls the team does not wait for"):
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): decision,
+                (None, "call-unknown"): approval("call-unknown", "add", {"a": 1, "b": 2}, agent="squad"),
+            },
+            ctx=ctx,
+        )
+    # A decision on the right call id but the wrong member leaves the checker's call undecided.
     with pytest.raises(ValueError, match="Decisions do not cover exactly the calls"):
         continue_team(
             team,
             paused,
             _resume_request(paused),
-            approved=[decision, approval("call-unknown", "add", {"a": 1, "b": 2}, agent="squad")],
+            approved={("writer", APPROVED_CALL): decision},
+            ctx=ctx,
+        )
+    with pytest.raises(ValueError, match="name calls the team does not wait for"):
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", APPROVED_CALL): decision},
+            denied={("writer", "call-elsewhere"): None},
             ctx=ctx,
         )
     without_checker = replace(team, members=team.members[:1])
     with pytest.raises(ValueError, match="not a member of team 'squad'"):
-        continue_team(without_checker, paused, _resume_request(paused), approved=[decision], ctx=ctx)
+        continue_team(
+            without_checker,
+            paused,
+            _resume_request(paused),
+            approved={("checker", APPROVED_CALL): decision},
+            ctx=ctx,
+        )
     orphaned = replace(paused, member_responses=[])
     with pytest.raises(ValueError, match="no longer holds member run"):
-        continue_team(team, orphaned, _resume_request(paused), approved=[decision], ctx=ctx)
+        continue_team(team, orphaned, _resume_request(paused), approved={("checker", APPROVED_CALL): decision}, ctx=ctx)
+    assert paused.requirements is not None
+    unbound = replace(paused, requirements=[replace(paused.requirements[0], member_run_id=None)])
+    with pytest.raises(ValueError, match="has no paused run identity"):
+        continue_team(team, unbound, _resume_request(paused), approved={("checker", APPROVED_CALL): decision}, ctx=ctx)
     completed = replace(paused, status=RunStatus.completed)
     with pytest.raises(ValueError, match="Only a paused run can be resumed"):
-        continue_team(team, completed, _resume_request(paused), approved=[decision], ctx=ctx)
+        continue_team(
+            team,
+            completed,
+            _resume_request(paused),
+            approved={("checker", APPROVED_CALL): decision},
+            ctx=ctx,
+        )
 
     assert paused.to_dict() == before
     assert (leader.requests, writer.requests, checker.requests) == ([], [], [])
+
+
+async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_waits_for_it() -> None:
+    """Two paused members resume from one approval, each on its own call, and the leader reads both results."""
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
+        answer("Both say 42.", usage(10, 2)),
+    )
+    # Both members pause on a call with the same id: the member names the call, not the id alone.
+    writer = scripted(
+        "writer-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("Writer: 42", usage(5, 1)),
+    )
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=7, b=6), metrics=usage(5, 1)),
+        answer("Checker: 42", usage(5, 1)),
+    )
+    team = squad(
+        leader,
+        writer,
+        checker,
+        mode=TeamMode.COLLABORATE,
+        writer_toolkits=(calculator(gate_multiply=True),),
+    )
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.requirements is not None
+    assert sorted((r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements) == [
+        ("checker", "call-mul"),
+        ("writer", "call-mul"),
+    ]
+    assert [member.agent_id for member in paused.member_responses] == ["writer", "checker"]
+
+    events, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={
+                ("writer", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="writer"),
+                ("checker", "call-mul"): approval("call-mul", "multiply", {"a": 7, "b": 6}, agent="checker"),
+            },
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
+    resumed = member_records(events)
+    assert [(member.agent_id, member.status) for member in resumed] == [
+        ("writer", RunStatus.completed),
+        ("checker", RunStatus.completed),
+    ]
+    # Each member ran its own approved call with its own arguments.
+    assert writer.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+    assert checker.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+    assert record.tools is not None
+    assert record.tools[0].result == (
+        "Member results after human-in-the-loop resolution:\n[Writer]: Writer: 42\n[Checker]: Checker: 42"
+    )
+    assert leader.requests[-1].messages[-1].content == record.tools[0].result
+    assert record.requirements == []
+
+
+async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the_leader_the_member_s_result() -> None:
+    """A mixed resume answers the delegation with the member's result and runs the leader's own approved call.
+
+    Agno's continuation took its team-level branch here and left the delegation result as the pause notice; the owned
+    runtime gives the leader the member's result in the same entry, a deviation that favors the leader.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-team", member_id="checker", task="Multiply 6 by 7"),
+            tool_call("echo", "call-echo", text="hello"),
+            metrics=usage(10, 2),
+        ),
+        answer("42 and hello.", usage(10, 2)),
+    )
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, scripted("writer-model"), checker, leader_toolkits=(gated(echo, name="job_controls"),))
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.requirements is not None
+    assert {(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements} == {
+        (None, "call-echo"),
+        ("checker", "call-mul"),
+    }
+
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker"),
+                (None, "call-echo"): approval("call-echo", "echo", {"text": "hello"}, agent="squad"),
+            },
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "42 and hello.")
+    assert record.tools is not None
+    results = {tool.tool_name: tool.result for tool in record.tools}
+    assert results == {
+        "delegate_task_to_member": "Member results after human-in-the-loop resolution:\n[Checker]: 42",
+        "echo": "hello",
+    }
+    assert [message.content for message in leader.requests[-1].messages if message.role == "tool"] == [
+        results["delegate_task_to_member"],
+        "hello",
+    ]
+
+
+async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones_as_agno_did() -> None:
+    """A Stop during a member's resume ends the member and the team ``CANCELLED``; the approval is not resumable again.
+
+    Agno's continuation stored the same rows, so the owned runtime keeps that; the envelope writes its interrupted
+    record over the team row afterwards.
+    """
+    paused = _paused_team_approved()
+    resuming = asyncio.Event()
+
+    async def wait_to_be_cancelled() -> None:
+        resuming.set()
+        await asyncio.Event().wait()
+
+    checker = scripted("checker-model", [TextDelta("Dra"), Await(wait_to_be_cancelled)])
+    store = Store()
+
+    async def consume() -> None:
+        events = continue_team(
+            squad(scripted("leader-model"), scripted("writer-model"), checker),
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
+            ctx=run_context("team-approved", SQUAD_APPROVED),
+            persist=store,
+        )
+        async for _ in events:
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(resuming.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert store.statuses == [("checker", "CANCELLED"), ("squad", "CANCELLED")]
+    member_row, team_row = store.records
+    assert member_row["run_id"] == paused.member_responses[0].run_id
+    assert team_row["run_id"] == "team-approved"
+    assert team_row["requirements"] == []

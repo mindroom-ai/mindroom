@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from mindroom.llm.runs import RunRecord, ToolExecution
-from mindroom.team_runtime.delegate_tools import NO_MEMBER_RESPONSE, member_result_text
+from mindroom.teams.delegate_tools import NO_MEMBER_RESPONSE, member_result_text
 
 
 def test_member_result_text_follows_agno_for_text_tool_results_and_silence() -> None:

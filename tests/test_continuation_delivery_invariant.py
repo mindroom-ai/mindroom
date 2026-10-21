@@ -569,8 +569,11 @@ class TestTeamContinuation:
         team = self._team(turn.timeline)
 
         with (
-            patch("mindroom.teams.create_agent", return_value=_make_test_agent("GeneralAgent")),
-            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.teams.members.create_agent", return_value=_make_test_agent("GeneralAgent")),
+            patch(
+                "mindroom.teams.members.resolve_agent_knowledge_access",
+                return_value=_KnowledgeResolution(knowledge=None),
+            ),
             patch("mindroom.teams._create_team_instance", return_value=team),
         ):
             await turn.runner.generate_team_response_helper(

@@ -36,7 +36,6 @@ from mindroom.history.replay import (
 from mindroom.history.session_context import (
     BoundTeamScopeContext,
     ScopeSessionContext,
-    ad_hoc_team_agent_names,
     resolve_bound_history_owner,
     resolve_bound_team_scope_context,
 )
@@ -69,7 +68,6 @@ from mindroom.timing import timed
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from agno.agent import Agent
     from agno.metrics import MessageMetrics
     from agno.models.base import Model
     from agno.models.message import Message
@@ -937,7 +935,8 @@ def finalize_history_preparation(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,
-    agents: list[Agent],
+    member_names: Sequence[str],
+    model: ModelProvider | None,
     runtime_paths: RuntimePaths,
     config: Config,
     static_prompt_tokens: int,
@@ -950,23 +949,22 @@ async def prepare_bound_scope_history(
     pipeline_timing: DispatchPipelineTiming | None = None,
     allow_native_compaction: bool = True,
 ) -> PreparedScopeHistory:
-    """Prepare one team-owned scope by compacting its persisted session before the run."""
+    """Prepare one team-owned scope by compacting its persisted session before the run.
+
+    ``model`` is the leader's provider, whose native compaction the scope may use.
+    """
     if scope_context is not None:
-        owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
+        owner_agent_name = resolve_bound_history_owner(member_names)
         bound_scope = (
-            BoundTeamScopeContext(
-                owner_agent=owner_agent,
-                owner_agent_name=owner_agent_name,
-                scope=scope_context.scope,
-            )
-            if owner_agent is not None and owner_agent_name is not None
+            BoundTeamScopeContext(owner_agent_name=owner_agent_name, scope=scope_context.scope)
+            if owner_agent_name is not None
             else None
         )
-    elif team_name is None and ad_hoc_team_has_private_member(ad_hoc_team_agent_names(agents), config.agents):
+    elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
         bound_scope = None
     else:
         bound_scope = resolve_bound_team_scope_context(
-            agents=agents,
+            member_names=member_names,
             config=config,
             team_name=team_name,
         )
@@ -984,11 +982,10 @@ async def prepare_bound_scope_history(
             resolved_inputs=resolved_inputs,
         )
 
-    # The team leader's provider arrives when the team runtime moves onto the owned loop.
     return await prepare_scope_history(
         agent_name=bound_scope.owner_agent_name,
         scope=bound_scope.scope,
-        model=None,
+        model=model,
         resolved_inputs=resolved_inputs,
         runtime_paths=runtime_paths,
         config=config,

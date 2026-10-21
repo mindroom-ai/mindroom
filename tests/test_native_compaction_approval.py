@@ -24,8 +24,10 @@ from mindroom.history.types import HistoryScope
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
+from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.members import ResolvedExactTeamMembers
+from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
@@ -106,8 +108,8 @@ async def _resume_approval(
             storage_factory=lambda: actor.db,
         )
         with (
-            patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-            patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.teams.members.materialize_exact_team_members", return_value=members),
+            patch("mindroom.teams.envelope.open_resolved_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
         ):
             result = await continue_paused_team_run(
@@ -125,7 +127,7 @@ async def _resume_approval(
                 decisions={tool_call_id: False},
                 denial_reasons={tool_call_id: None},
                 refresh_scheduler=None,
-                prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
+                prior_presentation_state=TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
                 progress=None,
             )
 

@@ -92,7 +92,6 @@ __all__ = [
     "apply_exact_approval_decisions",
     "apply_local_approval_decisions",
     "build_matrix_run_metadata",
-    "paused_attempt_from_pause",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
@@ -478,7 +477,7 @@ def paused_attempt_from_response(
                 for tool in delegation.pending_tools
                 if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
             }
-        paused = paused_attempt_from_pause(
+        paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
             tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
@@ -494,7 +493,7 @@ def paused_attempt_from_response(
             if paused is not None
             else None
         )
-    return paused_attempt_from_pause(
+    return _paused_attempt_from_pause(
         toolkit_owners=toolkit_owners,
         tools=record.tools or (),
         requirements=record.requirements or (),
@@ -503,7 +502,7 @@ def paused_attempt_from_response(
     )
 
 
-def paused_attempt_from_pause(
+def _paused_attempt_from_pause(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],

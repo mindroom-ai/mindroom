@@ -67,7 +67,9 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
-from mindroom.teams import TeamMode, _select_team_mode, team_response_stream
+from mindroom.teams.envelope import team_response_stream
+from mindroom.teams.formation import _select_team_mode
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _ThreadEnrichment
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -1424,7 +1426,7 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     **_structured_helper(
         "team_mode",
-        "mindroom.teams._select_team_mode",
+        "mindroom.teams.formation._select_team_mode",
         _team_mode,
         '{"mode": "coordinate", "reasoning": "Separate sub-tasks."}',
     ),

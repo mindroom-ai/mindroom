@@ -31,8 +31,7 @@ from mindroom.constants import (
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
-from mindroom.history.prompt_tokens import build_static_token_estimator, team_static_token_estimator
-from mindroom.history.replay import apply_replay_plan
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.runtime import (
     PreparedScopeHistory,
@@ -61,14 +60,12 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
-    from agno.agent import Agent
-    from agno.team import Team
-
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
+    from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
@@ -1096,8 +1093,10 @@ async def _prepare_bound_team_execution_context(
     ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext | None,
-    agents: list[Agent],
-    team: Team,
+    member_names: Sequence[str],
+    leader_system_message: Message,
+    leader_tools: Sequence[ToolSpec],
+    model: ModelProvider,
     prompt: str,
     transient_context_messages: Sequence[Message] = (),
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -1116,8 +1115,12 @@ async def _prepare_bound_team_execution_context(
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
-    """Prepare one bound team scope for the current call."""
-    static_token_estimator = team_static_token_estimator(team)
+    """Prepare one bound team scope for the current call.
+
+    ``leader_system_message`` and ``leader_tools`` size the static part of every leader request; the delegation tool
+    the run adds is among them.
+    """
+    static_token_estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
     team_compaction_config = config.resolve_entity(
         team_name if team_name is not None and team_name in config.teams else None,
     ).compaction_config
@@ -1126,7 +1129,8 @@ async def _prepare_bound_team_execution_context(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
         return await prepare_bound_scope_history(
-            agents=agents,
+            member_names=member_names,
+            model=model,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -1170,25 +1174,14 @@ async def _prepare_bound_team_execution_context(
     )
 
 
-def _scrub_bound_team_scope_context(
-    *,
-    scope_context: ScopeSessionContext | None,
-    team: Team,
-    entity_name: str | None,
-) -> None:
-    """Recover prior queued-message notices before preparing a bound team run."""
-    ai_runtime.scrub_queued_notice_session_context(
-        scope_context=scope_context,
-        entity_name=entity_name or str(team.name or "Team"),
-    )
-
-
 async def prepare_bound_team_run_context(
     ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext | None,
-    agents: list[Agent],
-    team: Team,
+    member_names: Sequence[str],
+    leader_system_message: Message,
+    leader_tools: Sequence[ToolSpec],
+    model: ModelProvider,
     prompt: str,
     transient_context_messages: Sequence[Message] = (),
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -1206,17 +1199,18 @@ async def prepare_bound_team_run_context(
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
-    """Prepare a team run with queued-notice scrubbing and replay application."""
-    _scrub_bound_team_scope_context(
+    """Prepare a team run: recover queued notices in its scope, then plan its prompt and history replay."""
+    ai_runtime.scrub_queued_notice_session_context(
         scope_context=scope_context,
-        team=team,
-        entity_name=entity_name,
+        entity_name=entity_name or ctx.entity_label,
     )
-    prepared_execution = await _prepare_bound_team_execution_context(
+    return await _prepare_bound_team_execution_context(
         ctx,
         scope_context=scope_context,
-        agents=agents,
-        team=team,
+        member_names=member_names,
+        leader_system_message=leader_system_message,
+        leader_tools=leader_tools,
+        model=model,
         prompt=prompt,
         transient_context_messages=transient_context_messages,
         thread_history=thread_history,
@@ -1235,6 +1229,3 @@ async def prepare_bound_team_run_context(
         thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,
     )
-    if prepared_execution.replay_plan is not None:
-        apply_replay_plan(target=team, replay_plan=prepared_execution.replay_plan)
-    return prepared_execution

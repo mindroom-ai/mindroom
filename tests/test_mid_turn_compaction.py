@@ -1313,7 +1313,7 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
     )
-    monkeypatch.setattr("mindroom.teams.prepare_bound_team_run_context", AsyncMock(return_value=prepared))
+    monkeypatch.setattr("mindroom.teams.envelope.prepare_bound_team_run_context", AsyncMock(return_value=prepared))
     lifecycle = RecordingCompactionLifecycle()
     recorder = TurnRecorder(user_message="Do the task")
 

@@ -18,14 +18,14 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.llm.errors import ProviderError
-from mindroom.teams import (
-    TeamMode,
+from mindroom.teams.formation import (
     TeamOutcome,
     TeamResolution,
     _TeamModeDecision,
     decide_team_formation,
     select_ad_hoc_team_mode,
 )
+from mindroom.teams.spec import TeamMode
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, usage
@@ -139,7 +139,7 @@ def mock_config(tmp_path):
 
 
 class TestTeamModeDecision:
-    """Test the TeamModeDecision model."""
+    """Test the _TeamModeDecision model."""
 
     def test_team_mode_decision_coordinate(self):
         """Test creating a coordinate mode decision."""
@@ -167,7 +167,7 @@ class TestSelectAdHocTeamMode:
     async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
         model = _mode_model("coordinate", "Different agents handle different subtasks")
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             result = await _select_team_mode_for_test(
                 "Send me an email then call me",
                 ["email", "phone"],
@@ -181,7 +181,7 @@ class TestSelectAdHocTeamMode:
     async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
         model = _mode_model("collaborate", "All agents work on the same brainstorming task")
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             result = await _select_team_mode_for_test(
                 "What do you think about this idea?",
                 ["research", "analyst"],
@@ -200,8 +200,8 @@ class TestSelectAdHocTeamMode:
             raise ProviderError(msg, provider="Synthetic")
 
         with (
-            patch("mindroom.teams.build_model_provider", return_value=ScriptedModel([[Await(fail)]])),
-            patch("mindroom.teams.logger") as mock_logger,
+            patch("mindroom.teams.formation.build_model_provider", return_value=ScriptedModel([[Await(fail)]])),
+            patch("mindroom.teams.formation.logger") as mock_logger,
         ):
             result = await _select_team_mode_for_test(
                 "Do something",
@@ -217,8 +217,8 @@ class TestSelectAdHocTeamMode:
     @pytest.mark.asyncio
     async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
-        model = ScriptedModel([answer("Just a string, not TeamModeDecision")])
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        model = ScriptedModel([answer("Just a string, not _TeamModeDecision")])
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             result = await _select_team_mode_for_test(
                 "Do something",
                 ["email", "phone"],
@@ -232,7 +232,7 @@ class TestSelectAdHocTeamMode:
     async def test_team_mode_choice_is_counted_as_internal_usage(self, mock_config):
         """The mode choice is a paid model call, so organization usage reports it under system:internal."""
         model = _mode_model("coordinate", "Different subtasks", metrics=usage(600, 20))
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             result = await _select_team_mode_for_test("Send me an email then call me", ["email", "phone"], mock_config)
 
         assert result == TeamMode.COORDINATE
@@ -247,7 +247,7 @@ class TestShouldFormTeam:
     def test_decide_team_formation_never_calls_ai(self, mock_config):
         """Formation is pure: it must never reach for the AI mode selector."""
         with patch(
-            "mindroom.teams._select_team_mode",
+            "mindroom.teams.formation._select_team_mode",
             side_effect=AssertionError("formation must not call AI"),
         ):
             result = decide_team_formation_for_test(
@@ -356,7 +356,7 @@ class TestIntegrationScenarios:
         assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
         model = _mode_model("coordinate", "Different tasks: email agent sends email, phone agent makes call")
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             mode = await select_ad_hoc_team_mode(
                 "Email me the details, then call me to discuss",
                 result.eligible_members,
@@ -383,7 +383,7 @@ class TestIntegrationScenarios:
         assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
         model = _mode_model("collaborate", "All agents provide their perspective on the same question")
-        with patch("mindroom.teams.build_model_provider", return_value=model):
+        with patch("mindroom.teams.formation.build_model_provider", return_value=model):
             mode = await select_ad_hoc_team_mode(
                 "What are your thoughts on this approach?",
                 result.eligible_members,

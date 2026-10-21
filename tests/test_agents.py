@@ -80,7 +80,7 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
-from mindroom.teams import materialize_exact_team_members
+from mindroom.teams.members import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT

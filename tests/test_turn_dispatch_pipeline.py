@@ -60,7 +60,8 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.teams import TeamIntent, TeamMode, TeamResolution
+from mindroom.teams.formation import TeamIntent, TeamResolution
+from mindroom.teams.spec import TeamMode
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan

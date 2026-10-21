@@ -45,8 +45,8 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from mindroom.teams.members import ResolvedExactTeamMembers
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -475,7 +475,7 @@ async def test_prepare_materialized_team_execution_applies_system_enrichment_to_
         ) as scope_context,
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
-            "mindroom.teams.prepare_bound_team_run_context",
+            "mindroom.teams.envelope.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
@@ -566,7 +566,7 @@ async def test_prepare_materialized_team_execution_returns_message_helpers(tmp_p
         ) as scope_context,
         patch("mindroom.teams._create_team_instance", return_value=prepared_team),
         patch(
-            "mindroom.teams.prepare_bound_team_run_context",
+            "mindroom.teams.envelope.prepare_bound_team_run_context",
             new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
         ),
     ):
