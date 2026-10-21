@@ -224,7 +224,7 @@ class ConversationStore:
     def delete_run_subtrees(self, run_ids: Collection[str], *, session_id: str | None = None) -> set[str]:
         """Delete ``run_ids`` with every member run below them, within one session when given; return the deleted ids."""
         with self.transaction(write=True) as connection:
-            return _delete_run_subtrees(connection, self.names, run_ids, session_id=session_id)
+            return delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session_id)
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""
@@ -515,7 +515,7 @@ def _set_token_counts(target: RunMetrics | ModelMetrics, metrics: Mapping[str, o
             setattr(target, name, value)
 
 
-def _delete_run_subtrees(
+def delete_run_subtrees_in_transaction(
     connection: sqlite3.Connection,
     names: TableNames,
     run_ids: Collection[str],
@@ -613,5 +613,6 @@ def _replay_summary(
 
 __all__ = [
     "ConversationStore",
+    "delete_run_subtrees_in_transaction",
     "open_conversation_store",
 ]

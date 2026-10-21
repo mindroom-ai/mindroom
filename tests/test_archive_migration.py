@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -96,7 +97,7 @@ def _main_database(
     )
     seed_session(storage, session)
     storage.close()
-    with sqlite3.connect(_db(tmp_path)) as connection:
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
         connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
         connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
         for statement in _ARCHIVE_DDL:
@@ -148,7 +149,7 @@ def _main_database(
 
 
 def _tables(tmp_path: Path) -> set[str]:
-    with sqlite3.connect(_db(tmp_path)) as connection:
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
         return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
@@ -353,7 +354,7 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
 def test_rows_without_an_index_keep_their_place(tmp_path: Path) -> None:
     """Rows an old writer stored without an index keep the place a read gave them: first among the live runs."""
     _main_database(tmp_path, live=[_run("r1"), _run("r2")], generations=[_Generation("summary of r0", [_run("r0")])])
-    with sqlite3.connect(_db(tmp_path)) as connection:
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
         connection.execute("UPDATE code_sessions_runs SET run_index = NULL WHERE run_id = 'r2'")
 
     replay = _replay(tmp_path)

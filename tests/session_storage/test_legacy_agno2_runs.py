@@ -6,9 +6,11 @@ import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.runs import RunRecord
+from mindroom.session_storage.legacy_agno2_runs import number_unindexed_runs
 from mindroom.session_storage.schema import TableNames, run_log_sql
 from mindroom.session_storage.store import open_conversation_store
 from mindroom.session_storage.types import ConversationSession
@@ -22,12 +24,12 @@ _NAMES = TableNames("code_sessions")
 
 
 def _blob(db_file: Path) -> object:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone()[0]
 
 
 def _set_blob(db_file: Path, entries: list[object]) -> None:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "UPDATE code_sessions SET runs = ? WHERE session_id = 'session-1'",
             (json.dumps(json.dumps(entries)),),
@@ -35,7 +37,7 @@ def _set_blob(db_file: Path, entries: list[object]) -> None:
 
 
 def _add_rows(db_file: Path, *rows: tuple[str, int, dict[str, Any]]) -> None:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         for statement in run_log_sql(_NAMES):
             connection.execute(statement)
         connection.executemany(
@@ -109,7 +111,7 @@ def test_blob_entries_a_read_could_not_address_are_dropped(tmp_path: Path) -> No
 def test_an_unreadable_blob_is_cleared_without_rows(tmp_path: Path) -> None:
     """A blob that is not JSON holds nothing a read could return."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute("UPDATE code_sessions SET runs = 'not json'")
 
     open_conversation_store(db_file, _NAMES)
@@ -156,3 +158,40 @@ def test_owners_opening_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
         list(pool.map(open_store, range(4)))
 
     assert [(run_id, index) for run_id, index, _ in _log(db_file)] == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
+
+
+def test_rows_without_an_index_are_numbered_in_read_order(tmp_path: Path) -> None:
+    """Agno read rows without an index first; sessions that hold none keep their indexes, gaps included."""
+    with closing(sqlite3.connect(tmp_path / "code.db")) as connection:
+        for statement in run_log_sql(_NAMES):
+            connection.execute(statement)
+        connection.executemany(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, created_at) VALUES (?, 'agent', 'code', 1)",
+            [("session-1",), ("session-2",)],
+        )
+        connection.executemany(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, run_index, run_data, created_at) "
+            "VALUES (?, ?, 'agent', 'code', ?, '{}', ?)",
+            [
+                ("late", "session-1", None, 9),
+                ("early", "session-1", None, 3),
+                ("first", "session-1", 4, 1),
+                ("second", "session-1", 7, 2),
+                ("kept-a", "session-2", 2, 1),
+                ("kept-b", "session-2", 5, 2),
+            ],
+        )
+
+        number_unindexed_runs(connection, _NAMES)
+
+        rows = connection.execute(
+            "SELECT session_id, run_id, run_index FROM code_sessions_runs ORDER BY session_id, run_index",
+        ).fetchall()
+    assert rows == [
+        ("session-1", "early", 0),
+        ("session-1", "late", 1),
+        ("session-1", "first", 2),
+        ("session-1", "second", 3),
+        ("session-2", "kept-a", 2),
+        ("session-2", "kept-b", 5),
+    ]

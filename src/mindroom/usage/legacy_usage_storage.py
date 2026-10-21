@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -104,7 +104,7 @@ def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
 
 def _decode(raw: object) -> object:
     try:
-        return decode_persisted_session_json(raw)
+        return decode_session_json(raw)
     except (RecursionError, TypeError, ValueError):
         return False
 
