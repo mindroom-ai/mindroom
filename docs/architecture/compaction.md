@@ -12,7 +12,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Decisions
 
-- A summary request goes out without streaming and with the provider's own retries, thinking, and prompt cache off, because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix.
+- A summary request goes out without streaming, with the provider's own retries and prompt cache off, and with thinking off where the route can turn it off (the Claude routes), because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix.
   It keeps the route's transport timeout instead of overriding it with `timeout_seconds`, because a shorter authored provider timeout must still apply; the summary call's own deadline cancels a slower request.
 - A summary counts as complete only when the provider reports that it ended on its own; a summary cut off by the output limit, a content filter, or a tool call is never stored.
   A route that reports no stop reason cannot show a cut-off, so its summaries count as complete.

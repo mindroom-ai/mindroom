@@ -1,8 +1,8 @@
 """One portable summary call and its bounded retry policy.
 
-The summary request goes through the provider pipeline as one non-streaming call with the provider's own retries,
-thinking, and prompt cache turned off, bounded by the compaction deadline. This module owns the call's
-lifecycle, cancellation, complete-output validation, and the retry decision chunk execution uses.
+The summary request goes through the provider pipeline as one non-streaming call with the provider's own retries and
+prompt cache turned off, and thinking off where the route can turn it off, bounded by the compaction deadline. This
+module owns the call's lifecycle, cancellation, complete-output validation, and the retry decision chunk execution uses.
 """
 
 from __future__ import annotations
