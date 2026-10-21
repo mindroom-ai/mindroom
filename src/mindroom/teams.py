@@ -9,7 +9,6 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from agno.db.base import SessionType
 from agno.models.message import Message
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
@@ -41,7 +40,6 @@ from mindroom.ai_run_metadata import (
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
 )
-from mindroom.approval.receipt import install_approval_receipt_hooks
 from mindroom.approval.tool_owners import (
     approval_denial_context,
     record_approval_denials,
@@ -71,8 +69,6 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import (
-    bind_compaction_lifecycle,
-    install_mid_turn_compaction,
     without_fold_records,
 )
 from mindroom.history.native import restore_native_history
@@ -116,7 +112,7 @@ from mindroom.response_turn import (
     TurnSinks,
     apply_local_approval_decisions,
     build_matrix_run_metadata,
-    paused_attempt_from_event,
+    paused_attempt_from_pause,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
@@ -883,7 +879,7 @@ def _register_team_notice_storage(
     ai_runtime.register_queued_notice_storage(
         storage_factory=scope_context.storage_factory if scope_context is not None else None,
         session_id=session_id,
-        session_type=SessionType.TEAM,
+        session_kind="team",
         entity_name=entity_name,
     )
 
@@ -2250,12 +2246,6 @@ def _create_team_instance(
         model_name,
         execution_identity=execution_identity,
     )
-    # Coordinate-mode tool calls run through the shared team model in v1.
-    # Member-agent models are intentionally not wrapped here.
-    ai_runtime.install_queued_message_notice_hook(
-        model,
-        notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
-    )
     team_scope = config.resolve_entity(
         configured_team_name if configured_team_name is not None and configured_team_name in config.teams else None,
     )
@@ -2306,13 +2296,6 @@ def _create_team_instance(
     if history_settings.policy.mode == "all":
         # Undo Agno's default three-run history fallback.
         team.num_history_runs = None
-    install_mid_turn_compaction(
-        team,
-        config=config,
-        runtime_paths=runtime_paths,
-        entity_name=configured_team_name if configured_team_name in config.teams else None,
-        model_name=model_name,
-    )
     # The team budget caps the coordinator's own calls; members carry their own. Installed after mid-turn
     # compaction so a refused request never spends a summary call.
     install_model_call_cap(model, entity_name=configured_team_name or team_display_name)
@@ -2622,7 +2605,7 @@ def _approval_history_scope(
 @owned_tool_execution(
     enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
 )
-async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
+async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -2719,8 +2702,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             configured_team_name=configured_team_name,
             execution_identity=execution_identity,
         )
-        if team.model is not None:
-            install_approval_receipt_hooks(team.model, team.fallback_config)
         restore_native_history(team.model, persisted_run=persisted, session=session)
         requirements = apply_local_approval_decisions(
             persisted,
@@ -2748,8 +2729,6 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             stack.enter_context(
                 approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)),
             )
-            if member.model is not None:
-                install_approval_receipt_hooks(member.model, member.fallback_config)
         presentation = _TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,
@@ -2833,7 +2812,7 @@ async def prepare_materialized_team_execution(
     compaction_lifecycle: CompactionLifecycle | None = None,
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
-    turn_recorder: TurnRecorder | None = None,
+    turn_recorder: TurnRecorder | None = None,  # noqa: ARG001 - S4 binds the team's compaction hook to it
 ) -> _PreparedMaterializedTeamExecution:
     """Prepare one materialized team for execution."""
     ctx = replace(
@@ -2875,7 +2854,6 @@ async def prepare_materialized_team_execution(
         pipeline_timing=pipeline_timing,
     )
     prepared_history = prepared_execution.prepared_history
-    bind_compaction_lifecycle(team, compaction_lifecycle, turn_recorder)
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
@@ -3844,10 +3822,11 @@ async def team_response_stream(  # noqa: C901, PLR0915
             if isinstance(event, TeamRunPausedEvent):
                 if event.team_id and event.team_id != bound_team_id:
                     continue
-                paused_attempt = paused_attempt_from_event(
-                    event,
-                    fallback_session_id=ctx.session_id,
-                    fallback_run_id=attempt_run_id,
+                paused_attempt = paused_attempt_from_pause(
+                    tools=event.tools or (),
+                    requirements=event.requirements or (),
+                    session_id=event.session_id or ctx.session_id,
+                    run_id=event.run_id or attempt_run_id,
                     toolkit_owners=toolkit_owners_for_agents(attempt_agents),
                 )
                 if paused_attempt is not None:

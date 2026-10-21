@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from agno.run.agent import RunOutput
-from agno.session.summary import SessionSummary
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
@@ -37,6 +36,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
+    ScopeSummary,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
+    from agno.session.summary import SessionSummary
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
@@ -381,7 +382,7 @@ async def _rewrite_working_session_for_compaction(
             break
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
-        chunk_summary = SessionSummary(summary=chunk.summary.summary, updated_at=datetime.now(UTC))
+        chunk_summary = ScopeSummary(text=chunk.summary.summary, updated_at=datetime.now(UTC))
         appended = await run_blocking_until_complete(
             partial(
                 append_compaction_chunk,
@@ -390,7 +391,7 @@ async def _rewrite_working_session_for_compaction(
                 scope=scope,
                 basis=basis,
                 included_run_ids=compacted_run_ids,
-                summary=chunk_summary,
+                summary=chunk_summary.text,
                 summary_model=_model_identifier(chunk.summarizer.model.model),
             ),
         )
@@ -398,7 +399,7 @@ async def _rewrite_working_session_for_compaction(
             _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
             break
         summarizer = chunk.summarizer
-        summary_text = chunk_summary.summary
+        summary_text = chunk_summary.text
         working_session.summary = chunk_summary
         working_session.runs = runs_without(working_session.runs or [], compacted_run_ids)
         compacted_run_count += len(chunk.included_runs)

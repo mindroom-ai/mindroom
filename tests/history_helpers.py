@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import AsyncIterator, Iterator
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,7 +59,6 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
-    FakeModel,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -76,43 +76,39 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
+
+class FakeModel(Model):
+    """Minimal model returning one canned response, for deterministic agent tests."""
+
+    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake response."""
+        return ModelResponse(content="ok")
+
+    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+        """Return one successful fake async response."""
+        return ModelResponse(content="ok")
+
+    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
+        """Yield one successful fake streaming response."""
+        yield ModelResponse(content="ok")
+
+    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        """Yield one successful fake async streaming response."""
+        yield ModelResponse(content="ok")
+
+    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
+        return response
+
+    def _parse_provider_response_delta(
+        self,
+        response: ModelResponse,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        return response
+
+
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
-
-_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
-    policy=HistoryPolicy(mode="all"),
-    max_tool_calls_from_history=None,
-)
-
-
-def _summarizer(
-    model: Model | None = None,
-    input_budget_tokens: int = 16_000,
-    *,
-    name: str = "summary-model",
-    fallback: SummaryModel | None = None,
-    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
-    prompt: str = COMPACTION_SUMMARY_PROMPT,
-    timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-    session_id: str = "session-1",
-    scope: HistoryScope | None = None,
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None = None,
-) -> Summarizer:
-    """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
-    return Summarizer(
-        model=SummaryModel(model or FakeModel(id="summary-model", provider="fake"), name, input_budget_tokens),
-        fallback=fallback,
-        prompt=prompt,
-        timeout_seconds=timeout_seconds,
-        history_settings=history_settings,
-        session_id=session_id,
-        scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
-        on_usage=on_usage,
-    )
-
-
-async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
-    """Stand in for the reply lifecycle's success report."""
-    return outcome
 
 
 @dataclass
@@ -149,6 +145,43 @@ class RecordingModel(Model):
         **_kwargs: object,
     ) -> ModelResponse:
         return response
+
+
+_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
+    policy=HistoryPolicy(mode="all"),
+    max_tool_calls_from_history=None,
+)
+
+
+def _summarizer(
+    model: Model | None = None,
+    input_budget_tokens: int = 16_000,
+    *,
+    name: str = "summary-model",
+    fallback: SummaryModel | None = None,
+    history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
+    prompt: str = COMPACTION_SUMMARY_PROMPT,
+    timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    session_id: str = "session-1",
+    scope: HistoryScope | None = None,
+    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None = None,
+) -> Summarizer:
+    """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
+    return Summarizer(
+        model=SummaryModel(model or FakeModel(id="summary-model", provider="fake"), name, input_budget_tokens),
+        fallback=fallback,
+        prompt=prompt,
+        timeout_seconds=timeout_seconds,
+        history_settings=history_settings,
+        session_id=session_id,
+        scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
+        on_usage=on_usage,
+    )
+
+
+async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
+    """Stand in for the reply lifecycle's success report."""
+    return outcome
 
 
 @dataclass

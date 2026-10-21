@@ -40,8 +40,6 @@ import pytest
 import pytest_asyncio
 import structlog
 import yaml
-from agno.models.base import Model
-from agno.models.response import ModelResponse
 from agno.utils import log as agno_log
 from aioresponses import aioresponses
 from structlog.testing import ReturnLoggerFactory
@@ -2092,37 +2090,6 @@ class _ExtractedCollaboratorProxy[CollaboratorT]:
             return
         msg = f"{type(self).__name__!s} has no attribute {name!r}"
         raise AttributeError(msg)
-
-
-class FakeModel(Model):
-    """Minimal model returning one canned response, for deterministic agent tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake response."""
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        """Return one successful fake async response."""
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        """Yield one successful fake streaming response."""
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        """Yield one successful fake async streaming response."""
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 class FakeCredentialsManager:

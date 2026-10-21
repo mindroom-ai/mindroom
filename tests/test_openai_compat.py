@@ -16,7 +16,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import FakeModel, seed_session
+from tests.conftest import seed_session
+from tests.history_helpers import FakeModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator

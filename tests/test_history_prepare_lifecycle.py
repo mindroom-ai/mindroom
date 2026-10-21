@@ -56,13 +56,10 @@ from mindroom.history.types import (
 )
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import (
-    FakeModel,
-    prepare_history_for_run_for_test,
-    seed_session,
-)
+from tests.conftest import prepare_history_for_run_for_test, seed_session
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
+    FakeModel,
     RecordingCompactionLifecycle,
     _agent,
     _completed_run,

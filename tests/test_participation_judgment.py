@@ -1,4 +1,4 @@
-"""TypeSafe participation at the real gate, using deterministic provider boundaries."""
+"""Judgment backends decide participation at the real gate, falling back to the reply model's own check."""
 
 from __future__ import annotations
 
@@ -9,30 +9,32 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from groq import AsyncGroq
 
-from mindroom.agno_participation import participation_model
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import run_agent
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
 from mindroom.participation import ParticipationGate
+from mindroom.participation_hook import participation_hook
 from mindroom.participation_judgment import create_participation_decider
-from mindroom.providers.groq_model import MindRoomGroq
+from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
+    from mindroom.llm.runs import RunRecord
     from tests.fakes.scripted_model import ScriptStep
+
+_RESPOND = '{"action":"respond","reason":"Useful help."}'
 
 
 async def _fail_judge() -> None:
@@ -82,13 +84,30 @@ def _gate(
     )
 
 
+async def _reply(
+    model: ScriptedModel,
+    gate: ParticipationGate,
+    messages: Sequence[Message],
+    *,
+    run_id: str = "run-1",
+) -> RunRecord:
+    """Run one reply under the gate and return its record."""
+    _, record = await collect(
+        run_agent(
+            spec(model),
+            list(messages),
+            ctx=context(run_id=run_id),
+            hooks=LoopHooks(before_request=(participation_hook(gate, model),)),
+        ),
+    )
+    return record
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(("score", "approved"), [(0.8, True), (0.79, False)])
 async def test_typesafe_controls_real_gate_without_model_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
     score: float,
     approved: bool,
 ) -> None:
@@ -101,7 +120,7 @@ async def test_typesafe_controls_real_gate_without_model_check(
         return _response(score)
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
-    model = ParticipationModel(ModelResponse(content="Useful answer"))
+    model = ScriptedModel([answer("Useful answer"), answer("Useful answer")])
     gate = _gate(tmp_path, key=" \ttest-secret\n")
     messages = [
         Message(role="system", content="Private workspace instructions"),
@@ -112,17 +131,11 @@ async def test_typesafe_controls_real_gate_without_model_check(
         ),
         Message(role="user", content="Can anyone explain this?"),
     ]
-    with participation_model(model, gate, run_id="primary"):
-        for _ in range(2):
-            if stream:
-                chunks = [
-                    item async for item in model.aresponse_stream(messages, run_response=RunOutput(run_id="primary"))
-                ]
-                content = "".join(item.content or "" for item in chunks)
-            else:
-                result = await model.aresponse(messages, run_response=RunOutput(run_id="primary"))
-                content = result.content or ""
-            assert content == ("Useful answer" if approved else "")
+
+    for run_id in ("run-1", "run-2"):
+        record = await _reply(model, gate, messages, run_id=run_id)
+        assert (record.content or "") == ("Useful answer" if approved else "")
+
     assert gate.approved is approved
     assert len(posted) == 1
     assert posted[0]["questions"]["participation"]["type"] == "noul"
@@ -148,7 +161,6 @@ async def test_typesafe_controls_real_gate_without_model_check(
         "attachment",
         "history_attachment",
         "output_media",
-        "compressed",
     ],
 )
 async def test_typesafe_failure_uses_existing_model_check(
@@ -157,10 +169,10 @@ async def test_typesafe_failure_uses_existing_model_check(
     failure: str,
 ) -> None:
     """Provider failures and incomplete text must retain the current participation path."""
-    calls: list[bytes] = []
+    posts: list[bytes] = []
 
     async def post(_self: JudgmentClient, body: bytes) -> bytes:
-        calls.append(body)
+        posts.append(body)
         if failure == "timeout":
             await asyncio.Event().wait()
         if failure == "transport":
@@ -187,17 +199,16 @@ async def test_typesafe_failure_uses_existing_model_check(
     if failure == "output_media":
         messages.insert(
             0,
-            Message(role="assistant", content="See image.", image_output=Image(url="https://example.org/image.png")),
+            Message(role="assistant", content="See image.", images=[Image(url="https://example.org/image.png")]),
         )
-    if failure == "compressed":
-        messages[0].compressed_content = "Different provider-visible context."
-    model = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Useful help."}'))
-    with participation_model(model, gate, run_id="primary"):
-        response = await model.aresponse(messages, run_response=RunOutput(run_id="primary"))
-    assert response.content == "Useful answer"
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
+
+    record = await _reply(model, gate, messages)
+
+    assert record.content == "Useful answer"
     assert gate.approved
     assert len(model.requests) == 2
-    assert len(calls) == (1 if failure in {"timeout", "transport", "invalid", "drift"} else 0)
+    assert len(posts) == (1 if failure in {"timeout", "transport", "invalid", "drift"} else 0)
 
 
 @pytest.mark.asyncio
@@ -209,9 +220,9 @@ async def test_typesafe_cancellation_does_not_fall_back(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
-    model = ParticipationModel(ModelResponse(content="Should never be called"))
-    with pytest.raises(asyncio.CancelledError), participation_model(model, gate, run_id="primary"):
-        await model.aresponse([Message(role="user", content="Any ideas?")], run_response=RunOutput(run_id="primary"))
+    model = ScriptedModel([answer("Should never be called")])
+    with pytest.raises(asyncio.CancelledError):
+        await _reply(model, gate, [Message(role="user", content="Any ideas?")])
     assert gate.decision is None
     assert model.requests == []
 
@@ -230,7 +241,7 @@ async def test_typesafe_drops_prompt_metadata_and_preserves_speaker_identity(
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
-    model = ParticipationModel(ModelResponse(content="Should not run"))
+    model = ScriptedModel([answer("Should not run")])
     messages = [
         Message(
             role="user",
@@ -239,8 +250,9 @@ async def test_typesafe_drops_prompt_metadata_and_preserves_speaker_identity(
         Message(role="user", content='<msg event_id="$b" from="@bob:example.org"><![CDATA[Answer.]]></msg>'),
         Message(role="user", content='<msg event_id="$c" from="@alice:example.org"><![CDATA[Thanks.]]></msg>'),
     ]
-    with participation_model(model, gate, run_id="primary"):
-        await model.aresponse(messages, run_response=RunOutput(run_id="primary"))
+
+    await _reply(model, gate, messages)
+
     wire = json.dumps(posted[0])
     assert not any(value in wire for value in ("@alice", "@bob", "Alice", "$a", "$b", "$c"))
     texts = [message["text"] for message in posted[0]["state"]["conversation"]]
@@ -249,65 +261,43 @@ async def test_typesafe_drops_prompt_metadata_and_preserves_speaker_identity(
         '<msg from="speaker_2"><![CDATA[Answer.]]></msg>',
         '<msg from="speaker_1"><![CDATA[Thanks.]]></msg>',
     ]
+    assert model.requests == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("score", [0.95, 0.05, None])
-async def test_typesafe_gates_groq_native_tools_before_any_provider_call(
+@pytest.mark.parametrize(("score", "requests"), [(0.95, 1), (0.05, 0), (None, 1)])
+async def test_typesafe_decides_before_any_provider_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     score: float | None,
+    requests: int,
 ) -> None:
-    """Compound may run native tools only after approval; failed fallback stays quiet."""
-    requests: list[dict[str, Any]] = []
+    """An approved reply reaches the provider with its tools selectable, and a refused one never does.
+
+    An abstention falls back to the model's own decision, which an ordinary answer fails.
+    """
 
     async def post(_self: JudgmentClient, _body: bytes) -> bytes:
         return _response(score)
 
-    def reply(request: httpx.Request) -> httpx.Response:
-        requests.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "reply",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "groq/compound",
-                "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": "Useful answer"}, "finish_reason": "stop"},
-                ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-            },
-        )
-
     monkeypatch.setattr(JudgmentClient, "_post", post)
     gate = _gate(tmp_path)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as http_client:
-        model = MindRoomGroq(
-            id="groq/compound",
-            api_key="test-key",
-            async_client=AsyncGroq(api_key="test-key", http_client=http_client),
-        )
-        with participation_model(model, gate, run_id="primary"):
-            response = await model.aresponse(
-                [Message(role="user", content="Any ideas?")],
-                run_response=RunOutput(run_id="primary"),
-            )
-    assert (response.content or "") == ("Useful answer" if score == 0.95 else "")
+    model = ScriptedModel([answer("Useful answer")])
+
+    record = await _reply(model, gate, [Message(role="user", content="Any ideas?")])
+
+    assert (record.content or "") == ("Useful answer" if score == 0.95 else "")
     assert gate.approved is (score == 0.95)
-    assert len(requests) == (1 if score == 0.95 else 0)
-    if requests:
-        assert requests[0]["model"] == "groq/compound"
-        assert requests[0].get("tool_choice") != "none"
+    assert len(model.requests) == requests
+    if score == 0.95:
+        assert model.requests[0].tool_choice is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("approved", [False, True])
 async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    stream: bool,
     approved: bool,
 ) -> None:
     """Changing the judge backend must preserve visible behavior and isolate the reply model."""
@@ -319,20 +309,13 @@ async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_deci
         return judge
 
     monkeypatch.setattr(judgment_llm, "build_model_provider", load)
-    reply = ParticipationModel(ModelResponse(content="Useful answer"))
+    reply = ScriptedModel([answer("Useful answer")])
     gate = _gate(tmp_path, backend="llm", key="")
     messages = [Message(role="system", content="Private system prompt"), Message(role="user", content="Any ideas?")]
-    with participation_model(reply, gate, run_id="primary"):
-        if stream:
-            content = "".join(
-                [
-                    item.content or ""
-                    async for item in reply.aresponse_stream(messages, run_response=RunOutput(run_id="primary"))
-                ],
-            )
-        else:
-            content = (await reply.aresponse(messages, run_response=RunOutput(run_id="primary"))).content
-    assert content == ("Useful answer" if approved else "")
+
+    record = await _reply(reply, gate, messages)
+
+    assert (record.content or "") == ("Useful answer" if approved else "")
     assert gate.approved is approved
     assert selected == ["cheap"]
     assert len(judge.requests) == 1
@@ -362,14 +345,12 @@ async def test_dedicated_llm_abstention_uses_existing_fallback(
     """Both explicit abstention and judge failures preserve the existing fallback policy."""
     judge = ScriptedModel([turn])
     monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
-    reply = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Useful help."}'))
+    reply = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
     gate = _gate(tmp_path, backend="llm")
-    with participation_model(reply, gate, run_id="primary"):
-        response = await reply.aresponse(
-            [Message(role="user", content="Any ideas?")],
-            run_response=RunOutput(run_id="primary"),
-        )
-    assert response.content == "Useful answer"
+
+    record = await _reply(reply, gate, [Message(role="user", content="Any ideas?")])
+
+    assert record.content == "Useful answer"
     assert gate.approved
     assert len(judge.requests) == 1
     assert len(reply.requests) == 2
@@ -383,9 +364,9 @@ async def test_dedicated_llm_cancellation_does_not_start_fallback(
     """Cancellation has the same unsettled outcome for either backend."""
     judge = ScriptedModel([[Await(_cancel_judge)]])
     monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
-    reply = ParticipationModel(ModelResponse(content="Must not run"))
+    reply = ScriptedModel([answer("Must not run")])
     gate = _gate(tmp_path, backend="llm")
-    with pytest.raises(asyncio.CancelledError), participation_model(reply, gate, run_id="primary"):
-        await reply.aresponse([Message(role="user", content="Any ideas?")], run_response=RunOutput(run_id="primary"))
+    with pytest.raises(asyncio.CancelledError):
+        await _reply(reply, gate, [Message(role="user", content="Any ideas?")])
     assert gate.decision is None
     assert reply.requests == []

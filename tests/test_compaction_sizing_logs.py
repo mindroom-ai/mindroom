@@ -16,9 +16,10 @@ from structlog.testing import capture_logs
 from mindroom.history.compaction import _rewrite_working_session_for_compaction
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import FakeModel, seed_session
+from tests.conftest import seed_session
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
+    FakeModel,
     _completed_run,
     _make_config,
     _session,

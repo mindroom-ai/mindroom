@@ -28,7 +28,9 @@ from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
 from openai import AsyncOpenAI
 
-from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -37,6 +39,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
+from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import RunRecord
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
@@ -50,7 +53,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning import library
 from mindroom.skill_learning import runner as runner_module
-from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
+from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, capture_final_request
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
@@ -59,7 +62,9 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
+from tests.agent_loop.helpers import collect, context, spec
 from tests.conftest import seed_session
+from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1422,17 +1427,29 @@ async def _answer(
     run_id: str = "r1",
     model_name: str = "default",
 ) -> None:
-    """Run one agent response loop whose final request the capture records, as a primary attempt does."""
+    """Run one Agno response loop and hand the review its final request, as the owned loop's capture hook does.
+
+    The reviews here still run on Agno models until F6 moves them onto the owned loop, so the request is recorded
+    from the loop's message list, which Agno extends with the model's final answer.
+    """
     messages = [
         Message(role="system", content="You are Mind, a deployment assistant."),
         Message(role="user", content="Deploy the web service"),
     ]
-    with observe_final_request(capture, model, run_id=run_id, model_name=model_name):
-        await model.aresponse(
-            messages=messages,
-            tools=list(tools),
-            run_response=RunOutput(run_id=run_id),
-        )
+    await model.aresponse(
+        messages=messages,
+        tools=list(tools),
+        run_response=RunOutput(run_id=run_id),
+    )
+    capture.latest = CapturedRequest(
+        model=cast("Any", model),
+        model_name=model_name,
+        run_id=run_id,
+        messages=cast("Any", tuple(messages)),
+        tools=cast("Any", tuple(tools)),
+        tool_choice=None,
+        response_format=None,
+    )
 
 
 def _learning_agent_with_a_skill(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -1529,26 +1546,31 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
 
 
 @pytest.mark.asyncio
-async def test_the_capture_keeps_only_its_attempts_final_request_as_sent(tmp_path: Path) -> None:
-    """Loops of other runs on the model are ignored, and later edits of the messages never change the capture."""
-    config, paths = _learning_agent_with_a_skill(tmp_path)
-    tools = _agent_tools(config, paths, [])
-    model = _model()
+async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> None:
+    """The hook records the run it is installed on, and later edits of the messages never change the capture."""
     capture = SkillReviewCapture()
-    with observe_final_request(capture, model, run_id="r1", model_name="default"):
-        await model.aresponse(
-            messages=[Message(role="user", content="helper request")],
-            tools=tools,
-            run_response=RunOutput(run_id="helper"),
-        )
-        assert capture.latest is None
-        messages = [Message(role="user", content="Deploy the web service")]
-        await model.aresponse(messages=messages, tools=tools, run_response=RunOutput(run_id="r1"))
-    messages[-1].content = "rewritten after the loop"
-    await model.aresponse(messages=list(messages), tools=tools, run_response=RunOutput(run_id="r1"))
+    model = ScriptedModel([answer("Done.")])
+    hooks = LoopHooks(on_loop_end=capture_final_request(capture, model, run_id="r1", model_name="default"))
+
+    _, record = await collect(
+        run_agent(
+            spec(model),
+            [OwnedMessage(role="user", content="Deploy the web service")],
+            ctx=context(),
+            hooks=hooks,
+        ),
+    )
+    record.messages[-1].content = "rewritten after the loop"
+
     assert capture.latest is not None
-    assert [message.get_content_string() for message in capture.latest.messages] == ["Deploy the web service", "Done."]
-    assert capture.latest.tools == tuple(tools)
+    assert (capture.latest.run_id, capture.latest.model_name) == ("r1", "default")
+    assert [message.get_content_string() for message in capture.latest.messages] == [
+        "You are Code.",
+        "Deploy the web service",
+        "Done.",
+    ]
+    assert capture.latest.tools == ()
+    assert capture.latest.tool_choice is None
 
 
 @pytest.mark.asyncio
@@ -1724,7 +1746,6 @@ async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
     _seed(config, paths, _tool_turn("r1"))
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     notice = "Pause tool use and summarize before handling the newer message."
-    install_queued_message_notice_hook(model, notice_text=notice)
     with (
         patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
         queued_message_signal_context(_PendingMessage()),

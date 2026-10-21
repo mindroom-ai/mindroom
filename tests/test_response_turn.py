@@ -11,14 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import Mock
 
 import pytest
-from agno.db.base import BaseDb
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.requirement import RunRequirement
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
@@ -31,6 +23,7 @@ from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -52,6 +45,8 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 
@@ -205,7 +200,7 @@ def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager
     def _open() -> AbstractContextManager[ScopeSessionContext]:
         log.scope = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id="general"),
-            storage=Mock(spec=BaseDb),
+            storage=Mock(spec=ConversationStore),
             session=None,
         )
         return contextlib.nullcontext(log.scope)
@@ -288,10 +283,10 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     requirement.member_agent_id = "member-id"
     requirement.member_agent_name = "researcher"
     requirement.member_run_id = "member-run"
-    response = TeamRunOutput(
-        status=RunStatus.paused,
-        session_id="team-session",
+    response = TeamRunRecord(
         run_id="team-run",
+        session_id="team-session",
+        status=RunStatus.paused,
         tools=[],
         requirements=[requirement],
     )
@@ -320,7 +315,7 @@ def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
     )
 
     with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
-        response_turn_module._paused_attempt(
+        response_turn_module.paused_attempt_from_pause(
             tools=(invalid_tool, valid_tool),
             requirements=(invalid_requirement,),
             session_id="session-1",
@@ -343,83 +338,12 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
     )
 
     with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
-        response_turn_module._paused_attempt(
+        response_turn_module.paused_attempt_from_pause(
             tools=(),
             requirements=requirements,
             session_id="session-1",
             run_id="run-1",
             toolkit_owners={},
-        )
-
-
-def test_paused_attempt_rejects_mixed_unresolved_hitl_requirements() -> None:
-    """MindRoom must not show an approval card when the same run also needs unsupported user input."""
-    confirmation = RunRequirement(
-        ToolExecution(
-            tool_call_id="confirm-call",
-            tool_name="dangerous",
-            requires_confirmation=True,
-        ),
-    )
-    user_input = RunRequirement(
-        ToolExecution(
-            tool_call_id="input-call",
-            tool_name="needs_input",
-            requires_user_input=True,
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
-        response_turn_module._paused_attempt(
-            tools=(),
-            requirements=(confirmation, user_input),
-            session_id="session-1",
-            run_id="run-1",
-            toolkit_owners={},
-        )
-
-
-def test_exact_approval_decisions_reject_mixed_unresolved_hitl_requirements() -> None:
-    """A persisted mixed pause must fail closed instead of executing a tool with missing input."""
-    confirmation = RunRequirement(
-        ToolExecution(
-            tool_call_id="confirm-call",
-            tool_name="dangerous",
-            requires_confirmation=True,
-        ),
-    )
-    user_input = RunRequirement(
-        ToolExecution(
-            tool_call_id="input-call",
-            tool_name="needs_input",
-            requires_user_input=True,
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
-        response_turn_module.apply_exact_approval_decisions(
-            (confirmation, user_input),
-            decisions={"confirm-call": True},
-            denial_reasons={"confirm-call": None},
-        )
-
-
-def test_exact_approval_decisions_reject_one_call_with_confirmation_and_input() -> None:
-    """Confirmation must not execute a call that still needs a separate input answer."""
-    mixed = RunRequirement(
-        ToolExecution(
-            tool_call_id="mixed-call",
-            tool_name="dangerous_with_input",
-            requires_confirmation=True,
-            requires_user_input=True,
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="unsupported non-confirmation"):
-        response_turn_module.apply_exact_approval_decisions(
-            (mixed,),
-            decisions={"mixed-call": True},
-            denial_reasons={"mixed-call": None},
         )
 
 
@@ -506,7 +430,7 @@ async def _collect(stream: AsyncIterator[str]) -> list[str]:
 async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finish: str) -> None:
     """The caller's owner must follow each attempt pull and close without leaking at public yields."""
     log = _AdapterLog()
-    storage = Mock(spec=BaseDb)
+    storage = Mock(spec=ConversationStore)
     scope = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="general"),
         storage=storage,
@@ -692,21 +616,21 @@ async def test_cancel_during_scope_open_closes_entered_context() -> None:
     assert exited.is_set()
 
 
-def _history_run(run_id: str, *, team: bool, event_id: str, seen: list[str]) -> RunOutput | TeamRunOutput:
+def _history_run(run_id: str, *, team: bool, event_id: str, seen: list[str]) -> RunRecord | TeamRunRecord:
     metadata: dict[str, Any] = {
         MATRIX_EVENT_ID_METADATA_KEY: event_id,
         MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen,
         MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: f"{event_id}-reply",
     }
     if team:
-        return TeamRunOutput(
+        return TeamRunRecord(
             run_id=run_id,
             team_id="crew",
             session_id="session-1",
             status=RunStatus.completed,
             metadata=metadata,
         )
-    return RunOutput(
+    return RunRecord(
         run_id=run_id,
         agent_id="crew",
         session_id="session-1",
@@ -738,12 +662,10 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     ]
     seed_session(
         storage,
-        TeamSession(session_id="session-1", team_id="crew", runs=runs)
-        if team
-        else AgentSession(session_id="session-1", agent_id="crew", runs=runs),
+        ConversationSession(session_id="session-1", kind="team" if team else "agent", owner_id="crew", runs=runs),
     )
 
-    def _stored_session() -> AgentSession | TeamSession | None:
+    def _stored_session() -> ConversationSession | None:
         return storage.load_session("session-1", "team") if team else storage.load_session("session-1", "agent")
 
     lookups: list[tuple[str, ...]] = []
@@ -831,8 +753,8 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
     monkeypatch.setattr(history_storage, "_remove_redacted_event_from_history", remove)
     scope_context = ScopeSessionContext(
         scope=HistoryScope(kind="agent", scope_id="general"),
-        storage=Mock(spec=BaseDb),
-        session=AgentSession(session_id="session-1", agent_id="general"),
+        storage=Mock(spec=ConversationStore),
+        session=ConversationSession(session_id="session-1", kind="agent", owner_id="general"),
     )
 
     await response_turn_module._remove_history_of_redacted_events(

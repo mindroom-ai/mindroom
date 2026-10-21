@@ -6,16 +6,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
-from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
+from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.history.types import HistoryScope
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -33,7 +32,7 @@ class _ManualCompactionRequestResult:
 
 def request_compaction_before_next_reply(
     *,
-    agent: Agent,
+    scope: HistoryScope,
     agent_name: str,
     session_id: str,
     runtime_paths: RuntimePaths,
@@ -44,9 +43,9 @@ def request_compaction_before_next_reply(
     session_state: dict[str, object] | None = None,
     record_pending_scope_in_session_state: bool = False,
 ) -> _ManualCompactionRequestResult:
-    """Schedule text compaction before the next reply in the current history scope."""
+    """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to."""
     with open_resolved_scope_session_context(
-        scope=resolve_history_scope(agent),
+        scope=scope,
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
@@ -58,7 +57,7 @@ def request_compaction_before_next_reply(
             return _ManualCompactionRequestResult("Error: Current agent has no history scope. Cannot compact context.")
 
         runtime_model, compaction_config = _resolve_active_compaction_settings(
-            agent=agent,
+            scope=scope,
             agent_name=agent_name,
             config=config,
             runtime_paths=runtime_paths,
@@ -85,7 +84,7 @@ def request_compaction_before_next_reply(
         assert session is not None
         current_state = read_scope_state(session, scope_context.scope)
         set_force_compaction_state(session, scope_context.scope, current_state, force=True)
-        scope_context.storage.upsert_session(session)
+        scope_context.storage.save_session_fields(session, "metadata")
 
         next_session_state = session_state
         if record_pending_scope_in_session_state:
@@ -103,7 +102,7 @@ def request_compaction_before_next_reply(
 
 def _resolve_active_compaction_settings(
     *,
-    agent: Agent,
+    scope: HistoryScope,
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -111,7 +110,7 @@ def _resolve_active_compaction_settings(
     room_id: str | None,
 ) -> tuple[ResolvedRuntimeModel, CompactionConfig]:
     """Resolve the active model and compaction config for the current scope."""
-    if agent.team_id is None:
+    if scope.kind == "agent":
         runtime_model = config.resolve_runtime_model(
             entity_name=agent_name,
             active_model_name=active_model_name,
@@ -120,7 +119,9 @@ def _resolve_active_compaction_settings(
         )
         return runtime_model, config.resolve_entity(agent_name).compaction_config
 
-    if agent.team_id not in config.teams:
+    team_name = scope.scope_id
+    if team_name not in config.teams:
+        # An ad-hoc team has no authored settings of its own.
         runtime_model = config.resolve_runtime_model(
             entity_name=None,
             active_model_name=active_model_name,
@@ -128,9 +129,9 @@ def _resolve_active_compaction_settings(
         return runtime_model, config.resolve_entity(None).compaction_config
 
     runtime_model = config.resolve_runtime_model(
-        entity_name=agent.team_id,
+        entity_name=team_name,
         active_model_name=active_model_name,
         room_id=room_id,
         runtime_paths=runtime_paths,
     )
-    return runtime_model, config.resolve_entity(agent.team_id).compaction_config
+    return runtime_model, config.resolve_entity(team_name).compaction_config

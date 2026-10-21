@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING, cast
 
 from agno.exceptions import ModelProviderError
 
-from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
+from mindroom.llm.errors import (
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    ContextWindowExceeded,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
@@ -52,10 +59,6 @@ class IncompleteResponsesStreamError(ModelProviderError):
     """A Responses stream cannot safely reuse accumulated output in a retry."""
 
 
-class ModelOutputLimitError(RuntimeError):
-    """A run's model responses kept stopping at the output limit before their tool calls were complete."""
-
-
 class MinimalModeUnavailableError(RuntimeError):
     """Minimal mode cannot serve a turn; the message already names its recovery command."""
 
@@ -87,15 +90,6 @@ def run_error_event_text(event: RunErrorEvent | TeamRunErrorEvent, *, entity_lab
     return f"{entity_label} run failed without provider error details"
 
 
-def run_error_event_exception(event: RunErrorEvent | TeamRunErrorEvent) -> Exception:
-    """Restore the failure class Agno flattened into a streaming error event."""
-    text = run_error_event_text(event)
-    # Agno reports an untyped exception's class name as its stable error_type.
-    if event.error_type == MinimalModeUnavailableError.__name__:
-        return MinimalModeUnavailableError(text)
-    return Exception(text)
-
-
 def _run_error_additional_message(data: object) -> str | None:
     if isinstance(data, str):
         stripped = data.strip()
@@ -118,7 +112,9 @@ def is_model_safeguard_refusal(error: Exception | str) -> bool:
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:
-    """Try to extract the provider name from the exception's module."""
+    """Try to extract the provider name from the exception's module, or from an owned provider error."""
+    if isinstance(error, ProviderError):
+        return error.provider
     module = type(error).__module__ or ""
     # e.g. "openai" from "openai._exceptions", "anthropic" from "anthropic._exceptions"
     top_module = module.split(".")[0] if module else ""
@@ -163,8 +159,10 @@ def _has_provider_status(error: Exception, status_code: int) -> bool:
 
 def _is_transient_provider_error(error: Exception) -> bool:
     """Recognize provider failures that already exhausted automatic retries."""
+    if isinstance(error, ProviderUnavailable):
+        return True
     status_code = getattr(error, "status_code", None)
-    if isinstance(error, ModelProviderError) and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
+    if isinstance(error, ModelProviderError | ProviderError) and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
         return True
     if _extract_provider_from_error(error) is not None and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
         return True
@@ -228,12 +226,23 @@ def get_user_friendly_error_message(  # noqa: PLR0911
     if _MISSING_PROVIDER_KEY_PATTERN.search(error_str):
         return f"{agent_prefix}{_missing_provider_key_message(runtime_paths)}"
 
+    if isinstance(error, ContextWindowExceeded):
+        return (
+            f"{agent_prefix}⚠️ The conversation no longer fits the model's context window. "
+            "Start a new thread or compact the conversation, then try again."
+        )
     # Only distinguish the most important error types
-    if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]):
+    if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]) or (
+        isinstance(error, ProviderError) and error.status_code in {401, 403}
+    ):
         provider = _extract_provider_from_error(error)
         provider_hint = f" ({provider})" if provider else ""
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
-    if any(x in error_str for x in ["rate", "429", "quota"]) or _has_provider_status(error, 429):
+    if (
+        isinstance(error, RateLimited)
+        or any(x in error_str for x in ["rate", "429", "quota"])
+        or _has_provider_status(error, 429)
+    ):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."
     if _is_transient_provider_error(error):
         return (

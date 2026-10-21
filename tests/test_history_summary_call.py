@@ -42,13 +42,10 @@ from mindroom.history.types import (
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.session_storage.agent_storage import create_session_storage
-from tests.conftest import (
-    FakeModel,
-    prepare_history_for_run_for_test,
-    seed_session,
-)
+from tests.conftest import prepare_history_for_run_for_test, seed_session
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
+    FakeModel,
     RecordingModel,
     _agent,
     _completed_run,

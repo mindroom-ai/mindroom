@@ -386,7 +386,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         ),
         presentation=presentation,
         prompt=decision.next_prompt or continuation.request_body,
-        reusable_agent=None if decision.should_continue else agent,
+        reusable_build=None if decision.should_continue else agent,
         initial_continuation_count=continuation.continuation_count + int(decision.should_continue),
         delegation_depth=payload.delegation_depth,
         media=MediaInputs(

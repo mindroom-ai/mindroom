@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from agno.models.message import Message
-
 from mindroom import ai_runtime
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.constants import (
@@ -31,8 +31,9 @@ from mindroom.constants import (
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
-from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator, team_static_token_estimator
 from mindroom.history.replay import apply_replay_plan
+from mindroom.history.request_messages import TurnMessages
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
@@ -41,7 +42,8 @@ from mindroom.history.runtime import (
     resolve_agent_preparation_inputs,
 )
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.history.types import ResolvedReplayPlan
+from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
 from mindroom.prompt_message_tags import render_msg_tag
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.team import Team
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.attachments.storage import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.history.session_context import ScopeSessionContext
@@ -104,19 +107,19 @@ class _PartialReplyKind(str, Enum):
 class _PreparedExecutionContext:
     """Final request-scoped input planning result."""
 
-    messages: tuple[Message, ...]
+    turn: TurnMessages
     unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
 
     @property
     def final_prompt(self) -> str:
         """Return the prompt-visible text derived from the canonical message input."""
-        return render_prepared_messages_text(self.messages)
+        return render_prepared_messages_text(self.turn.in_request_order())
 
     @property
     def context_messages(self) -> tuple[Message, ...]:
         """Return replayed context messages without the current user turn."""
-        return tuple(message for message in self.messages[:-1] if message.add_to_agent_memory)
+        return self.turn.context
 
     @property
     def replay_plan(self) -> ResolvedReplayPlan | None:
@@ -408,10 +411,10 @@ def _messages_with_capped_context(
     static_token_budget: int,
     estimate_static_tokens_fn: Callable[[str], int],
     render_messages_text_fn: Callable[[Sequence[Message]], str],
-) -> tuple[Message, ...]:
+) -> TurnMessages:
     """Return the newest context-message suffix that fits the total static token budget."""
 
-    def with_context(context: Sequence[Message]) -> tuple[Message, ...]:
+    def with_context(context: Sequence[Message]) -> TurnMessages:
         return _messages_with_current_prompt(
             prompt,
             context_messages=context,
@@ -424,8 +427,8 @@ def _messages_with_capped_context(
             member_display_names=member_display_names,
         )
 
-    def fits(messages: Sequence[Message]) -> bool:
-        return estimate_static_tokens_fn(render_messages_text_fn(messages)) <= static_token_budget
+    def fits(turn: TurnMessages) -> bool:
+        return estimate_static_tokens_fn(render_messages_text_fn(turn.in_request_order())) <= static_token_budget
 
     full_messages = with_context(context_messages)
     if fits(full_messages):
@@ -452,9 +455,8 @@ def _messages_with_current_prompt(
     current_prompt_is_structured: bool = False,
     config: Config,
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
-) -> tuple[Message, ...]:
-    """Return canonical live request messages with the current user turn last."""
-    messages = [message.model_copy(deep=True) for message in context_messages]
+) -> TurnMessages:
+    """Return the canonical live turn: its context messages, the current user prompt, and its transient context."""
     current_ts = format_timestamp_ms(current_timestamp_ms, timezone=config.timezone)
     current_prompt = (
         _build_matrix_prompt_with_history(
@@ -471,9 +473,11 @@ def _messages_with_current_prompt(
         if current_sender_id is not None
         else prompt
     )
-    messages.extend(message.model_copy(deep=True) for message in transient_context_messages)
-    messages.append(Message(role="user", content=current_prompt))
-    return tuple(messages)
+    return TurnMessages(
+        prompt=Message(role="user", content=current_prompt),
+        context=tuple(deepcopy(message) for message in context_messages),
+        transient=tuple(deepcopy(message) for message in transient_context_messages),
+    )
 
 
 def render_prepared_messages_text(messages: Sequence[Message]) -> str:
@@ -508,8 +512,8 @@ def _build_unseen_context_messages(
     current_prompt_is_structured: bool = False,
     config: Config,
     attachment_context: _ThreadAttachmentContext | None = None,
-) -> tuple[tuple[Message, ...], list[str]]:
-    """Return canonical request messages for unseen thread context plus the current turn."""
+) -> tuple[TurnMessages, list[str]]:
+    """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
     history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
         history_before_current or (),
@@ -567,8 +571,8 @@ def _build_thread_history_messages(
     estimate_static_tokens_fn: Callable[[str], int] | None = None,
     render_messages_text_fn: Callable[[Sequence[Message]], str] | None = None,
     attachment_context: _ThreadAttachmentContext | None = None,
-) -> tuple[Message, ...]:
-    """Return canonical request messages for fallback full-thread replay."""
+) -> TurnMessages:
+    """Return the canonical turn for fallback full-thread replay."""
     if not thread_history:
         return _messages_with_current_prompt(
             prompt,
@@ -896,7 +900,9 @@ async def _prepare_execution_context_common(
             member_display_names=member_display_names,
         )
 
-    prepared_scope_history = await prepare_scope_history_fn(render_messages_text_fn(provisional_messages))
+    prepared_scope_history = await prepare_scope_history_fn(
+        render_messages_text_fn(provisional_messages.in_request_order()),
+    )
 
     final_messages = _messages_with_current_prompt(
         prompt,
@@ -928,7 +934,7 @@ async def _prepare_execution_context_common(
     else:
         unseen_event_ids = []
 
-    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
+    final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages.in_request_order()))
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -936,10 +942,9 @@ async def _prepare_execution_context_common(
         pipeline_timing=pipeline_timing,
     )
     if scheduled_history_budget is not None:
-        inline_history_messages = sum(message.add_to_agent_memory for message in final_messages[:-1])
         prepared_history = _prepared_history_with_scheduled_limit(
             prepared_history,
-            max(0, scheduled_history_budget.limit - inline_history_messages),
+            max(0, scheduled_history_budget.limit - len(final_messages.context)),
         )
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
@@ -975,7 +980,7 @@ async def _prepare_execution_context_common(
             member_display_names=member_display_names,
         )
         final_messages = replay_fallback_messages
-        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
+        fallback_context_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages.in_request_order()))
         if prepared_history.replay_plan is not None:
             fallback_context_tokens += prepared_history.replay_plan.estimated_tokens
         prepared_history = replace(prepared_history, prepared_context_tokens=fallback_context_tokens)
@@ -983,7 +988,7 @@ async def _prepare_execution_context_common(
         pipeline_timing.mark("prompt_assembly_ready")
 
     return _PreparedExecutionContext(
-        messages=final_messages,
+        turn=final_messages,
         unseen_event_ids=unseen_event_ids,
         prepared_history=prepared_history,
     )
@@ -994,7 +999,8 @@ async def prepare_agent_execution_context(
     ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext | None,
-    agent: Agent,
+    build: AgentBuild,
+    system_message: Message,
     prompt: str,
     transient_context_messages: Sequence[Message] = (),
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -1009,7 +1015,10 @@ async def prepare_agent_execution_context(
     include_openai_compat_guidance: bool = False,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
-    """Prepare one agent's final prompt and replay plan for the current call."""
+    """Prepare one agent's final prompt and replay plan for the current call.
+
+    ``system_message`` is the turn's rendered system message, which sizes the static part of every request.
+    """
     agent_name = ctx.entity_label
     response_sender = None
     if not include_openai_compat_guidance:
@@ -1021,23 +1030,28 @@ async def prepare_agent_execution_context(
         thread_id=ctx.thread_id,
         runtime_paths=runtime_paths,
     )
-    static_token_estimator = agent_static_token_estimator(agent)
+    static_token_estimator = build_static_token_estimator(
+        system_message,
+        prepare_run_tools(build.spec).specs(),
+        build.request_template.deferred_tool_names,
+    )
     compaction_config = config.resolve_entity(agent_name).compaction_config
 
     async def _prepare_agent_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
         resolved_inputs = resolve_agent_preparation_inputs(
-            agent=agent,
             agent_name=agent_name,
+            history_settings=build.history_settings,
             config=config,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
         )
         return await prepare_scope_history(
-            agent=agent,
             agent_name=agent_name,
+            scope=scope_context.scope if scope_context is not None else HistoryScope(kind="agent", scope_id=agent_name),
+            model=build.spec.model,
             resolved_inputs=resolved_inputs,
             non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
             runtime_paths=runtime_paths,
@@ -1113,7 +1127,6 @@ async def _prepare_bound_team_execution_context(
     ) -> PreparedScopeHistory:
         return await prepare_bound_scope_history(
             agents=agents,
-            team=team,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,

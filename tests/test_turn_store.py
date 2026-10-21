@@ -59,7 +59,6 @@ from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
-    FakeModel,
     bind_runtime_paths,
     make_visible_message,
     request_envelope,
@@ -67,7 +66,7 @@ from tests.conftest import (
     seed_session,
     test_runtime_paths,
 )
-from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
+from tests.history_helpers import FakeModel, compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 

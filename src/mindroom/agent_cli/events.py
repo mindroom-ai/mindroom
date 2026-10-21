@@ -6,8 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING
 
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
-
+from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.events import AuditedToolExecution
@@ -34,7 +33,7 @@ class _CliSuspension:
 
 
 def emit_cli_suspension(error: BaseException) -> None:
-    """Leave Agno through the response stream even when its tool runner catches errors."""
+    """Leave the run through the response stream even when its tool runner catches errors."""
     sink = _SINK.get()
     if sink is not None:
         sink(_CliSuspension(error))
@@ -51,19 +50,19 @@ def emit_cli_tool_event(event: AgentToolCallEvent, parent: str | None) -> None:
         return
     if event.kind not in {"started", "completed", "failed", "continuation_required"}:
         return
-    cls = ToolCallStartedEvent if event.kind == "started" else ToolCallCompletedEvent
-    emit_cli_run_event(cls(tool=event.execution), parent=parent, toolkit_name=event.key.toolkit)
+    cls = ToolStarted if event.kind == "started" else ToolCompleted
+    emit_cli_run_event(cls(event.execution), parent=parent, toolkit_name=event.key.toolkit)
 
 
 def emit_cli_run_event(
-    event: ToolCallStartedEvent | ToolCallCompletedEvent,
+    event: ToolStarted | ToolCompleted,
     *,
     parent: str | None,
     toolkit_name: str | None,
 ) -> None:
     """Retain native event provenance while adding trusted hidden-call audit identity."""
     sink = _SINK.get()
-    if sink is None or event.tool is None:
+    if sink is None:
         return
     sink(replace(event, tool=project_cli_execution(event.tool, parent=parent, toolkit_name=toolkit_name)))
 
@@ -86,7 +85,6 @@ async def stream_cli_events(source: AsyncIterator[object]) -> AsyncIterator[obje
     """Merge actual provider and hidden events; may start before tool preparation.
 
     The existing attempt and presentation consumers remain the only trace owners.
-    Bash stays a coroutine returning ToolResult, preserving Agno's media handling.
     """
 
     async def produce(on_event: Callable[[object], None]) -> None:

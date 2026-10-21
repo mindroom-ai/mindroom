@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from threading import RLock
 from typing import TYPE_CHECKING, TypeGuard, cast
@@ -45,6 +45,9 @@ from mindroom.tool_system.tool_schema_cache import (
 if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.team import Team
+
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ToolSpec
 
 type _ToolDefinition = dict[str, object]
 
@@ -90,6 +93,27 @@ class _StaticTokenEstimator:
 def agent_static_token_estimator(agent: Agent) -> _StaticTokenEstimator:
     """Return a request-local static-token estimator for one prepared agent response."""
     return _StaticTokenEstimator(partial(_estimate_agent_non_prompt_static_tokens, agent))
+
+
+def build_static_token_estimator(
+    system_message: Message,
+    tools: Sequence[ToolSpec],
+    deferred_tool_names: frozenset[str],
+) -> _StaticTokenEstimator:
+    """Return a request-local static-token estimator for one owned agent build's rendered prompt and tools.
+
+    Deferred tools stay off the request until tool search loads them, so they are left out of the estimate.
+    """
+
+    def non_prompt_tokens() -> int:
+        payloads = [
+            {key: value for key, value in asdict(tool).items() if value is not None}
+            for tool in tools
+            if tool.name not in deferred_tool_names
+        ]
+        return estimate_text_tokens(str(system_message.content or "")) + _definition_tokens(payloads)
+
+    return _StaticTokenEstimator(non_prompt_tokens)
 
 
 def team_static_token_estimator(team: Team) -> _StaticTokenEstimator:

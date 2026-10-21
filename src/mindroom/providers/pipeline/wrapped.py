@@ -24,7 +24,14 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["AGGREGATE_USAGE_KEY", "WrappedProvider", "add_usage", "is_visible_output", "with_carried_usage"]
+__all__ = [
+    "AGGREGATE_USAGE_KEY",
+    "WrappedProvider",
+    "add_usage",
+    "bare_adapter",
+    "is_visible_output",
+    "with_carried_usage",
+]
 
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 
@@ -55,6 +62,13 @@ class WrappedProvider:
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Delegate tool-result formatting to the wrapped provider."""
         return self.inner.format_tool_results(messages, results)
+
+
+def bare_adapter(provider: ModelProvider) -> ModelProvider:
+    """Return the adapter inside every pipeline stage around ``provider``, which carries the route's own settings."""
+    while isinstance(provider, WrappedProvider):
+        provider = provider.inner
+    return provider
 
 
 def is_visible_output(event: StreamEvent) -> bool:

@@ -44,6 +44,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import copy_history_message, filter_tool_calls
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
@@ -89,7 +90,6 @@ from mindroom.session_storage.agent_storage import (
     get_team_session,
     save_compaction_usage,
 )
-from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,

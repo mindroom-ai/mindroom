@@ -43,8 +43,9 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     tool_execution_identity,
 )
-from tests.conftest import FakeModel, bind_runtime_paths
+from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context
+from tests.history_helpers import FakeModel
 from tests.history_helpers import _agent as history_agent
 from tests.history_helpers import _runtime_paths as history_runtime_paths
 from tests.tool_job_helpers import (

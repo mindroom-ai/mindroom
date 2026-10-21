@@ -165,6 +165,8 @@ class ModelCall:
     response_format: dict[str, Any] | type[BaseModel] | None
     # Claude's request hook sends these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
+    # Whether the request came through the owned provider layer rather than an Agno model.
+    owned: bool = True
 
 
 type Responder = Callable[[ModelCall], ModelResponse]
@@ -210,6 +212,7 @@ class Recorder:
             tool_choice=deepcopy(kwargs.get("tool_choice")),
             response_format=kwargs.get("response_format"),
             deferred_tool_names=sorted(claude_deferred_tool_names(model)),
+            owned=False,
         )
         self.calls.append(call)
         return self.responder(call)

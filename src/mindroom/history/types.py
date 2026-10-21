@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from mindroom.llm.provider import NativeCompactionReplay
+
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
 _ScopeKind = Literal["agent", "team"]
@@ -327,6 +329,22 @@ class CompactionOutcome:
 
 
 @dataclass(frozen=True)
+class NativeHistory:
+    """What a run's requests carry for provider-managed history: the native compaction replay and portable replay.
+
+    ``native_compaction`` is None when the provider compacts nothing for this run; ``portable_replay`` says the
+    request replays its history explicitly instead of continuing provider-stored state.
+    """
+
+    native_compaction: NativeCompactionReplay | None
+    portable_replay: bool
+
+    def without_native_compaction(self) -> NativeHistory:
+        """Return these settings with the provider's compaction turned off, keeping the replay policy."""
+        return NativeHistory(native_compaction=None, portable_replay=self.portable_replay)
+
+
+@dataclass(frozen=True)
 class PreparedHistoryState:
     """Prepared persisted-history state for one run."""
 
@@ -337,3 +355,4 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
+    native_history: NativeHistory | None = None

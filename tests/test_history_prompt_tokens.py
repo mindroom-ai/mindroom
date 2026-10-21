@@ -40,9 +40,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from tests.conftest import (
-    FakeModel,
-)
+from tests.history_helpers import FakeModel
 
 if TYPE_CHECKING:
     import pytest

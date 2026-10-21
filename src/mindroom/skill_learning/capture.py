@@ -2,40 +2,37 @@
 
 Like Hermes' review fork, the review replays that request with its tools unchanged and appends the review prompt,
 so the provider serves the conversation from its prompt cache. Only the ordinary response path records requests, and
-it builds its agent and model for that one response, so the review owns the model once the response has ended.
+it builds its provider for that one response, so the review owns the provider once the response has ended.
 """
 
 from __future__ import annotations
 
 import copy
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
-
-from agno.run.agent import RunOutput
-
-from mindroom.agno_compat_model_hooks import temporary_response_observer
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from contextlib import AbstractContextManager
+    from collections.abc import Mapping
+    from typing import Any
 
-    from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.tools.function import Function
     from pydantic import BaseModel
+
+    from mindroom.agent_loop.model_loop import LoopEndHook, LoopState
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelProvider, ModelRequest, ToolChoice, ToolSpec
 
 
 @dataclass(frozen=True)
 class CapturedRequest:
-    """One response loop's last model request, whose messages end with the model's final answer."""
+    """One run's last model request, whose messages end with the model's final answer."""
 
-    model: Model
+    model: ModelProvider
     model_name: str
     run_id: str
     messages: tuple[Message, ...]
-    tools: tuple[Function | dict[str, Any], ...]
-    tool_choice: str | dict[str, Any] | None
-    response_format: dict[str, Any] | type[BaseModel] | None
+    tools: tuple[ToolSpec, ...]
+    tool_choice: ToolChoice | None
+    response_format: type[BaseModel] | Mapping[str, Any] | None
 
 
 @dataclass
@@ -45,35 +42,32 @@ class SkillReviewCapture:
     latest: CapturedRequest | None = None
 
 
-def observe_final_request(
-    capture: SkillReviewCapture | None,
-    model: Model | None,
+def capture_final_request(
+    capture: SkillReviewCapture,
+    model: ModelProvider,
     *,
     run_id: str,
     model_name: str,
-) -> AbstractContextManager[None]:
-    """Record one primary attempt's final request when its response counts toward skill learning.
+) -> LoopEndHook:
+    """Return the loop-end hook that records one primary attempt's final request for the skill review.
 
     Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
     response.
     """
-    if capture is None or model is None:
-        return nullcontext()
 
-    def record(kwargs: dict[str, object]) -> None:
-        run_response = kwargs.get("run_response")
-        messages = kwargs.get("messages")
-        if not isinstance(run_response, RunOutput) or run_response.run_id != run_id or not isinstance(messages, list):
-            return
+    def record(state: LoopState, request: ModelRequest) -> None:
         capture.latest = CapturedRequest(
             model=model,
             model_name=model_name,
             run_id=run_id,
             # The run keeps using these messages after the loop, so copies keep the request exactly as sent.
-            messages=tuple(copy.copy(message) for message in cast("list[Message]", messages)),
-            tools=tuple(cast("list[Function | dict[str, Any]]", kwargs.get("tools") or [])),
-            tool_choice=cast("str | dict[str, Any] | None", kwargs.get("tool_choice")),
-            response_format=cast("dict[str, Any] | type[BaseModel] | None", kwargs.get("response_format")),
+            messages=tuple(copy.copy(message) for message in state.messages),
+            tools=tuple(request.tools),
+            tool_choice=request.tool_choice,
+            response_format=request.response_format,
         )
 
-    return temporary_response_observer(model, record)
+    return record
+
+
+__all__ = ["CapturedRequest", "SkillReviewCapture", "capture_final_request"]

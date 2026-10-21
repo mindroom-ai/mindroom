@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.team import Team
-
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.history.team_scope import ad_hoc_team_scope_id
@@ -58,7 +56,7 @@ class BoundTeamScopeContext:
 
 
 def resolve_history_scope(agent: Agent) -> HistoryScope | None:
-    """Return the persisted history scope addressed by one live agent."""
+    """Return the persisted history scope addressed by one live Agno agent, which the team path still runs."""
     team_id = agent.team_id
     if isinstance(team_id, str) and team_id:
         return HistoryScope(kind="team", scope_id=team_id)
@@ -66,13 +64,6 @@ def resolve_history_scope(agent: Agent) -> HistoryScope | None:
     if isinstance(agent_id, str) and agent_id:
         return HistoryScope(kind="agent", scope_id=agent_id)
     return None
-
-
-def resolve_target_history_scope(target: Agent | Team) -> HistoryScope | None:
-    """Return the persisted history scope a live agent or team replays."""
-    if isinstance(target, Team):
-        return HistoryScope(kind="team", scope_id=target.id) if target.id else None
-    return resolve_history_scope(target)
 
 
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:

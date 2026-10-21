@@ -1,9 +1,8 @@
-"""The owned path reproduces the prompt goldens: helper requests, and the first request of every Matrix reply.
+"""The owned path reproduces the prompt goldens: every request of each helper call and each Matrix reply.
 
-Helper call sites already send their requests through the owned provider layer, so the recorder compares every
-request they send. A Matrix reply does not run on the owned loop yet, so its agent is built through ``create_agent``
-as ``ai`` builds it, and the request the loop would send first is compared with the golden's first request; the
-replies' later requests, and the goldens of the other entry points, are compared once their paths move.
+Helper call sites and Matrix replies send their requests through the owned provider layer, so one recorder compares
+every request they send, byte for byte, with the golden. The goldens of the entry points that do not run on the
+owned path yet are listed with the step that will compare them.
 """
 
 from __future__ import annotations
@@ -14,37 +13,38 @@ import pytest
 
 from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
 from mindroom.llm.messages import Message
-from tests.agent_loop.prompt_parity_support import first_request
 from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, Recorder, call_dict, load_golden, normalize
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json"))
-RECORDED = [name for name in GOLDENS if name.startswith("helper_")]
 # The owner of each golden whose entry point does not run on the owned path yet.
 PENDING = {
     "agent_minimal_mode": "F3 renders minimal mode's bootstrap prompt and Bash facade from the build's surface",
+    "delegated_child_run": "S3 drives the delegate tool's externally executed children through the owned loop",
     "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
     "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
+    "skill_review_fork": "F6 runs the skill review fork on the owned loop from the captured final request",
     "voice_call_cascaded": "F4 builds voice calls on the owned loop",
     "voice_call_realtime": "F4 builds voice calls on the owned loop",
 }
 TEAM = [name for name in GOLDENS if name.startswith("team_")]
-BUILT = [name for name in GOLDENS if name not in RECORDED and name not in PENDING and name not in TEAM]
+RECORDED = [name for name in GOLDENS if name not in PENDING and name not in TEAM]
+# Requests an Agno model still sends, by position in the golden: F7 moves the compaction summarizer.
+AGNO_REQUESTS = {"compaction_summary": {3}}
 
 
 def test_every_golden_is_compared_here_or_assigned_an_owner() -> None:
     """Each prompt golden is compared by this module, by the team runtime, or named with the step that will."""
     assert set(GOLDENS) == set(SCENARIOS)
-    assert all(SCENARIOS[name].turn is not None for name in BUILT)
-    assert sorted({*RECORDED, *BUILT, *PENDING, *TEAM}) == GOLDENS
+    assert sorted({*RECORDED, *PENDING, *TEAM}) == GOLDENS
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", RECORDED)
-async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
-    """Each helper's production call site sends its golden requests byte for byte, through the owned provider layer."""
+async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
+    """Each entry point sends its golden requests byte for byte, through the owned provider layer."""
     golden = load_golden(name)
     scenario = SCENARIOS[name]
     recorder = Recorder(responder=scenario.responder)
@@ -55,30 +55,11 @@ async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> N
     assert scenario.description == golden["description"]
     assert normalize(output.input, tmp_path) == golden["input"]
     assert recorder.calls
-    # Owned messages show the request went through the provider registry rather than an Agno model.
-    assert all(isinstance(message, Message) for call in recorder.calls for message in call.messages)
-    assert normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path) == golden["requests"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", BUILT)
-async def test_a_replys_first_request_equals_the_golden(name: str, tmp_path: Path) -> None:
-    """The agent ``create_agent`` builds for a reply sends the golden's first system message, tools, and deferral."""
-    golden = load_golden(name)
-
-    first = await first_request(name, tmp_path)
-
-    assert SCENARIOS[name].description == golden["description"]
-    assert normalize(first.input, tmp_path) == golden["input"]
-    expected = golden["requests"][0]
-    recorded = normalize(call_dict(first.call), tmp_path)
-    assert isinstance(recorded, dict)
-    assert recorded["model"] == expected["model"]
-    assert recorded["messages"][0] == expected["messages"][0]
-    assert recorded["tools"] == expected["tools"]
-    assert recorded["deferred_tool_names"] == expected["deferred_tool_names"]
-    # The shell CLI surface is set exactly for the reply whose shell reaches MindRoom's CLI.
-    assert first.build.surface.cli_shell == (name == "agent_cli_shell")
+    ordered = recorder.ordered_calls()
+    # Every other request went through the provider registry rather than an Agno model.
+    assert {index for index, call in enumerate(ordered) if not call.owned} == AGNO_REQUESTS.get(name, set())
+    assert all(isinstance(message, Message) for call in ordered if call.owned for message in call.messages)
+    assert normalize([call_dict(call) for call in ordered], tmp_path) == golden["requests"]
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:

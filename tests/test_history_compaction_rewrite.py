@@ -70,7 +70,6 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
-    FakeModel,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
@@ -78,6 +77,7 @@ from tests.conftest import (
 )
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
+    FakeModel,
     RecordingCompactionLifecycle,
     StoredSummaryRow,
     _agent,

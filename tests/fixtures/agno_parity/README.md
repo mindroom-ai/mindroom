@@ -257,7 +257,7 @@ The resumed runs are such rows, since Agno's continuation reads the paused run f
 The current-behavior test pins exactly these differences.
 The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds with `save_runs` after delivering a reply; `storage/response_linkage.json` pins that re-save.
 
-The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because MindRoom's interrupted-turn text falls back to replayed history when the failed request produced no assistant message; the golden keeps that current behavior.
+The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because the Agno-era interrupted-turn text fell back to replayed history when the failed request produced no assistant message; the golden keeps that stored legacy data, while the owned loop keeps only the failed reply's own text (`tests/test_agent_turn_runtime.py::test_an_error_record_never_repeats_an_earlier_answer`).
 
 ### Normalization
 

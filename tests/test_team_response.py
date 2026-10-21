@@ -100,7 +100,6 @@ from mindroom.teams import (
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import (
-    FakeModel,
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
@@ -108,6 +107,7 @@ from tests.conftest import (
     seed_session,
     test_runtime_paths,
 )
+from tests.history_helpers import FakeModel
 from tests.identity_helpers import entity_ids, fixture_entity_matrix_id, persist_entity_accounts
 
 if TYPE_CHECKING:

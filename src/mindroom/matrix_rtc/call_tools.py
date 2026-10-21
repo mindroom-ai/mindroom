@@ -55,7 +55,6 @@ from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_k
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
-from mindroom.pre_model_preparation import prewarm_agent_model_client
 from mindroom.providers.claude_prompt_cache import (
     aclose_anthropic_async_client,
     arefresh_session_backed_bedrock_async_client,
@@ -562,7 +561,6 @@ class _CallAgentCache:
             eager_deferred_tools=True,
         )
         _refuse_text_chat_functions(agent, self.config)
-        prewarm_agent_model_client(agent, history_storage)
         return agent
 
 
@@ -915,7 +913,7 @@ async def _run_authorized_call_agent(
                     refresh_scheduler=refresh_scheduler,
                     turn_recorder=recorder,
                     eager_deferred_tools=True,
-                    reusable_agent=agent,
+                    reusable_build=agent,
                     attempt_model_runtime=tool_support,
                 )
             finally:

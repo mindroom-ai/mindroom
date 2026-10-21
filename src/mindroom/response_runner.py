@@ -12,9 +12,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
 
-from agno.db.base import SessionType
-from agno.run.base import RunStatus
-
 from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
@@ -69,6 +66,7 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope, render_enrichment_bl
 from mindroom.interactive import InteractiveMetadata
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.judgment.conversation import conversation_context_before_sources
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.client_visible_messages import (
     ResolvedVisibleMessage,
     replace_visible_message,
@@ -210,8 +208,6 @@ if TYPE_CHECKING:
 
     import nio
     import structlog
-    from agno.db.base import BaseDb
-    from agno.run.requirement import RunRequirement
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -225,12 +221,15 @@ if TYPE_CHECKING:
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
+    from mindroom.llm.runs import RunRequirement
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import SessionKind
     from mindroom.streaming import ProgressPublisher, StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
@@ -2449,7 +2448,7 @@ class ResponseRunner:
         return ResponseOutcome(
             response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
-            session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
+            session_type="team" if continuation.entity_kind == "team" else "agent",
             execution_identity=execution_identity,
             run_succeeded=final.terminal_status == "completed",
             response_target=target,
@@ -3677,8 +3676,8 @@ class ResponseRunner:
         self,
         *,
         session_id: str,
-        session_type: SessionType,
-        create_storage: Callable[[], BaseDb],
+        session_type: SessionKind,
+        create_storage: Callable[[], ConversationStore],
     ) -> Callable[[str, str], Awaitable[None]]:
         """Build the response-event persistence callback for one session-backed response."""
 
@@ -4710,7 +4709,7 @@ class ResponseRunner:
         )
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def team_storage_factory() -> BaseDb:
+        def team_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
@@ -5055,7 +5054,7 @@ class ResponseRunner:
             return ResponseOutcome(
                 response_run_id=team_turn_recorder.run_id or response_run_id,
                 session_id=session_id,
-                session_type=SessionType.TEAM,
+                session_type="team",
                 execution_identity=tool_dispatch.execution_identity,
                 run_succeeded=team_turn_recorder.outcome == "completed",
                 response_target=resolved_target,
@@ -5471,7 +5470,7 @@ class ResponseRunner:
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def history_storage_factory() -> BaseDb:
+        def history_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(
@@ -5609,7 +5608,7 @@ class ResponseRunner:
         session_scope = self.deps.state_writer.history_scope()
         session_type = self.deps.state_writer.session_type_for_scope(session_scope)
 
-        def history_storage_factory() -> BaseDb:
+        def history_storage_factory() -> ConversationStore:
             return self.deps.state_writer.create_storage(runtime.tool_dispatch.execution_identity, scope=session_scope)
 
         session_started_watch = lifecycle.setup_session_watch(

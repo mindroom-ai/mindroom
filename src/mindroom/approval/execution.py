@@ -28,7 +28,6 @@ from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
-from mindroom.approval.receipt import install_approval_receipt_hooks
 from mindroom.approval.tool_owners import (
     approval_denial_context,
     approved_executions_context,
@@ -352,7 +351,7 @@ async def _stream_continuation_turn(
         tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
         supports_native_tool_approval=True,
         attempt_model_runtime=ToolRuntimeModelBinding(),
-        reusable_agent=reusable_agent,
+        reusable_build=reusable_agent,
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,
         delegation_depth=delegation_depth,
@@ -485,12 +484,6 @@ class AgentApprovalExecution:
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
         try:
-            if agent.model is not None:
-                ai_runtime.install_queued_message_notice_hook(
-                    agent.model,
-                    notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
-                )
-                install_approval_receipt_hooks(agent.model, agent.fallback_config)
             restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
             scope_context = ScopeSessionContext(
                 scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
@@ -539,7 +532,7 @@ class AgentApprovalExecution:
                                 recovered.presentation,
                                 prompt=recovered.prompt,
                                 show_tool_calls=continuation.show_tool_calls,
-                                reusable_agent=recovered.reusable_agent,
+                                reusable_build=recovered.reusable_agent,
                                 initial_continuation_count=recovered.initial_continuation_count,
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
@@ -610,7 +603,7 @@ class AgentApprovalExecution:
                 ai_runtime.register_queued_notice_storage(
                     storage_factory=storage_factory,
                     session_id=continuation.session_id,
-                    session_type=SessionType.AGENT,
+                    session_kind="agent",
                     entity_name=continuation.entity_name,
                 )
         return result

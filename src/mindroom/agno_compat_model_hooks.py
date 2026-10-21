@@ -31,19 +31,6 @@ type _RequestPreparation = Callable[
 ]
 
 
-class _MessageProjection(Protocol):
-    """Owner-managed transient request messages and history publication."""
-
-    @property
-    def outbound_messages(self) -> list[Message]:
-        """Messages to pass to Agno."""
-        ...
-
-    def publish_model_mutations(self) -> None:
-        """Return model mutations to owner history after the invocation."""
-        ...
-
-
 class _ClientProvider(Protocol):
     """Provider adapter with the SDK client factories used by Claude models."""
 
@@ -59,45 +46,6 @@ class _ClientProvider(Protocol):
 # Remove when: A public model request hook accepts transient message projections and
 # preserves owner-controlled history publication on success, failure, and cancellation.
 # Coverage: tests/test_approval_receipt.py.
-def install_message_projection(
-    model: Model,
-    *,
-    marker: str,
-    project: Callable[[list[Message]], _MessageProjection | None],
-) -> None:
-    """Bind a message projection to this model's async response entry point."""
-    try:
-        original = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
-        model_dict = vars(model)
-    except (AttributeError, TypeError):
-        return
-    if model_dict.get(marker) is True:
-        return
-    model_dict[marker] = True
-
-    async def response_with_projection(*args: object, **kwargs: object) -> ModelResponse:
-        messages: object = kwargs.get("messages")
-        if isinstance(messages, list):
-            projection = project(cast("list[Message]", messages))
-            if projection is None:
-                return await original(*args, **kwargs)
-            try:
-                return await original(*args, **{**kwargs, "messages": projection.outbound_messages})
-            finally:
-                projection.publish_model_mutations()
-        if args and isinstance(args[0], list):
-            projection = project(cast("list[Message]", args[0]))
-            if projection is None:
-                return await original(*args, **kwargs)
-            try:
-                return await original(projection.outbound_messages, *args[1:], **kwargs)
-            finally:
-                projection.publish_model_mutations()
-        return await original(*args, **kwargs)
-
-    model_dict["aresponse"] = response_with_projection
-
-
 def _with_tool_checkpoint(
     messages: list[Message],
     kwargs: dict[str, object],
@@ -495,25 +443,6 @@ def install_tool_call_rewrite(
 # Coverage: tests/test_participation.py::test_agent_turn_applies_decision_before_model_answer;
 # tests/test_participation.py::test_cancellation_is_not_converted_to_silence;
 # tests/test_participation_ownership.py::test_helpers_cannot_acquire_primary_decision.
-@contextmanager
-def temporary_async_invocation_hooks(
-    model: Model,
-    *,
-    invoke: _AsyncInvoke,
-    stream: _AsyncStream,
-) -> Iterator[None]:
-    """Bind attempt-scoped provider callbacks while bypassing Agno's answer cache."""
-    model_dict = vars(model)
-    saved = {name: model_dict.get(name) for name in ("ainvoke", "ainvoke_stream", "cache_response")}
-    model_dict["ainvoke"] = invoke
-    model_dict["ainvoke_stream"] = stream
-    model_dict["cache_response"] = False
-    try:
-        yield
-    finally:
-        _restore(model_dict, saved)
-
-
 def _restore(model_dict: dict[str, object], saved: dict[str, object | None]) -> None:
     for name, value in saved.items():
         if value is None:
@@ -531,39 +460,6 @@ def _restore(model_dict: dict[str, object], saved: dict[str, object | None]) -> 
 # Remove when: Agno reports each response loop's final messages, tools, tool choice, and response format to a
 # scoped callback; the skill review's fork of that request remains MindRoom policy.
 # Coverage: tests/test_skill_learning.py::test_the_review_fork_replays_the_final_request_through_each_adapter.
-@contextmanager
-def temporary_response_observer(model: Model, observe: Callable[[dict[str, object]], None]) -> Iterator[None]:
-    """Pass the keyword arguments of each async response loop of ``model`` to ``observe`` once the loop returns.
-
-    Agno appends every assistant and tool message to the ``messages`` it was given, so they end with the loop.
-    """
-    model_dict = vars(model)
-    saved = {name: model_dict.get(name) for name in ("aresponse", "aresponse_stream")}
-    original_response = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
-    original_response_stream = cast(
-        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
-        model.aresponse_stream,
-    )
-
-    async def response(**kwargs: object) -> ModelResponse:
-        result = await original_response(**kwargs)
-        observe(kwargs)
-        return result
-
-    async def response_stream(**kwargs: object) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
-        async with aclosing(original_response_stream(**kwargs)) as stream:
-            async for event in stream:
-                yield event
-        observe(kwargs)
-
-    model_dict["aresponse"] = response
-    model_dict["aresponse_stream"] = response_stream
-    try:
-        yield
-    finally:
-        _restore(model_dict, saved)
-
-
 # AGNO_COMPAT: Retry cycles lack public context and classification hooks.
 # Reason: Request-scoped media state must enclose Agno's private retry loops,
 # while the owner's retry classifier must compose with Agno's predicate.

@@ -61,7 +61,8 @@ from mindroom.history.types import (
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.tool_schema_cache import clear_tool_schema_cache
-from tests.conftest import FakeModel, bind_runtime_paths, make_turn_context, make_visible_message
+from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message
+from tests.history_helpers import FakeModel
 
 if TYPE_CHECKING:
     from pathlib import Path

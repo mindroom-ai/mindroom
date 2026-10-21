@@ -19,18 +19,6 @@ if TYPE_CHECKING:
 _AI_RUN_METADATA_VERSION = 1
 
 
-def empty_request_metric_totals() -> dict[str, int]:
-    """Return zeroed cumulative model-request counters for one streamed run."""
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "reasoning_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-    }
-
-
 def accumulate_model_request_metrics(
     totals: dict[str, int],
     observed_fields: set[str],

@@ -48,7 +48,6 @@ from tests.authorization_helpers import (
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
-    FakeModel,
     bind_runtime_paths,
     delivered_matrix_side_effect,
     install_runtime_journal_support,
@@ -57,7 +56,7 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import RecordingCompactionLifecycle, completed_outcome, folded_run_ids
+from tests.history_helpers import FakeModel, RecordingCompactionLifecycle, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

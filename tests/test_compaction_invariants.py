@@ -69,8 +69,9 @@ from mindroom.providers.openai_models import MindRoomOpenRouter
 from mindroom.providers.vertex_claude_compat import MindroomVertexAIClaude
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import FakeModel, bind_runtime_paths, prepare_history_for_run_for_test, seed_session
+from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 from tests.history_helpers import (
+    FakeModel,
     _reported,
     _summarizer,
     compact_runs,

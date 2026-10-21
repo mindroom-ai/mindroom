@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.agent import Agent  # noqa: TC002
 from agno.run import RunContext  # noqa: TC002
 from agno.tools import Toolkit
 
 from mindroom.config.main import Config  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
 from mindroom.history.manual import request_compaction_before_next_reply
+from mindroom.history.types import HistoryScope
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
 if TYPE_CHECKING:
@@ -33,12 +33,15 @@ class CompactContextTools(Toolkit):
         self._execution_identity = execution_identity
         super().__init__(name="compact_context", tools=[self.compact_context])
 
-    async def compact_context(self, agent: Agent | None = None, run_context: RunContext | None = None) -> str:
+    async def compact_context(self, run_context: RunContext | None = None) -> str:
         """Request compaction before the next reply."""
-        if agent is None:
-            return "Error: No active agent available. Cannot determine history scope."
-
         runtime_context = get_tool_runtime_context()
+        # The scope the running entity stores to; an agent on its own stores to its own scope.
+        scope = (
+            runtime_context.history_scope
+            if runtime_context is not None and runtime_context.history_scope is not None
+            else HistoryScope(kind="agent", scope_id=self._agent_name)
+        )
         session_id = resolve_current_session_id(
             execution_identity=self._execution_identity,
             runtime_context=runtime_context,
@@ -47,7 +50,7 @@ class CompactContextTools(Toolkit):
             return "Error: No active session available. Cannot determine session."
 
         result = request_compaction_before_next_reply(
-            agent=agent,
+            scope=scope,
             agent_name=self._agent_name,
             session_id=session_id,
             runtime_paths=self._runtime_paths,

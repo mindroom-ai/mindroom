@@ -70,8 +70,9 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import TeamMode, _create_team_instance, prepare_materialized_team_execution
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
-from tests.conftest import FakeModel, make_turn_context, seed_session
+from tests.conftest import make_turn_context, seed_session
 from tests.history_helpers import (
+    FakeModel,
     RecordingCompactionLifecycle,
     _completed_run,
     _completed_team_run,

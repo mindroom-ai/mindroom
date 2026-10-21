@@ -42,6 +42,10 @@ class TurnMessages:
     context: tuple[Message, ...] = ()
     transient: tuple[Message, ...] = ()
 
+    def in_request_order(self) -> tuple[Message, ...]:
+        """Return the turn's messages as a request sends them: the context, the prompt, then the transient context."""
+        return (*self.context, self.prompt, *self.transient)
+
 
 def scope_history_messages(
     runs: Sequence[AnyRunRecord],

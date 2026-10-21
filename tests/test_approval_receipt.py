@@ -1,23 +1,18 @@
-"""Focused tests for trusted approval-receipt rendering and model delivery."""
+"""Trusted approval-receipt rendering and its projection into a resumed run's first request."""
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock
-
 import pytest
-from agno.exceptions import ModelProviderError
-from agno.models.fallback import FallbackConfig, acall_model_with_fallback
-from agno.models.message import Message
-from agno.models.response import ModelResponse
 
+from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
+from mindroom.agent_loop.run import run_agent
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.receipt import build_approval_receipt
+from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
-from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
-from mindroom.providers.google_gemini import MindRoomGoogleGemini
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from tests.history_helpers import RecordingModel
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities
+from tests.agent_loop.helpers import collect, context, spec
+from tests.fakes.scripted_model import ScriptedModel, answer
 
 
 def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
@@ -134,172 +129,116 @@ def test_approval_receipt_rejects_unsettled_calls() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_model_call_hook_appends_one_trusted_approval_receipt_after_tool_results() -> None:
-    """A resumed model must see approval provenance after its protocol-required tool result."""
-    model = RecordingModel(id="approval-receipt", provider="fake")
-    approval_receipt.install_approval_receipt_hooks(model, None)
+def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None:
+    """The projection extends the prompt a resumed model sees and leaves the run's own messages untouched."""
     messages = [
         Message(role="system", content="base rules"),
         Message(role="assistant", content="calling tool"),
         Message(role="tool", content="tool result"),
     ]
 
-    with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        await model.aresponse(messages=messages)
+    projected = messages_with_approval_receipt(messages, "trusted approval receipt")
 
-    assert [(message.role, message.content) for message in model.seen_messages] == [
+    assert [(message.role, message.content) for message in projected] == [
         ("system", "base rules\n\ntrusted approval receipt"),
         ("assistant", "calling tool"),
         ("tool", "tool result"),
     ]
-    assert model.seen_messages[0].provider_data == {"mindroom_approval_receipt": True}
-    assert [(message.role, message.content) for message in messages] == [
-        ("system", "base rules"),
-        ("assistant", "calling tool"),
-        ("tool", "tool result"),
-        ("assistant", "ok"),
+    assert projected[0].provider_data == {"mindroom_approval_receipt": True}
+    assert projected[0] is not messages[0]
+    assert messages[0].content == "base rules"
+    assert messages[0].provider_data is None
+
+
+def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_message() -> None:
+    """A run with no system message still delivers the receipt, first, without storing it."""
+    projected = messages_with_approval_receipt([Message(role="user", content="Do the task")], "Approved.")
+
+    assert [(message.role, message.content) for message in projected] == [
+        ("system", "Approved."),
+        ("user", "Do the task"),
     ]
+    assert projected[0].add_to_agent_memory is False
 
 
-@pytest.mark.asyncio
-async def test_openai_previous_response_chain_keeps_receipt_provider_visible() -> None:
-    """Stateful Responses requests must include the receipt after their chain boundary."""
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
-    seen_requests: list[tuple[dict[str, object], list[object]]] = []
-
-    async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
-        seen_requests.append(
-            (
-                model.get_request_params(messages=messages),
-                model._format_messages(messages),
-            ),
-        )
-        return ModelResponse(content="ok")
-
-    vars(model)["aresponse"] = record_request
-    approval_receipt.install_approval_receipt_hooks(model, None)
-    messages = [
-        Message(role="system", content="base rules"),
-        Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "call_abcdefghijklmnopqrstuvwx",
-                    "type": "function",
-                    "function": {"name": "publish_report", "arguments": "{}"},
-                },
-            ],
-            provider_data={"response_id": "resp_previous"},
-        ),
-        Message(
-            role="tool",
-            content="published",
-            tool_call_id="call_abcdefghijklmnopqrstuvwx",
-        ),
-    ]
-
-    with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        await model.aresponse(messages=messages)
-
-    request_params, formatted_messages = seen_requests[0]
-    assert request_params["previous_response_id"] == "resp_previous"
-    assert formatted_messages[0] == {"role": "developer", "content": "trusted approval receipt"}
-    assert formatted_messages[1]["type"] == "function_call_output"
-    assert formatted_messages[1]["output"] == "published"
-
-
-@pytest.mark.asyncio
-async def test_gemini_fallback_preserves_system_prompt_from_openai_history() -> None:
-    """OpenAI response metadata must not replace Gemini's original system rules."""
-    primary = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")
-    fallback = MindRoomGoogleGemini(id="gemini-3.8-flash", api_key="test-key")
-    seen_system_message: list[object] = []
-
-    async def record_request(*, messages: list[Message], **_kwargs: object) -> ModelResponse:
-        _formatted_messages, system_message = fallback._format_messages(messages)
-        seen_system_message.append(system_message)
-        return ModelResponse(content="ok")
-
-    vars(primary)["aresponse"] = AsyncMock(side_effect=ModelProviderError("primary failed"))
-    vars(fallback)["aresponse"] = record_request
-    fallback_config = FallbackConfig(on_error=[fallback])
-    approval_receipt.install_approval_receipt_hooks(primary, fallback_config)
+def test_a_stored_response_chain_keeps_the_receipt_provider_visible() -> None:
+    """Routes that continue stored responses see only what follows the chain, so the receipt goes after it."""
     messages = [
         Message(role="system", content="base rules"),
         Message(role="assistant", content="calling tool", provider_data={"response_id": "resp_previous"}),
-        Message(role="tool", content="published", tool_call_id="call-1", tool_name="publish_report"),
+        Message(role="tool", content="published", tool_call_id="call-1"),
     ]
 
-    with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        response = await acall_model_with_fallback(primary, fallback_config, messages=messages)
+    projected = messages_with_approval_receipt(messages, "trusted approval receipt", after_response_id=True)
 
-    assert response.content == "ok"
-    assert seen_system_message == ["base rules\n\ntrusted approval receipt"]
-
-
-@pytest.mark.asyncio
-async def test_approval_receipt_reaches_fallback_model_after_primary_failure() -> None:
-    """A resumed fallback call must receive the same trusted approval provenance."""
-    primary = RecordingModel(id="primary", provider="fake")
-    fallback = RecordingModel(id="fallback", provider="fake")
-    vars(primary)["aresponse"] = AsyncMock(side_effect=ModelProviderError("primary failed"))
-    fallback_config = FallbackConfig(on_error=[fallback])
-    approval_receipt.install_approval_receipt_hooks(primary, fallback_config)
-    messages = [Message(role="system", content="base rules")]
-
-    with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        response = await acall_model_with_fallback(
-            primary,
-            fallback_config,
-            messages=messages,
-        )
-
-    assert response.content == "ok"
-    assert fallback.seen_messages[0].content == "base rules\n\ntrusted approval receipt"
-    # Agno keeps the fallback reply in history; the receipt itself must not land there.
-    assert [(message.role, message.content) for message in messages] == [
+    assert [(message.role, message.content) for message in projected] == [
         ("system", "base rules"),
-        ("assistant", "ok"),
+        ("assistant", "calling tool"),
+        ("system", "trusted approval receipt"),
+        ("tool", "published"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_approval_receipt_reaches_each_concurrent_model_once() -> None:
-    """Every model participating in one resumed team run must receive the trusted receipt."""
-    first = RecordingModel(id="first-member", provider="fake")
-    second = RecordingModel(id="second-member", provider="fake")
-    approval_receipt.install_approval_receipt_hooks(first, None)
-    approval_receipt.install_approval_receipt_hooks(second, None)
+async def test_the_hook_projects_the_receipt_into_the_first_request_only() -> None:
+    """A resumed run's first request carries the bound receipt; later requests and the stored run never do."""
+    model = ScriptedModel([answer("first"), answer("second")])
+    hook = approval_receipt_hook(Capabilities())
 
     with approval_receipt.approval_receipt_context("trusted approval receipt"):
-        await asyncio.gather(
-            first.aresponse(messages=[Message(role="system", content="first rules")]),
-            second.aresponse(messages=[Message(role="system", content="second rules")]),
+        _, first = await collect(
+            run_agent(
+                spec(model),
+                [Message(role="user", content="Go")],
+                ctx=context(),
+                hooks=LoopHooks(before_request=(hook,)),
+            ),
+        )
+        _, second = await collect(
+            run_agent(
+                spec(model),
+                [Message(role="user", content="Again")],
+                ctx=context(run_id="run-2"),
+                hooks=LoopHooks(before_request=(hook,)),
+            ),
         )
 
-    assert first.seen_messages[0].content == "first rules\n\ntrusted approval receipt"
-    assert second.seen_messages[0].content == "second rules\n\ntrusted approval receipt"
+    assert model.requests[0].messages[0].content == "You are Code.\n\ntrusted approval receipt"
+    assert model.requests[1].messages[0].content == "You are Code."
+    assert all(
+        "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
+    )
 
 
-def test_publishing_keeps_a_legacy_summary_strip_made_on_the_outbound_copy() -> None:
-    """A mid-turn compaction that strips Agno's old summary block from the projected copy also strips the caller's."""
-    legacy_system = Message(
-        role="system",
-        content=(
-            "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
-            "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
-            "Current date: Monday"
+@pytest.mark.asyncio
+async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> None:
+    """Outside an approval continuation, the hook is a no-op."""
+    hook = approval_receipt_hook(Capabilities())
+    model = ScriptedModel([answer("ok")])
+
+    _, record = await collect(
+        run_agent(
+            spec(model),
+            [Message(role="user", content="Go")],
+            ctx=context(),
+            hooks=LoopHooks(before_request=(hook,)),
         ),
     )
-    caller = [legacy_system, Message(role="user", content="Do the task")]
-    with approval_receipt.approval_receipt_context("Approved."):
-        projection = approval_receipt._messages_with_approval_receipt(caller, model_id=1)
-    assert projection is not None
-    strip_embedded_summary(projection.receipt_message)
 
-    projection.publish_model_mutations()
+    assert record.content == "ok"
+    assert model.requests[0].messages[0].content == "You are Code."
+    assert isinstance(await hook(_state_stub()), SendRequest)
 
-    assert caller[0] is legacy_system
-    assert "summary_of_previous_interactions" not in str(legacy_system.content)
-    assert str(legacy_system.content).startswith("Be precise.")
+
+def _state_stub() -> object:
+    from mindroom.agent_loop.model_loop import LoopState  # noqa: PLC0415 - test-only state shape
+    from mindroom.llm.runs import RunRecord  # noqa: PLC0415
+
+    return LoopState(
+        messages=[Message(role="system", content="rules")],
+        tools=(),
+        run=context(),
+        record=RunRecord(run_id="run-1"),
+        request_index=0,
+        loop_start_ids=frozenset(),
+    )

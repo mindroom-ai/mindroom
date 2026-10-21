@@ -39,15 +39,10 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from tests.conftest import (
-    FakeModel,
-    bind_runtime_paths,
-    make_turn_context,
-    make_visible_message,
-    seed_session,
-)
+from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message, seed_session
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
+    FakeModel,
     RecordingModel,
     _agent,
     _completed_run,

@@ -27,10 +27,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
-from agno.models.response import ToolExecution
-from agno.run.base import RunStatus
-from agno.run.requirement import RunRequirement
-
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime, response_cli_lifetime
 from mindroom.ai_turn_state import AITurnState
@@ -46,6 +42,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
+from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
@@ -57,16 +54,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
-    from agno.run.agent import RunOutput, RunPausedEvent
-    from agno.run.team import RunPausedEvent as TeamRunPausedEvent
-    from agno.run.team import TeamRunOutput
-
     from mindroom.agent_modes import AgentMode
     from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.participation import ParticipationGate
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.tool_system.events import ToolTraceEntry
@@ -98,7 +92,7 @@ __all__ = [
     "apply_exact_approval_decisions",
     "apply_local_approval_decisions",
     "build_matrix_run_metadata",
-    "paused_attempt_from_event",
+    "paused_attempt_from_pause",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
@@ -114,16 +108,6 @@ class CompletedApprovalRun:
     metadata_content: dict[str, Any]
 
 
-def _has_unsupported_approval_requirement(requirement: RunRequirement) -> bool:
-    """Return whether MindRoom cannot safely resolve this paused requirement."""
-    return (
-        requirement.needs_user_input
-        or requirement.needs_user_feedback
-        or requirement.needs_external_execution
-        or (not requirement.is_resolved() and not requirement.needs_confirmation)
-    )
-
-
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
     *,
@@ -131,14 +115,11 @@ def apply_exact_approval_decisions(
     denial_reasons: Mapping[str, str | None],
 ) -> list[RunRequirement]:
     """Apply decisions only when they exactly identify one persisted call each."""
-    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
-        msg = "Paused run contains an unsupported non-confirmation requirement"
-        raise RuntimeError(msg)
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
     call_ids: list[str] = []
     for requirement in pending:
         tool = requirement.tool_execution
-        if tool is None or not tool.tool_call_id:
+        if not tool.tool_call_id:
             msg = "Paused tools no longer match the approval continuation"
             raise RuntimeError(msg)
         call_ids.append(tool.tool_call_id)
@@ -419,7 +400,7 @@ class PausedAnswer:
 
 @dataclass(frozen=True)
 class PausedAttempt:
-    """One Agno run durably paused before approval-gated tool execution."""
+    """One run durably paused before approval-gated tool execution."""
 
     session_id: str
     run_id: str
@@ -439,7 +420,7 @@ class PausedAttempt:
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
-    """Leave the live response turn while its persisted Agno run awaits approval."""
+    """Leave the live response turn while its persisted run awaits approval."""
 
     def __init__(self, paused: PausedAttempt) -> None:
         super().__init__(f"Run {paused.run_id} is waiting for tool approval")
@@ -461,35 +442,35 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
 
 
 def apply_local_approval_decisions(
-    response: RunOutput | TeamRunOutput,
+    record: AnyRunRecord,
     *,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
 ) -> list[RunRequirement]:
     """Apply this actor's approvals; projected child calls belong to the child executor."""
-    delegation = DelegationState.from_metadata(response.metadata)
+    delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_child_id is not None:
         return []
     return apply_exact_approval_decisions(
         [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
         if delegation.pending_requirements
-        else deepcopy(response.requirements or []),
+        else deepcopy(record.requirements or []),
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
 
 
 def paused_attempt_from_response(
-    response: RunOutput | TeamRunOutput,
+    record: AnyRunRecord,
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
     toolkit_owners: dict[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
-    """Extract confirmation requirements from one persisted paused Agno run."""
-    if response.status != RunStatus.paused:
+    """Extract confirmation requirements from one paused run record."""
+    if record.status is not RunStatus.paused:
         return None
-    delegation = DelegationState.from_metadata(response.metadata)
+    delegation = DelegationState.from_metadata(record.metadata)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
             toolkit_owners = {
@@ -497,12 +478,12 @@ def paused_attempt_from_response(
                 for tool in delegation.pending_tools
                 if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
             }
-        paused = _paused_attempt(
+        paused = paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
             tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
-            session_id=response.session_id or fallback_session_id,
-            run_id=response.run_id or fallback_run_id,
+            session_id=record.session_id or fallback_session_id,
+            run_id=record.run_id or fallback_run_id,
         )
         return (
             replace(
@@ -513,33 +494,16 @@ def paused_attempt_from_response(
             if paused is not None
             else None
         )
-    return _paused_attempt(
+    return paused_attempt_from_pause(
         toolkit_owners=toolkit_owners,
-        tools=response.tools or (),
-        requirements=response.requirements or (),
-        session_id=response.session_id or fallback_session_id,
-        run_id=response.run_id or fallback_run_id,
+        tools=record.tools or (),
+        requirements=record.requirements or (),
+        session_id=record.session_id or fallback_session_id,
+        run_id=record.run_id or fallback_run_id,
     )
 
 
-def paused_attempt_from_event(
-    event: RunPausedEvent | TeamRunPausedEvent,
-    *,
-    fallback_session_id: str | None,
-    fallback_run_id: str | None,
-    toolkit_owners: dict[tuple[str, str], str | None],
-) -> PausedAttempt | None:
-    """Extract confirmation requirements from one streamed Agno pause event."""
-    return _paused_attempt(
-        toolkit_owners=toolkit_owners,
-        tools=event.tools or (),
-        requirements=event.requirements or (),
-        session_id=event.session_id or fallback_session_id,
-        run_id=event.run_id or fallback_run_id,
-    )
-
-
-def _paused_attempt(
+def paused_attempt_from_pause(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
@@ -547,24 +511,14 @@ def _paused_attempt(
     session_id: str | None,
     run_id: str | None,
 ) -> PausedAttempt | None:
-    """Build one restartable pause from Agno's common pause fields."""
-    if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
-        msg = "Paused run contains an unsupported non-confirmation requirement"
-        raise RuntimeError(msg)
+    """Build one restartable pause from a run's paused tools and confirmation requirements."""
     pending_requirement_candidates = tuple(
         requirement for requirement in requirements if requirement.needs_confirmation
     )
-    if any(
-        requirement.tool_execution is None or not requirement.tool_execution.tool_call_id
-        for requirement in pending_requirement_candidates
-    ):
+    if any(not requirement.tool_execution.tool_call_id for requirement in pending_requirement_candidates):
         msg = "Paused approval requirement is missing its exact tool-call ID"
         raise RuntimeError(msg)
-    requirement_call_ids = [
-        requirement.tool_execution.tool_call_id
-        for requirement in pending_requirement_candidates
-        if requirement.tool_execution is not None
-    ]
+    requirement_call_ids = [requirement.tool_execution.tool_call_id for requirement in pending_requirement_candidates]
     if len(requirement_call_ids) != len(set(requirement_call_ids)):
         msg = "Paused approval requirements contain duplicate tool-call IDs"
         raise RuntimeError(msg)
@@ -581,7 +535,7 @@ def _paused_attempt(
     known_call_ids = {tool.tool_call_id for tool in pending_tools}
     for requirement in pending_requirements:
         tool = requirement.tool_execution
-        if tool is not None and tool.tool_call_id not in known_call_ids:
+        if tool.tool_call_id not in known_call_ids:
             pending_tools.append(tool)
             known_call_ids.add(tool.tool_call_id)
     if not pending_tools or session_id is None or run_id is None:
@@ -664,8 +618,9 @@ class BlockingTurnAdapter:
     ]
     snapshot_partial: Callable[[], TurnPartialSnapshot]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
-    close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
+    # Set by an entity whose runtime holds database handles the turn must close once it ends.
+    close_runtime_dbs: Callable[[ScopeSessionContext | None], None] | None = None
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
@@ -683,13 +638,19 @@ class StreamingTurnAdapter[ChunkT]:
     ]
     snapshot_partial: Callable[[], TurnPartialSnapshot]
     release_attempt_entity: Callable[[ScopeSessionContext | None], None]
-    close_runtime_dbs: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
+    close_runtime_dbs: Callable[[ScopeSessionContext | None], None] | None = None
     on_scope_opened: Callable[[ScopeSessionContext | None], None] | None = None
     finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
     unexpected_error_text: Callable[[Exception], str] | None = None
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None] | None = None
+
+
+def _close_runtime_dbs(adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any], run: TurnRunState) -> None:
+    """Close the entity's runtime database handles once the turn ends, when it holds any."""
+    if adapter.close_runtime_dbs is not None:
+        adapter.close_runtime_dbs(run.scope_context)
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -1045,7 +1006,7 @@ async def run_blocking_response_turn(
         logger.exception("Response turn failed", entity=ctx.entity_label)
         return adapter.unexpected_error_text(e)
     finally:
-        adapter.close_runtime_dbs(run.scope_context)
+        _close_runtime_dbs(adapter, run)
 
 
 def skip_unapproved_attempt(
@@ -1458,4 +1419,4 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
         yield adapter.make_text_chunk(adapter.unexpected_error_text(e))
         return
     finally:
-        adapter.close_runtime_dbs(run.scope_context)
+        _close_runtime_dbs(adapter, run)

@@ -22,7 +22,6 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
-from mindroom.approval.receipt import install_approval_receipt_hooks
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import (
     approval_denial_context,
@@ -328,8 +327,6 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
     )
-    if agent.model is not None:
-        install_approval_receipt_hooks(agent.model, agent.fallback_config)
     session = await agent.aget_session(session_id=child.session_id, user_id=identity.requester_id)
     restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession | None", session))
     requirements = apply_local_approval_decisions(

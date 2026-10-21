@@ -11,8 +11,6 @@ from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
-from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-
 from mindroom import interactive
 from mindroom.constants import (
     STREAM_STATUS_CANCELLED,
@@ -26,6 +24,7 @@ from mindroom.constants import (
 )
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
@@ -140,9 +139,7 @@ RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
-StreamInputChunk = (
-    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
-)
+StreamInputChunk = str | StructuredStreamChunk | ContentDelta | RunFinished | ToolStarted | ToolCompleted
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
 
@@ -1729,17 +1726,17 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 streaming.apply_tool_trace_snapshot(chunk.tool_trace)
             if chunk.presentation_state is not None:
                 streaming.presentation_state = deepcopy(chunk.presentation_state)
-        elif isinstance(chunk, RunContentEvent):
-            if chunk.content:
-                text_chunk = str(chunk.content)
+        elif isinstance(chunk, ContentDelta):
+            if chunk.text:
+                text_chunk = chunk.text
             else:
                 _queue_delivery_request(delivery_queue, progress_hint=True)
                 continue
-        elif isinstance(chunk, RunCompletedEvent):
-            if chunk.content is not None:
-                streaming.canonical_final_body_candidate = str(chunk.content)
+        elif isinstance(chunk, RunFinished):
+            if isinstance(chunk.record.content, str):
+                streaming.canonical_final_body_candidate = chunk.record.content
             continue
-        elif isinstance(chunk, ToolCallStartedEvent):
+        elif isinstance(chunk, ToolStarted):
             if not streaming.show_tool_calls:
                 await _flush_phase_boundary_if_needed(streaming, delivery_queue)
                 if chunk.tool is not None:
@@ -1778,7 +1775,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 ),
             )
             continue
-        elif isinstance(chunk, ToolCallCompletedEvent):
+        elif isinstance(chunk, ToolCompleted):
             completion = tool_tracker.complete(chunk.tool)
             if completion is not None:
                 tool_name, result, pending_tool, completed_trace = completion

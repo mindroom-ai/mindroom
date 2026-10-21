@@ -6,12 +6,11 @@ from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 from agno.db.base import SessionType
-from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
 
@@ -33,6 +32,7 @@ from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, Resp
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope, PreparedHistoryState
@@ -42,6 +42,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
@@ -170,15 +171,18 @@ def _config_with_team_matrix_message() -> Config:
 
 
 def _prepared_prompt_result(
-    agent: object,
+    build: object,
     *,
     prompt: str = "test prompt",
     prepared_context_tokens: int | None = None,
     runtime_model_name: str = "default",
 ) -> _PreparedAgentRun:
     return _PreparedAgentRun(
-        agent=agent,
-        messages=(Message(role="user", content=prompt),),
+        build=cast("Any", build),
+        spec=cast("Any", build).spec,
+        turn=TurnMessages(prompt=OwnedMessage(role="user", content=prompt)),
+        history=(),
+        summary=None,
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(
             prepared_context_tokens=prepared_context_tokens,

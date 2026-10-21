@@ -14,14 +14,11 @@ New runs also send their unstored turn context after the prompt.
 from __future__ import annotations
 
 import threading
-import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.agent import _messages as agent_messages
 from agno.models.message import Message
-from agno.run.base import RunContext
 from agno.run.messages import RunMessages
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
@@ -151,50 +148,6 @@ def _strip_history_inline_media(run_messages: RunMessages) -> RunMessages:
     return run_messages
 
 
-@dataclass
-class _BuiltRequests:
-    target: weakref.ref[object]
-    # Sessions by run id, oldest first; parallel delegations can run one member several times at once.
-    sessions: dict[str, AgentSession | TeamSession] = field(default_factory=dict)
-    # Continuation builders get no run id, so the first request after one claims its session, replacing the
-    # session its run's earlier loop was built from.
-    unclaimed: AgentSession | TeamSession | None = None
-
-
-_BUILT_REQUESTS: dict[int, _BuiltRequests] = {}
-_RUNS_KEPT_PER_TARGET = 32
-
-
-def built_request_session(target: Agent | Team, run_id: str) -> AgentSession | TeamSession | None:
-    """Return the session Agno built the target's requests of ``run_id`` from, which it writes when the run ends.
-
-    None means the target's own builders never built this run, such as a skill review reusing the target's model.
-    """
-    built = _BUILT_REQUESTS.get(id(target))
-    if built is None or built.target() is not target:
-        return None
-    if built.unclaimed is not None:
-        built.sessions.pop(run_id, None)
-        built.sessions[run_id], built.unclaimed = built.unclaimed, None
-    return built.sessions.get(run_id)
-
-
-def _record_request_session(target: object, run_id: str | None, session: AgentSession | TeamSession) -> None:
-    # Agno's Agent and Team dataclasses are unhashable, so key by identity and drop the entry with the target.
-    key = id(target)
-    built = _BUILT_REQUESTS.get(key)
-    if built is None or built.target() is not target:
-        built = _BuiltRequests(weakref.ref(target, lambda _ref: _BUILT_REQUESTS.pop(key, None)))
-        _BUILT_REQUESTS[key] = built
-    if run_id is None:
-        built.unclaimed = session
-        return
-    built.sessions.pop(run_id, None)
-    built.sessions[run_id] = session
-    while len(built.sessions) > _RUNS_KEPT_PER_TARGET:
-        built.sessions.pop(next(iter(built.sessions)))
-
-
 def _insert_session_summary(run_messages: RunMessages, session: AgentSession | TeamSession) -> None:
     """Place the scope's summary once, first in history.
 
@@ -240,8 +193,6 @@ def _prepare_history(
         _send_turn_context_after_prompt(run_messages.messages)
     session = kwargs.get("session")
     if isinstance(session, (AgentSession, TeamSession)):
-        run_context = kwargs.get("run_context")
-        _record_request_session(target, run_context.run_id if isinstance(run_context, RunContext) else None, session)
         replays_history = kwargs.get("add_history_to_context")
         if continuation and replays_history is None:
             replays_history = cast("Agent | Team", target).add_history_to_context

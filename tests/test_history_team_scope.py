@@ -38,11 +38,9 @@ from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_call_budget import install_model_call_cap
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import (
-    FakeModel,
-    bind_runtime_paths,
-)
+from tests.conftest import bind_runtime_paths
 from tests.history_helpers import (
+    FakeModel,
     _agent,
     _make_config,
     _runtime_paths,

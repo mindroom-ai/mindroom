@@ -12,13 +12,14 @@ import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from mindroom.llm.provider import TurnCompleted, UsageReported
 from mindroom.llm.request_context import current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["RequestLog", "logged_stream"]
+__all__ = ["RequestLog", "logged_stream", "model_params", "provider_model_params"]
 
 logger = get_logger(__name__)
 
@@ -59,7 +60,22 @@ class RequestLog:
     settings: object | None = None
 
 
-def _model_params(settings: object) -> dict[str, Any]:
+@runtime_checkable
+class _RouteSettings(Protocol):
+    """An adapter that carries its route's parsed ``extra_kwargs`` settings."""
+
+    @property
+    def settings(self) -> object: ...
+
+
+def provider_model_params(provider: ModelProvider) -> dict[str, Any]:
+    """Return the JSON-safe route settings of ``provider``'s adapter, as run metadata records them."""
+    adapter = bare_adapter(provider)
+    return model_params(adapter.settings) if isinstance(adapter, _RouteSettings) else {}
+
+
+def model_params(settings: object) -> dict[str, Any]:
+    """Return the JSON-safe, non-secret fields of a route's settings dataclass; anything else gives ``{}``."""
     if settings is None or isinstance(settings, type) or not is_dataclass(settings):
         return {}
     params: dict[str, Any] = {}
@@ -102,7 +118,7 @@ def _request_record(
         "message_count": len(messages),
         "tools": tools,
         "tool_count": len(tools),
-        "model_params": _model_params(log.settings),
+        "model_params": model_params(log.settings),
     }
 
 

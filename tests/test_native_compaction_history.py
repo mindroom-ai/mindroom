@@ -41,8 +41,9 @@ from mindroom.providers.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
-from tests.conftest import FakeModel, seed_session
+from tests.conftest import seed_session
 from tests.history_helpers import (
+    FakeModel,
     _agent,
     _completed_run,
     _completed_team_run,

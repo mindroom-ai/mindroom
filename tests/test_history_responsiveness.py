@@ -29,8 +29,9 @@ from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import FakeModel, seed_session
+from tests.conftest import seed_session
 from tests.history_helpers import (
+    FakeModel,
     RecordingCompactionLifecycle,
     _agent,
     _completed_run,

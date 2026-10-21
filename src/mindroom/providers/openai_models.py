@@ -25,7 +25,6 @@ from mindroom.native_compaction import (
     common_native_endpoint,
     native_replay_messages,
     record_native_checkpoint,
-    recorded_native_settings,
 )
 from mindroom.providers.agno_compat_openai_chat import OpenAIChatProviderCompat as AgnoOpenAIChatProviderCompat
 from mindroom.providers.agno_compat_openai_responses import OpenAIResponsesProviderCompat
@@ -266,36 +265,6 @@ class MindRoomOpenAIResponses(KeepHttpClient, NativeCompactionModel, OpenAIRespo
     cache_system_prompt: bool = True
     _store_before_native_compaction: bool | None = field(default=None, init=False, repr=False)
     _portable_replay: bool = field(default=False, init=False, repr=False)
-
-    def configure_portable_replay(self, *, enabled: bool = True) -> None:
-        """Replay the locally budgeted history without hidden server-side context."""
-        self._portable_replay = enabled
-
-    def restore_portable_replay(self, message: Message | None) -> None:
-        """Restore exact saved policy, using canonical provenance for legacy responses."""
-        data = (message.provider_data or {}) if message is not None else {}
-        saved = data.get("mindroom_portable_replay")
-        if isinstance(saved, bool):
-            self.configure_portable_replay(enabled=saved)
-            return
-        items = data.get("mindroom_response_output")
-        has_ordered_reasoning = (
-            isinstance(items, list)
-            and all(isinstance(item, dict) for item in items)
-            and any(
-                item.get("type") == "reasoning"
-                and isinstance(encrypted := item.get("encrypted_content"), str)
-                and bool(encrypted.strip())
-                for item in items
-            )
-        )
-        # Legacy records cannot always reveal the original budget. Preserve
-        # stored continuation unless canonical replay has its own provenance.
-        self.configure_portable_replay(
-            enabled=data.get("mindroom_response_stored") is False
-            or (message is not None and recorded_native_settings(message) is not None)
-            or has_ordered_reasoning,
-        )
 
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
         """Count the explicit Responses payload used by portable history planning."""
