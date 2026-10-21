@@ -33,6 +33,17 @@ def _google_adc_file_type(credentials_path: str) -> str | None:
     return credentials_type if isinstance(credentials_type, str) else None
 
 
+def load_ambient_google_credentials() -> tuple[GoogleCredentials, str | None]:
+    """Locate Application Default Credentials and the project they name, without minting a token.
+
+    Raises google-auth's ``DefaultCredentialsError`` when the host has none, as the SDK's own lookup does.
+    """
+    import google.auth  # noqa: PLC0415 - loaded on the first Vertex request, off the event loop
+
+    credentials, project_id = google.auth.default(scopes=[_GOOGLE_CLOUD_PLATFORM_SCOPE])
+    return cast("GoogleCredentials", credentials), project_id
+
+
 def load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
     if not Path(credentials_path).is_file():

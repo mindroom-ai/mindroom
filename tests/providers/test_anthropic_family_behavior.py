@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+import google.auth
 import httpx
 import pytest
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderUnavailable, RateLimited
-from mindroom.llm.media import Audio
+from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
@@ -47,6 +50,9 @@ _ROUTE_CONFIGS: dict[str, dict[str, Any]] = {
     },
 }
 _USAGE = {"input_tokens": 40, "output_tokens": 9, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+)
 
 
 class _Wire:
@@ -677,3 +683,151 @@ def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path:
     provider = _provider("anthropic", tmp_path, _Wire(_json_reply([])))
     results = [Message(role="tool", tool_call_id="a", content="1"), Message(role="tool", tool_call_id="b", content="2")]
     assert provider.format_tool_results(_user(), results) == results
+
+
+@pytest.mark.asyncio
+async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
+    """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""
+    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    direct = _provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        extra_kwargs={
+            "default_headers": {"x-mindroom": "authored"},
+            "client_params": {
+                "api_key": "params-key",
+                "base_url": "https://gateway.example/anthropic",
+                "default_headers": {"x-mindroom": "params"},
+                "http_client": object(),  # never used: requests go through the adapter's shared client
+            },
+        },
+    )
+    await _turn(direct, ModelRequest(messages=_user()))
+    request = wire.requests[-1]
+    assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
+    assert request.headers["x-api-key"] == "params-key"
+    assert request.headers["x-mindroom"] == "authored"
+
+    vertex = _provider(
+        "vertexai_claude",
+        tmp_path,
+        wire,
+        extra_kwargs={
+            "client_params": {"base_url": "https://vertex.example/v1", "project_id": "params-project", "region": "eu"},
+        },
+    )
+    await _turn(vertex, ModelRequest(messages=_user()))
+    assert str(wire.requests[-1].url) == (
+        "https://vertex.example/v1/projects/params-project/locations/eu/publishers/anthropic/models/"
+        "claude-sonnet-5-5:streamRawPredict"
+    )
+
+    bedrock = _provider(
+        "bedrock_claude",
+        tmp_path,
+        wire,
+        extra_kwargs={"client_params": {"aws_region": "eu-central-1"}},
+    )
+    await _turn(bedrock, ModelRequest(messages=_user()))
+    assert wire.requests[-1].url.host == "bedrock-mantle.eu-central-1.api.aws"
+
+
+@pytest.mark.asyncio
+async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without configured credentials, ADC discovery runs once; every request reuses them and their project."""
+    discoveries = 0
+
+    def default(scopes: list[str]) -> tuple[Credentials, str]:
+        nonlocal discoveries
+        discoveries += 1
+        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+        return Credentials(token="ambient-token"), "adc-project"  # noqa: S106 - synthetic SDK credential
+
+    monkeypatch.setattr(google.auth, "default", default)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    with isolated_provider_environment():
+        built = build_provider(
+            ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs={"region": "us-east5"}),
+            runtime_paths,
+        )
+    assert built.google_credentials.credentials is None, "discovery waits for the first request"
+    provider = replace(built, http_client=wire.client)
+    await _turn(provider, ModelRequest(messages=_user()))
+    await _turn(provider, ModelRequest(messages=_user()))
+    assert discoveries == 1
+    assert [request.headers["authorization"] for request in wire.requests] == ["Bearer ambient-token"] * 2
+    assert all(request.url.path.startswith("/v1/projects/adc-project/locations/us-east5/") for request in wire.requests)
+
+
+@pytest.mark.asyncio
+async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) -> None:
+    """URL images and non-PDF URL documents are fetched and sent inline; Claude reads a PDF from its URL itself."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "media.example":
+            return _sse_reply([{"type": "text", "text": "Seen."}])
+        if request.url.path == "/photo":
+            return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
+        if request.url.path == "/pic.png":
+            return httpx.Response(200, content=_PNG, headers={"content-type": "application/octet-stream"})
+        return httpx.Response(200, content=b"# Notes\n", headers={"content-type": "text/markdown; charset=utf-8"})
+
+    wire = _Wire(respond)
+    provider = _provider("anthropic", tmp_path, wire)
+    message = Message(
+        role="user",
+        content="Look.",
+        images=[Image(url="https://media.example/photo"), Image(url="https://media.example/pic.png")],
+        files=[
+            File(url="https://media.example/notes", mime_type="text/markdown"),
+            File(url="https://media.example/report.pdf", mime_type="application/pdf"),
+        ],
+    )
+    await _turn(provider, ModelRequest(messages=[message]))
+    blocks = wire.body()["messages"][0]["content"]
+    assert [block["type"] for block in blocks] == ["text", "image", "image", "document", "document"]
+    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
+    assert blocks[1]["source"] == png
+    assert blocks[2]["source"] == png
+    assert blocks[3]["source"] == {"type": "text", "media_type": "text/plain", "data": "# Notes\n"}
+    assert blocks[4]["source"] == {"type": "url", "url": "https://media.example/report.pdf"}
+    assert [str(request.url) for request in wire.requests[:-1]] == [
+        "https://media.example/photo",
+        "https://media.example/pic.png",
+        "https://media.example/notes",
+    ]
+    assert message.images is not None
+    assert all(image.url is not None for image in message.images), "the request's inlined copies leave the input alone"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_path: Path) -> None:
+    """An expired or unreachable URL drops its media with a warning; the rest of the message is still sent."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "media.example":
+            return _sse_reply([{"type": "text", "text": "Ok."}])
+        if request.url.path == "/gone":
+            return httpx.Response(404)
+        msg = "connection refused"
+        raise httpx.ConnectError(msg, request=request)
+
+    wire = _Wire(respond)
+    provider = _provider("anthropic", tmp_path, wire)
+    message = Message(
+        role="user",
+        content="Look.",
+        images=[Image(url="https://media.example/gone")],
+        files=[File(url="https://media.example/down", mime_type="text/plain")],
+    )
+    completed = await _turn(provider, ModelRequest(messages=[message]))
+    assert completed.message.content == "Ok."
+    blocks = wire.body()["messages"][0]["content"]
+    assert [(block["type"], block["text"]) for block in blocks] == [("text", "Look.")]

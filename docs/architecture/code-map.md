@@ -214,7 +214,7 @@ Matrix sync callback
 | `providers/model_loading.py` | Model instantiation and provider-specific loader selection |
 | `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
-| `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, and parsing of the finished response into an assistant message |
+| `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
 | `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
 | `providers/anthropic/prompt_cache.py` | Composition of the Claude prompt-cache ladder, deferred tool search, and history repairs for one request body |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |

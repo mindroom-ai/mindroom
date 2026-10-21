@@ -10,10 +10,12 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
+import httpx
 from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock, Usage
 from anthropic.types.beta import (
     BetaMessage,
@@ -251,9 +253,88 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
     return None
 
 
+def _url_document_stays_remote(file: File) -> bool:
+    """Return whether Claude reads this URL document itself: a PDF, or a document of unknown type."""
+    return file.url is not None and file.mime_type in {None, "application/pdf"}
+
+
+async def _fetched(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str | None] | None:
+    """Return the bytes and media type behind ``url``, or None with a warning when it cannot be read."""
+    try:
+        response = await http_client.get(url)
+        response.raise_for_status()
+    except (httpx.HTTPError, httpx.InvalidURL) as error:
+        logger.warning("claude_url_media_dropped", url=url, error=str(error))
+        return None
+    media_type = response.headers.get("content-type", "").partition(";")[0].strip()
+    return response.content, media_type or None
+
+
+async def _inlined_images(images: Sequence[Image] | None, http_client: httpx.AsyncClient) -> list[Image]:
+    """Return the images with every URL-backed one fetched into ``content``, minus those that failed."""
+    inlined: list[Image] = []
+    for image in images or ():
+        if image.url is None:
+            inlined.append(image)
+            continue
+        fetched = await _fetched(image.url, http_client)
+        if fetched is None:
+            continue
+        data, media_type = fetched
+        url_format = Path(urlparse(image.url).path).suffix[1:].lower() or None
+        inlined.append(
+            replace(
+                image,
+                url=None,
+                content=data,
+                mime_type=image.mime_type or media_type,
+                format=image.format or url_format,
+            ),
+        )
+    return inlined
+
+
+async def _inlined_files(files: Sequence[File] | None, http_client: httpx.AsyncClient) -> list[File]:
+    """Return the documents with every URL Claude would not read itself fetched into ``content``."""
+    inlined: list[File] = []
+    for file in files or ():
+        if file.url is None or _url_document_stays_remote(file):
+            inlined.append(file)
+            continue
+        fetched = await _fetched(file.url, http_client)
+        if fetched is not None:
+            inlined.append(replace(file, url=None, content=fetched[0]))
+    return inlined
+
+
+async def inline_url_media(messages: Sequence[Message], http_client: httpx.AsyncClient) -> Sequence[Message]:
+    """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
+
+    A URL that cannot be read drops its media with a warning instead of failing the request, because the
+    message replays on every later request and an expired or private URL would fail them all. The input is
+    returned unchanged when no message carries such media.
+    """
+    inlined: list[Message] | None = None
+    for index, message in enumerate(messages):
+        if message.role != "user" or not _has_remote_media(message):
+            continue
+        if inlined is None:
+            inlined = list(messages)
+        inlined[index] = replace(
+            message,
+            images=await _inlined_images(message.images, http_client),
+            files=await _inlined_files(message.files, http_client),
+        )
+    return messages if inlined is None else inlined
+
+
+def _has_remote_media(message: Message) -> bool:
+    return any(image.url is not None for image in message.images or ()) or any(
+        file.url is not None and not _url_document_stays_remote(file) for file in message.files or ()
+    )
+
+
 def _image_block(image: Image) -> dict[str, Any] | None:
-    if image.url is not None:
-        return {"type": "image", "source": {"type": "url", "url": image.url}}
     data = image.content
     if data is None and image.filepath is not None:
         path = Path(image.filepath)
@@ -273,6 +354,7 @@ def _image_block(image: Image) -> dict[str, Any] | None:
 
 def _document_block(file: File, *, enable_citations: bool) -> dict[str, Any] | None:
     if file.url is not None:
+        # Only a document ``inline_url_media`` left remote reaches here.
         source: dict[str, Any] = {"type": "url", "url": file.url}
     else:
         if file.filepath is not None:
@@ -574,6 +656,7 @@ __all__ = [
     "build_system_blocks",
     "format_claude_messages",
     "format_claude_tools",
+    "inline_url_media",
     "parse_claude_usage",
     "serialize_content_blocks",
     "stop_reason_of",

@@ -1,9 +1,10 @@
 """The Claude adapter over the Anthropic Messages API, on the direct API, Vertex AI, and Bedrock Mantle.
 
 One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
-builds its SDK client and wire body off the event loop (Bedrock credential resolution and attachment encoding
-block), streams the reply through the SDK's message stream, and parses the finished message once. Structured
-output requests, which no caller streams, are sent without streaming as before.
+fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
+resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
+finished message once. Structured output requests, which no caller streams, are sent without streaming as
+before. The only state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import anthropic
@@ -74,6 +75,7 @@ from mindroom.providers.anthropic.wire import (
     build_system_blocks,
     format_claude_messages,
     format_claude_tools,
+    inline_url_media,
     parse_claude_usage,
     stop_reason_of,
     supports_prefill,
@@ -81,7 +83,7 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.claude_prompt_cache import native_tool_search_supported
-from mindroom.providers.google_adc import load_google_application_credentials
+from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
@@ -92,6 +94,7 @@ if TYPE_CHECKING:
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types.beta import BetaMessage
+    from google.auth.credentials import Credentials as GoogleCredentials
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
@@ -159,6 +162,24 @@ class _PreparedRequest:
     checkpoint_prefix: bool
 
 
+@dataclass(slots=True)
+class _AmbientGoogleCredentials:
+    """Application Default Credentials a Vertex adapter discovers on first use and shares across its clients.
+
+    The SDK refreshes the shared credentials' token only when it expires, so discovery and token minting
+    happen once per adapter instead of on every request of a tool loop.
+    """
+
+    credentials: GoogleCredentials | None = None
+    project_id: str | None = None
+
+    def load(self) -> tuple[GoogleCredentials, str | None]:
+        """Return the discovered credentials and the project they name, discovering them on the first call."""
+        if self.credentials is None:
+            self.credentials, self.project_id = load_ambient_google_credentials()
+        return self.credentials, self.project_id
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ClaudeProvider:
     """A Claude model behind one of the Anthropic Messages routes."""
@@ -168,6 +189,7 @@ class ClaudeProvider:
     route: ClaudeRouteKind
     settings: ClaudeSettings
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
+    google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
         """Append each result as its own tool message; the wire formatter merges them into one user turn."""
@@ -214,6 +236,9 @@ class ClaudeProvider:
         as every caller drains it whole.
         """
         started = time.monotonic()
+        messages = await inline_url_media(request.messages, self.http_client)
+        if messages is not request.messages:
+            request = replace(request, messages=messages)
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
@@ -402,31 +427,59 @@ class ClaudeProvider:
         )
 
     def _client(self, timeout_seconds: float | None, max_retries: int | None) -> _AsyncClaudeClient:
-        """Build this request's SDK client over the shared HTTP client, resolving route credentials."""
+        """Build this request's SDK client over the shared HTTP client.
+
+        The route's own credentials and endpoint come first and ``client_params`` may override any of them;
+        ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller's
+        per-request deadline and retry budget win over everything the model authored.
+        """
         settings = self.settings
-        common: dict[str, Any] = {"http_client": self.http_client}
+        kwargs = self._route_client_kwargs()
         if settings.timeout is not None:
-            common["timeout"] = settings.timeout
+            kwargs["timeout"] = settings.timeout
+        kwargs.update(settings.client_params or {})
         if settings.default_headers is not None:
-            common["default_headers"] = dict(settings.default_headers)
-        common.update(settings.client_params or {})
-        # A caller's per-request deadline and retry budget win over everything the model authored.
+            kwargs["default_headers"] = dict(settings.default_headers)
+        kwargs["http_client"] = self.http_client
         if timeout_seconds is not None:
-            common["timeout"] = timeout_seconds
+            kwargs["timeout"] = timeout_seconds
         if max_retries is not None:
-            common["max_retries"] = max_retries
+            kwargs["max_retries"] = max_retries
         if self.route == "anthropic":
-            return AsyncAnthropic(api_key=settings.api_key, auth_token=settings.auth_token, **common)
+            return AsyncAnthropic(**kwargs)
+        if self.route == "vertexai_claude":
+            return self._vertex_client(kwargs)
+        return _bedrock_client(kwargs)
+
+    def _route_client_kwargs(self) -> dict[str, Any]:
+        """Return the credentials and endpoint of this route, before ``client_params`` and the HTTP client."""
+        settings = self.settings
+        if self.route == "anthropic":
+            return {"api_key": settings.api_key, "auth_token": settings.auth_token}
         if self.route == "vertexai_claude":
             # Unset values stay unset so the SDK reads CLOUD_ML_REGION, ANTHROPIC_VERTEX_PROJECT_ID, and
             # ANTHROPIC_VERTEX_BASE_URL itself.
-            return AsyncAnthropicVertex(
-                region=NOT_GIVEN if settings.region is None else settings.region,
-                project_id=NOT_GIVEN if settings.project_id is None else settings.project_id,
-                base_url=settings.base_url,
-                **common,
-            )
-        return _bedrock_client(settings, common)
+            return {
+                "region": NOT_GIVEN if settings.region is None else settings.region,
+                "project_id": NOT_GIVEN if settings.project_id is None else settings.project_id,
+                "base_url": settings.base_url,
+            }
+        return _bedrock_credentials(settings)
+
+    def _vertex_client(self, kwargs: dict[str, Any]) -> AsyncAnthropicVertex:
+        """Build a Vertex client; without configured credentials it shares the adapter's ambient ones.
+
+        Handing the SDK the credentials keeps it from running Application Default Credentials discovery and
+        minting a token for every client; the project they name fills in when nothing else set one, as the
+        SDK's own lookup would.
+        """
+        if "credentials" in kwargs or "access_token" in kwargs:
+            return AsyncAnthropicVertex(**kwargs)
+        credentials, project_id = self.google_credentials.load()
+        client = AsyncAnthropicVertex(credentials=credentials, **kwargs)
+        if client.project_id is None:
+            client.project_id = project_id
+        return client
 
     def _raise_provider_error(self, error: Exception) -> NoReturn:
         """Translate an SDK or transport failure into the shared provider errors."""
@@ -479,33 +532,35 @@ def _raw_request_params(settings: ClaudeSettings, *, disable_thinking: bool) -> 
     return request_params
 
 
-def _bedrock_client(settings: ClaudeSettings, common: dict[str, Any]) -> AsyncAnthropicBedrockMantle:
-    """Build a Bedrock Mantle client; a boto3 session resolves rotating credentials for this request."""
+def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
+    """Return this request's AWS credentials; a boto3 session resolves rotating credentials every time."""
+    if settings.session is None:
+        return {
+            "aws_access_key": settings.aws_access_key,
+            "aws_secret_key": settings.aws_secret_key,
+            "aws_session_token": settings.aws_session_token,
+            "aws_region": settings.aws_region,
+        }
+    resolved = settings.session.get_credentials()
+    if resolved is None:
+        msg = (
+            "boto3 session has no credentials. Check your AWS configuration "
+            "(environment variables, config files, IAM role, etc.)."
+        )
+        raise ValueError(msg)
+    credentials = resolved.get_frozen_credentials()
+    return {
+        "aws_access_key": credentials.access_key,
+        "aws_secret_key": credentials.secret_key,
+        "aws_session_token": credentials.token,
+        "aws_region": settings.aws_region or settings.session.region_name,
+    }
+
+
+def _bedrock_client(kwargs: dict[str, Any]) -> AsyncAnthropicBedrockMantle:
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle  # noqa: PLC0415 - optional aws_bedrock extra
 
-    if settings.session is not None:
-        resolved = settings.session.get_credentials()
-        if resolved is None:
-            msg = (
-                "boto3 session has no credentials. Check your AWS configuration "
-                "(environment variables, config files, IAM role, etc.)."
-            )
-            raise ValueError(msg)
-        credentials = resolved.get_frozen_credentials()
-        return AsyncAnthropicBedrockMantle(
-            aws_access_key=credentials.access_key,
-            aws_secret_key=credentials.secret_key,
-            aws_session_token=credentials.token,
-            aws_region=settings.aws_region or settings.session.region_name,
-            **common,
-        )
-    return AsyncAnthropicBedrockMantle(
-        aws_access_key=settings.aws_access_key,
-        aws_secret_key=settings.aws_secret_key,
-        aws_session_token=settings.aws_session_token,
-        aws_region=settings.aws_region,
-        **common,
-    )
+    return AsyncAnthropicBedrockMantle(**kwargs)
 
 
 def claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> Capabilities:
