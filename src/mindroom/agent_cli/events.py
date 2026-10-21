@@ -6,9 +6,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING
 
-from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
+from mindroom.llm.runs import ToolExecution
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.events import AuditedToolExecution
 

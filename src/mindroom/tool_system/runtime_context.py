@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from agno.run.requirement import RunRequirement
     from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
@@ -50,6 +49,7 @@ if TYPE_CHECKING:
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
+    from mindroom.llm.runs import RunRequirement
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.relation_lookup import RelationLookup

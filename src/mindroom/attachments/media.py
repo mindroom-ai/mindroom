@@ -5,8 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from agno.media import Audio, File, Image, Video
-
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.logging_config import get_logger
 from mindroom.timing import emit_elapsed_timing
 
@@ -21,7 +20,7 @@ logger = get_logger(__name__)
 def attachment_records_to_media(
     attachment_records: list[AttachmentRecord],
 ) -> tuple[list[Audio], list[Image], list[File], list[Video]]:
-    """Convert attachment records into Agno media objects."""
+    """Convert attachment records into model media objects."""
     audio: list[Audio] = []
     images: list[Image] = []
     files: list[File] = []
@@ -47,22 +46,14 @@ def attachment_records_to_media(
                 ),
             )
         elif record.kind == "file":
-            try:
-                file_media = File(
+            files.append(
+                File(
                     id=record.attachment_id,
                     filepath=str(record.local_path),
                     mime_type=record.mime_type,
                     filename=record.filename,
-                )
-            except ValueError:
-                # Agno validates file MIME types against a strict allow-list.
-                # Fall back to filepath+filename so arbitrary attachments still work.
-                file_media = File(
-                    id=record.attachment_id,
-                    filepath=str(record.local_path),
-                    filename=record.filename,
-                )
-            files.append(file_media)
+                ),
+            )
         elif record.kind == "video":
             videos.append(
                 Video(

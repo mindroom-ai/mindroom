@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from agno.run.agent import RunCancelledEvent, RunContentEvent, RunErrorEvent, RunOutput, ToolCallStartedEvent
-from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -28,6 +27,7 @@ from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.error_handling import run_error_event_text
+from mindroom.llm.runs import RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context

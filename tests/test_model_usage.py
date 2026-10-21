@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
-from agno.metrics import MessageMetrics
-from agno.models.message import Message
-
+from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics
 from mindroom.model_usage import response_context_tokens
 
 

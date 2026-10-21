@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agno.metrics import RunMetrics
-from agno.run.base import RunStatus
-
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.llm.runs import RunStatus
+from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import context_input_tokens_from_counts
 
 if TYPE_CHECKING:

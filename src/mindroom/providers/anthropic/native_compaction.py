@@ -10,7 +10,7 @@ The shared selection and route rules live in :mod:`mindroom.native_compaction`.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.model_defaults import CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
 from mindroom.native_compaction import (
@@ -102,15 +102,9 @@ def _is_unsigned_thinking(block: dict[str, Any]) -> bool:
     return block.get("type") == "thinking" and not block.get("signature")
 
 
-# ``mindroom.native_compaction`` is annotated with Agno's message type until the cutover swaps its import; its
-# helpers read only ``role`` and ``provider_data``, which the owned message shares.
-def _checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]]:
-    return checkpoint_items(cast("Any", message), route)
-
-
 def request_uses_native_checkpoint(messages: Sequence[Message], route: str | None) -> bool:
     """Return whether the projected request replays a stored checkpoint of this route."""
-    return route is not None and any(_checkpoint_items(message, route) for message in messages)
+    return route is not None and any(checkpoint_items(message, route) for message in messages)
 
 
 def native_replay_messages_for_route(
@@ -126,7 +120,7 @@ def native_replay_messages_for_route(
     valid chain. Legacy manual thinking requires unchanged thinking inside a tool turn and predates prefix
     binding, so it keeps every block. Unsigned thinking never replays. The input messages are not mutated.
     """
-    prepared = cast("list[Message]", native_replay_messages(cast("Any", messages), route))
+    prepared = native_replay_messages(messages, route)
     thinking_route = route if request_uses_native_checkpoint(prepared, route) else None
     result: list[Message] = []
     stale_thinking = False
@@ -135,7 +129,7 @@ def native_replay_messages_for_route(
         if not data and not stale_thinking:
             result.append(message)
             continue
-        items = _checkpoint_items(message, route)
+        items = checkpoint_items(message, route)
         block_lists = {
             key: data[key] for key in ("content_blocks", "server_tool_blocks") if isinstance(data.get(key), list)
         }
@@ -147,7 +141,7 @@ def native_replay_messages_for_route(
             for block in blocks
         ):
             stale_thinking = True
-        elif (matches := native_replay_route_matches(cast("Any", message), thinking_route)) is not None:
+        elif (matches := native_replay_route_matches(message, thinking_route)) is not None:
             stale_thinking = not matches
         dropped_types = {"compaction"}
         drop_thinking = stale_thinking and not manual_thinking
@@ -189,8 +183,8 @@ def record_native_checkpoint_on(
         {**block, "content": block.get("content")} if block.get("type") == "compaction" else block
         for block in (message.provider_data or {}).get("content_blocks", [])
     ]
-    record_native_checkpoint(cast("Any", message), items, cast("Any", replay))
-    record_native_request_prefix(cast("Any", message), checkpoint_prefix=checkpoint_prefix)
+    record_native_checkpoint(message, items, replay)
+    record_native_request_prefix(message, checkpoint_prefix=checkpoint_prefix)
 
 
 __all__ = [

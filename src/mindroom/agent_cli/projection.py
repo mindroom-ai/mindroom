@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.media import File
-
 from mindroom.attachments.storage import register_local_attachment
+from mindroom.llm.media import File
 from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     finalize_tool_output_file,

@@ -3,8 +3,8 @@
 import json
 
 import pytest
-from agno.models.response import ToolExecution
 
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import (
     _MAX_TOOL_RESULT_DISPLAY_CHARS,

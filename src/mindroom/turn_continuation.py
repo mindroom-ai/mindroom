@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.response import ToolExecution
+    from mindroom.llm.runs import ToolExecution
 
 __all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools"]
 

@@ -10,18 +10,17 @@ from mindroom.tool_jobs.approvals import ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
 
 if TYPE_CHECKING:
-    from agno.run.agent import RunOutput
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.event_journal import ApprovalCall
+    from mindroom.llm.runs import RunRecord
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 async def request_child_approvals(
     child: DelegationChild,
-    response: RunOutput,
+    response: RunRecord,
     toolkit_owners: dict[tuple[str, str], str | None],
     *,
     owner: ToolExecutionIdentity,

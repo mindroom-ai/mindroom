@@ -18,7 +18,6 @@ from agno.run.agent import (
     ToolCallErrorEvent,
     ToolCallStartedEvent,
 )
-from agno.run.base import RunStatus
 
 from mindroom.delegation.records import (
     DelegationEvent,
@@ -28,16 +27,16 @@ from mindroom.delegation.records import (
     DelegationRecordOwner,
     DelegationTerminalStatus,
 )
+from mindroom.llm.runs import RunStatus
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
-    from agno.models.response import ToolExecution
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 

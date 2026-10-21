@@ -198,8 +198,7 @@ def responses_input(
     """
     prepared, explicit = _prepare_continuation(messages, explicit_replay=portable_replay)
     route = native_compaction.route if native_compaction is not None else None
-    # The shared replay helpers read the canonical message fields, which the owned Message keeps.
-    prepared = cast("list[Message]", native_replay_messages(cast("Any", repair_legacy_tool_replay(prepared)), route))
+    prepared = native_replay_messages(repair_legacy_tool_replay(prepared), route)
     replay_store = False if explicit else store
     formatted = _agno_input(prepared, store=replay_store)
     # Ordered output is restored only for the spans the request still sends.
@@ -423,7 +422,7 @@ def _record_completed_output(
     parts.provider_data[_STORED_KEY] = store is not False
     parts.provider_data[_PORTABLE_KEY] = portable_replay
     record = _ProviderDataRecord(provider_data=parts.provider_data)
-    record_native_checkpoint(cast("Any", record), items, cast("Any", native_compaction))
+    record_native_checkpoint(record, items, native_compaction)
     parts.provider_data = record.provider_data or {}
     if (store is False or portable_replay) and any(item.get("type") == "reasoning" for item in items):
         parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]

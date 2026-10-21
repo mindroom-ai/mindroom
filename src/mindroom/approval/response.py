@@ -42,12 +42,11 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from agno.models.response import ToolExecution
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import MatrixDelivery, PrincipalStore
+    from mindroom.llm.runs import ToolExecution
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_approval_grants import ApprovalOperation
     from mindroom.tool_system.events import ToolTraceEntry

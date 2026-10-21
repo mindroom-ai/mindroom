@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import cast
 
-from agno.run.requirement import RunRequirement
+from mindroom.llm.runs import RunRequirement
 
 
 @dataclass(frozen=True)

@@ -168,7 +168,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_cli.approval"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.agent_cli.delegation",
     "mindroom.agent_cli.turn",
@@ -255,6 +255,7 @@ path = "mindroom.agent_cli.events"
 depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
+    "mindroom.llm",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -327,6 +328,7 @@ depends_on = [
 path = "mindroom.agent_cli.projection"
 depends_on = [
     "mindroom.tool_system.output_files",
+    "mindroom.llm",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -832,6 +834,7 @@ path = "mindroom.ai_run_metadata"
 depends_on = [
     "mindroom.constants",
     "mindroom.model_usage",
+    "mindroom.llm",
 ]
 
 [[modules]]
@@ -849,7 +852,10 @@ visibility = [
 
 [[modules]]
 path = "mindroom.ai_turn_state"
-depends_on = ["mindroom.tool_system.events"]
+depends_on = [
+    "mindroom.tool_system.events",
+    "mindroom.llm",
+]
 visibility = ["mindroom.response_turn"]
 
 [[modules]]
@@ -2585,6 +2591,7 @@ depends_on = [
     "mindroom.attachments.storage",
     "mindroom.logging_config",
     "mindroom.timing",
+    "mindroom.llm",
 ]
 
 [[modules]]
@@ -2689,7 +2696,10 @@ visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindro
 
 [[modules]]
 path = "mindroom.native_compaction"
-depends_on = ["mindroom.logging_config"]
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.llm",
+]
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
@@ -5389,7 +5399,7 @@ depends_on = ["mindroom.egress_broker", "mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.events"
-depends_on = []
+depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.tool_system.approval_exemptions"
@@ -5663,6 +5673,7 @@ depends_on = [
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
     "mindroom.tool_system.events",
+    "mindroom.session_storage.types",
 ]
 
 [[modules]]
@@ -7720,6 +7731,7 @@ path = "mindroom.delegation.audit"
 depends_on = [
     "mindroom.delegation.records",
     "mindroom.tool_system.worker_routing",
+    "mindroom.llm",
 ]
 
 [[modules]]
@@ -7971,6 +7983,7 @@ depends_on = [
     "mindroom.tool_system.progress",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.llm",
 ]
 visibility = [
     "mindroom.ai",
@@ -9553,6 +9566,7 @@ depends_on = [
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.session_storage.agent_storage",
+    "mindroom.llm",
 ]
 visibility = ["mindroom.automations.registry"]
 [[modules]]

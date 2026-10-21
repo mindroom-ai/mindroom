@@ -8,34 +8,31 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.message import Message
-    from agno.models.response import ModelResponse
+    from mindroom.llm.messages import Message
 
 logger = get_logger(__name__)
 
 _NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
 
 
-@dataclass(frozen=True)
-class _NativeCompactionSettings:
-    """One replay route; a null trigger leaves the authored provider policy intact."""
+class _ProviderDataHolder(Protocol):
+    """A completed response, or the record of one, whose ``provider_data`` carries the checkpoint state."""
 
-    route: str
-    threshold: int | None
+    provider_data: dict[str, Any] | None
 
 
 class NativeCompactionModel:
     """Capability seam implemented by MindRoom's native provider adapters."""
 
-    native_compaction: _NativeCompactionSettings | None = None
+    native_compaction: NativeCompactionReplay | None = None
     id: str
     provider: str
 
@@ -94,7 +91,7 @@ class NativeCompactionModel:
             endpoint=endpoint,
             history_generation=history_generation,
         )
-        self.native_compaction = _NativeCompactionSettings(route=route, threshold=threshold)
+        self.native_compaction = NativeCompactionReplay(route=route, threshold=threshold)
 
 
 def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
@@ -109,9 +106,9 @@ def common_native_endpoint(identities: Sequence[str]) -> str:
 
 
 def record_native_checkpoint(
-    response: ModelResponse,
+    response: _ProviderDataHolder,
     items: Sequence[dict[str, Any]],
-    settings: _NativeCompactionSettings | None,
+    settings: NativeCompactionReplay | None,
 ) -> None:
     """Record effective replay settings and, when present, the latest checkpoint.
 
@@ -141,14 +138,14 @@ def record_native_checkpoint(
     }
 
 
-def record_native_request_prefix(response: ModelResponse, *, checkpoint_prefix: bool) -> None:
+def record_native_request_prefix(response: _ProviderDataHolder, *, checkpoint_prefix: bool) -> None:
     """Mark completed output that inherited a checkpoint from its actual request."""
     state = (response.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
     if checkpoint_prefix and isinstance(state, dict):
         state["checkpoint_prefix"] = True
 
 
-def recorded_native_settings(message: Message) -> _NativeCompactionSettings | None:
+def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
     """Read the effective native policy from one completed assistant response."""
     state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
     if message.role != "assistant" or not isinstance(state, dict):
@@ -158,7 +155,7 @@ def recorded_native_settings(message: Message) -> _NativeCompactionSettings | No
         return None
     if threshold is not None and (type(threshold) is not int or threshold <= 0):
         return None
-    return _NativeCompactionSettings(route=route, threshold=threshold)
+    return NativeCompactionReplay(route=route, threshold=threshold)
 
 
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:

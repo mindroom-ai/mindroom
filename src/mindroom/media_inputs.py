@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.media import Audio, File, Image, Video
+    from mindroom.llm.media import Audio, File, Image, Video
 
 type MediaKind = Literal["audio", "image", "file", "video"]
 

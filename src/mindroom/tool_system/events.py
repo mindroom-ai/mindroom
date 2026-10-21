@@ -7,8 +7,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, cast
 
-from agno.models.response import ToolExecution
-
+from mindroom.llm.runs import ToolExecution
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agno.models.response import ToolExecution
-
+from mindroom.llm.runs import ToolExecution
 from mindroom.turn_continuation import (
     TURN_CONTINUATION_LIMIT,
     continuation_decision_from_tools,
