@@ -46,12 +46,9 @@ from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.envelope import team_response_stream
-from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
@@ -64,23 +61,9 @@ from tests.history_helpers import (
     segments_of,
     summary_rows_of,
 )
+from tests.team_turn_helpers import SESSION_ID, ProbeToolkit, TeamTurn, registered_probe
 from tests.test_mid_turn_compaction import _SCOPE, _TOOL_RESULT, _seeded_storage, _SummaryCalls, _ToolLoopModel
-from tests.test_team_turn_runtime import (
-    REQUESTER_ID,
-    SESSION_ID,
-    TEAM_SCOPE,
-    _approval,
-    _ctx,
-    _respond,
-    _stored_runs,
-    _stream,
-    _Team,
-    _team,
-    registered_probe,
-)
-from tests.test_team_turn_runtime import (
-    _resume as _resume_team,
-)
+from tests.test_team_turn_runtime import TEAM_SCOPE, _approval, _team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -91,7 +74,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from tests.fakes.scripted_model import ScriptStep
-    from tests.test_team_turn_runtime import _ProbeToolkit
 
 # Metadata a follow-up after an approval resume seeds from the resumed run, including that run's folded usage.
 _SEEDED_METADATA = {COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}], "room_topic": "kept"}
@@ -107,7 +89,7 @@ def summary_calls(monkeypatch: pytest.MonkeyPatch) -> _SummaryCalls:
 
 
 @pytest.fixture
-def probe() -> Iterator[type[_ProbeToolkit]]:
+def probe() -> Iterator[type[ProbeToolkit]]:
     """Register the team probe toolkit for the test."""
     with registered_probe() as toolkit:
         yield toolkit
@@ -462,7 +444,7 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
 # ---------------------------------------------------------------------------
 
 
-def _seed_team_history(team: _Team) -> None:
+def _seed_team_history(team: TeamTurn) -> None:
     runs = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
     seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=runs))
 
@@ -489,33 +471,13 @@ def _contents(request: ModelRequest) -> list[str]:
     return [str(message.content) for message in request.messages]
 
 
-async def _stream_with(team: _Team, *, matrix_run_metadata: dict[str, Any], **kwargs: Any) -> list[Any]:  # noqa: ANN401
-    """Stream one team reply whose turn seeds ``matrix_run_metadata`` from the run it follows."""
-    with tool_runtime_context(team.runtime):
-        return [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=team.member_ids(),
-                message="Hello",
-                orchestrator=team.orchestrator,
-                execution_identity=team.identity,
-                ctx=replace(_ctx(team), matrix_run_metadata=matrix_run_metadata),
-                mode=TeamMode.COORDINATE,
-                user_id=REQUESTER_ID,
-                configured_team_name="squad",
-                turn_recorder=team.recorder,
-                **kwargs,
-            )
-        ]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
     *,
     stream: bool,
 ) -> None:
@@ -531,21 +493,21 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     _seed_team_history(team)
 
     if stream:
-        chunks = await _stream(team)
+        chunks = await team.stream()
         text = chunks[-1].content
     else:
-        text = await _respond(team)
+        text = await team.respond()
 
     assert text.endswith("All parts done")
     assert summary_calls.inputs
-    compacted = _first_compacted(team.leader)
+    compacted = _first_compacted(team.models["default"])
     [summary] = _summaries(compacted.messages)
     assert summary.from_history is True
     contents = _contents(compacted)
     # The fold leaves the turn's prompt in place and puts the summary of everything else after it.
     assert "Hello" in contents[contents.index(str(summary.content)) - 1]
     assert not any("team question" in content or "team answer" in content for content in contents)
-    record, members = _stored_runs(team)
+    record, members = team.stored_runs()
     rows = summary_rows_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
     assert log_of(team.storage, TEAM_SCOPE.key, SESSION_ID) == [
         "run:past-1",
@@ -568,7 +530,7 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
 ) -> None:
     """The team reply binds its compaction notices and recorder, and its metadata leaves out the earlier run's folds."""
     del probe
@@ -585,12 +547,15 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     )
     lifecycle = RecordingCompactionLifecycle()
 
-    await _stream_with(team, matrix_run_metadata=_SEEDED_METADATA, compaction_lifecycle=lifecycle)
+    await team.stream(
+        ctx=replace(team.ctx(), matrix_run_metadata=_SEEDED_METADATA),
+        compaction_lifecycle=lifecycle,
+    )
 
     assert summary_calls.inputs
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
     assert "call-1" in team.recorder.folded_tool_call_ids
-    record, _members = _stored_runs(team)
+    record, _members = team.stored_runs()
     assert record.metadata is not None
     assert record.metadata["room_topic"] == "kept"
     # The folded usage is this run's own; the fold records seeded from the earlier run are gone.
@@ -604,7 +569,7 @@ async def test_team_approval_resume_after_mid_turn_compaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
 ) -> None:
     """A member's approval pauses the team after the leader compacted; the resumed leader request keeps that summary."""
     team = _team(
@@ -622,22 +587,17 @@ async def test_team_approval_resume_after_mid_turn_compaction(
     )
     _seed_team_history(team)
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await _stream(team, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
     assert summary_calls.inputs
     assert probe.calls == []
-    paused_request = team.leader.requests[-1]
-    before = len(team.leader.requests)
+    paused_request = team.models["default"].requests[-1]
+    before = len(team.models["default"].requests)
 
-    result = await _resume_team(
-        team,
-        raised.value.paused,
-        approved=True,
-        calls_=(_approval("call-touch", "dangerous"),),
-    )
+    result = await team.resume(raised.value.paused, approved=True, approvals=(_approval("call-touch", "dangerous"),))
 
     assert isinstance(result, CompletedApprovalRun)
     assert probe.calls == ["dangerous"]
-    resumed = team.leader.requests[before]
+    resumed = team.models["default"].requests[before]
     [summary] = _summaries(resumed.messages)
     [paused_summary] = _summaries(paused_request.messages)
     assert summary.content == paused_summary.content
@@ -653,7 +613,7 @@ async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
 ) -> None:
     """The configured team budget refuses the fifth request before compaction could size it."""
     del probe
@@ -671,10 +631,10 @@ async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
         max_tool_calls_per_turn=2,
     )
 
-    await _stream(team)
+    await team.stream()
 
     # The cap allows the limit plus two requests, so it refuses the fifth.
-    assert len(team.leader.requests) == 4
+    assert len(team.models["default"].requests) == 4
     assert summary_calls.inputs == []
 
 
@@ -683,7 +643,7 @@ async def test_team_member_loop_compacts_run_locally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
 ) -> None:
     """A member's own tool loop compacts within its run; the summary is the run's own, not replayed history."""
     del probe
@@ -698,13 +658,13 @@ async def test_team_member_loop_compacts_run_locally(
         context_window=4000,
     )
 
-    chunks = await _stream(team)
+    chunks = await team.stream()
 
     assert chunks[-1].content.endswith("The writer dug.")
     assert summary_calls.inputs
-    compacted = _first_compacted(team.writer)
+    compacted = _first_compacted(team.models["writer-model"])
     assert [message.from_history for message in _summaries(compacted.messages)] == [False]
-    _record, [member] = _stored_runs(team)
+    _record, [member] = team.stored_runs()
     assert member.status is RunStatus.completed
 
 
@@ -748,7 +708,7 @@ async def test_parallel_delegations_to_one_member_both_compact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: _SummaryCalls,
-    probe: type[_ProbeToolkit],
+    probe: type[ProbeToolkit],
 ) -> None:
     """Two concurrent runs of one member each compact their own loop."""
     del probe
@@ -767,13 +727,13 @@ async def test_parallel_delegations_to_one_member_both_compact(
     writer = _PerTaskLoop(tool_rounds=6)
     team.models["writer-model"] = writer  # type: ignore[assignment]
 
-    chunks = await _stream(team)
+    chunks = await team.stream()
 
     assert chunks[-1].content.endswith("Both done")
     assert summary_calls.inputs
     for task in ("Task A", "Task B"):
         compacted = [request for name, request in writer.requests if name == task and _summaries(request.messages)]
         assert compacted, task
-    _record, members = _stored_runs(team)
+    _record, members = team.stored_runs()
     assert sorted(str(member.content) for member in members) == ["Task A done", "Task B done"]
     assert isinstance(_record, TeamRunRecord)
