@@ -27,7 +27,7 @@ Regenerate with `.venv/bin/python -m tests.agno_parity.capture_providers [family
 | `input.messages` | Stored-message dicts in `Message.to_dict()` shape, oldest first; earlier turns carry `from_history: true` as replayed history does. |
 | `input.tools` | `Function.to_dict()` dicts, which Agno's `_format_tools` turns into request tools. |
 | `input.tool_choice` | Always `null`. |
-| `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay checks the class still has `json_schema`. |
+| `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
 | `input.stream` | `true` for `aresponse_stream`, `false` for `aresponse`. |
