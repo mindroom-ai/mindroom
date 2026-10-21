@@ -62,6 +62,7 @@ async def complete_once[T: BaseModel](
             messages=tuple(messages),
             response_format=None if response_format is None else response_format.request_format,
             overrides=overrides or RequestOverrides(),
+            stream=False,
         ),
     )
     identity = provider.identity

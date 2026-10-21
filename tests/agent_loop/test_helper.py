@@ -97,6 +97,7 @@ async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> N
     assert normalize([message_dict(message) for message in request.messages], tmp_path) == expected["messages"]
     assert response_format_dict(request.response_format) == expected["response_format"]
     assert (request.tools, request.tool_choice) == ((), None)
+    assert request.stream is expected["stream"]
 
 
 @pytest.mark.asyncio
