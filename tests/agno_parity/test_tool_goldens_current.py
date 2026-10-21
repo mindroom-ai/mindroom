@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import capture_tools
+from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,9 +28,9 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::DeprecationWarning:openbb_"),
 ]
 
-SCHEMAS = json.loads(capture_tools.SCHEMAS_PATH.read_text(encoding="utf-8"))
-ALL_ENABLED_SCHEMAS = json.loads(capture_tools.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
-ARGUMENTS = json.loads(capture_tools.ARGUMENTS_PATH.read_text(encoding="utf-8"))
+SCHEMAS = json.loads(support.SCHEMAS_PATH.read_text(encoding="utf-8"))
+ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
+ARGUMENTS = json.loads(support.ARGUMENTS_PATH.read_text(encoding="utf-8"))
 
 
 def assert_same_json(actual: object, golden: object) -> None:
@@ -41,8 +42,8 @@ def assert_same_json(actual: object, golden: object) -> None:
 def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Config, RuntimePaths]:
     """Build the capture runtime once per worker."""
     root = tmp_path_factory.mktemp("tool-golden").resolve()
-    with capture_tools.isolated_process(root):
-        config, runtime_paths = capture_tools.golden_runtime(root)
+    with support.isolated_process(root):
+        config, runtime_paths = support.golden_runtime(root)
     return root, config, runtime_paths
 
 
@@ -56,10 +57,10 @@ def probe_functions() -> dict[str, Function]:
 def test_tool_schema_matches_golden(tool_name: str, golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
     """Each registered tool still reaches the model with its golden definition and instructions."""
     root, config, runtime_paths = golden_runtime
-    with capture_tools.isolated_process(root):
-        if (missing := capture_tools.missing_dependencies(tool_name)) is not None:
+    with support.isolated_process(root):
+        if (missing := support.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")
-        toolkit = capture_tools.build_toolkit(tool_name, config, runtime_paths)
+        toolkit = support.build_toolkit(tool_name, config, runtime_paths)
         assert_same_json(capture_tools.tool_schema(toolkit), SCHEMAS[tool_name])
 
 
@@ -70,8 +71,8 @@ def test_all_enabled_tool_schema_matches_golden(
 ) -> None:
     """Each registered tool with every function switched on still reaches the model with its golden definition."""
     root, config, runtime_paths = golden_runtime
-    with capture_tools.isolated_process(root):
-        if (missing := capture_tools.missing_dependencies(tool_name)) is not None:
+    with support.isolated_process(root):
+        if (missing := support.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")
         assert_same_json(
             capture_tools.all_enabled_tool_schema(tool_name, config, runtime_paths),
@@ -84,19 +85,17 @@ def test_schema_golden_covers_every_buildable_registered_tool(
 ) -> None:
     """A registered tool is missing from the goldens only when it cannot be built here."""
     root, _config, _runtime_paths = golden_runtime
-    with capture_tools.isolated_process(root):
+    with support.isolated_process(root):
         uncovered = {
             tool_name
             for tool_name in BUILTIN_TOOL_METADATA
             if tool_name not in SCHEMAS
             and tool_name not in capture_tools.UNBUILDABLE
-            and capture_tools.missing_dependencies(tool_name) is None
+            and support.missing_dependencies(tool_name) is None
         }
     assert uncovered == set()
     assert set(SCHEMAS) <= set(BUILTIN_TOOL_METADATA)
-    assert set(ALL_ENABLED_SCHEMAS) == {
-        tool_name for tool_name in SCHEMAS if capture_tools.all_enabled_overrides(tool_name)
-    }
+    assert set(ALL_ENABLED_SCHEMAS) == {tool_name for tool_name in SCHEMAS if support.all_enabled_overrides(tool_name)}
 
 
 @pytest.mark.usefixtures("golden_runtime")

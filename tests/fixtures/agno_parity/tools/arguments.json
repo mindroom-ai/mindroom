@@ -6,7 +6,7 @@
     "function": "probe_agent",
     "kwargs": {
       "agent": {
-        "type": "Agent",
+        "type": "injected",
         "value": null
       },
       "query": {
@@ -29,7 +29,7 @@
     "function": "probe_agent",
     "kwargs": {
       "agent": {
-        "type": "Agent",
+        "type": "injected",
         "value": null
       },
       "query": {

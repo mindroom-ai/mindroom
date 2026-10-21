@@ -34,8 +34,8 @@ def _encode(value: object) -> dict[str, object]:
         return {"type": type(value).__name__, "value": [_encode(item) for item in value]}
     if isinstance(value, dict):
         return {"type": "dict", "value": {str(key): _encode(item) for key, item in value.items()}}
-    # Injected framework objects, such as the calling agent, are recorded by type only.
-    return {"type": type(value).__name__, "value": None}
+    # Injected framework objects, such as the calling agent, are recorded as injected, whatever implements them.
+    return {"type": "injected", "value": None}
 
 
 def _received(**kwargs: object) -> str:

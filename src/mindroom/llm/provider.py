@@ -53,12 +53,21 @@ class Capabilities:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolSpec:
-    """A model-facing tool definition; ``parameters`` is the final JSON schema."""
+    """A model-facing tool definition; ``parameters`` is the final JSON schema.
+
+    ``description`` and the flags keep Agno's tri-state: None means the tool never set the value, so wires that send
+    the field inside each function definition omit it, as Agno's ``Function.to_dict()`` did.
+    The approval flags are not policy here: OpenAI-family wires send them inside each function definition exactly as
+    Agno did, so request bodies and prompt caches stay unchanged.
+    """
 
     name: str
-    description: str
+    description: str | None
     parameters: Mapping[str, Any]
-    strict: bool = False
+    strict: bool | None = False
+    requires_confirmation: bool | None = None
+    external_execution: bool | None = None
+    approval_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

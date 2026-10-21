@@ -344,6 +344,9 @@ Matrix sync callback
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
+| `tool_system/tool_function.py` | `ToolFunction`, the only tool shape the owned loop sees: finished schema, loop flags, entrypoint, injected parameter names |
+| `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, and builds the Agno-shaped call-time arguments (run context, actor stand-in, media) their entrypoints expect |
+| `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware to its outcome: injection, synchronous offload, generator draining, error text |
 | `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py`; dispatch, approval, and cancellation ownership stay with the tool runtime |
 | `agno_compat_*.py` and subsystem-local `agno_compat_*.py` | Agno SDK repairs and private bindings; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |

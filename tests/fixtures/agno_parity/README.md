@@ -189,6 +189,7 @@ Every name in a tool's `ToolMetadata.function_names` appears in one of the two f
 The file maps a case id to `{"function", "raw_arguments", "arguments", "kwargs"}` or `{"function", "raw_arguments", "arguments", "error_text"}`.
 Each case sends one tool call, whose arguments string is `raw_arguments`, to a probe in `tests/agno_parity/tool_argument_probes.py` through Agno's `Model.get_function_calls_to_run` and `Model.arun_function_calls`.
 `kwargs` is what the probe body received, each value encoded by `encode_kwargs` as `{"type": <Python type name>, "value": ...}`, so coercion such as `"3"` to `3` stays visible.
+An injected framework object, such as the calling agent, is encoded as `{"type": "injected", "value": null}`, so the owned loop may inject its own stand-in.
 `error_text` is the tool message content the model reads when the call fails.
 `arguments` is the tool message's `tool_args`, which history keeps: the decoded arguments after Agno turns top-level `"true"`, `"false"`, `"none"`, and `"null"` strings into booleans and null, and drops values the model sent for injected parameters such as `agent`.
 `arguments` is null when the model sent `[]`, and absent when Agno rejects the call before running it.
