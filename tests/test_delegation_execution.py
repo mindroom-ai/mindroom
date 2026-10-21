@@ -26,6 +26,7 @@ from mindroom.delegation.records import DelegationRecordLocator, DelegationRecor
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.events import ToolCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -506,6 +507,89 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path, monkeyp
     assert "child was not executed" in str(
         next(message.content for message in resumed.messages if message.tool_call_id == "policy-gated"),
     )
+
+
+@pytest.mark.asyncio
+async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path: Path) -> None:
+    """A team member's gated delegation is carded and gated as ``member_id:call_id``, never as the bare call id."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=(), gate_delegation=True)
+    identity = _leader_identity()
+    requirement = RunRequirement(
+        ToolExecution(
+            tool_call_id="call",
+            tool_name="run_subagent",
+            tool_args={"agent_name": "code", "task": "Write report"},
+            external_execution_required=True,
+        ),
+        member_agent_id="member",
+    )
+    response = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.paused,
+        tools=[requirement.tool_execution],
+        requirements=[requirement],
+    )
+    persisted: list[DelegationState] = []
+
+    async def persist(state: DelegationState) -> None:
+        persisted.append(deepcopy(state))
+
+    async def unused_child(**_kwargs: object) -> str:
+        pytest.fail("A gated delegation must not execute a child before its gate is approved")
+
+    events: list[object] = []
+    options = {
+        "response": response,
+        "persist": persist,
+        "agent_name": "leader",
+        "run_child": unused_child,
+        "config": config,
+        "runtime_paths": paths,
+        "execution_identity": identity,
+        "member_config_names": {"member": "leader"},
+        "on_event": events.append,
+    }
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        state, previous, _own = execution.prepare_delegation_state(
+            response,
+            agent_name="leader",
+            config=config,
+            decisions=None,
+            denial_reasons=None,
+        )
+        asked = await execution.advance_delegation_call(requirement, state=state, previous_state=previous, **options)
+        assert asked is None
+        assert state.pending_agent_name == "leader"
+        assert state.pending_tools[0]["tool_call_id"] == "member:call"
+        assert RunRequirement.from_dict(state.pending_requirements[0]).tool_execution.tool_call_id == "member:call"
+        assert persisted[-1].pending_tools == state.pending_tools
+
+        # The answer to that card is kept as the gate of the same key, which settles the call without a child.
+        response.metadata = {DELEGATION_STATE_KEY: state.to_dict()}
+        decisions = {"member:call": False}
+        denial_reasons = {"member:call": "No"}
+        state, previous, _own = execution.prepare_delegation_state(
+            response,
+            agent_name="leader",
+            config=config,
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
+        assert state.gates == {"member:call": False}
+        denied = await execution.advance_delegation_call(
+            requirement,
+            state=state,
+            previous_state=previous,
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+            **options,
+        )
+
+    assert denied == "Delegation denied by requester; child was not executed."
+    assert state.children == []
+    assert [event.tool.result for event in events if isinstance(event, ToolCompleted)] == [denied]
 
 
 @pytest.mark.asyncio
