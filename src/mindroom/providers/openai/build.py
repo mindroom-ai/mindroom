@@ -53,7 +53,7 @@ from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, d
 from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     import httpx
     from openai import AsyncOpenAI
@@ -233,47 +233,68 @@ def _provider_default_sampling(model_id: str) -> bool:
     )
 
 
-def _client_options(settings: ChatSettings | ResponsesSettings, *, organization: bool = True) -> dict[str, Any]:
-    options = {
+def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:
+    """Return the endpoint a config sets; ``client_params.base_url`` overrides ``base_url``, as in Agno."""
+    return (client_params or {}).get("base_url") or base_url
+
+
+def _client_options(
+    settings: ChatSettings | ResponsesSettings,
+    *,
+    base_url: str,
+    organization: bool = True,
+) -> dict[str, Any]:
+    """Return the SDK client options a route configures; ``client_params`` is merged over them per client."""
+    return {
         "organization": settings.organization if organization else None,
+        "base_url": base_url,
         "timeout": settings.timeout,
         "max_retries": settings.max_retries,
         "default_headers": settings.default_headers,
         "default_query": settings.default_query,
     }
-    return {key: value for key, value in options.items() if value is not None}
+
+
+def _sdk_client_kwargs(
+    configured: Mapping[str, Any],
+    settings: ChatSettings | ResponsesSettings,
+    http_client: httpx.AsyncClient,
+) -> dict[str, Any]:
+    """Return SDK client keywords in Agno's precedence: the configured values that are set, then ``client_params``.
+
+    ``client_params.base_url`` is already in the configured endpoint (Groq and Cerebras append their API path
+    to it), and the shared HTTP client always wins.
+    """
+    authored = {key: value for key, value in (settings.client_params or {}).items() if key != "base_url"}
+    return (
+        {key: value for key, value in configured.items() if value is not None} | authored | {"http_client": http_client}
+    )
 
 
 def _openai_client(
     api_key: str,
-    base_url: str,
-    options: dict[str, Any],
+    options: Mapping[str, Any],
     settings: ChatSettings | ResponsesSettings,
     http_client: httpx.AsyncClient,
 ) -> AsyncOpenAI:
     from openai import AsyncOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-    return AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        **options,
-        **(settings.client_params or {}),
-        http_client=http_client,
-    )
+    return AsyncOpenAI(**_sdk_client_kwargs({"api_key": api_key, **options}, settings, http_client))
 
 
 def _chat_base_url(route_key: str, route: _ChatRoute, settings: ChatSettings, runtime: ProviderRuntime) -> str:
     env = runtime.runtime_paths
+    authored = _authored_base_url(settings.client_params, settings.base_url)
     if route_key == "openai":
-        return settings.base_url or env.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
+        return authored or env.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
     if route_key == "groq":
         # The Groq SDK's base URL was a host; its paths start with /openai/v1.
-        host = settings.base_url or env.process_env.get("GROQ_BASE_URL") or "https://api.groq.com"
+        host = authored or env.process_env.get("GROQ_BASE_URL") or "https://api.groq.com"
         return f"{host.rstrip('/')}/openai/v1"
     if route_key == "cerebras":
-        host = settings.base_url or env.process_env.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai"
+        host = authored or env.process_env.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai"
         return f"{host.rstrip('/')}/v1"
-    return settings.base_url or route.base_url or ""
+    return authored or route.base_url or ""
 
 
 def _chat_client_factory(
@@ -287,7 +308,7 @@ def _chat_client_factory(
 ) -> Callable[[], AsyncOpenAI]:
     http_client = runtime.http_client
     process_env = runtime.runtime_paths.process_env
-    options = _client_options(settings, organization=route.dialect == "openai")
+    options = _client_options(settings, base_url=base_url, organization=route.dialect == "openai")
     if route_key == "kimi":
 
         def kimi_client() -> AsyncOpenAI:
@@ -300,7 +321,7 @@ def _chat_client_factory(
                     status_code=401,
                     code="authentication",
                 ) from error
-            return _openai_client(token, base_url, options, settings, http_client)
+            return _openai_client(token, options, settings, http_client)
 
         return kimi_client
     if route_key == "azure":
@@ -321,17 +342,13 @@ def _chat_client_factory(
                 "organization": settings.organization,
                 "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
                 "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
-                "base_url": settings.base_url,
+                "base_url": base_url or None,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
                 "default_headers": settings.default_headers,
                 "default_query": settings.default_query,
             }
-            return AsyncAzureOpenAI(
-                **{key: value for key, value in azure.items() if value is not None},
-                **(settings.client_params or {}),
-                http_client=http_client,
-            )
+            return AsyncAzureOpenAI(**_sdk_client_kwargs(azure, settings, http_client))
 
         return azure_client
 
@@ -342,7 +359,7 @@ def _chat_client_factory(
                 raise missing_api_key_error(route.api_key_env, provider=route.provider_name)
             # OpenAI-compatible local and keyless endpoints took Agno's placeholder key.
             key = "not-provided"
-        return _openai_client(key, base_url, options, settings, http_client)
+        return _openai_client(key, options, settings, http_client)
 
     return client
 
@@ -384,7 +401,11 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
     if route_key in {"openrouter", "zai"} and not api_key:
         logger.warning("No API key found in environment or CredentialsManager", provider=route_key)
     base_url = _chat_base_url(route_key, route, settings, runtime)
-    endpoint = (settings.azure_endpoint or settings.base_url) if route_key == "azure" else base_url
+    endpoint = (
+        (settings.client_params or {}).get("azure_endpoint") or settings.azure_endpoint or base_url
+        if route_key == "azure"
+        else base_url
+    )
     identity = ModelIdentity(
         id=model_id,
         provider=route.provider,
@@ -457,12 +478,13 @@ def _build_responses(
     settings = parse_settings(ResponsesSettings, extra_kwargs, accepted=accepted, provider=model_config.provider)
     # One storage setting drives both request building and history replay.
     store = (settings.request_params or {}).get("store", settings.store)
+    authored_base_url = _authored_base_url(settings.client_params, settings.base_url)
     if route_key == "codex":
         store = False if store is None else store
-        base_url = settings.base_url or CODEX_BASE_URL
+        base_url = authored_base_url or CODEX_BASE_URL
         provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
     else:
-        base_url = settings.base_url or runtime.runtime_paths.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
+        base_url = authored_base_url or runtime.runtime_paths.env_value("OPENAI_BASE_URL") or _OPENAI_API_BASE_URL
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")
     identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
@@ -487,7 +509,7 @@ def _build_responses(
         default_instructions=settings.default_instructions or runtime.codex_default_instructions,
     )
     http_client = runtime.http_client
-    options = _client_options(settings)
+    options = _client_options(settings, base_url=base_url)
     if route_key == "codex":
 
         def codex_client() -> AsyncOpenAI:
@@ -503,8 +525,7 @@ def _build_responses(
             headers = dict(settings.default_headers or {})
             if account_id:
                 headers["ChatGPT-Account-ID"] = account_id
-            client_options = {**options, "default_headers": headers} if headers else options
-            return _openai_client(token, base_url, client_options, settings, http_client)
+            return _openai_client(token, {**options, "default_headers": headers or None}, settings, http_client)
 
         return ResponsesAdapter(
             identity=identity,
@@ -519,7 +540,7 @@ def _build_responses(
     def openai_client() -> AsyncOpenAI:
         if not api_key:
             raise missing_api_key_error(api_key_env, provider=provider_name)
-        return _openai_client(api_key, base_url, options, settings, http_client)
+        return _openai_client(api_key, options, settings, http_client)
 
     return ResponsesAdapter(
         identity=identity,
@@ -542,9 +563,11 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> Model
     if route_key == "codex":
         return _build_responses("codex", model_id, model_config, runtime)
     if route_key == "openai":
-        base_url = (model_config.extra_kwargs or {}).get("base_url") or runtime.runtime_paths.env_value(
-            "OPENAI_BASE_URL",
-        )
+        extra_kwargs = model_config.extra_kwargs or {}
+        base_url = _authored_base_url(
+            extra_kwargs.get("client_params"),
+            extra_kwargs.get("base_url"),
+        ) or runtime.runtime_paths.env_value("OPENAI_BASE_URL")
         if model_config.api == "responses" or (
             model_config.api is None and openai_native_tool_search_supported("openai", model_id, base_url=base_url)
         ):

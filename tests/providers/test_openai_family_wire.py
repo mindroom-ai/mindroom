@@ -472,6 +472,96 @@ async def test_configured_groq_host_keeps_the_sdk_path(tmp_path: Path) -> None:
     assert str(built.requests[0].url) == "http://groq.test/openai/v1/chat/completions"
 
 
+def _client_options(prefix: str) -> dict[str, Any]:
+    return {"timeout": 30, "max_retries": 0, "default_headers": {"X-Origin": prefix}, "organization": f"org-{prefix}"}
+
+
+_CONFIGURED_CLIENT = {"base_url": "http://configured.test/v1", **_client_options("configured")}
+_CLIENT_PARAMS = {"base_url": "http://client.test/v1", **_client_options("client_params")}
+_AZURE_CLIENT = {
+    "azure_endpoint": "https://configured.openai.azure.com",
+    "api_version": "2024-10-21",
+    "default_headers": {"X-Origin": "configured"},
+    "organization": "org-configured",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "reply", "url", "endpoint"),
+    [
+        (
+            {**_OPENAI_CHAT, "extra_kwargs": {**_CONFIGURED_CLIENT, "client_params": _CLIENT_PARAMS}},
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "http://client.test/v1/chat/completions",
+            "http://client.test/v1",
+        ),
+        (
+            {**_OPENAI_RESPONSES, "extra_kwargs": {**_CONFIGURED_CLIENT, "client_params": _CLIENT_PARAMS}},
+            _responses_reply(*_text_events("ok"), _completed()),
+            "http://client.test/v1/responses",
+            "http://client.test/v1",
+        ),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "api_key": "test-key",
+                "extra_kwargs": {
+                    **_AZURE_CLIENT,
+                    "client_params": {
+                        "azure_endpoint": "https://client.openai.azure.com",
+                        "api_version": "2025-04-01-preview",
+                        "default_headers": {"X-Origin": "client_params"},
+                        "organization": "org-client_params",
+                    },
+                },
+            },
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "https://client.openai.azure.com/openai/deployments/gpt-6-astra/chat/completions"
+            "?api-version=2025-04-01-preview",
+            "https://client.openai.azure.com",
+        ),
+    ],
+    ids=["chat", "responses", "azure"],
+)
+async def test_client_params_override_the_configured_client_options(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    url: str,
+    endpoint: str,
+) -> None:
+    """``client_params`` win over the same options set directly in ``extra_kwargs``, endpoint included."""
+    built = _Built(tmp_path, model_config, reply)
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    request = built.requests[0]
+    assert (str(request.url), request.headers["x-origin"], request.headers["openai-organization"]) == (
+        url,
+        "client_params",
+        "org-client_params",
+    )
+    assert built.provider.identity.endpoint == endpoint
+
+
+@pytest.mark.asyncio
+async def test_client_params_base_url_is_the_groq_host(tmp_path: Path) -> None:
+    config = {
+        "provider": "groq",
+        "id": "openai/gpt-oss-120b",
+        "api_key": "k",
+        "extra_kwargs": {"base_url": "http://groq.test", "client_params": {"base_url": "http://client.test"}},
+    }
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert str(built.requests[0].url) == "http://client.test/openai/v1/chat/completions"
+    assert built.provider.identity.endpoint == "http://client.test/openai/v1"
+
+
 @pytest.mark.asyncio
 async def test_kimi_borrows_the_login_token_for_every_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     borrowed: list[str | None] = []
@@ -569,6 +659,12 @@ def test_openai_routes_pick_responses_only_where_it_is_selected_or_searchable(tm
 
     assert isinstance(build_provider(gpt6, runtime), ResponsesAdapter)
     assert isinstance(build_provider(gpt6, proxied), ChatAdapter)
+    client_proxied = ModelConfig(
+        provider="openai",
+        id="gpt-6-astra",
+        extra_kwargs={"client_params": {"base_url": "http://localhost:4000/v1"}},
+    )
+    assert isinstance(build_provider(client_proxied, runtime), ChatAdapter)
     assert isinstance(
         build_provider(ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions"), runtime),
         ChatAdapter,
@@ -587,6 +683,15 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
         ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"store": True}),
         runtime,
     ).capabilities
+    proxied = build_provider(
+        ModelConfig(
+            provider="openai",
+            id="gpt-6-astra",
+            api="responses",
+            extra_kwargs={"client_params": {"base_url": "http://localhost:4000/v1"}},
+        ),
+        runtime,
+    ).capabilities
 
     assert (gpt6.native_tool_search, gpt6.native_compaction, gpt6.approval_receipt_after_response_id) == (
         True,
@@ -595,6 +700,7 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
     )
     assert (gpt5.native_tool_search, gpt5.native_compaction) == (False, False)
     assert stored.native_compaction is False
+    assert (proxied.native_tool_search, proxied.native_compaction) == (False, False)
     assert gpt6.omitted_media == frozenset({"audio", "video"})
 
 
