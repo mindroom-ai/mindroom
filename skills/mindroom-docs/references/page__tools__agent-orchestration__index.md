@@ -197,7 +197,7 @@ The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, learning, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -528,7 +528,7 @@ The tool exposes four functions:
   `dry_run=True` validates a patch without saving it.
   The receipt lists the changed paths without echoing their values.
   When `config.yaml` uses `!include`, inspection works but patching is refused; edit the source files instead.
-- **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, `markdown`, `learning`, and `learning_mode`.
+- **`manage_agent(operation, agent_name, ...)`**: `operation` is `create`, `update`, or `validate`, and the optional fields are `display_name`, `role`, `tools`, `instructions`, `model`, `rooms`, `knowledge_bases`, `include_default_tools`, and `markdown`.
   Creating requires `display_name`, takes a lowercase name of letters, digits, and underscores, defaults `model` to `default`, and defaults `include_default_tools` to `true`.
   Tool names and knowledge base IDs must exist.
 - **`manage_team(team_name, display_name, role, agents, mode="coordinate")`**: Creates a new team in `coordinate` or `collaborate` mode; it rejects unknown member agents and existing team names, and it cannot update a team.
@@ -590,7 +590,7 @@ agents:
 ```
 
 `get_own_config()` returns the agent's redacted YAML.
-`update_own_config()` changes only the fields you pass: `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `learning`, `learning_mode`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `compress_tool_results`, `max_tool_calls_from_history`, and `context_files`.
+`update_own_config()` changes only the fields you pass: `display_name`, `role`, `instructions`, `tools`, `model`, `rooms`, `markdown`, `knowledge_bases`, `skills`, `include_default_tools`, `show_tool_calls`, `thread_mode`, `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, and `context_files`.
 Every `update_own_config()` call shows an approval card, even when `tool_approval.default` is `auto_approve`.
 An agent cannot give itself `config_manager`, and `include_default_tools=True` is refused when `defaults.tools` contains `config_manager`.
 Access, redaction, and saving follow the [shared rules above](#access-redaction-and-saving).

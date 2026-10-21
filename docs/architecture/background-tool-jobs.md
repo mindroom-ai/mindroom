@@ -64,7 +64,7 @@ A follow-up whose turn ends without collecting its jobs is not admitted again in
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline; answering one runs nothing, though a timed approval chosen on it still covers later calls.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.
-Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, learning, and team delegation run inline.
+Only functions of toolkits MindRoom assembles become jobs; SDK-generated knowledge search, skill access, and team delegation run inline.
 A wait that ends while the mid-turn judge is still deciding cancels that judgment, so the post-batch check judges the same queue again.
 A primary that dies without closing its connection leaves a worker command running until the runner notices the dead connection, and a local shell job whose process is killed with SIGKILL keeps running.
 Unhooked synchronous local tools in a job run on Agno's shared thread pool, because Agno chooses that thread; worker calls and calls that async entrypoints offload get their own threads.

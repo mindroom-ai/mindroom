@@ -118,7 +118,7 @@ Accepting an invitation never grants permission to interact; every later message
 ### Agents mentioning other agents
 
 When an agent or team reply, including a message an agent sends with `matrix_api`, mentions another agent or team, the mentioned entity acts for the person or configured bot account who requested the reply.
-It responds only when its own `access` admits that requester, and it uses the requester's credentials, private instances, memory, learning, and approvals.
+It responds only when its own `access` admits that requester, and it uses the requester's credentials, private instances, memory, and approvals.
 A mention wakes the mentioned entity only after the reply finishes (not when it was stopped or failed) and only while the requester is a joined member of the room.
 Agents stop waking each other once a conversation has [`defaults.max_consecutive_agent_replies`](configuration/agents.md#defaults) consecutive agent or team messages since a person last wrote there, and resume after the next message from a person.
 In a room-level conversation, the count covers the room's messages outside threads.

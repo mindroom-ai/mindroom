@@ -106,7 +106,6 @@ models:
 
 agents:
   mind:
-    learning: false
     access:
       current_room_members: true
       members_of_rooms: []
