@@ -38,7 +38,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
-from mindroom.teams import TeamOutcome, TeamResolution
+from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
@@ -1748,11 +1748,9 @@ class TestRoutingRegression:
         ]
 
     @pytest.mark.asyncio
-    @patch("mindroom.teams.resolve_agent_knowledge_access")
-    @patch("mindroom.teams.create_agent")
-    @patch("mindroom.teams.Team.arun")
+    @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.ai_response")
-    @patch("mindroom.teams.build_model_provider")
+    @patch("mindroom.teams.formation.build_model_provider")
     @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
@@ -1761,12 +1759,11 @@ class TestRoutingRegression:
         mock_get_model_instance: MagicMock,
         mock_build_model_provider: MagicMock,
         mock_ai_response: AsyncMock,
-        mock_team_arun: AsyncMock,
-        mock_create_agent: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
@@ -1800,10 +1797,10 @@ class TestRoutingRegression:
         team_mode_model = ScriptedModel([answer(json.dumps({"mode": "collaborate", "reasoning": "Both weigh in"}))])
         mock_build_model_provider.return_value = team_mode_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-        fake_member = MagicMock()
-        fake_member.name = "MockAgent"
-        fake_member.instructions = []
-        mock_create_agent.return_value = fake_member
+        # The members build on scripted providers that are never asked; the team's leader answers on its own.
+        team_leader = ScriptedModel([answer("Team response")])
+        monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_a, **_k: ScriptedModel([]))
+        monkeypatch.setattr("mindroom.teams.envelope.build_model_provider", lambda *_a, **_k: team_leader)
 
         test_room_id = "!research:localhost"
 
@@ -1827,9 +1824,8 @@ class TestRoutingRegression:
         research_bot.orchestrator = mock_orchestrator
         news_bot.orchestrator = mock_orchestrator
 
-        # Mock AI responses and team response
+        # Mock AI responses; the team's leader is scripted above.
         mock_ai_response.side_effect = ["Research response!", "News response!"]
-        mock_team_arun.return_value = "Team response"
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -1870,7 +1866,7 @@ class TestRoutingRegression:
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # No individual response
         assert news_bot.client.room_send.call_count == 2  # Team response (thinking + final)
-        assert mock_team_arun.call_count == 1  # Team formed once
+        assert len(team_leader.requests) == 1  # Team formed once
         assert len(team_mode_model.requests) == 1  # The team mode was chosen once
 
     @pytest.mark.asyncio

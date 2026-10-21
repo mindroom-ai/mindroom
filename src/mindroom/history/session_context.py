@@ -17,10 +17,8 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
-
-    from agno.agent import Agent
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -50,51 +48,40 @@ class ScopeSessionContext:
 class BoundTeamScopeContext:
     """Resolved stable owner and scope for one live team run."""
 
-    owner_agent: Agent
     owner_agent_name: str
     scope: HistoryScope
 
 
-def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
-    """Return the canonical storage owner for one bound team run."""
-    candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
-    if not candidates:
-        return None, None
-
-    owner_agent_name = min(agent_id for agent_id, _agent in candidates)
-    for agent_id, agent in candidates:
-        if agent_id == owner_agent_name:
-            return agent, owner_agent_name
-    return None, None
+def resolve_bound_history_owner(member_names: Sequence[str]) -> str | None:
+    """Return the member whose configured storage settings own one bound team run: the first by name."""
+    return min((name for name in member_names if name), default=None)
 
 
 def resolve_bound_team_scope_context(
     *,
-    agents: list[Agent],
+    member_names: Sequence[str],
     config: Config,
     team_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> BoundTeamScopeContext | None:
     """Resolve the stable owner and scope backing one live team run."""
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
+    owner_agent_name = resolve_bound_history_owner(member_names)
+    if owner_agent_name is None:
         return None
 
     if team_name is not None and team_name in config.teams:
         team_scope_id = team_name
     else:
         team_scope_id = ad_hoc_team_scope_id(
-            ad_hoc_team_agent_names(agents),
+            member_names,
             config.agents,
             requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
         )
     if team_scope_id is None:
         return None
-    scope = HistoryScope(kind="team", scope_id=team_scope_id)
     return BoundTeamScopeContext(
-        owner_agent=owner_agent,
         owner_agent_name=owner_agent_name,
-        scope=scope,
+        scope=HistoryScope(kind="team", scope_id=team_scope_id),
     )
 
 
@@ -139,7 +126,7 @@ def open_resolved_scope_session_context(
 @contextmanager
 def open_bound_scope_session_context(
     *,
-    agents: list[Agent],
+    member_names: Sequence[str],
     session_id: str | None,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -148,11 +135,11 @@ def open_bound_scope_session_context(
     create_session_if_missing: bool = False,
 ) -> Iterator[ScopeSessionContext | None]:
     """Open the canonical scope-backed session context for one bound team run."""
-    if not agents and team_name is not None and team_name in config.teams:
+    if not member_names and team_name is not None and team_name in config.teams:
         owner_agent_name, scope = team_name, HistoryScope(kind="team", scope_id=team_name)
     else:
         bound_scope = resolve_bound_team_scope_context(
-            agents=agents,
+            member_names=member_names,
             config=config,
             team_name=team_name,
             execution_identity=execution_identity,
@@ -209,8 +196,3 @@ def _team_scope_state_root(
     runtime_paths: RuntimePaths,
 ) -> Path:
     return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
-
-
-def ad_hoc_team_agent_names(agents: list[Agent]) -> tuple[str, ...]:
-    """Return stable member identities used to resolve an ad hoc team scope."""
-    return tuple(agent_id for agent in agents if isinstance((agent_id := agent.id), str) and agent_id)

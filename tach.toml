@@ -1284,7 +1284,7 @@ depends_on = [
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
 ]
-visibility = ["mindroom.ai", "mindroom.approval.execution", "mindroom.delegation.execution"]
+visibility = ["mindroom.ai", "mindroom.approval.execution", "mindroom.delegation.execution", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.loop_hooks"
@@ -1303,7 +1303,6 @@ path = "mindroom.approval.tool_owners"
 depends_on = [
     "mindroom.authorization",
     "mindroom.tool_system.runtime_context",
-    "mindroom.approval.agno_compat_approval",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.job",
     "mindroom.mcp.registry",
@@ -1507,17 +1506,6 @@ depends_on = [
     "mindroom.matrix.identity",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
-]
-
-[[modules]]
-path = "mindroom.team_exact_members"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.logging_config",
-]
-visibility = [
-    "mindroom.responder_availability",
-    "mindroom.teams",
 ]
 
 [[modules]]
@@ -1762,6 +1750,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.agent_run_context",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
@@ -1773,12 +1762,15 @@ depends_on = [
     "mindroom.execution_preparation",
     "mindroom.helper_usage",
     "mindroom.history.session_context",
+    "mindroom.history.storage",
     "mindroom.knowledge.utils",
+    "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
     "mindroom.requester_identity",
     "mindroom.response_activity",
     "mindroom.routing",
+    "mindroom.session_storage.store",
     "mindroom.teams",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -2587,22 +2579,11 @@ depends_on = [
 path = "mindroom.history.summary_message"
 depends_on = []
 visibility = [
-    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.conversation_text",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
 ]
-
-[[modules]]
-path = "mindroom.history.agno_compat_message_builder"
-depends_on = [
-    "mindroom.history.message_content",
-    "mindroom.history.legacy_summary_system_prompt",
-    "mindroom.history.replay",
-    "mindroom.history.summary_message",
-]
-visibility = ["mindroom.agents", "mindroom.teams", "mindroom.history.mid_turn_compaction"]
 
 [[modules]]
 path = "mindroom.history.compaction"
@@ -2627,12 +2608,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.prompt_tokens"
-depends_on = [
-    "mindroom.agno_compat_prepared_tools",
-    "mindroom.timing",
-    "mindroom.token_budget",
-    "mindroom.tool_system.tool_schema_cache",
-]
+depends_on = ["mindroom.token_budget"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -3267,7 +3243,6 @@ path = "mindroom.responder_availability"
 depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.team_exact_members",
     "mindroom.teams",
 ]
 visibility = [
@@ -3294,52 +3269,58 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.agent_loop.build",
+    "mindroom.agent_loop.helper",
+    "mindroom.agent_loop.prompt",
     "mindroom.agent_run_context",
-    "mindroom.session_storage.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
+    "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.delegation.execution",
-    "mindroom.delegation.state",
     "mindroom.entity_resolution",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.helper_usage",
-    "mindroom.history.agno_compat_message_builder",
-    "mindroom.history.interrupted_replay",
+    "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
-    "mindroom.history.prompt_tokens",
+    "mindroom.history.replay",
+    "mindroom.history.request_messages",
     "mindroom.history.runtime",
     "mindroom.history.session_context",
     "mindroom.history.storage",
+    "mindroom.history.team_scope",
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
+    "mindroom.llm",
+    "mindroom.llm_request_logging",
     "mindroom.logging_config",
     "mindroom.matrix.message_builder",
-    "mindroom.matrix.state",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.pipeline",
     "mindroom.providers.registry",
-    "mindroom.agent_loop.helper",
     "mindroom.response_turn",
-    "mindroom.streaming",
-    "mindroom.team_exact_members",
+    "mindroom.session_storage.agent_storage",
+    "mindroom.session_storage.store",
+    "mindroom.system_prompt",
     "mindroom.thread_models",
-    "mindroom.tool_call_budget",
-    "mindroom.history.team_scope",
+    "mindroom.timing",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
-    "mindroom.history.mid_turn_compaction",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -3349,7 +3330,6 @@ visibility = [
     "mindroom.turn_controller",
     "mindroom.turn_policy",
 ]
-
 [[modules]]
 path = "mindroom.config.worker_projection"
 depends_on = ["mindroom.config.models"]
@@ -5157,7 +5137,7 @@ depends_on = [
 visibility = [
     "mindroom.approval.resume",
     "mindroom.agent_loop",
-    "mindroom.team_runtime",
+    "mindroom.teams",
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.turn",
@@ -5989,17 +5969,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.team_runtime"
-depends_on = [
-    "mindroom.agent_loop",
-    "mindroom.history.request_messages",
-    "mindroom.llm",
-    "mindroom.logging_config",
-    "mindroom.tool_system.agno_toolkits",
-    "mindroom.tool_system.context_bound_streams",
-]
-
-[[modules]]
 path = "mindroom.knowledge"
 depends_on = []
 
@@ -6299,29 +6268,34 @@ from = ["mindroom.routing"]
 
 [[interfaces]]
 expose = [
-    "TeamIntent",
-    "TeamMemberStatus",
-    "TeamMode",
-    "TeamOutcome",
-    "TeamResolution",
-    "TeamResolutionMember",
-    "resolve_configured_team",
-    "decide_team_formation",
-    "select_ad_hoc_team_mode",
-    "materialize_exact_team_members",
-    "prepare_materialized_team_execution",
-    "build_materialized_team_instance",
-    "continue_paused_team_run",
-    "format_team_response",
-    "is_cancelled_run_output",
-    "is_errored_run_output",
-    "resolve_team_turn_models",
-    "TeamTurnModelSelection",
-    "select_model_for_team",
-    "strip_team_display",
-    "team_response",
-    "team_response_stream",
-    "resolve_live_shared_agent_names",
+    "envelope.BuiltTeam",
+    "envelope.build_team_spec",
+    "envelope.continue_paused_team_run",
+    "envelope.prepare_materialized_team_execution",
+    "envelope.team_label",
+    "envelope.team_response",
+    "envelope.team_response_stream",
+    "formation.TeamIntent",
+    "formation.TeamMemberStatus",
+    "formation.TeamOutcome",
+    "formation.TeamResolution",
+    "formation.TeamResolutionMember",
+    "formation.decide_team_formation",
+    "formation.resolve_configured_team",
+    "formation.resolve_live_shared_agent_names",
+    "formation.select_ad_hoc_team_mode",
+    "members.ResolvedExactTeamMembers",
+    "members.TeamTurnModelSelection",
+    "members.materialize_exact_team_members",
+    "members.resolve_team_turn_models",
+    "members.select_model_for_team",
+    "presentation.TeamStreamPresentation",
+    "presentation.apply_team_event",
+    "presentation.render_team_member_slots",
+    "presentation.strip_team_display",
+    "runtime.MemberRunEnded",
+    "runtime.run_team",
+    "spec.TeamMode",
 ]
 from = ["mindroom.teams"]
 
@@ -7762,7 +7736,6 @@ depends_on = [
     "mindroom.llm",
 ]
 visibility = [
-    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",
@@ -7796,9 +7769,9 @@ visibility = [
     "mindroom.history.compaction",
     "mindroom.history.runtime",
     "mindroom.history.summary_input",
-    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -8332,15 +8305,6 @@ expose = ["install_server_fetch_guard"]
 [[modules]]
 path = "mindroom.tools.browser_mcp"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
-
-[[modules]]
-path = "mindroom.approval.agno_compat_approval"
-depends_on = []
-visibility = ["mindroom.approval.tool_owners"]
-
-[[interfaces]]
-from = ["mindroom.approval.agno_compat_approval"]
-expose = ["append_denied_tool_result", "before_tool_lookup"]
 
 [[modules]]
 path = "mindroom.agno_compat_model_hooks"
@@ -9596,7 +9560,6 @@ path = "mindroom.history.legacy_summary_system_prompt"
 depends_on = []
 visibility = [
     "mindroom.approval.receipt",
-    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]

@@ -17,10 +17,10 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.provider import TextDelta, UsageReported
 from mindroom.llm.runs import RunStatus
-from mindroom.team_runtime.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
-from mindroom.team_runtime.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
-from mindroom.team_runtime.runtime import MemberEvent, run_team, team_paused_content, team_usage
-from mindroom.team_runtime.spec import TeamMode
+from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
+from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
+from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, team_usage
+from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.team_runtime.squad import (

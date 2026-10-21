@@ -1,7 +1,6 @@
 """Team approval reconstruction closes its scope when consumption finalization fails.
 
 The agent continuation has no handle to close: the owned conversation store holds no connection.
-The team continuation still runs through Agno until the team runtime cutover.
 """
 
 from __future__ import annotations
@@ -11,15 +10,15 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.team import TeamSession
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.teams import TeamMode, continue_paused_team_run
+from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.session_storage.types import ConversationSession
+from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
@@ -50,15 +49,15 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
     config = _config()
     paths = test_runtime_paths(tmp_path)
     identity = _identity()
-    storage = MagicMock()
     scope = ScopeSessionContext(
         scope=HistoryScope(kind="team", scope_id="research"),
-        storage=storage,
-        session=TeamSession(
+        storage=MagicMock(),
+        session=ConversationSession(
             session_id="session-1",
-            team_id="research",
+            kind="team",
+            owner_id="research",
             user_id=identity.requester_id,
-            runs=[TeamRunOutput(run_id="run-1", session_id="session-1", status=RunStatus.paused)],
+            runs=[TeamRunRecord(run_id="run-1", session_id="session-1", status=RunStatus.paused)],
         ),
         session_id="session-1",
     )
@@ -77,14 +76,10 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.teams.open_resolved_scope_session_context", return_value=open_scope()),
-        patch("mindroom.teams.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
-        patch("mindroom.teams.finalize_consumption", new=fail_finalization),
-        patch("mindroom.teams._register_team_notice_storage"),
-        patch(
-            "mindroom.teams.close_team_runtime_state_dbs",
-            side_effect=lambda **_kwargs: cleanup_order.append("team"),
-        ),
+        patch("mindroom.teams.envelope.open_resolved_scope_session_context", return_value=open_scope()),
+        patch("mindroom.teams.envelope.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
+        patch("mindroom.teams.envelope.finalize_consumption", new=fail_finalization),
+        patch("mindroom.teams.envelope._register_team_notice_storage"),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await continue_paused_team_run(
@@ -105,4 +100,4 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
             progress=None,
         )
 
-    assert cleanup_order == ["finalize", "team", "scope"]
+    assert cleanup_order == ["finalize", "scope"]

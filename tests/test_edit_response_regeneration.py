@@ -39,7 +39,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
-from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
+from mindroom.teams.formation import TeamOutcome, TeamResolution
+from mindroom.teams.spec import TeamMode
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot

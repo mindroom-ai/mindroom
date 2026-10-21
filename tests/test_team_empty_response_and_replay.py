@@ -20,7 +20,8 @@ from mindroom import ai_runtime, teams
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.teams import TeamMode, team_response, team_response_stream
+from mindroom.teams.envelope import team_response, team_response_stream
+from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import make_turn_context, runtime_paths_for
@@ -48,8 +49,11 @@ def _make_orchestrator() -> tuple[MagicMock, object]:
 def _team_patches(mock_team: AgnoTeam) -> list[AbstractContextManager[object]]:
     fake_agent = _make_test_agent("GeneralAgent")
     return [
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams.members.create_agent", return_value=fake_agent),
+        patch(
+            "mindroom.teams.members.resolve_agent_knowledge_access",
+            return_value=_KnowledgeResolution(knowledge=None),
+        ),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ]
 

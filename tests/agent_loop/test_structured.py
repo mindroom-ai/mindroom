@@ -15,7 +15,7 @@ from mindroom.agent_loop.structured import json_output_prompt, parse_structured,
 from mindroom.llm.provider import Capabilities
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
-from mindroom.teams import _TeamModeDecision
+from mindroom.teams.formation import _TeamModeDecision
 from mindroom.thread_summary import _ThreadEnrichment, _ThreadSummary
 from mindroom.topic_generator import _RoomTopic
 from tests.agno_parity.prompt_scenarios import load_golden, response_format_dict

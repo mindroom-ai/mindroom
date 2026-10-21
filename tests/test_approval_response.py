@@ -1,29 +1,15 @@
-"""Focused tests for response-side native approval coordination.
-
-The last test drives ``approval_denial_context``, the Agno hook the team continuation still binds until the team
-runtime cutover; everything else runs on owned records and events.
-"""
+"""Focused tests for response-side native approval coordination, on owned records and events."""
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ToolExecution as AgnoToolExecution
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_owners import approval_denial_context
-from mindroom.event_journal import ApprovalCall
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import unwrap_extracted_collaborator
@@ -412,48 +398,3 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
             toolkit_owners=origins,
         )
         assert plan.calls[0].toolkit_name == "calculator"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("exit_error", [None, RuntimeError, asyncio.CancelledError])
-async def test_denial_context_matches_run_identity_and_restores_lookup(exit_error: type[BaseException] | None) -> None:
-    """Exact denials survive retries but cannot affect other runs or outlive the continuation."""
-    actor = Agent(id="general", model=SyntheticModel(id="synthetic"), tools=[], telemetry=False)
-    call = ApprovalCall(tool_call_id="reused-id", tool_name="missing", invoking_agent="general", expires_at_ns=2**62)
-
-    async def lookup_twice(run_id: str) -> tuple[RunOutput, AgnoToolExecution]:
-        tool = AgnoToolExecution(
-            tool_call_id="reused-id",
-            tool_name="missing",
-            confirmed=False,
-            requires_confirmation=True,
-            confirmation_note="Declined by requester",
-        )
-        run = RunOutput(run_id=run_id, session_id="session", messages=[], tools=[tool])
-        for _ in range(2):
-            await actor.aget_tools(
-                run_response=run,
-                run_context=RunContext(run_id=run_id, session_id="session"),
-                session=AgentSession(session_id="session"),
-            )
-        return run, tool
-
-    with (
-        pytest.raises(exit_error) if exit_error is not None else nullcontext(),
-        approval_denial_context(actor, {"continued-run": (call,)}),
-    ):
-        for run_id in ("earlier-run", "continued-run", "later-run", "continued-run"):
-            run, tool = await lookup_twice(run_id)
-            if run_id == "continued-run":
-                assert len(run.messages or []) == 1
-                assert run.messages[0].tool_call_error is True
-                assert tool.requires_confirmation is False
-            else:
-                assert run.messages == []
-                assert tool.requires_confirmation is True
-        if exit_error is not None:
-            raise exit_error
-
-    run, tool = await lookup_twice("continued-run")
-    assert run.messages == []
-    assert tool.requires_confirmation is True

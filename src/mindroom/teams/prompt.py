@@ -12,12 +12,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.llm.messages import Message
-from mindroom.team_runtime.spec import TeamMode
+from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.team_runtime.spec import TeamMember
+    from mindroom.teams.spec import TeamMember
 
 TEAM_OPENING_PROMPT = (
     "You coordinate this team to fulfill the user's request. "

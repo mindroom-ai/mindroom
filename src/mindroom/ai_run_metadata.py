@@ -19,39 +19,6 @@ if TYPE_CHECKING:
 _AI_RUN_METADATA_VERSION = 1
 
 
-def accumulate_model_request_metrics(
-    totals: dict[str, int],
-    observed_fields: set[str],
-    *,
-    input_tokens: int | None,
-    output_tokens: int | None,
-    total_tokens: int | None,
-    reasoning_tokens: int | None,
-    cache_read_tokens: int | None,
-    cache_write_tokens: int | None,
-    time_to_first_token: float | None,
-    first_token_latency: float | None,
-) -> float | None:
-    """Accumulate observed integer counters and retain the first numeric latency.
-
-    The caller owns counter initialization; missing counters are left untouched.
-    """
-    for field_name, value in (
-        ("input_tokens", input_tokens),
-        ("output_tokens", output_tokens),
-        ("total_tokens", total_tokens),
-        ("reasoning_tokens", reasoning_tokens),
-        ("cache_read_tokens", cache_read_tokens),
-        ("cache_write_tokens", cache_write_tokens),
-    ):
-        if isinstance(value, int):
-            observed_fields.add(field_name)
-            totals[field_name] = totals.get(field_name, 0) + value
-    if first_token_latency is None and isinstance(time_to_first_token, (int, float)):
-        return float(time_to_first_token)
-    return first_token_latency
-
-
 def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
@@ -72,29 +39,6 @@ def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str,
     if isinstance(metrics, dict):
         return _sanitize_metrics_payload(metrics)
     return None
-
-
-def build_model_request_metrics_fallback(
-    totals: dict[str, int],
-    first_token_latency: float | None,
-    observed_fields: set[str] | None = None,
-) -> dict[str, Any] | None:
-    """Build aggregate usage metadata from streamed request events."""
-    if observed_fields is None:
-        payload: dict[str, Any] = {key: value for key, value in totals.items() if value > 0}
-    else:
-        payload: dict[str, Any] = {key: totals[key] for key in observed_fields if key in totals}
-    total_tokens = payload.get("total_tokens")
-    if isinstance(total_tokens, int) and total_tokens <= 0:
-        payload.pop("total_tokens")
-    if "total_tokens" not in payload:
-        input_tokens = payload.get("input_tokens")
-        output_tokens = payload.get("output_tokens")
-        if isinstance(input_tokens, int) and isinstance(output_tokens, int):
-            payload["total_tokens"] = input_tokens + output_tokens
-    if first_token_latency is not None:
-        payload["time_to_first_token"] = format(first_token_latency, ".12g")
-    return payload or None
 
 
 def _build_context_payload(

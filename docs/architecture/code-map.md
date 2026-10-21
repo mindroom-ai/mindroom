@@ -18,7 +18,7 @@ Matrix sync callback
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
-       -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
+       -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
@@ -40,7 +40,6 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `team_exact_members.py` | Runtime resolution for exact team member materialization |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
 | `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
 | `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
@@ -163,7 +162,14 @@ Matrix sync callback
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
-| `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
+| `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
+| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, and the leader's and members' model aliases for a turn |
+| `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
+| `teams/prompt.py` | The leader's system message in the layout Agno rendered: roster, mode block, tool instructions, provider note, context |
+| `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
+| `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
+| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, and the durable `team_stream` snapshot an approval resume restores |
+| `teams/envelope.py` | `team_response`, `team_response_stream`, and `continue_paused_team_run`: build the leader and members, run the team through the turn drivers, drive a member's delegations and resume the run with their results, render the reply |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `agent_cli/minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
 | `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |

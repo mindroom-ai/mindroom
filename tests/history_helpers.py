@@ -27,7 +27,6 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.history import summary_rows
-from mindroom.history.agno_compat_message_builder import apply_patch
 from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
     append_compaction_chunk,
@@ -359,7 +358,6 @@ def _agent(
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
 ) -> Agent:
-    apply_patch()
     return Agent(
         id=agent_id,
         name=name,

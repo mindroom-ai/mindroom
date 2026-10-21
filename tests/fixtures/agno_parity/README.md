@@ -112,9 +112,9 @@ Skipped where the route has nothing to pin:
 ## Prompt goldens (`prompts/`)
 
 `prompts/<scenario>.json` holds every model request one scenario sends, as the provider adapter receives it from the request loop.
-`tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site) and `tests/agno_parity/capture_prompts.py` writes the files.
+`tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.envelope.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site) and `tests/agno_parity/capture_prompts.py` writes the files.
 `tests/agent_loop/test_prompt_parity.py` compares the helper requests and the first request of every Matrix reply with the owned path (the agent `create_agent` builds and the request the loop sends first), `tests/team_runtime/test_prompt_parity.py` the team goldens, and names the step that will compare each remaining golden.
-Requests MindRoom sends through its own provider layer are recorded where the provider adapter receives them, below the request pipeline; requests the Agno team runtime still sends are recorded at the Agno model call.
+Requests MindRoom sends through its own provider layer are recorded where the provider adapter receives them, below the request pipeline.
 Rewrite the fixtures with `.venv/bin/python -m tests.agno_parity.capture_prompts [scenario ...]` from the repository root.
 
 Each file has these keys:

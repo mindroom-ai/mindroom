@@ -11,9 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.run.team import RunContentEvent as TeamContentEvent
-from agno.run.team import TeamRunOutput
-from agno.team import Team as AgnoTeam
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -30,12 +27,16 @@ from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
+from mindroom.llm.messages import Message
 from mindroom.providers.synthetic_model import SyntheticModel
-from mindroom.teams import TeamMode, TeamTurnModelSelection
+from mindroom.teams.envelope import BuiltTeam
+from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection
+from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
@@ -46,7 +47,7 @@ from tests.test_dynamic_workflow_subagents import _Workflow as _SubagentWorkflow
 from tests.test_dynamic_workflows import _fake_stream_agent, _make_context, _make_multi_agent_context, _workflow_spec
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.budgets.monitor import BudgetMonitor
@@ -355,23 +356,40 @@ def test_openai_compat_agent_completion_budgets_mapped_requesters(
     assert response.await_args.args[0].active_model_name == expected
 
 
+def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+    """Return what ``_build_team`` builds for a team whose leader answers on its own: no members materialized."""
+    spec = TeamSpec(
+        id="super-team",
+        name="Super Team",
+        mode=TeamMode.COORDINATE,
+        model=ScriptedModel([answer("Team answer")]),
+        system_message=Message(role="system", content="You lead the team."),
+        members=(),
+    )
+    members = ResolvedExactTeamMembers(
+        requested_agent_names=[],
+        builds=[],
+        display_names=[],
+        materialized_agent_names=set(),
+        failed_agent_names=[],
+    )
+    return members, BuiltTeam(spec=spec, leader_middleware=()), TeamMode.COORDINATE
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, stream: bool) -> None:
-    team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
-
-    async def stream_events() -> AsyncIterator[object]:
-        yield TeamContentEvent(content="Team answer")
-
-    async def run() -> TeamRunOutput:
-        return TeamRunOutput(content="Team answer")
-
-    team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
-        patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)) as build,
+        patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()) as build,
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(
+                return_value=openai_compat._PreparedOpenAITeamPrompt(
+                    run_input=[Message(role="user", content="Build it")],
+                    prompt="Build it",
+                    run_metadata=None,
+                ),
+            ),
         ) as prepare,
     ):
         reply = client.post(
@@ -430,17 +448,21 @@ async def test_dynamic_workflow_subagent_participant_uses_fallback(
 
 @pytest.mark.parametrize("model", ["general", "team/super_team"])
 def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: Path, model: str) -> None:
-    team = AgnoTeam(name="Super Team", id="super-team", model=SyntheticModel(id="synthetic"), members=[], tools=[])
-    team.arun = AsyncMock(return_value=TeamRunOutput(content="Team answer"))
     monitor = budget_monitor_with_spend(_runtime_paths(tmp_path), {})
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
         patch.object(monitor, "response_finished") as response_finished,
         patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
-        patch("mindroom.api.openai_compat._build_team", return_value=([], team, TeamMode.COORDINATE)),
+        patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(
+                return_value=openai_compat._PreparedOpenAITeamPrompt(
+                    run_input=[Message(role="user", content="Build it")],
+                    prompt="Build it",
+                    run_metadata=None,
+                ),
+            ),
         ),
     ):
         config_lifecycle.app_state(client.app).budget_monitor = monitor

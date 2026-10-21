@@ -24,9 +24,6 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.agent import Agent
-    from agno.team import Team
-
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
@@ -290,17 +287,6 @@ def plan_replay_that_fits(
         add_history_to_context=True,
         num_history_runs=0,
     )
-
-
-def apply_replay_plan(
-    *,
-    target: Agent | Team,
-    replay_plan: ResolvedReplayPlan,
-) -> None:
-    """Apply one resolved persisted-replay plan to a live Agent or Team."""
-    target.add_history_to_context = replay_plan.add_history_to_context
-    target.num_history_runs = replay_plan.num_history_runs
-    target.num_history_messages = replay_plan.num_history_messages
 
 
 def _context_window_guard_limit_bounds(

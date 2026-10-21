@@ -93,7 +93,7 @@ __all__ = [
     "apply_local_approval_decisions",
     "build_matrix_run_metadata",
     "local_approval_requirements",
-    "paused_attempt_from_pause",
+    "pause_without_approval_error",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
@@ -442,6 +442,23 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
         )
 
 
+def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> RuntimeError:
+    """Return the error for a pause with no approval to ask for and no delegation to drive.
+
+    Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
+    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
+    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it, and a blocking
+    reply also raises it through the runner.
+    """
+    pending = [
+        requirement.tool_execution.tool_name
+        for requirement in record.requirements or ()
+        if not requirement.is_resolved()
+    ]
+    msg = f"{entity_label} run {record.run_id!r} paused on {pending} without an approval to ask for"
+    return RuntimeError(msg)
+
+
 def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     """Return copies of the requirements this actor's approval cards ask about.
 
@@ -487,7 +504,7 @@ def paused_attempt_from_response(
                 for tool in delegation.pending_tools
                 if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
             }
-        paused = paused_attempt_from_pause(
+        paused = _paused_attempt_from_pause(
             toolkit_owners=toolkit_owners,
             tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
@@ -503,7 +520,7 @@ def paused_attempt_from_response(
             if paused is not None
             else None
         )
-    return paused_attempt_from_pause(
+    return _paused_attempt_from_pause(
         toolkit_owners=toolkit_owners,
         tools=record.tools or (),
         requirements=record.requirements or (),
@@ -512,7 +529,7 @@ def paused_attempt_from_response(
     )
 
 
-def paused_attempt_from_pause(
+def _paused_attempt_from_pause(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],

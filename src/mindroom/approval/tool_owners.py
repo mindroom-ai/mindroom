@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.approval.agno_compat_approval import append_denied_tool_result, before_tool_lookup
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
@@ -20,12 +18,9 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from agno.agent import Agent
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-    from agno.team import Team
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -38,7 +33,8 @@ if TYPE_CHECKING:
 def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], str | None]:
     """Observe final async toolkit functions with Agno's first-wins collision policy.
 
-    The team path still builds Agno agents; an owned agent build carries the same map as ``AgentBuild.tool_owners``.
+    Tests that still build Agno agents read owners here; an owned agent build carries the same map as
+    ``AgentBuild.tool_owners``.
     """
     owners: dict[tuple[str, str], str | None] = {}
     for agent in agents:
@@ -53,50 +49,6 @@ def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], 
             elif callable(tool) and isinstance(name := getattr(tool, "__name__", None), str):
                 owners.setdefault((agent.id, name), None)
     return owners
-
-
-def record_approval_denials(
-    actor: Agent | Team,
-    run: RunOutput | TeamRunOutput,
-    calls: Sequence[ApprovalCall],
-) -> None:
-    """Consume exact denied IDs using Agno's native rejection result formatting."""
-    denied = {call.tool_call_id: call for call in calls}
-    run.messages = run.messages or []
-    tools = [*(run.tools or ()), *(r.tool_execution for r in run.requirements or () if r.tool_execution)]
-    for tool in tools:
-        call = denied.get(tool.tool_call_id or "")
-        if call is None or tool.confirmed is not False:
-            continue
-        if tool.tool_name != call.tool_name:
-            msg = "Denied approval no longer matches the pending function; retry the request"
-            raise RuntimeError(msg)
-        if not any(message.tool_call_id == tool.tool_call_id for message in run.messages):
-            append_denied_tool_result(actor, run.messages, tool, tool_name=call.tool_name)
-        tool.requires_confirmation = False
-        tool.tool_call_error = True
-
-
-@contextmanager
-def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
-    """Apply exact run denials while Agno owns this approval continuation.
-
-    Agno resolves a Function even to reject a removed tool. It calls aget_tools
-    after binding the canonical run and before copying messages. A team may continue
-    several paused runs on one member, and retries may bind a run again, so keep
-    the exact run map until the entire continuation exits. No placeholder enters
-    the model tool surface.
-    """
-    if not any(calls_by_run.values()):
-        yield
-        return
-
-    def apply_denials(run: RunOutput) -> None:
-        if run.run_id is not None and (calls := calls_by_run.get(run.run_id)):
-            record_approval_denials(actor, run, calls)
-
-    with before_tool_lookup(actor, apply_denials):
-        yield
 
 
 def validate_approval_tool_owners(

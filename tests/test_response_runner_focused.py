@@ -151,7 +151,8 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.teams import _TeamStreamPresentation, continue_paused_team_run
+from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
@@ -3518,7 +3519,7 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
     assert paused.response_text == ""
     assert paused.tool_trace == (trace,)
     assert paused.response_presentation_state == state
-    restored = _TeamStreamPresentation.restore(
+    restored = TeamStreamPresentation.restore(
         config_names=["member-a"],
         show_tool_calls=False,
         state=paused.response_presentation_state,

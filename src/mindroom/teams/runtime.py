@@ -10,7 +10,7 @@ the member, and ``continue_team`` resumes the members first, then the leader. Th
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
@@ -36,7 +36,7 @@ from mindroom.llm.provider import ReasoningDelta
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
-from mindroom.team_runtime.delegate_tools import DELEGATE_TOOL_NAMES, delegate_functions, propagate_member_pause
+from mindroom.teams.delegate_tools import DELEGATE_TOOL_NAMES, delegate_functions, propagate_member_pause
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
 if TYPE_CHECKING:
@@ -44,9 +44,10 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.team_runtime.spec import TeamMember, TeamSpec
+    from mindroom.teams.delegate_tools import MemberRunner
+    from mindroom.teams.spec import TeamMember, TeamSpec
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,9 @@ class MemberRunEnded:
 
 type TeamRunEvent = RunEvent | MemberEvent | MemberRunEnded
 type Emit = Callable[[TeamRunEvent], None]
+# One call a paused team waits for: the member whose run issued it, or None for the leader's own, and the call id.
+# Members' providers number their calls independently, so a call id alone does not name a call of the team.
+type TeamCallKey = tuple[str | None, str]
 
 
 def run_team(
@@ -114,7 +118,7 @@ def run_team(
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members)
+        leader = _leader_spec(spec, record, members.run)
         await _forward(
             drive_run(
                 leader,
@@ -138,9 +142,9 @@ def continue_team(
     paused: TeamRunRecord,
     messages: list[Message],
     *,
-    approved: Sequence[ApprovedCall] = (),
-    denied: Mapping[str, str | None] = {},
-    external_results: Mapping[str, str] = {},
+    approved: Mapping[TeamCallKey, ApprovedCall] = {},
+    denied: Mapping[TeamCallKey, str | None] = {},
+    external_results: Mapping[TeamCallKey, str] = {},
     ctx: RunContext,
     hooks: LoopHooks = NO_HOOKS,
     persist: Persist[AnyRunRecord] | None = None,
@@ -149,8 +153,9 @@ def continue_team(
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
     ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it.
-    Decisions name member calls and the leader's own calls alike by tool call id; every call the team waits for
-    must be covered exactly, as ``resume_agent`` requires, else ``ValueError`` here before anything runs.
+    Decisions are keyed by ``TeamCallKey``: the member whose run waits for the call, None for the leader's own
+    calls. Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision
+    must name a waiting call, else ``ValueError`` here before anything runs.
     A member that completes hands the leader its text in Agno's member-results message, which replaces every
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request.
@@ -159,29 +164,23 @@ def continue_team(
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
     record.content = None
-    member_requirements = [r for r in record.requirements or () if r.member_run_id is not None]
-    record.requirements = [r for r in record.requirements or () if r.member_run_id is None]
-    member_call_ids = {r.tool_execution.tool_call_id for r in member_requirements}
-    plans = _plan_member_resumes(
-        spec,
-        paused,
-        member_requirements,
-        approved=approved,
-        denied=denied,
-        external_results=external_results,
-    )
-    leader_approved = tuple(call for call in approved if call.tool_call_id not in member_call_ids)
+    member_requirements = [r for r in record.requirements or () if r.member_agent_id is not None]
+    record.requirements = [r for r in record.requirements or () if r.member_agent_id is None]
+    decisions = _TeamDecisions(approved, denied, external_results)
+    plans = _plan_member_resumes(spec, paused, member_requirements, decisions)
+    leader = decisions.take(None, {r.tool_execution.tool_call_id for r in record.requirements or ()})
     decided = decide_requirements(
         record,
-        approved=leader_approved,
-        denied={call_id: note for call_id, note in denied.items() if call_id not in member_call_ids},
-        external_results={call_id: r for call_id, r in external_results.items() if call_id not in member_call_ids},
+        approved=leader.approved,
+        denied=leader.denied,
+        external_results=leader.external_results,
     )
-    prepare_resume_tools(_base_leader_spec(spec), leader_approved)
+    prepare_resume_tools(_base_leader_spec(spec), leader.approved)
+    decisions.require_consumed()
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members)
+        leader = _leader_spec(spec, record, members.run)
         prepared = prepare_run_tools(leader)
 
         async def entry() -> AsyncIterator[RunEvent]:
@@ -257,6 +256,43 @@ def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetric
 
 
 @dataclass(frozen=True, slots=True)
+class _Decided:
+    """The decisions that fall to one run of the team: the leader's own or one member's."""
+
+    approved: tuple[ApprovedCall, ...]
+    denied: dict[str, str | None]
+    external_results: dict[str, str]
+
+
+@dataclass(slots=True)
+class _TeamDecisions:
+    """The resume's decisions by ``TeamCallKey``, handed out run by run so a stray decision is caught."""
+
+    approved: Mapping[TeamCallKey, ApprovedCall]
+    denied: Mapping[TeamCallKey, str | None]
+    external_results: Mapping[TeamCallKey, str]
+    consumed: set[TeamCallKey] = field(default_factory=set)
+
+    def take(self, member_id: str | None, call_ids: set[str | None]) -> _Decided:
+        """Return the decisions on ``member_id``'s calls among ``call_ids`` (None names the leader's own)."""
+        keys = {(member_id, call_id) for call_id in call_ids if call_id is not None}
+        self.consumed |= keys
+        return _Decided(
+            approved=tuple(call for key, call in self.approved.items() if key in keys),
+            denied={key[1]: note for key, note in self.denied.items() if key in keys},
+            external_results={key[1]: result for key, result in self.external_results.items() if key in keys},
+        )
+
+    def require_consumed(self) -> None:
+        """Refuse a decision that names no call the team waits for."""
+        stray = ({*self.approved, *self.denied, *self.external_results}) - self.consumed
+        if stray:
+            named = sorted(stray, key=lambda key: (key[0] or "", key[1]))
+            msg = f"Decisions name calls the team does not wait for: {named!r}; retry the request"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class _MemberResume:
     member: TeamMember
     paused: RunRecord
@@ -267,32 +303,32 @@ def _plan_member_resumes(
     spec: TeamSpec,
     paused: TeamRunRecord,
     requirements: Sequence[RunRequirement],
-    *,
-    approved: Sequence[ApprovedCall],
-    denied: Mapping[str, str | None],
-    external_results: Mapping[str, str],
+    decisions: _TeamDecisions,
 ) -> list[_MemberResume]:
     """Plan one resume per paused member run, checking every member's decisions before any member runs."""
     members = {member.spec.id: member for member in spec.members}
     embedded = {member.run_id: member for member in paused.member_responses if isinstance(member, RunRecord)}
-    by_run: dict[str, list[RunRequirement]] = {}
+    by_run: dict[tuple[str, str], list[RunRequirement]] = {}
     for requirement in requirements:
-        assert requirement.member_run_id is not None
-        by_run.setdefault(requirement.member_run_id, []).append(requirement)
+        assert requirement.member_agent_id is not None
+        if requirement.member_run_id is None:
+            msg = f"Saved member approval of {requirement.member_agent_id!r} has no paused run identity; retry the request"
+            raise ValueError(msg)
+        by_run.setdefault((requirement.member_agent_id, requirement.member_run_id), []).append(requirement)
     plans: list[_MemberResume] = []
-    for run_id, group in by_run.items():
-        member = members.get(group[0].member_agent_id or "")
+    for (member_id, run_id), group in by_run.items():
+        member = members.get(member_id)
         if member is None:
             msg = (
                 f"Paused member run {run_id!r} of team run {paused.run_id!r} belongs to "
-                f"{group[0].member_agent_id!r}, which is not a member of team {spec.id!r}"
+                f"{member_id!r}, which is not a member of team {spec.id!r}"
             )
             raise ValueError(msg)
         member_record = embedded.get(run_id)
         if member_record is None:
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
-        call_ids = {requirement.tool_execution.tool_call_id for requirement in group}
+        decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
         # The member resumes from its own record; its requirements name the member, as Agno's copies did, so the
         # resumed member row keeps the member fields the team run's requirements carry.
         named = replace(
@@ -310,9 +346,9 @@ def _plan_member_resumes(
         plan = plan_resume(
             member.spec,
             named,
-            approved=[call for call in approved if call.tool_call_id in call_ids],
-            denied={call_id: note for call_id, note in denied.items() if call_id in call_ids},
-            external_results={call_id: r for call_id, r in external_results.items() if call_id in call_ids},
+            approved=decided.approved,
+            denied=decided.denied,
+            external_results=decided.external_results,
         )
         plans.append(_MemberResume(member, named, plan))
     return plans
@@ -324,7 +360,7 @@ def _answer_delegations(record: TeamRunRecord, messages: list[Message], results:
     The replacement lands on the run's tool entries and on the leader's request, so the leader reads the members'
     results where it read the pause notice. ``results`` holds only the members resumed in this call, so a collaborate
     sibling's text that completed earlier, or a member completed in an earlier chained resume, no longer reaches the
-    leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps that until the owner rules.
+    leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps that.
     """
     text = "\n".join([MEMBER_RESULTS_HEADING, *results])
     answered: set[str | None] = set()
@@ -348,11 +384,25 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
     )
 
 
-def _leader_spec(spec: TeamSpec, record: TeamRunRecord, members: _MemberRuns) -> AgentSpec:
+def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner) -> AgentSpec:
     """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run."""
     base = _base_leader_spec(spec)
-    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=members.run)
+    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member)
     return replace(base, toolkits=(*base.toolkits, delegation))
+
+
+def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
+    """Return the tool definitions every leader request offers: the team's own tools, then the delegation tool.
+
+    The definitions do not depend on a run; a run binds the delegation tool to its own record and members.
+    """
+
+    async def no_member_runs(member: TeamMember, task: str) -> RunRecord:
+        msg = f"the tool definitions of team {spec.id!r} run no member; {member.spec.id!r} was asked {task!r}"
+        raise RuntimeError(msg)
+
+    unbound = TeamRunRecord(run_id="", team_id=spec.id, team_name=spec.name)
+    return prepare_run_tools(_leader_spec(spec, unbound, no_member_runs)).specs()
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,8 +520,10 @@ __all__ = [
     "MemberEvent",
     "MemberLoopEvent",
     "MemberRunEnded",
+    "TeamCallKey",
     "TeamRunEvent",
     "continue_team",
+    "leader_tool_specs",
     "run_team",
     "team_paused_content",
     "team_usage",

@@ -52,7 +52,7 @@ logger = get_logger(__name__)
 REJECTED_TEXT = "Function call was rejected by the user"
 
 type Persist[R] = Callable[[R], Awaitable[None]]
-type Entry = Callable[[], AsyncIterator[RunEvent]]
+type _Entry = Callable[[], AsyncIterator[RunEvent]]
 
 
 class ApprovedCall(Protocol):
@@ -349,7 +349,7 @@ def decide_requirements(
     return [requirement for call_id, requirement in requirements.items() if call_id in waited_for]
 
 
-def agent_paused_content(record: AnyRunRecord) -> str:
+def _agent_paused_content(record: AnyRunRecord) -> str:
     """Return Agno's text for an agent run paused on its own tools."""
     return paused_content(record.tools or ())
 
@@ -364,8 +364,8 @@ async def drive_run[R: AnyRunRecord](
     hooks: LoopHooks,
     persist: Persist[R] | None,
     template: ModelRequest,
-    entry: Entry | None = None,
-    pause_content: Callable[[R], str] = agent_paused_content,
+    entry: _Entry | None = None,
+    pause_content: Callable[[R], str] = _agent_paused_content,
 ) -> AsyncIterator[RunEvent]:
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
@@ -478,10 +478,8 @@ def paused_content(tools: Sequence[ToolExecution]) -> str:
 __all__ = [
     "REJECTED_TEXT",
     "ApprovedCall",
-    "Entry",
     "Persist",
     "ResumePlan",
-    "agent_paused_content",
     "decide_requirements",
     "drive_run",
     "paused_content",

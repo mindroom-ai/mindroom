@@ -139,16 +139,10 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
     clean_partial_reply_text,
 )
-from mindroom.teams import (
-    TeamMode,
-    TeamTurnModelSelection,
-    continue_paused_team_run,
-    resolve_team_turn_models,
-    select_model_for_team,
-    strip_team_display,
-    team_response,
-    team_response_stream,
-)
+from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
+from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models, select_model_for_team
+from mindroom.teams.presentation import strip_team_display
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed

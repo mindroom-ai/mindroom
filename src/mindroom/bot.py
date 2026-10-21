@@ -78,7 +78,8 @@ from mindroom.runtime_shutdown import (
     ShutdownBudget,
     restart_reason_category_for,
 )
-from mindroom.teams import TeamMode, TeamOutcome, resolve_configured_team
+from mindroom.teams.formation import TeamOutcome, resolve_configured_team
+from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 

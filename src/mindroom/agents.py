@@ -49,10 +49,8 @@ from mindroom.session_storage import agent_storage
 from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import approval_can_run_as_job
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
-from mindroom.tool_jobs.notices import install_job_notice_hook
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
@@ -79,7 +77,7 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, build_tool_hook_middleware, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, prepend_tool_hook_bridge
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -93,7 +91,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
-    from agno.models.base import Model
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
@@ -1094,27 +1091,6 @@ def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePa
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
-def _build_agent_tool_hook_bridge(
-    *,
-    hook_registry: HookRegistry | None,
-    plugins: list[HookRegistryPlugin],
-    agent_name: str,
-    dispatch_context: ToolDispatchContext | None,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-) -> Callable[..., Any]:
-    """Return the tool-call policy as the Agno tool hook the team path still prepends to its job controls."""
-    active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
-    return build_tool_hook_bridge(
-        active_hook_registry,
-        agent_name=agent_name,
-        dispatch_context=dispatch_context,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-
-@timed("system_prompt_assembly.agent_create.hook_bridge")
 def _build_agent_tool_middleware(
     *,
     hook_registry: HookRegistry | None,
@@ -1773,31 +1749,38 @@ def _job_controls(
     return None if controls is None else prepend_tool_hook_bridge(controls, tool_hook_bridge)
 
 
+@dataclass(frozen=True)
+class LeaderJobs:
+    """A team leader's job controls as the owned loop offers them, and the tool-call policy they run under."""
+
+    controls: AdaptedToolkit
+    middleware: ToolMiddleware
+
+
 def team_background_jobs(
-    model: Model,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     owner: ToolExecutionIdentity | None,
-) -> Toolkit | None:
-    """Let a team's calls run as background jobs, and return its leader's job controls.
+) -> LeaderJobs | None:
+    """Return a team leader's job controls while the instance runs managed jobs for a Matrix owner.
 
-    The team owns the jobs its members start for it: its leader hears when they end and collects them.
+    The team owns the jobs its members start for it: its leader collects them through these controls.
     """
-    if not background_tool_jobs_enabled(config, runtime_paths):
+    if not background_tool_jobs_enabled(config, runtime_paths) or owner is None:
         return None
-    install_tool_job_execution(model)
-    if owner is None:
+    controls = _job_controls((), runtime_paths, owner, depth=0, enabled=True, tool_hook_bridge=None)
+    if controls is None:
         return None
-    install_job_notice_hook(model, entity_name=owner.recipient)
-    bridge = _build_agent_tool_hook_bridge(
+    plugins = _load_agent_plugins(config, runtime_paths)
+    middleware = _build_agent_tool_middleware(
         hook_registry=None,
-        plugins=_load_agent_plugins(config, runtime_paths),
+        plugins=plugins,
         agent_name=owner.recipient,
         dispatch_context=ToolDispatchContext(execution_identity=owner),
         config=config,
         runtime_paths=runtime_paths,
     )
-    return _job_controls((), runtime_paths, owner, depth=0, enabled=True, tool_hook_bridge=bridge)
+    return LeaderJobs(controls=adapt_toolkit(controls), middleware=middleware)
 
 
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
@@ -2139,6 +2122,7 @@ def create_agent(
 
 
 __all__ = [
+    "LeaderJobs",
     "agent_build_can_overlap_file_memory",
     "apply_tool_approval_capability",
     "build_agent_toolkit",

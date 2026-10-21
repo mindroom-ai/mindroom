@@ -166,7 +166,7 @@ def _normalized_string_list(values: object) -> list[str]:
     return normalized
 
 
-def model_params_payload(model: Model) -> dict[str, JSONValue]:
+def _model_params_payload(model: Model) -> dict[str, JSONValue]:
     """Return JSON-safe model parameters suitable for durable request metadata."""
     return _model_params(model)
 
@@ -302,7 +302,7 @@ async def _write_llm_request_log(
             "message_count": len(messages),
             "tools": json_safe(tools),
             "tool_count": len(tools or []),
-            "model_params": model_params_payload(model),
+            "model_params": _model_params_payload(model),
         },
     )
 

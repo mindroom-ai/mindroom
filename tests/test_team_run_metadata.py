@@ -19,7 +19,8 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.teams import TeamMode, _TeamStreamUsage, team_response, team_response_stream
+from mindroom.teams.envelope import team_response, team_response_stream
+from mindroom.teams.spec import TeamMode
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
@@ -29,32 +30,6 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from agno.team import Team as AgnoTeam
-
-
-@pytest.mark.parametrize(
-    ("output_tokens", "expected_total", "expected_payload"),
-    [
-        (None, None, None),
-        (0, 0, {"output_tokens": 0}),
-        (False, 0, {"output_tokens": 0}),
-        (True, 1, {"output_tokens": 1}),
-        (1.5, None, None),
-        ("3", None, None),
-    ],
-)
-def test_team_stream_usage_preserves_sparse_totals(
-    output_tokens: int | None,
-    expected_total: int | None,
-    expected_payload: dict[str, int] | None,
-) -> None:
-    """Absent output usage stays unknown, including after a later request omits counters."""
-    usage = _TeamStreamUsage()
-
-    usage.track(TeamModelRequestCompletedEvent(output_tokens=output_tokens))
-    usage.track(TeamModelRequestCompletedEvent())
-
-    assert usage.request_metric_totals.get("output_tokens") == expected_total
-    assert usage.fallback_payload() == expected_payload
 
 
 def _make_orchestrator() -> tuple[MagicMock, object]:
@@ -70,8 +45,11 @@ def _make_orchestrator() -> tuple[MagicMock, object]:
 def _team_patches(mock_team: AgnoTeam) -> list[AbstractContextManager[object]]:
     fake_agent = _make_test_agent("GeneralAgent")
     return [
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+        patch("mindroom.teams.members.create_agent", return_value=fake_agent),
+        patch(
+            "mindroom.teams.members.resolve_agent_knowledge_access",
+            return_value=_KnowledgeResolution(knowledge=None),
+        ),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ]
 
