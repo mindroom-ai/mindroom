@@ -2674,6 +2674,7 @@ visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindro
 path = "mindroom.native_compaction"
 depends_on = ["mindroom.logging_config"]
 visibility = [
+    "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
     "mindroom.providers.claude_native_compaction",
     "mindroom.history.replay",
@@ -2741,10 +2742,12 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
+    "mindroom.native_compaction",
     "mindroom.providers.anthropic.native_compaction",
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.anthropic.wire",
+    "mindroom.providers.assistant_turn",
     "mindroom.providers.claude_prompt_cache",
     "mindroom.providers.errors",
     "mindroom.providers.google_adc",
@@ -5914,6 +5917,7 @@ depends_on = [
     "mindroom.native_compaction",
     "mindroom.prompts",
     "mindroom.providers.agno_compat_openai_responses_items",
+    "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",
@@ -7811,6 +7815,10 @@ path = "mindroom.providers.extra_kwargs"
 depends_on = []
 
 [[modules]]
+path = "mindroom.providers.assistant_turn"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
 path = "mindroom.providers.errors"
 depends_on = ["mindroom.llm"]
 
@@ -7820,15 +7828,29 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
 
 [[modules]]
 path = "mindroom.providers.gemini"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.errors", "mindroom.providers.tool_policy"]
+depends_on = [
+    "mindroom.llm",
+    "mindroom.providers.assistant_turn",
+    "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
+    "mindroom.providers.remote_media",
+    "mindroom.providers.tool_policy",
+]
 
 [[modules]]
 path = "mindroom.providers.ollama_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.errors", "mindroom.providers.tool_policy"]
+depends_on = [
+    "mindroom.llm",
+    "mindroom.providers.assistant_turn",
+    "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
+    "mindroom.providers.remote_media",
+    "mindroom.providers.tool_policy",
+]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs"]
+depends_on = ["mindroom.llm", "mindroom.providers.assistant_turn", "mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.groq_model"

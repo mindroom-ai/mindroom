@@ -22,6 +22,7 @@ from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
     RequestOverrides,
+    StreamProgress,
     TextDelta,
     ToolCallReady,
     ToolSpec,
@@ -235,8 +236,11 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     )
     provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
-    events = await _events(provider, ModelRequest(messages=_user(), tools=tools))
+    streamed = await _events(provider, ModelRequest(messages=_user(), tools=tools))
 
+    # Block starts, the signature delta, and the tool-call argument piece show up as provider activity.
+    events = [event for event in streamed if not isinstance(event, StreamProgress)]
+    assert len(streamed) - len(events) >= 3
     assert isinstance(events[0], UsageReported)
     assert events[0].final is False
     assert (events[0].usage.input_tokens, events[0].usage.output_tokens, events[0].usage.cache_read_tokens) == (

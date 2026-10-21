@@ -19,7 +19,8 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
     ChatWire,
@@ -55,9 +56,9 @@ class ChatAdapter:
     settings: ChatSettings
     clients: SDKClients
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Chat Completions takes one tool message per result, in order."""
-        return list(results)
+        return one_message_per_result(messages, results)
 
     async def _client(self, request: ModelRequest) -> AsyncOpenAI:
         client = await self.clients.client(request.overrides)
@@ -124,7 +125,7 @@ class ChatAdapter:
                     yield TextDelta(parts.content)
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
-        message = assistant_message(
+        message = finished_assistant_message(
             self.identity,
             content=parts.content,
             reasoning=parts.reasoning,
@@ -132,7 +133,7 @@ class ChatAdapter:
             provider_data=parts.provider_data,
             usage=parts.usage,
             started=started,
-            first_token=first_token,
+            first_output_at=first_token,
         )
         for call in parts.tool_calls:
             yield ToolCallReady(call)

@@ -1,8 +1,8 @@
 """The owned Gemini, Ollama, and synthetic adapters reproduce what the Agno-backed provider layer produced.
 
 For Gemini, Gemini on Vertex AI, and Ollama, each C1 golden's request (method, URL, kept headers, JSON body)
-and parsed reply (message dict, usage, stored stop reason) must match; ``gemini_ollama_support`` documents the
-projections and the stream-only replay of non-streaming goldens.
+and parsed reply (message dict, usage, stored stop reason) must match, with the request sent through the
+production pipeline stages; non-streaming goldens are sent as the non-streaming provider call they recorded.
 The synthetic model has no golden, so its streamed plans are pinned from ``SyntheticModel`` for the same inputs.
 """
 
@@ -19,6 +19,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
+    StreamProgress,
     TextDelta,
     ToolCallReady,
     ToolSpec,
@@ -27,13 +28,14 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from tests.providers.gemini_ollama_support import (
+    FAMILIES,
     Golden,
-    expected_request,
     goldens,
     hide_provider_environment,
     replay,
     runtime_paths_for,
 )
+from tests.providers.golden_support import comparable_metrics, expected_stop_reason
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +47,7 @@ GOLDENS = goldens()
 
 def test_every_route_has_goldens() -> None:
     """The parity suite iterates real fixtures for each route it covers."""
-    assert {golden.family for golden in GOLDENS} == {"gemini", "gemini_vertexai", "ollama"}
+    assert {golden.family for golden in GOLDENS} == set(FAMILIES)
 
 
 @pytest.mark.asyncio
@@ -56,8 +58,9 @@ async def test_adapter_reproduces_golden(golden: Golden, tmp_path: Path, monkeyp
 
     result = await replay(golden, tmp_path)
 
-    assert result.request == expected_request(golden)
+    assert result.request == golden.data["request"]
     assert result.parsed == golden.data["parsed"]
+    assert result.stop_reason == expected_stop_reason(golden.data)
 
 
 @pytest.mark.asyncio
@@ -67,7 +70,7 @@ async def test_stream_events_match_the_finished_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Deltas add up to the finished message, usage is reported once, and the stop reason is normalized."""
+    """Deltas add up to the finished message, usage is reported once as the message's own metrics."""
     hide_provider_environment(monkeypatch)
 
     result = await replay(golden, tmp_path)
@@ -83,8 +86,11 @@ async def test_stream_events_match_the_finished_message(
     assert reasoning == (message.reasoning_content or "")
     assert calls == (message.tool_calls or [])
     assert len(usage) == 1
-    assert usage[0].to_dict() == golden.data["parsed"]["metrics"]
-    assert result.stop_reason == ("tool_use" if calls else "end")
+    assert usage[0] is message.metrics
+    assert comparable_metrics(usage[0]) == golden.data["parsed"]["metrics"]
+    # Only a chunk without output (such as Ollama's final usage-only chunk) shows up as provider activity.
+    silent = [event for event in result.events if isinstance(event, StreamProgress)]
+    assert len(silent) <= (1 if golden.family == "ollama" and golden.data["input"]["stream"] else 0)
 
 
 # ---------------------------------------------------------------------------

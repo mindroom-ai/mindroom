@@ -1,23 +1,19 @@
-"""What the Chat Completions and Responses adapters share: SDK client reuse, request overrides, the finished message."""
+"""What the Chat Completions and Responses adapters share: SDK client reuse and request overrides."""
 
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-
-from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from openai import AsyncOpenAI
 
-    from mindroom.llm.provider import ModelIdentity, RequestOverrides
-    from mindroom.llm.usage import MessageMetrics
+    from mindroom.llm.provider import RequestOverrides
 
-__all__ = ["SDKClients", "assistant_message", "with_overrides"]
+__all__ = ["SDKClients", "with_overrides"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +39,10 @@ class SDKClients:
         return client
 
 
+# A request carries its output limit under one of these names; an override replaces whichever the config set.
+_OUTPUT_LIMIT_KEYS = ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
 def with_overrides(
     kwargs: dict[str, Any],
     overrides: RequestOverrides,
@@ -55,36 +55,13 @@ def with_overrides(
     if temperature and overrides.temperature is not None:
         body["temperature"] = overrides.temperature
     if output_limit_key is not None and overrides.max_output_tokens is not None:
+        for key in _OUTPUT_LIMIT_KEYS:
+            body.pop(key, None)
         body[output_limit_key] = overrides.max_output_tokens
     if body:
         kwargs["extra_body"] = body
+    elif overrides.max_output_tokens is not None:
+        kwargs.pop("extra_body", None)
     if overrides.timeout_seconds is not None:
         kwargs["timeout"] = overrides.timeout_seconds
     return kwargs
-
-
-def assistant_message(
-    identity: ModelIdentity,
-    *,
-    content: str | None,
-    reasoning: str | None,
-    tool_calls: list[dict[str, Any]],
-    provider_data: dict[str, Any],
-    usage: MessageMetrics | None,
-    started: float,
-    first_token: float | None,
-) -> Message:
-    """Return the finished assistant message, recording which model answered it and how long it took."""
-    message = Message(
-        role="assistant",
-        content=content,
-        reasoning_content=reasoning,
-        tool_calls=tool_calls or None,
-        provider_data={**provider_data, "mindroom_model": {"id": identity.id, "provider": identity.provider_name}},
-    )
-    if usage is not None:
-        message.metrics = usage
-    message.metrics.duration = time.monotonic() - started
-    if first_token is not None:
-        message.metrics.time_to_first_token = first_token - started
-    return message

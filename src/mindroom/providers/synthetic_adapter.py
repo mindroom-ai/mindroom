@@ -15,9 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 if TYPE_CHECKING:
@@ -25,6 +24,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Synthetic"
@@ -115,8 +115,7 @@ class SyntheticProvider:
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append one stored message per tool result."""
-        del messages
-        return list(results)
+        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.
@@ -134,27 +133,25 @@ class SyntheticProvider:
             and last_message.tool_call_id == plan.tool_call_id
         )
         content = plan.suffix if continuation else plan.prefix
-        started = time.perf_counter()
+        started = time.monotonic()
         first_text_at: float | None = None
         for start in range(0, len(content), settings.chunk_chars):
             chunk = content[start : start + settings.chunk_chars]
             if settings.chars_per_second:
                 await asyncio.sleep(len(chunk) / settings.chars_per_second)
             if first_text_at is None:
-                first_text_at = time.perf_counter()
+                first_text_at = time.monotonic()
             yield TextDelta(chunk)
         tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
         for call in tool_calls:
             yield ToolCallReady(call)
-        message = Message(
-            role="assistant",
+        message = finished_assistant_message(
+            self.identity,
             content=content or None,
-            tool_calls=tool_calls or None,
-            provider_data={"mindroom_model": {"id": self.identity.id, "provider": _PROVIDER}},
-            metrics=MessageMetrics(
-                duration=time.perf_counter() - started,
-                time_to_first_token=None if first_text_at is None else first_text_at - started,
-            ),
+            tool_calls=tool_calls,
+            usage=None,
+            started=started,
+            first_output_at=first_text_at,
         )
         yield TurnCompleted(message=message, stop_reason="tool_use" if tool_calls else "end")
 

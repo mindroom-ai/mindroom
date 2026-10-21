@@ -6,40 +6,27 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.providers.openai_family_support import golden_paths, load_golden, replay_golden
+from tests.providers.golden_support import expected_stop_reason, golden_id, golden_paths, load_golden
+from tests.providers.openai_family_support import OPENAI_FAMILIES, replay_golden
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-GOLDENS = golden_paths()
+GOLDENS = golden_paths(OPENAI_FAMILIES)
 
 
 def test_every_openai_family_golden_is_replayed() -> None:
     """The parity suite covers every golden of the families the owned adapters serve."""
-    families = {path.parent.name for path in GOLDENS}
-    assert families == {
-        "openai_chat",
-        "openai_responses",
-        "codex",
-        "azure",
-        "openrouter",
-        "deepseek",
-        "zai",
-        "llama_cpp",
-        "kimi",
-        "groq",
-        "cerebras",
-    }
-    assert len(GOLDENS) == 200
+    assert {path.parent.name for path in GOLDENS} == set(OPENAI_FAMILIES)
+    assert len(GOLDENS) == 265
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", GOLDENS, ids=lambda path: f"{path.parent.name}/{path.stem}")
+@pytest.mark.parametrize("path", GOLDENS, ids=golden_id)
 async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> None:
     """Request method, URL, kept headers, and body match, and the parsed reply matches field for field."""
     golden = load_golden(path)
-    request, parsed, turn = await replay_golden(golden, tmp_path)
-    assert request == golden["request"]
-    assert parsed == golden["parsed"]
-    expected_stop = "tool_use" if golden["parsed"]["message"].get("tool_calls") else "end"
-    assert turn.stop_reason == expected_stop
+    replay = await replay_golden(golden, tmp_path)
+    assert replay.request == golden["request"]
+    assert replay.parsed == golden["parsed"]
+    assert replay.stop_reason == expected_stop_reason(golden)

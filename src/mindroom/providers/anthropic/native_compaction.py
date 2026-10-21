@@ -9,8 +9,6 @@ The shared selection and route rules live in :mod:`mindroom.native_compaction`.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -67,11 +65,6 @@ def native_compaction_supported(*, provider: str, model_id: str, settings: Claud
         and "context_management" not in (request_params.get("extra_body") or {})
         and (provider == "VertexAI" or endpoint == "https://api.anthropic.com")
     )
-
-
-def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
-    """Return the replay route one model, endpoint, and history generation share."""
-    return hashlib.sha256(json.dumps([provider, model_id, endpoint, history_generation]).encode()).hexdigest()
 
 
 def compaction_context_management(threshold: int) -> dict[str, Any]:
@@ -205,7 +198,6 @@ __all__ = [
     "MIN_COMPACTION_THRESHOLD",
     "authored_native_compaction_supported",
     "compaction_context_management",
-    "native_compaction_route",
     "native_compaction_supported",
     "native_replay_messages_for_route",
     "record_native_checkpoint_on",

@@ -534,7 +534,11 @@ def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far."""
+    """What one streamed Gemini reply produced so far.
+
+    ``hosted_tool_ran`` turns true once a chunk shows a native tool (grounding, code execution) at work, after
+    which a failed attempt must not be retried, since the retry would run the tool again.
+    """
 
     content: str = ""
     reasoning: str = ""
@@ -542,10 +546,11 @@ class GeminiReply:
     thought_signature: str | None = None
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
+    hosted_tool_ran: bool = False
 
 
 def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: str) -> list[StreamEvent]:
-    """Add one streamed chunk to ``reply`` and return the events it carries.
+    """Add one streamed chunk (or one whole non-streamed response) to ``reply`` and return the events it carries.
 
     Gemini repeats cumulative usage on every chunk, so only usage on a finished candidate counts.
     """
@@ -557,6 +562,10 @@ def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: 
         msg = f"Generation ended with finish reason: {finish_reason}"
         raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
     parts = candidate.content.parts if candidate.content is not None else None
+    if candidate.grounding_metadata is not None or any(
+        part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
+    ):
+        reply.hosted_tool_ran = True
     events = [event for part in parts or () for event in _read_part(reply, part)]
     if finish_reason is not None:
         reply.finish_reason = finish_reason

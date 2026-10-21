@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
 
-from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -58,7 +58,6 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
-_INCOMPLETE = "incomplete_stream"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -559,14 +558,19 @@ class ResponsesStream:
         if not self.exposed:
             return error
         message = f"OpenAI Responses stream failed after yielding output: {error}"
-        return ProviderError(message, provider=self.wire.provider_name, status_code=error.status_code, code=_INCOMPLETE)
+        return ProviderError(
+            message,
+            provider=self.wire.provider_name,
+            status_code=error.status_code,
+            code=INCOMPLETE_STREAM,
+        )
 
     def incomplete_error(self) -> ProviderError:
         """Return the error for a stream that ended without ``response.completed``."""
         message = "OpenAI Responses stream ended without response.completed"
         # Before any exposed output, the early end is retried like a dropped connection.
         return self.attempt_error(
-            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=_INCOMPLETE),
+            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=INCOMPLETE_STREAM),
         )
 
     def finish(self) -> ResponsesTurnParts:

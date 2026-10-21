@@ -38,7 +38,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -46,6 +46,7 @@ from mindroom.llm.provider import (
     NativeCompactionReplay,
     ReasoningDelta,
     StreamEvent,
+    StreamProgress,
     TextDelta,
     ToolCallReady,
     TurnCompleted,
@@ -53,12 +54,12 @@ from mindroom.llm.provider import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
     MIN_COMPACTION_THRESHOLD,
     authored_native_compaction_supported,
     compaction_context_management,
-    native_compaction_route,
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
@@ -81,6 +82,7 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
+from mindroom.providers.assistant_turn import one_message_per_result, stamp_finished_turn
 from mindroom.providers.claude_prompt_cache import native_tool_search_supported
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
@@ -190,9 +192,9 @@ class ClaudeProvider:
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append each result as its own tool message; the wire formatter merges them into one user turn."""
-        return list(results)
+        return one_message_per_result(messages, results)
 
     def native_compaction_settings(
         self,
@@ -241,6 +243,7 @@ class ClaudeProvider:
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
+        server_tool_started = False
         try:
             if not request.stream:
                 response = await (
@@ -262,8 +265,13 @@ class ClaudeProvider:
                     elif (output := _output_event(event)) is not None:
                         first_output_at = first_output_at or time.monotonic()
                         yield output
+                    elif event.type in _PROVIDER_EVENT_TYPES:
+                        # Block starts, tool-call argument pieces, and server-tool blocks carry no output but
+                        # show the provider is still working; the SDK's own convenience events repeat them.
+                        server_tool_started = server_tool_started or _starts_server_tool(event)
+                        yield StreamProgress()
         except (anthropic.APIError, httpx.TransportError) as error:
-            self._raise_provider_error(error)
+            self._raise_provider_error(error, server_tool_started=server_tool_started)
 
     def _finish(
         self,
@@ -278,14 +286,7 @@ class ClaudeProvider:
             response,
             record_context_management=self.settings.context_management is not None,
         )
-        now = time.monotonic()
-        message.metrics.duration = now - started
-        if first_output_at is not None:
-            message.metrics.time_to_first_token = first_output_at - started
-        message.provider_data = {
-            **(message.provider_data or {}),
-            "mindroom_model": {"id": self.identity.id, "provider": self.identity.provider_name},
-        }
+        stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
         raw_stop_reason = response.stop_reason
         if raw_stop_reason in OUTPUT_LIMIT_STOP_REASONS:
@@ -485,14 +486,39 @@ class ClaudeProvider:
             client.project_id = project_id
         return client
 
-    def _raise_provider_error(self, error: Exception) -> NoReturn:
-        """Translate an SDK or transport failure into the shared provider errors."""
+    def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
+        """Translate an SDK or transport failure into the shared provider errors.
+
+        Once a server tool (web search, code execution, tool search) started, a retry would run it again, so the
+        failure is final and carries the code that keeps the media fallback from resending the request.
+        """
         provider = self.identity.provider_name
         if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
-            raise transport_error(error, provider=provider) from error
-        if isinstance(error, anthropic.APIStatusError):
-            raise classify_provider_error(error.message, provider=provider, status_code=error.status_code) from error
-        raise ProviderError(str(error), provider=provider) from error
+            mapped: ProviderError = transport_error(error, provider=provider)
+        elif isinstance(error, anthropic.APIStatusError):
+            mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+        else:
+            mapped = ProviderError(str(error), provider=provider)
+        if server_tool_started and mapped.retryable:
+            msg = f"Claude stream failed after a server tool started: {mapped}"
+            raise ProviderError(
+                msg,
+                provider=provider,
+                status_code=mapped.status_code,
+                code=INCOMPLETE_STREAM,
+            ) from error
+        raise mapped from error
+
+
+# Raw API events the SDK forwards; its convenience events (text, thinking, input_json, ...) repeat them.
+_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop", "message_delta"})
+# Blocks the model produces itself; any other block type is a server tool at work.
+_MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
+
+
+def _starts_server_tool(event: Any) -> bool:  # noqa: ANN401 - SDK stream event
+    """Return whether a ``content_block_start`` opens a block a server-side tool produces."""
+    return event.type == "content_block_start" and event.content_block.type not in _MODEL_BLOCK_TYPES
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:

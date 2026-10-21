@@ -19,10 +19,10 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from mindroom.credentials.sync import get_api_key_for_provider
-from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
+from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Google"
@@ -96,59 +97,85 @@ class GeminiProvider:
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append one stored message per tool result; the wire format merges them into one user turn."""
-        del messages
-        return list(results)
+        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one streamed ``generateContent`` request and yield its events.
+        """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
+        Media uploads and downloads happen first, so their SDK and transport errors are normalized too; a
+        failure after a native tool ran is final, because a retry would run the tool again.
         """
-        from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-
+        started = time.monotonic()
         reply = GeminiReply()
-        first_text_at: float | None = None
+        first_output_at: float | None = None
+        # Client construction reads credentials from disk; its failures are configuration errors, not transient.
+        client = self._sdk_client()
         try:
             contents, system_instruction = await format_contents(request.messages, self._media_route())
             config = self._request_config(request, system_instruction)
-            started = time.perf_counter()
-            chunks = await self._sdk_client().aio.models.generate_content_stream(
-                model=self.identity.id,
-                # The request dicts use google-genai's field names; the SDK validates them into its types.
-                contents=cast("Any", contents),
-                config=cast("Any", config or None),
-            )
-            async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
-                async for chunk in responses:
-                    for event in read_chunk(reply, chunk, provider=self.identity.provider_name):
-                        if first_text_at is None and isinstance(event, TextDelta):
-                            first_text_at = time.perf_counter()
-                        yield event
-        except APIError as error:
-            raise classify_provider_error(
-                str(error),
-                provider=self.identity.provider_name,
-                status_code=error.code,
-            ) from error
-        except (httpx.TransportError, OSError) as error:
-            raise transport_error(error, provider=self.identity.provider_name) from error
-        if reply.usage is not None:
-            yield UsageReported(reply.usage)
-        metrics = replace(reply.usage) if reply.usage is not None else MessageMetrics()
-        metrics.duration = time.perf_counter() - started
-        metrics.time_to_first_token = None if first_text_at is None else first_text_at - started
-        provider_data: dict[str, Any] = {"mindroom_model": {"id": self.identity.id, "provider": _PROVIDER}}
+            # The request dicts use google-genai's field names; the SDK validates them into its types.
+            call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
+            if request.stream:
+                chunks = await client.aio.models.generate_content_stream(**call)
+                async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
+                    async for chunk in responses:
+                        events = read_chunk(reply, chunk, provider=self.identity.provider_name)
+                        if not events:
+                            # A chunk without output, such as grounding or code-execution progress, is still activity.
+                            yield StreamProgress()
+                        for event in events:
+                            first_output_at = first_output_at or time.monotonic()
+                            yield event
+            else:
+                events = read_chunk(
+                    reply,
+                    await client.aio.models.generate_content(**call),
+                    provider=self.identity.provider_name,
+                )
+                first_output_at = time.monotonic()
+                for event in events:
+                    yield event
+        except Exception as error:
+            raise self._provider_error(error, hosted_tool_ran=reply.hosted_tool_ran) from error
+        provider_data: dict[str, Any] = {}
         if reply.thought_signature is not None:
             provider_data["thought_signature"] = reply.thought_signature
-        message = Message(
-            role="assistant",
+        message = finished_assistant_message(
+            self.identity,
             content=reply.content or None,
-            reasoning_content=reply.reasoning or None,
-            tool_calls=reply.tool_calls or None,
+            reasoning=reply.reasoning or None,
+            tool_calls=reply.tool_calls,
             provider_data=provider_data,
-            metrics=metrics,
+            usage=reply.usage,
+            started=started,
+            first_output_at=first_output_at,
         )
+        if reply.usage is not None:
+            yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
+
+    def _provider_error(self, error: Exception, *, hosted_tool_ran: bool) -> ProviderError:
+        """Return the normalized error for one failed request; unknown failures propagate as they are."""
+        import aiohttp  # noqa: PLC0415 - google-genai's production transport loads on first request
+        from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
+        from pydantic import ValidationError  # noqa: PLC0415 - loaded with the SDK types it validates
+
+        provider = self.identity.provider_name
+        if isinstance(error, ProviderError):
+            mapped = error
+        elif isinstance(error, APIError):
+            mapped = classify_provider_error(str(error), provider=provider, status_code=error.code)
+        elif isinstance(error, httpx.TransportError | aiohttp.ClientError):
+            mapped = transport_error(error, provider=provider)
+        elif isinstance(error, ValidationError):
+            # The SDK rejected an authored generation setting; the same request cannot succeed.
+            mapped = InvalidRequest(str(error), provider=provider)
+        else:
+            raise error
+        if hosted_tool_ran and mapped.retryable:
+            msg = f"Gemini stream failed after a native tool ran: {mapped}"
+            return ProviderError(msg, provider=provider, status_code=mapped.status_code, code=INCOMPLETE_STREAM)
+        return mapped
 
     def _request_config(
         self,
