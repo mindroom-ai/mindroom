@@ -48,9 +48,8 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
+from tests.history_helpers import (
     _agent,
-    _close_test_storages,
     _completed_run,
     _make_config,
     _runtime_paths,

@@ -19,8 +19,8 @@ from tests.session_storage.goldens import GoldenStore, agno_loaded_session, gold
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.history.types import ScopeSummary
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.types import ReplaySummary
 
 _SESSIONS = golden_sessions()
 _SESSION_IDS = [f"{store.label}:{session_id}" for store, session_id in _SESSIONS]
@@ -51,7 +51,7 @@ def _as_agno_reread(run: dict[str, Any]) -> dict[str, Any]:
     return reread
 
 
-def _summary_dict(summary: ReplaySummary | None) -> dict[str, str] | None:
+def _summary_dict(summary: ScopeSummary | None) -> dict[str, str] | None:
     return None if summary is None else {"summary": summary.text, "updated_at": summary.updated_at.isoformat()}
 
 

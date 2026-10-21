@@ -10,16 +10,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 from openai import AsyncOpenAI
 
 from mindroom.providers.openai_models import MindRoomOpenAIChat
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage import agno_compat_session_persistence as persistence
-from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.bot_helpers import (
@@ -33,82 +28,9 @@ from tests.conftest import request_envelope, runtime_paths_for
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from agno.db.base import BaseDb
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_cancelled_response_retains_canonical_history_after_detached_save(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    streaming: bool,
-) -> None:
-    """A delayed real Agno save cannot overwrite the response runner's canonical replay."""
-    release = asyncio.Event()
-    waiting: set[asyncio.Task[object]] = set()
-    captured: list[tuple[asyncio.Task[object], SqliteDb, str]] = []
-    original_save = persistence._offload_sync_save
-    original_wait = persistence.wait_for_future_until_complete
-
-    async def delayed_save(
-        lane: persistence._PersistenceLane,
-        save: Callable[..., object],
-        owner: object,
-        payload: object,
-        *args: object,
-    ) -> None:
-        if isinstance(payload, RunOutput) and payload.status == RunStatus.cancelled:
-            task = asyncio.current_task()
-            assert task is not None
-            assert isinstance(owner, Agent)
-            assert isinstance(owner.db, SqliteDb)
-            assert payload.run_id is not None
-            captured.append((task, owner.db, payload.run_id))
-            if waiting - {task}:
-                release.set()
-            await release.wait()
-        await original_save(lane, save, owner, payload, *args)
-
-    async def controlled_wait(
-        future: asyncio.Future[object],
-        *,
-        on_cancel: Callable[[], None] | None = None,
-        chain_cancelled_result: bool = True,
-    ) -> object:
-        task = asyncio.current_task()
-        assert task is not None
-        waiting.add(task)
-        try:
-            # Release when the response owns the save, or after it has already
-            # finalized below. Both orderings check the same durable outcome.
-            if captured and task is not captured[0][0]:
-                release.set()
-            return await original_wait(future, on_cancel=on_cancel, chain_cancelled_result=chain_cancelled_result)
-        finally:
-            waiting.discard(task)
-
-    monkeypatch.setattr(persistence, "_offload_sync_save", delayed_save)
-    monkeypatch.setattr(persistence, "wait_for_future_until_complete", controlled_wait)
-    try:
-        await test_disabled_participation_preserves_ordinary_response(tmp_path, monkeypatch, streaming, "cancel")
-    finally:
-        release.set()
-        async with asyncio.timeout(5):
-            await asyncio.gather(*(task for task, _, _ in captured))
-    assert len(captured) == 1
-    _, original_storage, run_id = captured[0]
-    storage = SqliteDb(db_file=original_storage.db_file, session_table=original_storage.session_table_name)
-    try:
-        run = storage.get_run(run_id)
-        assert run is not None
-        assert run.metadata is not None
-        assert run.metadata.get("mindroom_original_status") == "cancelled"
-        assert run.metadata.get("mindroom_replay_state") == "interrupted"
-    finally:
-        storage.close()
 
 
 def _provider_response(payload: dict[str, Any], message: dict[str, Any]) -> httpx.Response:
@@ -290,9 +212,8 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
 
     storage = bot._conversation_state_writer.create_storage(None)
     try:
-        session = get_agent_session(storage, envelope.target.session_id)
+        session = storage.load_session(envelope.target.session_id, "agent")
         assert session is not None
-        assert session.runs is not None
         assert len(session.runs) == 1
         run = session.runs[0]
         if scenario in {"reply", "tool"}:

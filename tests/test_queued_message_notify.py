@@ -430,7 +430,6 @@ def _queued_notice_storage(tmp_path: Path) -> BaseDb:
     return create_state_storage(
         "queued_notice",
         tmp_path,
-        subdir="sessions",
         session_table="queued_notice_sessions",
         prompt_roles=prompt_roles_for_history_storage(),
     )

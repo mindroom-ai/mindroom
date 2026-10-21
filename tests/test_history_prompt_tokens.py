@@ -46,9 +46,8 @@ from tests.conftest import (
 
 if TYPE_CHECKING:
     import pytest
-from tests.history_helpers import (  # noqa: F401
+from tests.history_helpers import (
     _agent,
-    _close_test_storages,
     _completed_run,
     _session,
 )

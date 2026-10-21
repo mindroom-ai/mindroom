@@ -12,16 +12,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import ModelMetrics, RunMetrics
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
@@ -32,7 +32,7 @@ from mindroom.usage.stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
-from tests.conftest import create_agno_2_sessions_db, seed_session
+from tests.conftest import create_agno_2_sessions_db, seed_session, seed_session_metrics
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -735,7 +735,6 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        subdir="sessions",
         session_table="code_sessions",
     )
     first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
@@ -787,47 +786,45 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
         "cache_read_tokens": 24,
         "cache_write_tokens": 7,
     }
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                user_id="@alice:example.test",
-                session_data={"session_metrics": totals},
-                runs=[
-                    RunOutput(
-                        run_id="mixed",
-                        model_provider="provider-a",
-                        model="model-a",
-                        created_at=first_day,
-                        metrics=metrics,
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="code",
+            user_id="@alice:example.test",
+            runs=[
+                RunRecord(
+                    run_id="mixed",
+                    model_provider="provider-a",
+                    model="model-a",
+                    created_at=first_day,
+                    metrics=metrics,
+                ),
+                RunRecord(
+                    run_id="other-provider",
+                    model_provider="other-provider",
+                    model="model-a",
+                    created_at=first_day,
+                    metrics=RunMetrics(
+                        input_tokens=20,
+                        output_tokens=3,
+                        total_tokens=23,
+                        cache_read_tokens=12,
+                        cache_write_tokens=4,
                     ),
-                    RunOutput(
-                        run_id="other-provider",
-                        model_provider="other-provider",
-                        model="model-a",
-                        created_at=first_day,
-                        metrics=RunMetrics(
-                            input_tokens=20,
-                            output_tokens=3,
-                            total_tokens=23,
-                            cache_read_tokens=12,
-                            cache_write_tokens=4,
-                        ),
-                    ),
-                    RunOutput(
-                        run_id="next-day",
-                        model_provider="provider-a",
-                        model="model-a",
-                        created_at=first_day + 86400,
-                        metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
-                    ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+                ),
+                RunRecord(
+                    run_id="next-day",
+                    model_provider="provider-a",
+                    model="model-a",
+                    created_at=first_day + 86400,
+                    metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
+                ),
+            ],
+        ),
+    )
+    seed_session_metrics(storage, "session-1", totals)
 
     report = (
         collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
@@ -973,23 +970,25 @@ def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: o
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        subdir="sessions",
         session_table="code_sessions",
     )
-    try:
-        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
-        storage.upsert_run(
-            {
-                "run_id": "run-1",
-                "model_provider": "provider-a",
-                "model": "model-a",
-                "created_at": 1_700_000_000,
-                "metrics": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20, "details": details},
-            },
-            session_id="session-1",
+    storage.save_run(
+        ConversationSession(kind="agent", session_id="session-1", owner_id="code", user_id="@alice:example.test"),
+        RunRecord(
+            run_id="run-1",
+            model_provider="provider-a",
+            model="model-a",
+            created_at=1_700_000_000,
+            metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+        ),
+        record_usage=True,
+    )
+    # The ledger snapshot of an older release may carry model details the reporter cannot use.
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            "UPDATE code_sessions_usage SET usage_data = json_set(usage_data, '$.metrics.details', json(?))",
+            (json.dumps(details),),
         )
-    finally:
-        storage.close()
 
     report = collect_self_usage(
         agent_name="code",

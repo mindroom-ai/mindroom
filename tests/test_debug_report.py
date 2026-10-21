@@ -13,9 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
 from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
@@ -37,8 +34,10 @@ from mindroom.debug_report import (
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.history.session_context import _team_scope_state_root
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system import tool_calls
 from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
@@ -277,34 +276,31 @@ def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]
     storage = create_state_storage(
         state_root.name,
         state_root,
-        subdir="sessions",
         session_table=f"{state_root.name}_sessions",
     )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id=session_id,
-                agent_id=state_root.name,
-                user_id="@alice:example.com",
-                runs=[
-                    RunOutput(
-                        run_id=run_id,
-                        agent_id=state_root.name,
-                        session_id=session_id,
-                        user_id="@alice:example.com",
-                        created_at=created_at,
-                        status=RunStatus.completed,
-                        metadata={"matrix_event_id": "$user"},
-                    )
-                    for run_id, created_at in runs
-                ],
-                created_at=1_723_837_600,
-                updated_at=1_723_837_600,
-            ),
-        )
-    finally:
-        storage.close()
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id=session_id,
+            owner_id=state_root.name,
+            user_id="@alice:example.com",
+            runs=[
+                RunRecord(
+                    run_id=run_id,
+                    agent_id=state_root.name,
+                    session_id=session_id,
+                    user_id="@alice:example.com",
+                    created_at=created_at,
+                    status=RunStatus.completed,
+                    metadata={"matrix_event_id": "$user"},
+                )
+                for run_id, created_at in runs
+            ],
+            created_at=1_723_837_600,
+            updated_at=1_723_837_600,
+        ),
+    )
 
 
 def _seed_agno(storage_root: Path) -> None:

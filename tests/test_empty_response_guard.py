@@ -147,7 +147,6 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
     storage = create_state_storage(
         "general",
         tmp_path,
-        subdir="sessions",
         session_table="general_sessions",
     )
     try:
@@ -192,7 +191,6 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
     storage = create_state_storage(
         "general",
         tmp_path,
-        subdir="sessions",
         session_table="general_sessions",
     )
     try:
@@ -236,7 +234,6 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
     storage = create_state_storage(
         "team_general",
         tmp_path,
-        subdir="sessions",
         session_table="team_general_sessions",
     )
     try:

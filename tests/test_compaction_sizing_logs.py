@@ -19,7 +19,6 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import (  # noqa: F401
     _ALL_HISTORY_SETTINGS,
-    _close_test_storages,
     _completed_run,
     _make_config,
     _session,

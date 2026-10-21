@@ -7,22 +7,22 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom import helper_usage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.helper_usage import record_system_usage
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 from mindroom.usage.stats_storage import discover_admin_usage_sources
 from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, quote_identifier
-from tests.conftest import seed_session
+from tests.conftest import seed_session, seed_session_metrics
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,7 +46,7 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
         for source in discover_admin_usage_sources(config=config, runtime_paths=paths)
     )
 
-    response = RunOutput(
+    response = RunRecord(
         run_id="stable-run",
         session_id="secret-session",
         user_id="secret-user",
@@ -73,28 +73,26 @@ async def test_system_usage_is_content_free_idempotent_and_does_not_create_conve
     assert system_only.request_coverage.unavailable_sources == before.request_coverage.unavailable_sources
 
     ordinary = create_session_storage("code", config, paths, execution_identity=None)
-    try:
-        seed_session(
-            ordinary,
-            AgentSession(
-                session_id="ordinary",
-                agent_id="code",
-                user_id="@person:example.test",
-                session_data={"session_metrics": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5}},
-                runs=[
-                    RunOutput(
-                        run_id="ordinary-run",
-                        user_id="@person:example.test",
-                        model="metered-model",
-                        model_provider="test-provider",
-                        created_at=1_723_837_600,
-                        metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5),
-                    ),
-                ],
-            ),
-        )
-    finally:
-        ordinary.close()
+    seed_session(
+        ordinary,
+        ConversationSession(
+            kind="agent",
+            session_id="ordinary",
+            owner_id="code",
+            user_id="@person:example.test",
+            runs=[
+                RunRecord(
+                    run_id="ordinary-run",
+                    user_id="@person:example.test",
+                    model="metered-model",
+                    model_provider="test-provider",
+                    created_at=1_723_837_600,
+                    metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5),
+                ),
+            ],
+        ),
+    )
+    seed_session_metrics(ordinary, "ordinary", {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5})
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
     assert report.totals.total_tokens == 15
@@ -154,7 +152,7 @@ async def test_system_usage_storage_failure_logs_without_content_but_cancellatio
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    response = RunOutput(run_id="paid", content="PRIVATE RESULT", metrics=RunMetrics(total_tokens=1))
+    response = RunRecord(run_id="paid", content="PRIVATE RESULT", metrics=RunMetrics(total_tokens=1))
     logged: list[tuple[str, dict[str, object]]] = []
 
     class CapturedLogger:

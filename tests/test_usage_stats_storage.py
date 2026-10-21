@@ -5,23 +5,19 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import ModelMetrics, RunMetrics
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-from agno.team import Team
-from agno.team._session import update_session_metrics
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats_storage import (
@@ -218,39 +214,36 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert "999" not in repr(row)
 
 
-def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -> None:
+def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
     """The adapter reads the exact JSON representation written by MindRoom's Agno storage."""
     storage = create_state_storage(
         "code",
         tmp_path,
-        subdir="sessions",
         session_table="code_sessions",
     )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                user_id="@alice:example.test",
-                runs=[
-                    RunOutput(
-                        run_id="run-1",
-                        agent_id="code",
-                        user_id="@alice:example.test",
-                        created_at=1_723_837_600,
-                        model_provider="openai",
-                        model="gpt-6-astra",
-                        status=RunStatus.completed,
-                        metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
-                    ),
-                ],
-                created_at=1_723_837_600,
-                updated_at=1_723_837_600,
-            ),
-        )
-    finally:
-        storage.close()
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="code",
+            user_id="@alice:example.test",
+            runs=[
+                RunRecord(
+                    run_id="run-1",
+                    agent_id="code",
+                    user_id="@alice:example.test",
+                    created_at=1_723_837_600,
+                    model_provider="openai",
+                    model="gpt-6-astra",
+                    status=RunStatus.completed,
+                    metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+                ),
+            ],
+            created_at=1_723_837_600,
+            updated_at=1_723_837_600,
+        ),
+    )
 
     result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
 
@@ -346,45 +339,21 @@ def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_pat
     assert row.runs_available is False
 
 
-def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:
-    """Agno's fallback timestamp remains available even when run_data omits it."""
-    storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
-    run = _run()
-    run.pop("created_at")
-    try:
-        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
-        storage.upsert_run(run, session_id="session-1", user_id="@alice:example.test")
-    finally:
-        storage.close()
-    database = tmp_path / "sessions" / "code.db"
-    with sqlite3.connect(database) as connection:
-        created_at = connection.execute("SELECT created_at FROM code_sessions_runs").fetchone()[0]
-    assert isinstance(created_at, int)
-
-    result = list(iter_usage_storage_rows(_source(database)))
-
-    assert len(result) == 1
-    row = result[0]
-    assert isinstance(row, UsageSessionRow)
-    assert row.runs[0].created_at == created_at
-    assert row.runs[0].metrics["total_tokens"] == 20
-
-
-@pytest.mark.parametrize("updated_timestamp", [None, "invalid", 1_723_924_000])
-def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path, updated_timestamp: object) -> None:
-    """Updating a payload must not lose or move the run's original creation date."""
-    storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
-    run = _run()
-    try:
-        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
-        storage.upsert_run(run, session_id="session-1", user_id="@alice:example.test")
-        storage.upsert_run(
-            {**run, "created_at": updated_timestamp},
-            session_id="session-1",
-            user_id="@alice:example.test",
-        )
-    finally:
-        storage.close()
+def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) -> None:
+    """Saving a run again, even with a later creation time, keeps the run's original creation date in the ledger."""
+    storage = create_state_storage("code", tmp_path, session_table="code_sessions")
+    session = ConversationSession(kind="agent", session_id="session-1", owner_id="code", user_id="@alice:example.test")
+    run = RunRecord(
+        run_id="run-1",
+        user_id="@alice:example.test",
+        created_at=1_723_837_600,
+        model_provider="openai",
+        model="gpt-6-astra",
+        status=RunStatus.completed,
+        metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+    )
+    storage.save_run(session, run, record_usage=True)
+    storage.save_run(session, replace(run, created_at=1_723_924_000), record_usage=True)
 
     result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
 
@@ -396,20 +365,21 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("legacy_encoding", [False, True])
-def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, legacy_encoding: bool) -> None:
-    """Admin totals use Agno's member-inclusive team session aggregate."""
-    session = TeamSession(
+def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, legacy_encoding: bool) -> None:
+    """Admin totals use the team session's member-inclusive aggregate, which member run rows add to."""
+    session = ConversationSession(
+        kind="team",
         session_id="session-1",
-        team_id="engineering",
+        owner_id="engineering",
         user_id="@alice:example.test",
-        session_data={},
         created_at=1_723_837_600,
         updated_at=1_723_837_600,
     )
-    update_session_metrics(
-        Team(id="engineering", members=[]),
+    storage = create_state_storage("engineering", tmp_path, session_table="engineering_sessions")
+    storage.save_run(
         session,
-        TeamRunOutput(
+        TeamRunRecord(
+            run_id="team-run",
             team_id="engineering",
             metrics=RunMetrics(
                 input_tokens=7,
@@ -427,39 +397,34 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
                     ],
                 },
             ),
-            member_responses=[
-                RunOutput(
-                    agent_id="code",
-                    metrics=RunMetrics(
-                        input_tokens=14,
-                        output_tokens=6,
-                        total_tokens=20,
-                        details={
-                            "model": [
-                                ModelMetrics(
-                                    id="model-b",
-                                    provider="provider-b",
-                                    input_tokens=14,
-                                    output_tokens=6,
-                                    total_tokens=20,
-                                ),
-                            ],
-                        },
-                    ),
-                ),
-            ],
         ),
+        record_usage=True,
     )
-    storage = create_state_storage(
-        "engineering",
-        tmp_path,
-        subdir="sessions",
-        session_table="engineering_sessions",
+    storage.save_run(
+        session,
+        RunRecord(
+            run_id="member-run",
+            agent_id="code",
+            parent_run_id="team-run",
+            metrics=RunMetrics(
+                input_tokens=14,
+                output_tokens=6,
+                total_tokens=20,
+                details={
+                    "model": [
+                        ModelMetrics(
+                            id="model-b",
+                            provider="provider-b",
+                            input_tokens=14,
+                            output_tokens=6,
+                            total_tokens=20,
+                        ),
+                    ],
+                },
+            ),
+        ),
+        record_usage=True,
     )
-    try:
-        seed_session(storage, session)
-    finally:
-        storage.close()
 
     source = _source(tmp_path / "sessions" / "engineering.db", table="engineering_sessions")
     if legacy_encoding:
@@ -476,7 +441,7 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
         ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
         ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
     ]
-    assert row.runs == ()
+    assert [run.run_id for run in row.runs] == ["team-run"]
     assert row.runs_available is True
     assert row.session_metrics_available is True
 

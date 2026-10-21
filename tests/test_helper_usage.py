@@ -32,8 +32,6 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
-    close_agent_runtime_state_dbs,
-    close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
 )
@@ -214,37 +212,27 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 supports_native_tool_approval=True,
             )
             owners = toolkit_owners_for_agents([actor])
-        try:
-            paused = await actor.arun("Add 2 and 3", session_id="approval-session", user_id=context.requester_id)
-            assert paused.status == RunStatus.paused
-            captured = paused_attempt_from_response(
-                paused,
-                fallback_session_id="approval-session",
-                fallback_run_id=paused.run_id,
-                toolkit_owners=owners,
+        paused = await actor.arun("Add 2 and 3", session_id="approval-session", user_id=context.requester_id)
+        assert paused.status == RunStatus.paused
+        captured = paused_attempt_from_response(
+            paused,
+            fallback_session_id="approval-session",
+            fallback_run_id=paused.run_id,
+            toolkit_owners=owners,
+        )
+        assert captured is not None
+        if is_cli:
+            # Reconstruct an interrupted minimal response using its exact saved approval.
+            paused.metadata = {**(paused.metadata or {}), "agent_mode": "minimal"}
+            scope_context.storage.upsert_run(paused, session_id="approval-session")
+        if caller == "team":
+            captured = _attach_team_pause_presentation(
+                captured,
+                response=paused,
+                config_names=["general", "second"],
+                display_names=["General", "Second"],
+                show_tool_calls=True,
             )
-            assert captured is not None
-            if is_cli:
-                # Reconstruct an interrupted minimal response using its exact saved approval.
-                paused.metadata = {**(paused.metadata or {}), "agent_mode": "minimal"}
-                scope_context.storage.upsert_run(paused, session_id="approval-session")
-            if caller == "team":
-                captured = _attach_team_pause_presentation(
-                    captured,
-                    response=paused,
-                    config_names=["general", "second"],
-                    display_names=["General", "Second"],
-                    show_tool_calls=True,
-                )
-        finally:
-            if caller == "team":
-                close_team_runtime_state_dbs(
-                    agents=members.agents,
-                    team_db=actor.db,
-                    shared_scope_storage=scope_context.storage,
-                )
-            else:
-                close_agent_runtime_state_dbs(actor, shared_scope_storage=scope_context.storage)
     calls = (
         ApprovalCall(
             "approved",

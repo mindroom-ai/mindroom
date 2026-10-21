@@ -113,10 +113,10 @@ def test_selection_matches_agno_get_messages(golden_name: str, selection_name: s
 
     history = scope_history_messages(
         runs,
-        _SETTINGS,
         scope=_stored_scope(golden),
         num_history_runs=params.get("last_n_runs"),
         num_history_messages=params.get("limit"),
+        max_tool_calls_from_history=None,
     )
 
     assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
@@ -143,10 +143,10 @@ def test_scoped_selection_matches_agno_get_messages(session_key: str, selection_
 
     history = scope_history_messages(
         runs,
-        _SETTINGS,
         scope=scope,
         num_history_runs=params["last_n_runs"],
         num_history_messages=params["limit"],
+        max_tool_calls_from_history=None,
     )
 
     assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
@@ -174,10 +174,10 @@ def test_replayed_history_limits_tool_calls_as_agno_did(golden_path: Path, max_t
 
     history = scope_history_messages(
         _stored_runs(golden),
-        replace(_SETTINGS, max_tool_calls_from_history=max_tool_calls),
         scope=_stored_scope(golden),
         num_history_runs=None,
         num_history_messages=None,
+        max_tool_calls_from_history=max_tool_calls,
     )
 
     assert [message.to_dict() for message in history] == [_as_replayed(message) for message in expected]
@@ -224,16 +224,18 @@ def _replay(
     runs: list[AnyRunRecord],
     *,
     scope: HistoryScope = _AGENT,
-    settings: ResolvedHistorySettings = _SETTINGS,
+    max_tool_calls_from_history: int | None = None,
+    system_message_role: str = "system",
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
 ) -> list[Message]:
     return scope_history_messages(
         runs,
-        settings,
         scope=scope,
         num_history_runs=num_history_runs,
         num_history_messages=num_history_messages,
+        max_tool_calls_from_history=max_tool_calls_from_history,
+        system_message_role=system_message_role,
     )
 
 
@@ -296,9 +298,7 @@ def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
             ],
         ),
     ]
-    settings = replace(_SETTINGS, system_message_role="instructions")
-
-    assert _contents(_replay(runs, settings=settings)) == ["run question", "run answer"]
+    assert _contents(_replay(runs, system_message_role="instructions")) == ["run question", "run answer"]
 
 
 def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_results() -> None:

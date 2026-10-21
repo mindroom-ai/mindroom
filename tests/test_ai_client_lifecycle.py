@@ -62,7 +62,6 @@ async def test_agent_turn_finalizer_closes_released_continuation_client(
     holder = ai._AgentTurnHolder(agent=cast("Any", SimpleNamespace(model=model)))
     close_client = AsyncMock()
     monkeypatch.setattr(ai, "aclose_anthropic_async_client", close_client)
-    monkeypatch.setattr(ai, "close_agent_runtime_state_dbs", lambda *_args, **_kwargs: None)
     callbacks = _callbacks(holder)
 
     callbacks.release_attempt_entity(None)

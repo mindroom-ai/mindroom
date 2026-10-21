@@ -5,32 +5,30 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.base import MessageData
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage
-from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
 
+_SESSION = ConversationSession(kind="agent", session_id="session", owner_id="code", user_id="@alice:example.test")
 _FIRST = {
     "input_tokens": 120_000,
     "output_tokens": 6,
@@ -55,9 +53,9 @@ _SECOND = {
 }
 
 
-def _run() -> RunOutput:
+def _run() -> RunRecord:
     totals = {name: value + _SECOND[name] for name, value in _FIRST.items()}
-    return RunOutput(
+    return RunRecord(
         run_id="run-1",
         session_id="session",
         agent_id="code",
@@ -94,39 +92,25 @@ def _run() -> RunOutput:
 
 
 @pytest.fixture
-def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, SqliteDb]]:
+def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, ConversationStore]]:
     """Persist real run and session rows through the production storage owner."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(
         agents={"code": AgentConfig(display_name="Code")},
         authorization=AuthorizationConfig(aliases={"@alice:example.test": ["@alias:example.test"]}),
     )
-    storage = create_state_storage("code", tmp_path / "agents/code", subdir="sessions", session_table="code_sessions")
-    assert isinstance(storage, SqliteDb)
-    run = _run()
-    assert run.metrics is not None
-    storage.upsert_session(
-        AgentSession(
-            session_id="session",
-            agent_id="code",
-            user_id="@alice:example.test",
-            session_data={"session_metrics": run.metrics.to_dict()},
-        ),
-    )
-    storage.upsert_run(run, session_id="session")
-    try:
-        yield config, paths, storage
-    finally:
-        storage.close()
+    storage = create_state_storage("code", tmp_path / "agents/code", session_table="code_sessions")
+    storage.save_run(_SESSION, _run(), record_usage=True)
+    return config, paths, storage
 
 
 def test_request_projection_survives_repeated_save_without_content(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """Saving again replaces projected requests instead of appending or copying conversation data."""
     _, _, storage = request_usage
-    storage.upsert_run(_run(), session_id="session")
-    with sqlite3.connect(storage.db_file) as connection:
+    storage.save_run(_SESSION, _run(), record_usage=True)
+    with sqlite3.connect(storage.path) as connection:
         payloads = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchall()
     assert len(payloads) == 1
     payload = json.loads(payloads[0][0])
@@ -138,7 +122,7 @@ def test_request_projection_survives_repeated_save_without_content(
 
 
 def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """A large run must not turn two smaller provider requests into one pricing input."""
     config, paths, _ = request_usage
@@ -177,7 +161,7 @@ def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
 @pytest.mark.parametrize("first_after_midnight", [False, True])
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_daily_usage_follows_requests_across_midnight_without_counting_extra_replies(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     first_after_midnight: bool,
     retained_run: bool,
 ) -> None:
@@ -188,9 +172,9 @@ def test_daily_usage_follows_requests_across_midnight_without_counting_extra_rep
     assert run.messages is not None
     run.messages[2].created_at = midnight + (10 if first_after_midnight else -10)
     run.messages[5].created_at = midnight + 30
-    storage.upsert_run(run, session_id="session")
+    storage.save_run(_SESSION, run, record_usage=True)
     if not retained_run:
-        with sqlite3.connect(storage.db_file) as connection:
+        with sqlite3.connect(storage.path) as connection:
             connection.execute("DELETE FROM code_sessions_runs")
 
     payload = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True).to_dict()
@@ -212,12 +196,12 @@ def test_daily_usage_follows_requests_across_midnight_without_counting_extra_rep
     ["old", "malformed", "mixed_models", "unknown", "undated", *[f"{field}_mismatch" for field in _FIRST]],
 )
 def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     case: str,
 ) -> None:
     """Incomplete or ambiguous request facts must never acquire a guessed provider/model."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["requests"] = [
             {"created_at": 1_700_086_401, "metrics": dict(_FIRST)},
@@ -251,12 +235,10 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
     assert report.request_coverage.unavailable_sources == 1
 
 
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_mixed_model_requests_keep_models_and_actual_dates(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     *,
-    streaming: bool,
     retained_run: bool,
 ) -> None:
     """Changing models must not omit request detail or move new usage to the run's original day."""
@@ -276,24 +258,16 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
         (run.messages[2], "first-model", "first-provider", _FIRST, first_day + 1),
         (run.messages[5], "second-model", "second-provider", _SECOND, second_day + 1),
     ):
-        model = RecordingModel(id=model_id, provider=provider)
+        # What the owned loop stamps on each request's assistant message: its usage and the model that answered.
         message.created_at = created_at
-        message.metrics = MessageMetrics()
-        provider_data = {"secret": "private provider metadata"}
-        if streaming:
-            model._populate_assistant_message_from_stream_data(
-                message,
-                MessageData(response_metrics=MessageMetrics(**metrics), response_provider_data=provider_data),
-            )
-        else:
-            populated = model._populate_assistant_message(
-                message,
-                ModelResponse(response_usage=MessageMetrics(**metrics), provider_data=provider_data),
-            )
-            assert populated is message
-    storage.upsert_run(run, session_id="session")
+        message.metrics = MessageMetrics(**metrics)
+        message.provider_data = {
+            "secret": "private provider metadata",
+            "mindroom_model": {"id": model_id, "provider": provider},
+        }
+    storage.save_run(_SESSION, run, record_usage=True)
     if not retained_run:
-        with sqlite3.connect(storage.db_file) as connection:
+        with sqlite3.connect(storage.path) as connection:
             connection.execute("DELETE FROM code_sessions_runs")
 
     payload = collect_admin_usage(
@@ -318,17 +292,17 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
     ]
     assert payload["user_breakdown"][0]["daily_breakdown"] == days
     assert payload["request_coverage"]["unavailable_sources"] == 0
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         stored = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0]
     assert "private" not in stored
 
 
 def test_daily_mixed_models_count_run_once_per_model(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """Repeated calls count one run overall and one run for each model used."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["metrics"] = {
             "input_tokens": 6,
@@ -362,12 +336,12 @@ def test_daily_mixed_models_count_run_once_per_model(
 
 @pytest.mark.parametrize("invalid", ["swapped_models", "missing_provider", "malformed_model", "empty_model"])
 def test_request_attribution_must_reconcile_per_model(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     invalid: str,
 ) -> None:
     """Correct overall totals cannot justify a wrong or incomplete per-request model."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["metrics"]["details"]["model"] = [
             {"id": "first-model", "provider": "test-provider", **_FIRST},
@@ -394,20 +368,20 @@ def test_request_attribution_must_reconcile_per_model(
 
 
 def test_initial_migration_imports_available_requests_without_reseeding_old_ledgers(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """Initial seeding may use retained messages; an initialized ledger is never reconstructed."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         connection.execute("DROP TABLE code_sessions_usage")
-    migrate_usage_database(Path(storage.db_file), "code_sessions")
+    migrate_usage_database(storage.path, "code_sessions")
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert [row.totals.input_tokens for row in report.request_breakdown] == [120_000, 130_000]
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         del payload["requests"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    migrate_usage_database(Path(storage.db_file), "code_sessions")
+    migrate_usage_database(storage.path, "code_sessions")
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()
@@ -416,11 +390,11 @@ def test_initial_migration_imports_available_requests_without_reseeding_old_ledg
 
 
 def test_history_without_retained_requests_marks_request_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """A readable aggregate cannot claim complete request detail after historical rows are lost."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         connection.execute("DELETE FROM code_sessions_usage")
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014

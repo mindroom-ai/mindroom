@@ -852,7 +852,6 @@ async def test_paused_team_scope_open_failure_does_not_materialize_members() -> 
     with (
         patch("mindroom.teams.materialize_exact_team_members") as materialize,
         patch("mindroom.teams.open_resolved_scope_session_context", return_value=ThrowingScope()),
-        patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
         pytest.raises(RuntimeError, match="scope open failed"),
     ):
         await continue_paused_team_run(
@@ -873,11 +872,6 @@ async def test_paused_team_scope_open_failure_does_not_materialize_members() -> 
         )
 
     materialize.assert_not_called()
-    close_dbs.assert_called_once_with(
-        agents=[],
-        team_db=None,
-        shared_scope_storage=None,
-    )
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
@@ -1025,7 +1019,6 @@ async def test_team_continuation_executes_real_agno_confirmation(  # noqa: PLR09
         ) as open_scope,
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch.object(team, "acontinue_run", new=continue_run),
-        patch("mindroom.teams.close_team_runtime_state_dbs"),
         patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
         patch("mindroom.teams.drive_delegation_stream", new=drive_resumed),
         approval_receipt_context("trusted approval receipt"),
@@ -1155,7 +1148,6 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
             return_value=nullcontext(scope_context),
         ),
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-        patch("mindroom.teams.close_team_runtime_state_dbs"),
         pytest.raises(RuntimeError, match="no longer match the approval continuation"),
     ):
         await continue_paused_team_run(
@@ -1196,7 +1188,6 @@ def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> No
     with (
         patch("mindroom.teams.create_agent", side_effect=[built_agent, RuntimeError("boom")]),
         patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams.close_team_runtime_state_dbs") as mock_close,
         pytest.raises(ValueError, match="research"),
     ):
         materialize_exact_team_members(
@@ -1205,12 +1196,6 @@ def test_materialize_exact_team_members_closes_partial_agents_on_failure() -> No
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-
-    mock_close.assert_called_once_with(
-        agents=[built_agent],
-        team_db=None,
-        shared_scope_storage=None,
-    )
 
 
 @pytest.mark.asyncio

@@ -1,29 +1,20 @@
-"""Shared helpers for the Agno history test modules."""
+"""Shared helpers for the history test modules."""
 # ruff: noqa: D102, ANN201, TC003
 
 from __future__ import annotations
 
 import json
-import sys
-from collections.abc import Iterator
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
-import pytest
 from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
 from agno.models.base import Model
-from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
-from agno.session.team import TeamSession
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -56,9 +47,12 @@ from mindroom.history.types import (
 from mindroom.hooks import (
     HookRegistry,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.session_storage.agent_storage import create_session_storage, ensure_session_row
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -75,7 +69,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agno.metrics import MessageMetrics
+    from agno.models.message import Message as AgnoMessage
 
+    from mindroom.history.types import ScopeSummary
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
@@ -121,7 +119,7 @@ async def _reported(outcome: CompactionOutcome) -> CompactionOutcome:
 class RecordingModel(Model):
     """Model that records the final prompt message list."""
 
-    seen_messages: list[Message] = field(default_factory=list)
+    seen_messages: list[AgnoMessage] = field(default_factory=list)
 
     def invoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         messages = kwargs.get("messages")
@@ -247,8 +245,8 @@ def _completed_run(
     *,
     agent_id: str = "test_agent",
     messages: list[Message] | None = None,
-) -> RunOutput:
-    return RunOutput(
+) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         agent_id=agent_id,
         status=RunStatus.completed,
@@ -265,8 +263,8 @@ def _completed_team_run(
     *,
     team_id: str,
     messages: list[Message] | None = None,
-) -> TeamRunOutput:
-    return TeamRunOutput(
+) -> TeamRunRecord:
+    return TeamRunRecord(
         run_id=run_id,
         team_id=team_id,
         status=RunStatus.completed,
@@ -282,13 +280,14 @@ def _session(
     session_id: str,
     *,
     agent_id: str = "test_agent",
-    runs: list[RunOutput | TeamRunOutput] | None = None,
-    metadata: dict[str, object] | None = None,
-    summary: SessionSummary | None = None,
-) -> AgentSession:
-    return AgentSession(
+    runs: list[AnyRunRecord] | None = None,
+    metadata: dict[str, Any] | None = None,
+    summary: ScopeSummary | None = None,
+) -> ConversationSession:
+    return ConversationSession(
         session_id=session_id,
-        agent_id=agent_id,
+        kind="agent",
+        owner_id=agent_id,
         runs=runs or [],
         metadata=metadata,
         summary=summary,
@@ -297,41 +296,18 @@ def _session(
     )
 
 
-@pytest.fixture(autouse=True)
-def _close_test_storages(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Close temporary SQLite handles created directly by Agno history tests."""
-    storages: list[object] = []
-    original_create_session_storage = create_session_storage
-
-    def _tracked_create_session_storage(*args: object, **kwargs: object) -> object:
-        storage = original_create_session_storage(*args, **kwargs)
-        storages.append(storage)
-        return storage
-
-    for module in {sys.modules[__name__], request.module}:
-        monkeypatch.setattr(module, "create_session_storage", _tracked_create_session_storage, raising=False)
-    yield
-
-    seen_storage_ids: set[int] = set()
-    for storage in storages:
-        storage_id = id(storage)
-        if storage_id in seen_storage_ids:
-            continue
-        seen_storage_ids.add(storage_id)
-        storage.close()
-
-
 def _team_session(
     session_id: str,
     *,
     team_id: str,
-    runs: list[RunOutput | TeamRunOutput] | None = None,
-    metadata: dict[str, object] | None = None,
-    summary: SessionSummary | None = None,
-) -> TeamSession:
-    return TeamSession(
+    runs: list[AnyRunRecord] | None = None,
+    metadata: dict[str, Any] | None = None,
+    summary: ScopeSummary | None = None,
+) -> ConversationSession:
+    return ConversationSession(
         session_id=session_id,
-        team_id=team_id,
+        kind="team",
+        owner_id=team_id,
         runs=runs or [],
         metadata=metadata,
         summary=summary,
@@ -403,10 +379,10 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
 def _forced_compaction_context(
     tmp_path: Path,
     *,
-    session: AgentSession,
+    session: ConversationSession,
     registry: HookRegistry | None = None,
     context_window: int = 64_000,
-) -> tuple[Config, RuntimePaths, object, HistoryScope, ToolRuntimeContext]:
+) -> tuple[Config, RuntimePaths, ConversationStore, HistoryScope, ToolRuntimeContext]:
     config, runtime_paths = _make_config(
         tmp_path,
         compaction=CompactionOverrideConfig(enabled=True),
@@ -425,16 +401,15 @@ def _forced_compaction_context(
     return config, runtime_paths, storage, scope, runtime_context
 
 
-def folded_run_ids(storage: object, session_id: str = "session-1") -> list[str]:
+def folded_run_ids(storage: ConversationStore, session_id: str = "session-1") -> list[str]:
     """Return one session's top-level runs behind their scope's latest summary row, in log order."""
-    assert isinstance(storage, SqliteDb)
-    runs = quote_identifier(storage.runs_table_name)
-    summaries = quote_identifier(storage.session_table_name + "_summaries")
+    runs = quote_identifier(storage.names.runs)
+    summaries = quote_identifier(storage.names.summaries)
     scope = "CASE WHEN run.run_type = 'team' THEN 'team:' || run.team_id ELSE 'agent:' || run.agent_id END"
-    with storage.db_engine.connect() as connection:
+    with closing(sqlite3.connect(storage.path)) as connection:
         return [
             row[0]
-            for row in connection.exec_driver_sql(
+            for row in connection.execute(
                 f"SELECT run.run_id FROM {runs} AS run WHERE run.session_id = ? AND run.parent_run_id IS NULL "  # noqa: S608
                 "AND run.status NOT IN ('PAUSED', 'CANCELLED', 'ERROR') AND run.run_index <= ("
                 f"SELECT row.after_run_index FROM {summaries} AS row WHERE row.session_id = run.session_id "
@@ -444,14 +419,13 @@ def folded_run_ids(storage: object, session_id: str = "session-1") -> list[str]:
         ]
 
 
-def stored_run_ids(storage: object, session_id: str = "session-1") -> list[str]:
+def stored_run_ids(storage: ConversationStore, session_id: str = "session-1") -> list[str]:
     """Return every run row of one session, folded or not, in log order."""
-    assert isinstance(storage, SqliteDb)
-    runs = quote_identifier(storage.runs_table_name)
-    with storage.db_engine.connect() as connection:
+    runs = quote_identifier(storage.names.runs)
+    with closing(sqlite3.connect(storage.path)) as connection:
         return [
             row[0]
-            for row in connection.exec_driver_sql(
+            for row in connection.execute(
                 f"SELECT run_id FROM {runs} WHERE session_id = ? ORDER BY run_index",  # noqa: S608
                 (session_id,),
             )
@@ -467,14 +441,17 @@ class StoredSummaryRow:
     legacy: bool
 
 
-def summary_rows_of(storage: object, scope_key: str, session_id: str = "session-1") -> list[StoredSummaryRow]:
+def summary_rows_of(
+    storage: ConversationStore,
+    scope_key: str,
+    session_id: str = "session-1",
+) -> list[StoredSummaryRow]:
     """Return one scope's summary rows, oldest first."""
-    assert isinstance(storage, SqliteDb)
-    table = quote_identifier(storage.session_table_name + "_summaries")
-    with storage.db_engine.connect() as connection:
+    table = quote_identifier(storage.names.summaries)
+    with closing(sqlite3.connect(storage.path)) as connection:
         return [
             StoredSummaryRow(summary=row[0], summary_model=row[1], legacy=bool(row[2]))
-            for row in connection.exec_driver_sql(
+            for row in connection.execute(
                 f"SELECT summary, summary_model, legacy FROM {table} "  # noqa: S608
                 "WHERE session_id = ? AND scope_key = ? ORDER BY id",
                 (session_id, scope_key),
@@ -482,19 +459,18 @@ def summary_rows_of(storage: object, scope_key: str, session_id: str = "session-
         ]
 
 
-def log_of(storage: object, scope_key: str, session_id: str = "session-1") -> list[str]:
+def log_of(storage: ConversationStore, scope_key: str, session_id: str = "session-1") -> list[str]:
     """Return one scope's top-level runs and summary rows in log order, as ``run:<id>`` and ``row:<summary>``.
 
     A barrier row reads ``row:None``.
     """
-    assert isinstance(storage, SqliteDb)
-    runs = quote_identifier(storage.runs_table_name)
-    summaries = quote_identifier(storage.session_table_name + "_summaries")
+    runs = quote_identifier(storage.names.runs)
+    summaries = quote_identifier(storage.names.summaries)
     scope = "CASE WHEN run_type = 'team' THEN 'team:' || team_id ELSE 'agent:' || agent_id END"
-    with storage.db_engine.connect() as connection:
+    with closing(sqlite3.connect(storage.path)) as connection:
         entries = [
             ((run_index, 0), f"run:{run_id}")
-            for run_id, run_index in connection.exec_driver_sql(
+            for run_id, run_index in connection.execute(
                 f"SELECT run_id, run_index FROM {runs} WHERE session_id = ? AND parent_run_id IS NULL "  # noqa: S608
                 f"AND {scope} = ?",
                 (session_id, scope_key),
@@ -502,7 +478,7 @@ def log_of(storage: object, scope_key: str, session_id: str = "session-1") -> li
         ]
         entries += [
             ((after_run_index, row_id), f"row:{summary}")
-            for row_id, after_run_index, summary in connection.exec_driver_sql(
+            for row_id, after_run_index, summary in connection.execute(
                 f"SELECT id, after_run_index, summary FROM {summaries} WHERE session_id = ? AND scope_key = ?",  # noqa: S608
                 (session_id, scope_key),
             )
@@ -510,14 +486,17 @@ def log_of(storage: object, scope_key: str, session_id: str = "session-1") -> li
     return [label for _key, label in sorted(entries)]
 
 
-def segments_of(storage: object, scope_key: str, session_id: str = "session-1") -> list[tuple[str, dict[str, Any]]]:
+def segments_of(
+    storage: ConversationStore,
+    scope_key: str,
+    session_id: str = "session-1",
+) -> list[tuple[str, dict[str, Any]]]:
     """Return the run and decoded segment of each of one scope's mid-turn fold rows, oldest first."""
-    assert isinstance(storage, SqliteDb)
-    summaries = quote_identifier(storage.session_table_name + "_summaries")
-    with storage.db_engine.connect() as connection:
+    summaries = quote_identifier(storage.names.summaries)
+    with closing(sqlite3.connect(storage.path)) as connection:
         return [
             (run_id, json.loads(segment))
-            for run_id, segment in connection.exec_driver_sql(
+            for run_id, segment in connection.execute(
                 f"SELECT segment_run_id, segment FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
                 "AND segment_run_id IS NOT NULL ORDER BY id",
                 (session_id, scope_key),
@@ -525,15 +504,15 @@ def segments_of(storage: object, scope_key: str, session_id: str = "session-1") 
         ]
 
 
-def latest_summary_model(storage: object, scope: HistoryScope, session_id: str = "session-1") -> str | None:
+def latest_summary_model(storage: ConversationStore, scope: HistoryScope, session_id: str = "session-1") -> str | None:
     """Return the model recorded for the scope's latest summary row."""
     rows = summary_rows_of(storage, scope.key, session_id)
     return rows[-1].summary_model if rows else None
 
 
 def compact_runs(
-    storage: SqliteDb,
-    session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    session: ConversationSession,
     scope: HistoryScope,
     run_ids: list[str],
     summary: str,
@@ -553,17 +532,17 @@ def compact_runs(
             previous_summary=_stored_summary(storage, session, scope),
         ),
         included_run_ids=run_ids,
-        summary=SessionSummary(summary=summary),
+        summary=summary,
         summary_model=summary_model,
     )
 
 
-def _stored_summary(storage: SqliteDb, session: AgentSession | TeamSession, scope: HistoryScope) -> str | None:
+def _stored_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope) -> str | None:
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     return latest.summary if latest is not None else None
 
 
-def seed_summary(storage: SqliteDb, session: AgentSession | TeamSession, scope: HistoryScope, summary: str) -> None:
+def seed_summary(storage: ConversationStore, session: ConversationSession, scope: HistoryScope, summary: str) -> None:
     """Give ``session`` a summary row that sorts before its runs, as an earlier compaction would have left it."""
     latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope.key)
     assert summary_rows.append_summary(
@@ -578,7 +557,7 @@ def seed_summary(storage: SqliteDb, session: AgentSession | TeamSession, scope: 
 
 
 def store_fold(
-    storage: SqliteDb,
+    storage: ConversationStore,
     session_id: str,
     scope: HistoryScope,
     run_id: str,
@@ -590,8 +569,7 @@ def store_fold(
     summary: str = "FOLD",
 ) -> int:
     """Append a mid-turn fold's summary row holding ``run_id``'s segment, covering no stored run."""
-    ensure_session_row(
-        storage,
+    storage.ensure_session_row(
         new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team"),
     )
     latest = summary_rows.latest_row(storage, session_id=session_id, scope_key=scope.key)

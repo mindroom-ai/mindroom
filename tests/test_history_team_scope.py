@@ -42,9 +42,8 @@ from tests.conftest import (
     FakeModel,
     bind_runtime_paths,
 )
-from tests.history_helpers import (  # noqa: F401
+from tests.history_helpers import (
     _agent,
-    _close_test_storages,
     _make_config,
     _runtime_paths,
 )

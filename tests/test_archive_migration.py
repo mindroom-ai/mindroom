@@ -9,19 +9,15 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-
 from mindroom import constants
 from mindroom.history import summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
 
@@ -48,15 +44,15 @@ class _Generation:
     """One archive generation as a released archive stored it."""
 
     summary: str | None
-    runs: list[RunOutput | TeamRunOutput] = field(default_factory=list)
+    runs: list[RunRecord | TeamRunRecord] = field(default_factory=list)
     tombstones: tuple[str, ...] = ()
     legacy: bool = False
     legacy_event_ids: tuple[str, ...] = ()
     scope_key: str = _SCOPE.key
 
 
-def _run(run_id: str, *, agent_id: str = "code", content: str | None = None) -> RunOutput:
-    return RunOutput(
+def _run(run_id: str, *, agent_id: str = "code", content: str | None = None) -> RunRecord:
+    return RunRecord(
         run_id=run_id,
         agent_id=agent_id,
         session_id="s1",
@@ -74,16 +70,16 @@ def _db(tmp_path: Path) -> Path:
     return tmp_path / "sessions" / "code.db"
 
 
-def _open(tmp_path: Path) -> SqliteDb:
-    storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
-    assert isinstance(storage, SqliteDb)
+def _open(tmp_path: Path) -> ConversationStore:
+    storage = create_state_storage("code", tmp_path, session_table="code_sessions")
+    assert isinstance(storage, ConversationStore)
     return storage
 
 
 def _main_database(
     tmp_path: Path,
     *,
-    live: list[RunOutput | TeamRunOutput],
+    live: list[RunRecord | TeamRunRecord],
     generations: list[_Generation],
     team: bool = False,
     blob: list[dict[str, object]] | None = None,
@@ -91,12 +87,11 @@ def _main_database(
     """Write a conversation database as a release with the compaction archive left it."""
     storage = _open(tmp_path)
     session = (
-        TeamSession(session_id="s1", team_id="eng", runs=live)
+        ConversationSession(kind="team", session_id="s1", owner_id="eng", runs=live)
         if team
-        else AgentSession(session_id="s1", agent_id="code", runs=live)
+        else ConversationSession(kind="agent", session_id="s1", owner_id="code", runs=live)
     )
     seed_session(storage, session)
-    storage.close()
     with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
         connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
         connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
@@ -127,7 +122,7 @@ def _main_database(
                     (
                         generation_id,
                         run.run_id,
-                        "team" if isinstance(run, TeamRunOutput) else "agent",
+                        "team" if isinstance(run, TeamRunRecord) else "agent",
                         json.dumps(event_ids),
                         json.dumps(seen_event_ids),
                         json.dumps(run.to_dict()),
@@ -164,18 +159,15 @@ class _Replay:
 
 def _replay(tmp_path: Path) -> _Replay:
     storage = _open(tmp_path)
-    try:
-        session = get_agent_session(storage, "s1")
-        assert session is not None
-        return _Replay(
-            loaded=[run.run_id or "" for run in session.runs or []],
-            summary=session.summary.summary if session.summary is not None else None,
-            seen=read_scope_seen_event_ids(storage, session, _SCOPE),
-            stored=stored_run_ids(storage, "s1"),
-            folded=folded_run_ids(storage, "s1"),
-        )
-    finally:
-        storage.close()
+    session = storage.load_session("s1", "agent")
+    assert session is not None
+    return _Replay(
+        loaded=[run.run_id or "" for run in session.runs or []],
+        summary=session.summary.text if session.summary is not None else None,
+        seen=read_scope_seen_event_ids(storage, session, _SCOPE),
+        stored=stored_run_ids(storage, "s1"),
+        folded=folded_run_ids(storage, "s1"),
+    )
 
 
 def test_ordinary_generations_become_summary_rows_after_their_runs(tmp_path: Path) -> None:
@@ -223,10 +215,7 @@ def test_a_legacy_generation_stays_in_force_before_every_run(tmp_path: Path) -> 
 
     replay = _replay(tmp_path)
     storage = _open(tmp_path)
-    try:
-        legacy = summary_rows.legacy_event_ids(storage, session_id="s1", scope_key=_SCOPE.key)
-    finally:
-        storage.close()
+    legacy = summary_rows.legacy_event_ids(storage, session_id="s1", scope_key=_SCOPE.key)
 
     assert replay.summary == "legacy summary and r0"
     assert replay.loaded == ["r1"]
@@ -283,14 +272,11 @@ def test_stale_copies_of_archived_and_tombstoned_runs_are_dropped(tmp_path: Path
 
     replay = _replay(tmp_path)
     storage = _open(tmp_path)
-    try:
-        restored = storage.get_run("r0")
-    finally:
-        storage.close()
+    restored = storage.get_run("r0")
 
     assert replay.loaded == ["r2"]
     assert replay.stored == ["r0", "r2"]
-    assert isinstance(restored, RunOutput)
+    assert isinstance(restored, RunRecord)
     assert restored.content == "answer r0"
 
 
@@ -325,9 +311,9 @@ def test_an_interrupted_compaction_keeps_visible_blob_runs_after_its_summary(tmp
 
 def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None:
     """A team run archived with its members is folded with them behind its summary row."""
-    member = RunOutput(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0")
-    team_run = TeamRunOutput(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)
-    later = TeamRunOutput(run_id="t1", team_id="eng", session_id="s1", status=RunStatus.completed)
+    member = RunRecord(run_id="m0", agent_id="helper", session_id="s1", parent_run_id="t0")
+    team_run = TeamRunRecord(run_id="t0", team_id="eng", session_id="s1", status=RunStatus.completed)
+    later = TeamRunRecord(run_id="t1", team_id="eng", session_id="s1", status=RunStatus.completed)
     _main_database(
         tmp_path,
         live=[later],
@@ -336,17 +322,14 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     )
 
     storage = _open(tmp_path)
-    try:
-        session = get_team_session(storage, "s1")
-        stored = stored_run_ids(storage, "s1")
-        folded = folded_run_ids(storage, "s1")
-    finally:
-        storage.close()
+    session = storage.load_session("s1", "team")
+    stored = stored_run_ids(storage, "s1")
+    folded = folded_run_ids(storage, "s1")
 
     assert session is not None
     assert [run.run_id for run in session.runs or []] == ["t1"]
     assert session.summary is not None
-    assert session.summary.summary == "team summary"
+    assert session.summary.text == "team summary"
     assert stored == ["m0", "t0", "t1"]
     assert folded == ["t0"]
 
@@ -393,11 +376,8 @@ def test_redaction_candidates_keep_what_the_archive_matched(tmp_path: Path) -> N
     )
 
     storage = _open(tmp_path)
-    try:
-        candidates = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="all")
-        seen = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen")
-    finally:
-        storage.close()
+    candidates = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="all")
+    seen = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen")
 
     assert candidates == {"$legacy", "$r0", "$read-by-r0"}
     assert seen == {"$legacy", "$r0"}
@@ -411,10 +391,7 @@ def test_redacting_an_archived_message_after_migration_cuts_from_its_run(tmp_pat
         generations=[_Generation("summary of r0", [_run("r0")]), _Generation("summary of r0 and r1", [_run("r1")])],
     )
     storage = _open(tmp_path)
-    try:
-        assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r1", match="any")
-    finally:
-        storage.close()
+    assert summary_rows.cut_at_event(storage, session_id="s1", scope_key=_SCOPE.key, event_id="$r1", match="any")
 
     replay = _replay(tmp_path)
 

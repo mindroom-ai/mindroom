@@ -22,6 +22,7 @@ from agno.run.agent import RunCompletedEvent, RunContentEvent, RunErrorEvent, Ru
 from agno.run.base import RunStatus
 from agno.run.cancel import acancel_run
 from agno.session.agent import AgentSession
+from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.config.agent import AgentConfig
@@ -33,7 +34,6 @@ from mindroom.providers.codex_model import CodexResponses
 from mindroom.providers.media_fallback import install_provider_media_fallback
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.system_prompt import render_session_context
 from mindroom.usage.stats import collect_admin_usage
 
@@ -448,7 +448,6 @@ async def test_mixed_model_failed_stream_keeps_request_attribution(tmp_path: Pat
     storage = create_state_storage(
         "status",
         tmp_path / "agents/status",
-        subdir="sessions",
         session_table="status_sessions",
     )
     complete = _response("resp_complete", "completed")
@@ -559,7 +558,6 @@ async def test_received_request_usage_survives_task_cancellation(tmp_path: Path)
     storage = create_state_storage(
         "status",
         tmp_path / "agents/status",
-        subdir="sessions",
         session_table="status_sessions",
     )
     held = _HeldStream("resp_cancelled")
@@ -703,7 +701,6 @@ async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool, comp
     storage = create_state_storage(
         "status",
         tmp_path / "agents/status",
-        subdir="sessions",
         session_table="status_sessions",
     )
     assert isinstance(storage, SqliteDb)
@@ -767,7 +764,6 @@ async def test_codex_blocking_usage_is_not_counted_twice(
     storage = create_state_storage(
         "status",
         tmp_path / "agents/status",
-        subdir="sessions",
         session_table="status_sessions",
     )
     assert isinstance(storage, SqliteDb)

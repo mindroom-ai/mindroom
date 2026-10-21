@@ -13,9 +13,7 @@ from agno.db.base import BaseDb, SessionType
 from agno.exceptions import ModelProviderError
 from agno.metrics import MessageMetrics
 from agno.models.base import Model
-from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 from agno.run.cancel import acancel_run
 from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
@@ -26,9 +24,7 @@ from agno.tools.function import Function
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.session_storage import agno_compat_session_persistence
-from mindroom.session_storage.agent_storage import create_state_storage, save_runs
-from mindroom.session_storage.agno_compat_session_persistence import drain_cancelled_team_save
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.usage.stats import collect_admin_usage
 
 if TYPE_CHECKING:
@@ -134,7 +130,6 @@ def _squad(
     storage = create_state_storage(
         "squad",
         tmp_path / "teams" / "squad",
-        subdir="sessions",
         session_table="squad_sessions",
     )
     storage.upsert_session(TeamSession(session_id="session", team_id="squad"))
@@ -297,87 +292,3 @@ async def test_member_stopped_after_approval_keeps_its_usage(tmp_path: Path, str
     await _finish_detached_saves()
 
     assert squad.model_tokens() == {"leader-model": 10, "member-model": 1100}
-
-
-@dataclass
-class _SlowToStopModel(_ScriptModel):
-    """Take a while to unwind when stopped, like closing a provider connection or a subprocess."""
-
-    async def _next(self) -> ModelResponse:
-        try:
-            return await super()._next()
-        except asyncio.CancelledError:
-            await asyncio.shield(asyncio.sleep(0.05))
-            raise
-
-
-@pytest.mark.asyncio
-async def test_interrupted_turn_written_after_a_stop_is_not_overwritten(tmp_path: Path) -> None:
-    """MindRoom's own record of a stopped turn lands after Agno's save of it, even while members take time to stop."""
-    squad = _squad(
-        tmp_path,
-        leader=[_delegation(), _answer(1)],
-        member=[_calling("lookup", "{}", 100), _calling("lookup", "{}", 1000), _HANG],
-    )
-    member = squad.team.members[0]
-    assert isinstance(member, Agent)
-    member.model = squad.member = _SlowToStopModel(
-        id="member-model",
-        provider="test-provider",
-        script=squad.member.script,
-    )
-    database = cast("BaseDb", squad.team.db)
-    session = database.get_session("session", session_type=SessionType.TEAM)
-    assert isinstance(session, TeamSession)
-    # Create the runs table up front, as an earlier turn would have.
-    save_runs(database, session, [TeamRunOutput(run_id="earlier", team_id="squad", session_id="session", content="Hi")])
-    reply = asyncio.create_task(_run(squad, stream=False))
-    await squad.member.hanging.wait()
-    reply.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await reply
-
-    await drain_cancelled_team_save("team-run")
-    interrupted = TeamRunOutput(
-        run_id="team-run",
-        team_id="squad",
-        session_id="session",
-        content="Partial answer",
-        status=RunStatus.completed,
-        messages=[Message(role="user", content="Go"), Message(role="assistant", content="Partial answer")],
-    )
-    await asyncio.to_thread(save_runs, database, session, [interrupted])
-    await _finish_detached_saves()
-
-    stored = database.get_session("session", session_type=SessionType.TEAM)
-    assert isinstance(stored, TeamSession)
-    run = stored.get_run("team-run")
-    assert run is not None
-    assert run.status == RunStatus.completed
-    assert squad.model_tokens()["member-model"] == 1100
-
-
-@pytest.mark.asyncio
-async def test_interrupted_turn_waits_only_for_its_own_team_save(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stopping one team reply never waits for another conversation's stopped team to finish saving."""
-    agno_compat_session_persistence.install_patch()
-    released = asyncio.Event()
-
-    def schedule_slow_save(*_args: object) -> None:
-        team_run._background_tasks.add(asyncio.create_task(released.wait()))
-
-    monkeypatch.setattr(agno_compat_session_persistence, "_ORIGINAL_CANCELLED_TEAM_RUN_PERSIST", schedule_slow_save)
-    team = Team(id="squad", members=[], telemetry=False)
-    team_run._persist_cancelled_team_run_in_background(
-        team,
-        TeamRunOutput(run_id="other-run", team_id="squad", session_id="other"),
-        TeamSession(session_id="other", team_id="squad"),
-    )
-    try:
-        async with asyncio.timeout(5):
-            await drain_cancelled_team_save("team-run")
-        assert "other-run" in agno_compat_session_persistence._CANCELLED_TEAM_SAVES
-    finally:
-        released.set()
-        await _finish_detached_saves()
-    assert "other-run" not in agno_compat_session_persistence._CANCELLED_TEAM_SAVES

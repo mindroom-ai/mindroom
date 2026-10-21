@@ -32,7 +32,6 @@ from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
-from mindroom.session_storage import agno_compat_session_persistence as session_persistence
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.approvals import _approval_run_id, settle_job_approvals
@@ -192,9 +191,8 @@ class DelegationFuzzRunner:
         monkeypatch.setattr("mindroom.agents.create_agent", self._build_child)
         monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.approvals)
         # Blocking work runs on the event loop, so an idle loop marks the end of each step and a crash lands between two
-        # awaits; synchronous session saves skip their thread lane for the same reason.
+        # awaits.
         monkeypatch.setattr(asyncio, "to_thread", _inline)
-        monkeypatch.setattr(session_persistence, "_registered_lane", lambda _database: None)
         run_journal_statements_inline(monkeypatch)
 
     async def open(self) -> None:

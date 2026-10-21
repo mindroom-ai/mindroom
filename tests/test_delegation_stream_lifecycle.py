@@ -18,8 +18,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
-from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -246,29 +245,24 @@ async def test_continuation_closes_before_run_owner_exits(
             message = "Consumer stopped"
             raise failure(message)
 
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            assert response.status == RunStatus.paused
-            assert response.run_id is not None
-            async with drain_agent_cancellation(parent, response.run_id) as bind_owner:
-                with bind_owner(), pytest.raises(failure, match="Consumer stopped"):
-                    await execution.drive_delegations(
-                        parent,
-                        response,
-                        agent_name="leader",
-                        run_child=unused_child,
-                        config=config,
-                        runtime_paths=paths,
-                        execution_identity=identity,
-                        on_event=deliver,
-                    )
-            persisted = get_agent_session(storage, identity.session_id)
-            assert persisted is not None
-            assert persisted.runs is not None
-            assert len(persisted.runs) == 1
-            assert persisted.runs[0].run_id == response.run_id
-            assert persisted.runs[0].status == RunStatus.cancelled
-            assert persisted.runs[0].content == "Parent continued"
-    finally:
-        storage.close()
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+        assert response.status == RunStatus.paused
+        assert response.run_id is not None
+        with pytest.raises(failure, match="Consumer stopped"):
+            await execution.drive_delegations(
+                parent,
+                response,
+                agent_name="leader",
+                run_child=unused_child,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                on_event=deliver,
+            )
+        persisted = storage.load_session(identity.session_id, "agent")
+        assert persisted is not None
+        assert len(persisted.runs) == 1
+        assert persisted.runs[0].run_id == response.run_id
+        assert persisted.runs[0].status == RunStatus.cancelled
+        assert persisted.runs[0].content == "Parent continued"

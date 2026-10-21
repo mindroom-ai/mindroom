@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -19,8 +16,11 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.custom_tools.usage_stats import UsageStatsTools
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
@@ -29,6 +29,7 @@ from tests.conftest import (
     make_relation_lookup,
     runtime_paths_for,
     seed_session,
+    seed_session_metrics,
     test_runtime_paths,
 )
 
@@ -104,37 +105,34 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
     storage = create_state_storage(
         "usage",
         context.runtime_paths.storage_root / "agents" / "usage",
-        subdir="sessions",
         session_table="usage_sessions",
     )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="usage",
-                user_id="@alice:example.test",
-                session_data={"session_metrics": {"total_tokens": 100}},
-                runs=[
-                    RunOutput(
-                        run_id="run-1",
-                        user_id="@alice:example.test",
-                        model_provider="test-provider",
-                        model="test-model",
-                        created_at=int(datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
-                        metrics=RunMetrics(
-                            input_tokens=12,
-                            output_tokens=8,
-                            total_tokens=20,
-                            cache_read_tokens=9,
-                            cache_write_tokens=2,
-                        ),
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="usage",
+            user_id="@alice:example.test",
+            runs=[
+                RunRecord(
+                    run_id="run-1",
+                    user_id="@alice:example.test",
+                    model_provider="test-provider",
+                    model="test-model",
+                    created_at=int(datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
+                    metrics=RunMetrics(
+                        input_tokens=12,
+                        output_tokens=8,
+                        total_tokens=20,
+                        cache_read_tokens=9,
+                        cache_write_tokens=2,
                     ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+                ),
+            ],
+        ),
+    )
+    seed_session_metrics(storage, "session-1", {"total_tokens": 100})
     toolkit = UsageStatsTools(agent_name="usage", admin_scope=admin)
     method = toolkit.get_all_usage if admin else toolkit.get_my_usage
 

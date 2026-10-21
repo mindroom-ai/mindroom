@@ -5323,8 +5323,6 @@ class TestTeamCompletion:
             resolved_thread_id=None,
         )
 
-        agents: list[AgnoAgent] | None = None
-        team: AgnoTeam | None = None
         with (
             open_bound_scope_session_context(
                 agents=[],
@@ -5337,7 +5335,7 @@ class TestTeamCompletion:
             patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             assert scope_context is not None
-            agents, team, mode = openai_compat._build_team(
+            agents, _team, mode = openai_compat._build_team(
                 "super_team",
                 team_config,
                 runtime_paths,
@@ -5346,17 +5344,9 @@ class TestTeamCompletion:
                 models=openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
             )
 
-        try:
-            assert mode is TeamMode.COORDINATE
-            assert [agent.id for agent in agents] == ["general", "code"]
-            assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
-        finally:
-            if agents is not None and team is not None:
-                openai_compat.close_team_runtime_state_dbs(
-                    agents=agents,
-                    team_db=team.db,
-                    shared_scope_storage=None,
-                )
+        assert mode is TeamMode.COORDINATE
+        assert [agent.id for agent in agents] == ["general", "code"]
+        assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
     def test_build_team_closes_materialized_agents_when_team_build_fails(self) -> None:
         """Configured-team build failures should close partially built member resources."""
@@ -5400,7 +5390,6 @@ class TestTeamCompletion:
                     "mindroom.api.openai_compat.build_materialized_team_instance",
                     side_effect=RuntimeError("team build failed"),
                 ),
-                patch("mindroom.api.openai_compat.close_team_runtime_state_dbs") as mock_close,
                 pytest.raises(RuntimeError, match="team build failed"),
             ):
                 openai_compat._build_team(
@@ -5411,11 +5400,6 @@ class TestTeamCompletion:
                     scope_context=scope_context,
                     models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
                 )
-            mock_close.assert_called_once_with(
-                agents=[built_agent],
-                team_db=None,
-                shared_scope_storage=scope_context.storage,
-            )
 
     def test_build_team_passes_knowledge_to_member_agents(self) -> None:
         """Team member creation resolves and passes configured knowledge."""

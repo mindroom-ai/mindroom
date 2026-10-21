@@ -16,7 +16,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store
+from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -702,6 +702,34 @@ def test_session_fields_create_a_missing_row(store: ConversationStore) -> None:
         {"key": "value"},
         1_700_000_000,
     )
+
+
+@pytest.mark.asyncio
+async def test_persist_to_saves_the_record_with_its_usage_and_the_session_state_only_when_it_changed(
+    store: ConversationStore,
+) -> None:
+    """The run callback appends the record with its usage, and writes ``session_state`` back only after tools changed it."""
+    _seed(store, [_run("r1", metrics=_usage(10))])
+    session = _loaded(store)
+    persist = persist_to(store, session)
+
+    await persist(_run("r2", metrics=_usage(5)))
+
+    assert _loaded_ids(store) == ["r1", "r2"]
+    assert _totals(store)["input_tokens"] == 15
+    # Another writer's state stays while this session's tools left theirs alone.
+    _execute(
+        store,
+        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"other": 1}'))""",
+    )
+    await persist(_run("r3"))
+    assert _loaded(store).session_state == {"other": 1}
+
+    session.session_state["mindroom_pending_compaction_scope_keys"] = ["agent:code"]
+    await persist(_run("r4"))
+
+    assert _loaded(store).session_state == {"mindroom_pending_compaction_scope_keys": ["agent:code"]}
+    assert _loaded_ids(store) == ["r1", "r2", "r3", "r4"]
 
 
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:

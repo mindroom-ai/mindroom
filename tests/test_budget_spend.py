@@ -9,10 +9,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.budgets.pricing import price_table
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
@@ -20,8 +16,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.providers.model_loading import get_model_instance
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
 from tests.conftest import seed_session
 
@@ -270,7 +270,6 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        subdir="sessions",
         session_table="code_sessions",
     )
     metrics = RunMetrics(
@@ -289,26 +288,24 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
             ],
         },
     )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="code",
-                user_id=ALICE,
-                runs=[
-                    RunOutput(
-                        run_id="run-1",
-                        model_provider=model.provider,
-                        model=model.id,
-                        created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
-                        metrics=metrics,
-                    ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+    seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="code",
+            user_id=ALICE,
+            runs=[
+                RunRecord(
+                    run_id="run-1",
+                    model_provider=model.provider,
+                    model=model.id,
+                    created_at=int(datetime(2026, 10, 3, tzinfo=UTC).timestamp()),
+                    metrics=metrics,
+                ),
+            ],
+        ),
+    )
 
     snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
 
@@ -344,7 +341,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         )
         return RunMetrics(input_tokens=tokens, total_tokens=tokens, details={"model": [model_metrics]})
 
-    run = RunOutput(
+    run = RunRecord(
         run_id="run-1",
         model_provider=model.provider,
         model=model.id,
@@ -355,19 +352,18 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
-        subdir="sessions",
         session_table="code_sessions",
     )
-    try:
-        with monkeypatch.context() as clock:
-            clock.setattr("agno.db.utils.time.time", lambda: started)
-            seed_session(storage, AgentSession(session_id="session-1", agent_id="code", user_id=ALICE, runs=[run]))
-            run.messages = [*(run.messages or []), request(resumed)]
-            run.metrics = metrics(2_000_000)
-            clock.setattr("agno.db.utils.time.time", lambda: resumed)
-            storage.upsert_run(run=run, session_id="session-1")
-    finally:
-        storage.close()
+    with monkeypatch.context() as clock:
+        clock.setattr("mindroom.session_storage.store.time", lambda: started)
+        session = seed_session(
+            storage,
+            ConversationSession(kind="agent", session_id="session-1", owner_id="code", user_id=ALICE, runs=[run]),
+        )
+        run.messages = [*run.messages, request(resumed)]
+        run.metrics = metrics(2_000_000)
+        clock.setattr("mindroom.session_storage.store.time", lambda: resumed)
+        storage.save_run(session, run, record_usage=True)
 
     snapshot = collect_monthly_spend(config, paths, NOW, price_table(config, paths).prices)
 

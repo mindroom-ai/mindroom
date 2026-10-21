@@ -35,6 +35,7 @@ from mindroom.history.compaction import (
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
     append_compaction_chunk,
+    read_scope_seen_event_ids,
     read_scope_state,
     set_force_compaction_state,
 )
@@ -46,6 +47,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
+    ScopeSummary,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -58,6 +60,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.runs import RunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
@@ -73,12 +76,11 @@ from tests.conftest import (
     prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
+from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
     StoredSummaryRow,
     _agent,
-    _close_test_storages,
     _completed_run,
     _forced_compaction_context,
     _hook_runtime_context,
@@ -1973,3 +1975,96 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
     assert outcome is None
     summary_mock.assert_not_awaited()
     assert summary_rows_of(storage, "agent:test_agent") == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True),
+        context_window=64_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            RunRecord(
+                run_id="run-1",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={
+                    "matrix_seen_event_ids": ["event-1", "event-2"],
+                    "matrix_response_event_id": "response-1",
+                },
+            ),
+            RunRecord(
+                run_id="run-2",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={
+                    "matrix_seen_event_ids": ["event-3"],
+                    "matrix_response_event_id": "response-2",
+                },
+            ),
+            RunRecord(
+                run_id="run-3",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={
+                    "matrix_seen_event_ids": ["event-4"],
+                    "matrix_response_event_id": "response-3",
+                },
+            ),
+            RunRecord(
+                run_id="run-4",
+                agent_id="test_agent",
+                status=RunStatus.completed,
+                metadata={
+                    "matrix_seen_event_ids": ["event-5"],
+                    "matrix_response_event_id": "response-4",
+                },
+            ),
+        ],
+    )
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(storage, session)
+
+    with (
+        patch(
+            "mindroom.providers.model_loading.get_model_instance",
+            return_value=FakeModel(id="summary-model", provider="fake"),
+        ),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(
+                return_value=ScopeSummary(text="merged summary", updated_at=datetime.now(UTC)),
+            ),
+        ),
+    ):
+        await prepare_history_for_run_for_test(
+            agent=_agent(db=storage),
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert persisted.runs == []
+    assert read_scope_seen_event_ids(storage, persisted, scope) == {
+        "event-1",
+        "event-2",
+        "event-3",
+        "event-4",
+        "event-5",
+        "response-1",
+        "response-2",
+        "response-3",
+        "response-4",
+    }

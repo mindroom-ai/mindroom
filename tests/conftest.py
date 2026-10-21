@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import json
 import os
 import re
 import shutil
@@ -145,13 +146,13 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore
+from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
@@ -161,15 +162,14 @@ from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
     from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
     from xdist.workermanage import WorkerController
 
     from mindroom.dispatch_handoff import DispatchEvent
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -500,8 +500,8 @@ async def prepare_history_for_run_for_test(
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: "ToolExecutionIdentity | None",
-    storage: "BaseDb | None" = None,
-    session: "AgentSession | TeamSession | None" = None,
+    storage: "ConversationStore | None" = None,
+    session: "ConversationSession | None" = None,
     history_settings: ResolvedHistorySettings | None = None,
     active_model_name: str | None = None,
     active_context_window: int | None = None,
@@ -552,11 +552,7 @@ async def prepare_history_for_run_for_test(
     if storage is not None and resolved_scope is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
-            persisted_session = (
-                get_team_session(storage, session_id)
-                if resolved_scope.kind == "team"
-                else get_agent_session(storage, session_id)
-            )
+            persisted_session = storage.load_session(session_id, resolved_scope.kind)
         scope_context = ScopeSessionContext(
             scope=resolved_scope,
             storage=storage,
@@ -3263,16 +3259,31 @@ def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
 
 
-def seed_session[SessionT: "AgentSession | TeamSession"](storage: "BaseDb", session: SessionT) -> SessionT:
-    """Persist a session row and every run it holds, in order, and return the session.
+def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":
+    """Persist a session row with its fields and every run it holds, in order, and return the session.
 
-    Production code writes runs explicitly (``save_runs``/``delete_runs``);
-    tests seed whole histories with this instead.
+    Production code writes runs one at a time as they finish; tests seed whole histories with this instead. Each
+    run is saved with its usage, as the run's own save would.
     """
-    storage.upsert_session(session)
-    for run in session.runs or []:
-        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+    storage.save_session_fields(session, "metadata", "session_state")
+    for run in session.runs:
+        storage.save_run(session, run, record_usage=True)
     return session
+
+
+def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:
+    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them."""
+    with storage.transaction(write=True) as connection:
+        (raw,) = connection.execute(
+            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchone()
+        session_data = json.loads(raw) if raw else {}
+        session_data["session_metrics"] = dict(totals)
+        connection.execute(
+            f"UPDATE {quote_identifier(storage.names.sessions)} SET session_data = ? WHERE session_id = ?",  # noqa: S608
+            (json.dumps(session_data), session_id),
+        )
 
 
 def create_agno_2_sessions_db(path: "Path") -> "Path":

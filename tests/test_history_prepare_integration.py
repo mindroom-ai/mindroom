@@ -46,11 +46,10 @@ from tests.conftest import (
     make_visible_message,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
+from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingModel,
     _agent,
-    _close_test_storages,
     _completed_run,
     _make_config,
     _runtime_paths,

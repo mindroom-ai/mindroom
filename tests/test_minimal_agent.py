@@ -4,7 +4,6 @@
 
 import asyncio
 import time
-from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +34,6 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
 from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, agent_static_token_estimator
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.hooks import EnrichmentItem
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.memory.functions import MemoryPromptParts
@@ -362,11 +360,10 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
         )
-        resources.callback(close_agent_runtime_state_dbs, agent)
         agent.response_context = _turn_context()
         return agent
 
-    with ExitStack() as resources, tool_runtime_context(runtime):
+    with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
             if rebuild:
                 initial = create()
@@ -445,19 +442,16 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
     )
     agent.response_context = _turn_context()
-    try:
-        with tool_runtime_context(runtime):
-            async with response_cli_lifetime() as lifetime:
-                result = await agent.arun("Hello", user_id=runtime.requester_id, session_id=runtime.session_id)
-                assert result.status == "ERROR"
-                assert "Run MindRoom with its API server" in result.content
-                assert "!mode helper standard" in result.content
-                # No grant is issued for a shell that cannot reach MindRoom.
-                assert lifetime.owner is None
-        assert provider.requests == []
-        assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "minimal"
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    with tool_runtime_context(runtime):
+        async with response_cli_lifetime() as lifetime:
+            result = await agent.arun("Hello", user_id=runtime.requester_id, session_id=runtime.session_id)
+            assert result.status == "ERROR"
+            assert "Run MindRoom with its API server" in result.content
+            assert "!mode helper standard" in result.content
+            # No grant is issued for a shell that cannot reach MindRoom.
+            assert lifetime.owner is None
+    assert provider.requests == []
+    assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "minimal"
 
 
 @pytest.mark.asyncio
