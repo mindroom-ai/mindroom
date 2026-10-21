@@ -6,6 +6,7 @@ the completion-ownership helpers, generators drained, and a raised exception tur
 reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
+Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
 """
 
 from __future__ import annotations
@@ -179,8 +180,10 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     """Call the entrypoint with the framework's and the model's arguments; drain a generator it returns."""
     entrypoint = function.entrypoint
-    # A name the schema declares belongs to the model, so a model value replaces the framework's.
-    kwargs = {**framework_arguments(function, context), **arguments}
+    # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
+    # rewrites them, so values for injected names are dropped here as well, as Agno dropped them at execution.
+    # A media name the schema declares belongs to the model, so that value replaces the framework's.
+    kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:

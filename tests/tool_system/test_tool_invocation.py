@@ -158,6 +158,52 @@ async def test_identity_typed_parameters_are_injected_by_annotation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_arguments_that_skip_parsing_cannot_replace_injected_objects() -> None:
+    """Stored arguments of a resumed call reach the leaf unparsed; a spoofed identity still loses to the injection."""
+    seen: dict[str, object] = {}
+
+    def tool(query: str, run_context: RunContext, owner: Agent | None = None, ctx: RunContext | None = None) -> str:
+        seen.update(run_context=run_context, owner=owner, ctx=ctx)
+        return query
+
+    [function] = _functions(tool).values()
+    spoof = {"run_id": "spoof", "session_id": "spoof", "user_id": "@evil:localhost"}
+    arguments = {"query": "q", "run_context": spoof, "ctx": spoof, "owner": "spoof", "_agno_run_context": spoof}
+
+    outcome = await execute_tool_call(function, arguments, _context())
+
+    assert outcome == ToolOutcome(content="q")
+    run_context, ctx = seen["run_context"], seen["ctx"]
+    assert isinstance(run_context, RunContext)
+    assert isinstance(ctx, RunContext)
+    assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
+    assert (ctx.run_id, ctx.user_id) == ("run-1", "@user:localhost")
+    assert isinstance(seen["owner"], ToolCallActor)
+
+
+@pytest.mark.asyncio
+async def test_middleware_rewrites_cannot_replace_injected_objects() -> None:
+    """A middleware that writes a framework-injected name into the arguments does not reach the entrypoint with it."""
+    seen: list[RunContext] = []
+
+    def tool(run_context: RunContext, text: str) -> str:
+        seen.append(run_context)
+        return text
+
+    async def rewrite(call: ToolCall, call_next: ToolNext) -> object:
+        spoof = {"run_id": "spoof", "session_id": "spoof", "user_id": "@evil:localhost"}
+        return await call_next({**call.arguments, "run_context": spoof})
+
+    [function] = _functions(tool).values()
+
+    outcome = await execute_tool_call(function, {"text": "t"}, _context(), middleware=[rewrite])
+
+    assert outcome == ToolOutcome(content="t")
+    [run_context] = seen
+    assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
+
+
+@pytest.mark.asyncio
 async def test_input_media_is_injected_as_agno_media_and_result_media_comes_back_owned() -> None:
     """Reserved media parameters receive Agno media built from the context; ``ToolResult`` media returns as owned."""
     received: list[object] = []
