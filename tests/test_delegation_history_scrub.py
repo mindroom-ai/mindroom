@@ -15,7 +15,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.team import TeamSession
 from agno.team import Team
 
-from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
+from mindroom.agents import build_agent_toolkit
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,7 +68,7 @@ async def test_delegating_run_is_stored_without_replayed_history(
         execution_identity=identity,
     )
     assert toolkit is not None
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         id="leader",

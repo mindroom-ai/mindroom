@@ -18,7 +18,6 @@ from agno.team import Team
 from agno.tools.calculator import CalculatorTools
 from agno.tools.function import UserInputField
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig
@@ -48,6 +47,7 @@ from tests.delegation_helpers import (
 from tests.identity_helpers import entity_ids
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -136,7 +136,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
     toolkit = DelegateTools("leader", [child_name], paths, config, execution_identity=identity)
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = "delegate"
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     context = _delegate_runtime_context(config, paths, execution_identity=identity)
     history_scope = HistoryScope(kind="team", scope_id="squad")
     with open_resolved_scope_session_context(
@@ -417,19 +417,17 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     delegate = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
     for function in delegate.get_async_functions().values():
         function.owning_toolkit = "delegate"
-    apply_tool_approval_capability(
+    with_agno_approval_flags(
         delegate,
         config,
-        supports_native_tool_approval=True,
         registered_tool_name="delegate",
     )
     calculator = CalculatorTools()
     for function in (*calculator.functions.values(), *calculator.async_functions.values()):
         function.owning_toolkit = "calculator"
-    apply_tool_approval_capability(
+    with_agno_approval_flags(
         calculator,
         config,
-        supports_native_tool_approval=True,
         registered_tool_name="calculator",
     )
     context = _delegate_runtime_context(config, paths, execution_identity=identity)

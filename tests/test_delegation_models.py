@@ -10,7 +10,6 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -23,6 +22,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -74,10 +74,9 @@ async def test_subagent_model_selection(
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         if native:
-            apply_tool_approval_capability(
+            with_agno_approval_flags(
                 toolkit,
                 config,
-                supports_native_tool_approval=True,
                 registered_tool_name="delegate",
             )
             storage = create_session_storage("leader", config, paths, identity)
