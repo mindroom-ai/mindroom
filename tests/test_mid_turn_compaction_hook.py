@@ -16,12 +16,21 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
 from mindroom.providers.openai.responses_wire import ResponsesWire, responses_request_kwargs
 from mindroom.providers.openai.settings import ResponsesSettings
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import _make_config
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
+
+    from mindroom.agent_loop.model_loop import BeforeRequestHook
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider, StreamEvent
 
 _NATIVE = NativeCompactionReplay(route="test-route", threshold=2000)
 _RESPONSES_WIRE = ResponsesWire(route="openai", provider_name="openai", store=True, explicit_breakpoint=False)
@@ -116,3 +125,83 @@ def _responses_body(request: ModelRequest) -> dict[str, object]:
         wire=_RESPONSES_WIRE,
     )
     return kwargs["extra_body"]
+
+
+def _small_window_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    return _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(model="summary", reserve_tokens=500),
+        models={
+            "default": ModelConfig(provider="openai", id="test-model", context_window=4000),
+            "summary": ModelConfig(provider="openai", id="summary-model", context_window=100_000),
+        },
+    )
+
+
+def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelProvider) -> BeforeRequestHook:
+    return mid_turn_compaction_hook(
+        config=config,
+        runtime_paths=runtime_paths,
+        entity_name="test_agent",
+        scope_id="test_agent",
+        is_team=False,
+        model_name="default",
+        model=model,
+        history_settings=config.resolve_entity("test_agent").history_settings,
+        store=None,
+        session=None,
+        scope=None,
+        native_compaction=None,
+        deferred_tool_names=frozenset(),
+        prompt_id=None,
+    )
+
+
+def spaced() -> str:
+    """Return a tool result whose tokens outnumber its characters / 4 about twice over."""
+    return "x " * 5000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_route", [False, True])
+async def test_a_responses_route_sizes_each_request_as_its_replay_sends_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    responses_route: bool,
+) -> None:
+    """The characters / 4 estimate fits a request the Responses route's own count does not, so only it compacts.
+
+    The fold runs end to end on the owned path: the summary model comes from the provider registry.
+    """
+    config, runtime_paths = _small_window_config(tmp_path)
+    summarizer = summary_model("SUMMARY")
+    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summarizer)
+    scripted = ScriptedModel([calls(tool_call("spaced", "call_1")), answer("done")])
+
+    def scripted_stage(_inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        return scripted.stream(request)
+
+    model = (
+        WrappedProvider(inner=responses_adapter(tmp_path, "test-model"), stage=scripted_stage)
+        if responses_route
+        else scripted
+    )
+
+    _, record = await collect(
+        run_agent(
+            spec(model, toolkit(spaced)),
+            [Message(role="user", content="Do the task")],
+            ctx=context(),
+            hooks=LoopHooks(before_request=(_run_local_hook(config, runtime_paths, model),)),
+        ),
+    )
+
+    assert record.content == "done"
+    second = scripted.requests[1]
+    if responses_route:
+        assert len(summarizer.requests) == 1
+        assert is_compaction_summary(second.messages[-1])
+        assert "SUMMARY" in str(second.messages[-1].content)
+    else:
+        assert summarizer.requests == []
+        assert not any(is_compaction_summary(message) for message in second.messages)

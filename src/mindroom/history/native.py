@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from mindroom.history.replay import compaction_summary_message, current_summary_text
+from mindroom.history.replay import PortableReplayEstimator, compaction_summary_message, current_summary_text
 from mindroom.history.types import NativeHistory
 from mindroom.native_compaction import recorded_native_settings
 from mindroom.providers.pipeline.wrapped import bare_adapter
@@ -127,6 +127,12 @@ def _history_generation(session: ConversationSession | None) -> str:
     return str(compaction_summary_message(summary, run_local=False).content) if summary is not None else ""
 
 
+def portable_replay_estimator(provider: ModelProvider | None) -> PortableReplayEstimator | None:
+    """Return the route that sizes explicitly replayed history the way its requests send it, or None for canonical."""
+    adapter = bare_adapter(provider) if provider is not None else None
+    return adapter if isinstance(adapter, PortableReplayEstimator) else None
+
+
 def native_history_route(native: NativeHistory | None) -> str | None:
     """Return the active projection identity, or canonical history when disabled."""
     return native.native_compaction.route if native is not None and native.native_compaction is not None else None
@@ -136,5 +142,6 @@ __all__ = [
     "SupportsNativeCompaction",
     "configure_native_history",
     "native_history_route",
+    "portable_replay_estimator",
     "restore_native_history",
 ]

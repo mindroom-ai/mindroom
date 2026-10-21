@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+@runtime_checkable
 class PortableReplayEstimator(Protocol):
     """A provider route that sizes explicitly replayed history the way its requests send it."""
 

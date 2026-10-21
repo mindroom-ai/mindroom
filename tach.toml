@@ -2638,7 +2638,13 @@ depends_on = [
     "mindroom.native_compaction",
     "mindroom.providers.pipeline",
 ]
-visibility = ["mindroom.approval.execution", "mindroom.history.runtime", "mindroom.teams", "mindroom.delegation.execution"]
+visibility = [
+    "mindroom.approval.execution",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.runtime",
+    "mindroom.teams",
+    "mindroom.delegation.execution",
+]
 
 [[modules]]
 path = "mindroom.native_compaction"
@@ -9537,6 +9543,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.helper_usage",
     "mindroom.history.legacy_summary_system_prompt",
+    "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",

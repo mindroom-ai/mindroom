@@ -18,15 +18,23 @@ from structlog.testing import capture_logs
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
-from mindroom.history.runtime import resolve_entity_preparation_inputs
+from mindroom.history.runtime import (
+    finalize_history_preparation,
+    prepare_scope_history,
+    resolve_entity_preparation_inputs,
+)
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ScopeSummary
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.native_compaction import checkpoint_estimated_tokens, record_native_checkpoint
 from mindroom.providers.openai.responses_wire import responses_input
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
+from tests.conftest import seed_session
 from tests.history_helpers import _completed_run, _make_config, _session
+from tests.providers.golden_support import pipeline_provider
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
@@ -482,3 +490,55 @@ def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]
         "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
     }
     assert events == ([expected] if logged else [])
+
+
+@pytest.mark.asyncio
+async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(tmp_path: Path) -> None:
+    """A reply on a Responses route sizes its stored history and fits its replay with the route's own count."""
+    config, runtime_paths = _make_config(tmp_path)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    spaced_answer = Message(role="assistant", content="x " * 2000)
+    session = seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[_completed_run("run-1", messages=[Message(role="user", content="Hi"), spaced_answer])],
+        ),
+    )
+    adapter = responses_adapter(tmp_path)
+    inputs = resolve_entity_preparation_inputs(
+        config=config,
+        entity_name="test_agent",
+        static_prompt_tokens=0,
+        active_model_name=None,
+        active_context_window=None,
+    )
+    route_estimate = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=_SCOPE,
+        history_settings=inputs.history_settings,
+        replay_model=adapter,
+    )
+    canonical_estimate = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=_SCOPE,
+        history_settings=inputs.history_settings,
+    )
+
+    prepared = await prepare_scope_history(
+        agent_name="test_agent",
+        scope=_SCOPE,
+        model=pipeline_provider(adapter),
+        resolved_inputs=inputs,
+        non_prompt_tokens=0,
+        runtime_paths=runtime_paths,
+        config=config,
+        scope_context=ScopeSessionContext(scope=_SCOPE, storage=storage, session=session, session_id="session-1"),
+        allow_native_compaction=False,
+    )
+    final = finalize_history_preparation(prepared_scope_history=prepared, config=config, static_prompt_tokens=0)
+
+    assert route_estimate > canonical_estimate
+    assert prepared.compaction_decision.current_history_tokens == route_estimate
+    assert final.replay_plan is not None
+    assert final.replay_plan.estimated_tokens == route_estimate

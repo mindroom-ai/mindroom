@@ -17,7 +17,7 @@ from mindroom.history.compaction import (
     scope_usage_recorder,
     summarize_runs,
 )
-from mindroom.history.native import configure_native_history, native_history_route
+from mindroom.history.native import configure_native_history, native_history_route, portable_replay_estimator
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
@@ -68,20 +68,18 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from agno.agent import Agent
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
 
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.history.replay import PortableReplayEstimator
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
-    from mindroom.native_compaction import NativeCompactionModel
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.timing import DispatchPipelineTiming
@@ -178,6 +176,8 @@ class PreparedScopeHistory:
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
+    # The route's own estimate of explicitly replayed history, which the final replay plan sizes with.
+    replay_estimator: PortableReplayEstimator | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +288,7 @@ async def prepare_scope_history(
     ``model`` is the provider the run's requests go to; None sizes history by estimate alone and sends no native
     settings.
     """
+    replay_estimator = portable_replay_estimator(model)
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=scope,
@@ -295,6 +296,7 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
             native_history=_native_history(model, resolved_inputs, None, allowed=allow_native_compaction),
+            replay_estimator=replay_estimator,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -324,7 +326,7 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
         native_route=native_route,
-        replay_model=None,
+        replay_model=replay_estimator,
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
     # A native checkpoint response is billed for the transcript it replaced, so native routes keep the estimate.
@@ -335,6 +337,7 @@ async def prepare_scope_history(
             resolved_inputs=resolved_inputs,
             config=config,
             model=model,
+            replay_estimator=replay_estimator,
             non_prompt_tokens=non_prompt_tokens,
         )
         if native_route is None and visible_runs
@@ -385,7 +388,7 @@ async def prepare_scope_history(
                 session=session,
                 scope=scope_context.scope,
                 history_settings=resolved_inputs.history_settings,
-                replay_model=None,
+                replay_model=replay_estimator,
             )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
@@ -413,7 +416,7 @@ async def prepare_scope_history(
                 resolved_inputs=resolved_inputs,
                 history_budget=compaction_budget,
                 before_tokens=current_history_tokens,
-                replay_model=None,
+                replay_model=replay_estimator,
                 config=config,
                 runtime_paths=runtime_paths,
             ),
@@ -439,6 +442,7 @@ async def prepare_scope_history(
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
         native_history=native_history,
+        replay_estimator=replay_estimator,
     )
 
 
@@ -449,6 +453,7 @@ def _reported_history_tokens(
     resolved_inputs: HistoryPreparationInputs,
     config: Config,
     model: ModelProvider | None,
+    replay_estimator: PortableReplayEstimator | None,
     non_prompt_tokens: int,
 ) -> int | None:
     """Size history from the request the provider reported for the scope's latest answer, or None when stale.
@@ -490,7 +495,7 @@ def _reported_history_tokens(
     )
     if reported is None:
         return None
-    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=None)
+    newer_tokens = estimate_request_messages_tokens(messages[anchor:], replay_model=replay_estimator)
     return reported + newer_tokens - non_prompt_tokens
 
 
@@ -600,7 +605,7 @@ async def _compact_before_reply(
     resolved_inputs: HistoryPreparationInputs,
     history_budget: int | None,
     before_tokens: int,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> CompactionOutcome | None:
@@ -640,7 +645,7 @@ async def summarize_run_locally(
     *,
     resolved_inputs: HistoryPreparationInputs,
     previous_summary: str | None,
-    snapshots: Sequence[RunOutput | TeamRunOutput],
+    snapshots: Sequence[AnyRunRecord],
     scope: HistoryScope,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -668,7 +673,7 @@ async def compact_scope_mid_turn(
     resolved_inputs: HistoryPreparationInputs,
     basis: FoldBasis,
     segment: Segment,
-    snapshots: Sequence[RunOutput | TeamRunOutput],
+    snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     before_tokens: int,
     config: Config,
@@ -757,10 +762,11 @@ def finalize_history_preparation(
         )
 
     history_settings = resolved_inputs.history_settings
-    session, scope, native_history = (
+    session, scope, native_history, replay_estimator = (
         prepared_scope_history.session,
         prepared_scope_history.scope,
         prepared_scope_history.native_history,
+        prepared_scope_history.replay_estimator,
     )
     if scope is None or session is None:
         replay_plan = configured_replay_plan(history_settings=history_settings, estimated_tokens=0)
@@ -771,7 +777,7 @@ def finalize_history_preparation(
             scope=scope,
             history_settings=history_settings,
             native_route=native_history_route(native_history),
-            replay_model=None,
+            replay_model=replay_estimator,
         )
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the
@@ -782,7 +788,7 @@ def finalize_history_preparation(
                 session=session,
                 scope=scope,
                 history_settings=history_settings,
-                replay_model=None,
+                replay_model=replay_estimator,
             )
         if history_budget is not None:
             replay_plan = plan_replay_that_fits(
@@ -791,7 +797,7 @@ def finalize_history_preparation(
                 history_settings=history_settings,
                 available_history_budget=history_budget,
                 current_history_tokens=current_history_tokens,
-                replay_model=None,
+                replay_model=replay_estimator,
             )
             log_replay_plan(
                 replay_plan=replay_plan,

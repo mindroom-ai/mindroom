@@ -20,6 +20,7 @@ from uuid import uuid4
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
+from mindroom.history.native import portable_replay_estimator
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.replay import PortableReplayEstimator
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings
@@ -94,6 +96,8 @@ class _MidTurnCompaction:
     session: ConversationSession | None
     scope: HistoryScope | None
     native_compaction: NativeCompactionReplay | None
+    # The route's own estimate of explicitly replayed history, which sizes each request.
+    replay_estimator: PortableReplayEstimator | None
     deferred_tool_names: frozenset[str]
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
@@ -166,6 +170,7 @@ def mid_turn_compaction_hook(
         session=session,
         scope=scope,
         native_compaction=native_compaction,
+        replay_estimator=portable_replay_estimator(model),
         deferred_tool_names=deferred_tool_names,
         prompt_id=prompt_id,
         lifecycle=lifecycle,
@@ -412,7 +417,11 @@ def _request_tokens(
     if policy.native_route is not None:
         projected = native_replay_messages(messages, policy.native_route)
         return (
-            estimate_request_messages_tokens(messages, replay_model=None, native_route=policy.native_route)
+            estimate_request_messages_tokens(
+                messages,
+                replay_model=binding.replay_estimator,
+                native_route=policy.native_route,
+            )
             # Thinking before the latest checkpoint is part of that checkpoint, not of the request.
             + _thinking_tokens(
                 [message for message in projected if not checkpoint_items(message, policy.native_route)],
@@ -438,13 +447,17 @@ def _request_tokens(
         )
         if reported is not None:
             newer = messages[anchor:]
-            return reported + estimate_request_messages_tokens(newer, replay_model=None) + _thinking_tokens(newer)
+            return (
+                reported
+                + estimate_request_messages_tokens(newer, replay_model=binding.replay_estimator)
+                + _thinking_tokens(newer)
+            )
     return _estimated_request_tokens(binding, messages, tools)
 
 
 def _estimated_request_tokens(binding: _MidTurnCompaction, messages: list[Message], tools: Sequence[ToolSpec]) -> int:
     return (
-        estimate_request_messages_tokens(messages, replay_model=None)
+        estimate_request_messages_tokens(messages, replay_model=binding.replay_estimator)
         + _thinking_tokens(messages)
         + _tool_tokens(binding, tools, messages)
     )
