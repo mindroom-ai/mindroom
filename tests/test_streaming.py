@@ -575,7 +575,7 @@ async def test_stream_rerenders_changed_markdown(config: Config, change: str) ->
         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
         config=config,
         runtime_paths=runtime_paths_for(config),
-        accumulated_text="Hello @helper",
+        accumulated_text="Hello @helper ",
     )
     initial = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False, stream_status=None)
     assert initial is not None
@@ -846,6 +846,41 @@ def test_only_a_final_edit_warns_about_an_unfinished_interactive_block(config: C
         streaming_mod._prepare_delivery_from_snapshot(final)
     mock_warning.assert_called_once()
     assert mock_warning.call_args.args == ("Interactive block not parsed",)
+
+
+@pytest.mark.parametrize(
+    ("streamed", "stream_status", "shown_user_id"),
+    [
+        # Still arriving: the cut ID would pill a different user, @grace:matrix.
+        ("Next item, @grace:matrix.", None, None),
+        ("Next item, @grace:matrix.localhost", STREAM_STATUS_COMPLETED, "@grace:matrix.localhost"),
+        ("Next item, @grace:matrix.localhost ", None, "@grace:matrix.localhost"),
+    ],
+)
+def test_streaming_edits_hide_a_mention_still_arriving(
+    config: Config,
+    streamed: str,
+    stream_status: str | None,
+    shown_user_id: str | None,
+) -> None:
+    """An edit leaves out a trailing mention until it is complete, so it never pills a prefix of the ID."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", "$thread", "$reply"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    streaming.accumulated_text = streamed
+    snapshot = streaming._delivery_snapshot(is_final=False, allow_empty_progress=False, stream_status=stream_status)
+    assert snapshot is not None
+
+    content = streaming_mod._prepare_delivery_from_snapshot(snapshot).content
+
+    assert "Next item," in content["body"]
+    assert content.get("m.mentions", {}).get("user_ids", []) == ([shown_user_id] if shown_user_id else [])
+    if shown_user_id is None:
+        assert "matrix.to/#/@grace" not in content["formatted_body"]
+    else:
+        assert f'href="https://matrix.to/#/{shown_user_id}"' in content["formatted_body"]
 
 
 _PICK_BLOCK_JSON = '{"question": "Pick one", "options": [{"emoji": "✅", "label": "Yes", "value": "yes"}]}'
