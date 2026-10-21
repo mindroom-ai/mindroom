@@ -164,6 +164,9 @@ def _recipients(value: object, field_name: str) -> list[dict[str, dict[str, str]
         text = raw.strip()
         named = _NAMED_EMAIL.fullmatch(text)
         name, address = (named["name"].strip(), named["address"].strip()) if named else ("", text)
+        if len(name) >= 2 and name[0] == name[-1] == '"':
+            # An RFC 5322 quoted display name, such as "Smith, Sam", keeps its text without the quotes.
+            name = name[1:-1].strip()
         if len(address) > _MAX_EMAIL_CHARS or not _EMAIL.fullmatch(address):
             msg = f"{field_name} has an invalid email address: {raw[:100]!r}."
             raise _invalid(msg)

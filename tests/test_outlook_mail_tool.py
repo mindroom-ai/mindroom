@@ -661,6 +661,7 @@ def test_invalid_recipients_are_refused_before_any_request(
         ("Sam Example <sam@contoso.com>", {"name": "Sam Example", "address": "sam@contoso.com"}),
         (" Sam Example  < sam@contoso.com > ", {"name": "Sam Example", "address": "sam@contoso.com"}),
         ("<sam@contoso.com>", {"address": "sam@contoso.com"}),
+        ('"Smith, Sam" <sam@contoso.com>', {"name": "Smith, Sam", "address": "sam@contoso.com"}),
     ],
 )
 def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
