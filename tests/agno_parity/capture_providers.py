@@ -465,12 +465,19 @@ def _json_body(body: dict[str, Any]) -> dict[str, Any]:
     return {"status": 200, "headers": {"content-type": "application/json"}, "json": body}
 
 
+def _input_token_details(reply: Reply) -> dict[str, int]:
+    details = {"cached_tokens": reply.cached_tokens}
+    if reply.cache_write_tokens:
+        details["cache_write_tokens"] = reply.cache_write_tokens
+    return details
+
+
 def _chat_usage(reply: Reply, family: Family) -> dict[str, Any]:
     usage: dict[str, Any] = {
         "prompt_tokens": reply.input_tokens,
         "completion_tokens": reply.output_tokens,
         "total_tokens": reply.input_tokens + reply.output_tokens,
-        "prompt_tokens_details": {"cached_tokens": reply.cached_tokens},
+        "prompt_tokens_details": _input_token_details(reply),
         "completion_tokens_details": {"reasoning_tokens": reply.reasoning_tokens},
     }
     if family.usage_style == "openrouter":
@@ -499,14 +506,14 @@ def _chat_tool_call_deltas(reply: Reply, family: Family) -> list[dict[str, Any]]
     return deltas
 
 
-def _chat_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, Any]:
+def _chat_reply(reply: Reply, family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     usage = _chat_usage(reply, family)
     finish_reason = "tool_calls" if reply.calls else "stop"
     base = {
         "id": "chatcmpl-parity",
         "object": "chat.completion.chunk" if stream else "chat.completion",
         "created": CREATED,
-        "model": family.wire_model_id,
+        "model": model_id,
         "system_fingerprint": "fp_parity",
     }
     if not stream:
@@ -569,14 +576,14 @@ def _claude_usage(reply: Reply, *, output_tokens: int) -> dict[str, Any]:
     }
 
 
-def _claude_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, Any]:
+def _claude_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     blocks = _claude_blocks(reply)
     stop_reason = "tool_use" if reply.calls else "end_turn"
     message = {
         "id": "msg_parity",
         "type": "message",
         "role": "assistant",
-        "model": family.wire_model_id,
+        "model": model_id,
         "content": blocks,
         "stop_reason": stop_reason,
         "stop_sequence": None,
@@ -665,13 +672,13 @@ def _responses_items(reply: Reply) -> list[dict[str, Any]]:
     return items
 
 
-def _responses_object(reply: Reply, family: Family, *, status: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+def _responses_object(reply: Reply, model_id: str, *, status: str, items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": "resp_parity",
         "object": "response",
         "created_at": CREATED,
         "status": status,
-        "model": family.wire_model_id,
+        "model": model_id,
         "output": items,
         "error": None,
         "incomplete_details": None,
@@ -679,7 +686,7 @@ def _responses_object(reply: Reply, family: Family, *, status: str, items: list[
         if status != "completed"
         else {
             "input_tokens": reply.input_tokens,
-            "input_tokens_details": {"cached_tokens": reply.cached_tokens},
+            "input_tokens_details": _input_token_details(reply),
             "output_tokens": reply.output_tokens,
             "output_tokens_details": {"reasoning_tokens": reply.reasoning_tokens},
             "total_tokens": reply.input_tokens + reply.output_tokens,
@@ -734,12 +741,12 @@ def _responses_added_item(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _responses_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, Any]:
+def _responses_reply(reply: Reply, family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     items = _responses_items(reply)
     if not stream and not family.always_streams:
-        return _json_body(_responses_object(reply, family, status="completed", items=items))
+        return _json_body(_responses_object(reply, model_id, status="completed", items=items))
     events: list[dict[str, Any]] = [
-        {"type": "response.created", "response": _responses_object(reply, family, status="in_progress", items=[])},
+        {"type": "response.created", "response": _responses_object(reply, model_id, status="in_progress", items=[])},
     ]
     for index, item in enumerate(items):
         events.append(
@@ -748,7 +755,7 @@ def _responses_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str,
         events.extend(_responses_item_events(index, item))
         events.append({"type": "response.output_item.done", "output_index": index, "item": item})
     events.append(
-        {"type": "response.completed", "response": _responses_object(reply, family, status="completed", items=items)},
+        {"type": "response.completed", "response": _responses_object(reply, model_id, status="completed", items=items)},
     )
     return _sse(
         [{"event": event["type"], "data": {**event, "sequence_number": number}} for number, event in enumerate(events)],
@@ -787,7 +794,7 @@ def _gemini_usage(reply: Reply, *, final: bool) -> dict[str, Any]:
     return usage
 
 
-def _gemini_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, Any]:
+def _gemini_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     parts = _gemini_parts(reply)
     if not stream:
         candidate = {"content": {"role": "model", "parts": parts}, "finishReason": "STOP", "index": 0}
@@ -795,7 +802,7 @@ def _gemini_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, An
             {
                 "candidates": [candidate],
                 "usageMetadata": _gemini_usage(reply, final=True),
-                "modelVersion": family.wire_model_id,
+                "modelVersion": model_id,
                 "responseId": "parity-response",
             },
         )
@@ -809,15 +816,15 @@ def _gemini_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, An
             {
                 "candidates": [candidate],
                 "usageMetadata": _gemini_usage(reply, final=final),
-                "modelVersion": family.wire_model_id,
+                "modelVersion": model_id,
                 "responseId": "parity-response",
             },
         )
     return _sse([{"data": item} for item in chunks])
 
 
-def _ollama_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, Any]:
-    base = {"model": family.wire_model_id, "created_at": CREATED_ISO}
+def _ollama_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
+    base = {"model": model_id, "created_at": CREATED_ISO}
     final = {
         **base,
         "message": {"role": "assistant", "content": "" if stream else reply.text},
@@ -833,7 +840,8 @@ def _ollama_reply(reply: Reply, family: Family, *, stream: bool) -> dict[str, An
     if not stream:
         return _json_body(final)
     lines = [
-        {**base, "message": {"role": "assistant", "content": piece}, "done": False} for piece in _pieces(reply.text)
+        {**base, "message": {"role": "assistant", "content": piece}, "done": False}
+        for piece in (_pieces(reply.text) if reply.text else [])
     ]
     if reply.calls:
         tool_calls = [{"function": {"name": call.name, "arguments": call.arguments}} for call in reply.calls]
@@ -855,7 +863,6 @@ _ENCODERS: dict[str, Callable[..., dict[str, Any]]] = {
 # ---------------------------------------------------------------------------
 
 _KEY = "parity-test-key"
-_MEDIA = frozenset({"image", "file", "audio"})
 
 
 @dataclass(frozen=True)
@@ -875,11 +882,6 @@ class Family:
     always_streams: bool = False
     # Family-specific goldens, each listed after the golden that seeds its history.
     extra_scenarios: tuple[str, ...] = ()
-
-    @property
-    def wire_model_id(self) -> str:
-        """Return the model id the provider reports back."""
-        return str(self.model_config["id"]).removeprefix("openai-codex/")
 
 
 _CLAUDE_REASONING = {"thinking": {"type": "enabled", "budget_tokens": 2048}}
@@ -1361,8 +1363,23 @@ def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Cas
     if name == "responses_continuation":
         return Case(_followup(done, "plain_turn", prompt="And for the evening?"), Reply(text="Add a warm layer."))
     if name in {"reasoning_tool_call", "responses_store_false_turn"}:
-        reply = Reply(reasoning="Check the forecast first.", calls=(_WEATHER,), reasoning_tokens=5)
-        return _responses_replay_case(name, family, [_system(), _user(_PROMPT)], reply)
+        reply = Reply(reasoning="Check the forecast first.", calls=(_call(family, _WEATHER),), reasoning_tokens=5)
+        if family.wire == "responses":
+            return _responses_replay_case(name, family, [_system(), _user(_PROMPT)], reply)
+        return Case(
+            [_system(), _user(_PROMPT)],
+            reply,
+            tools=weather_tools,
+            model_config={"extra_kwargs": family.reasoning_kwargs or {}},
+        )
+    if name == "reasoning_tool_results":
+        reply = Reply(text=_ANSWER, reasoning="The forecast says light rain.", reasoning_tokens=4)
+        return Case(
+            _followup(done, "reasoning_tool_call", _WEATHER_RESULT),
+            reply,
+            tools=weather_tools,
+            model_config={"extra_kwargs": family.reasoning_kwargs or {}},
+        )
     if name in _RESPONSES_REPLAY_SEEDS:
         messages = _followup(done, _RESPONSES_REPLAY_SEEDS[name], _WEATHER_RESULT)
         return _responses_replay_case(name, family, messages, Reply(text=_ANSWER))
@@ -1434,6 +1451,9 @@ def family_scenarios(family: Family) -> list[str]:
     names = list(_BASE_SCENARIOS)
     if family.reasoning_kwargs is not None:
         names += ["reasoning", "reasoning_replay"]
+        if family.wire != "responses":
+            # Responses routes replay a reasoning tool turn in responses_explicit_replay.
+            names += ["reasoning_tool_call", "reasoning_tool_results"]
     names += family.extra_scenarios
     names.append("structured_output")
     if family.prompt_cache_config is not None:
@@ -1480,7 +1500,9 @@ def capture_family(family: Family) -> dict[str, dict[str, Any]]:
     for name in family_scenarios(family):
         case = _scenario(name, family, done)
         case_input = _case_input(family, case)
-        response_raw = _json_roundtrip(_ENCODERS[family.wire](case.reply, family, stream=case_input["stream"]))
+        encode = _ENCODERS[family.wire]
+        model_id = case_input["model_config"]["id"]
+        response_raw = _json_roundtrip(encode(case.reply, family, model_id=model_id, stream=case_input["stream"]))
         result = run_golden(case_input, response_raw)
         done[name] = {
             "family": family.name,

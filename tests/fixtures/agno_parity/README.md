@@ -37,7 +37,7 @@ Regenerate with `.venv/bin/python -m tests.agno_parity.capture_providers [family
 | `parsed.metrics` | That message's `MessageMetrics.to_dict()`. |
 | `parsed.stop_reason` | The first of `provider_data` `stop_reason`, `finish_reason`, and `response_status`, or `null` when the route records none. |
 
-The harness encodes `sse` data as compact JSON lines separated by blank lines and `ndjson` as one compact object per line; SDKs parse both, so the byte layout is not part of the contract.
+The harness writes each `sse` event as its `event:` and `data:` lines plus a blank line, and each `ndjson` entry as one JSON line; SDKs parse both, so the byte layout is not part of the contract.
 
 ### Normalization
 
@@ -67,11 +67,12 @@ The harness encodes `sse` data as compact JSON lines separated by blank lines an
 | `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
+| `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
 | `claude_citations`, `claude_citations_replay` | A text document with citations, then the cited turn replayed. |
 | `claude_server_tool_blocks`, `claude_server_tool_blocks_replay` | Native tool-search server blocks with a deferred tool call, then the turn replayed with its result. |
 | `responses_continuation` | A stored response continued with `previous_response_id`. |
-| `reasoning_tool_call`, `responses_explicit_replay` | A reasoning tool-call turn under portable replay, then explicit replay of its items and result. |
-| `responses_store_false_turn`, `responses_store_false` | The same with `store: false`. |
+| `responses_explicit_replay` | On Responses routes, `reasoning_tool_call` runs under portable replay and this golden replays its items and result explicitly. |
+| `responses_store_false_turn`, `responses_store_false` | The same reasoning tool turn and explicit replay with `store: false`. |
 | `structured_output` | `mindroom.routing._RoutingSuggestion` as native schema, JSON schema, or JSON mode, per route. |
 | `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
 | `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
@@ -79,7 +80,7 @@ The harness encodes `sse` data as compact JSON lines separated by blank lines an
 
 Skipped where the route has nothing to pin:
 
-- `reasoning`, `reasoning_replay`: `openai_chat` and `azure` (Chat Completions returns no reasoning text), `ollama`, `groq`, and `cerebras` (Agno parses no streamed reasoning on these routes).
+- `reasoning`, `reasoning_replay`, `reasoning_tool_call`, `reasoning_tool_results`: `openai_chat` and `azure` (Chat Completions returns no reasoning text), `ollama`, `groq`, and `cerebras` (Agno parses no streamed reasoning on these routes); Responses routes have no `reasoning_tool_results` and use `responses_explicit_replay` instead.
 - `prompt_cache`: `openai_chat`, `azure`, `deepseek`, `zai`, `llama_cpp`, `gemini`, `gemini_vertexai`, `ollama`, `groq`, and `cerebras`, which have no MindRoom or Agno prompt-cache setting.
 - Claude-only scenarios run on `anthropic`, `vertexai_claude`, and `bedrock_claude`; the server tool-search blocks only on the first two, since Bedrock uses portable tool search.
 - `deferred_tool_search_replay`: `anthropic` and `vertexai_claude`, covered by `claude_server_tool_blocks_replay`.

@@ -89,6 +89,7 @@
     },
     "metrics": {
       "cache_read_tokens": 30,
+      "cache_write_tokens": 8,
       "cost": 0.00021,
       "input_tokens": 42,
       "output_tokens": 12,
@@ -222,7 +223,7 @@
           ],
           "created": 1792540800,
           "id": "chatcmpl-parity",
-          "model": "z-ai/glm-5.3",
+          "model": "anthropic/claude-sonnet-5.5",
           "object": "chat.completion.chunk",
           "system_fingerprint": "fp_parity"
         }
@@ -240,7 +241,7 @@
           ],
           "created": 1792540800,
           "id": "chatcmpl-parity",
-          "model": "z-ai/glm-5.3",
+          "model": "anthropic/claude-sonnet-5.5",
           "object": "chat.completion.chunk",
           "system_fingerprint": "fp_parity"
         }
@@ -258,7 +259,7 @@
           ],
           "created": 1792540800,
           "id": "chatcmpl-parity",
-          "model": "z-ai/glm-5.3",
+          "model": "anthropic/claude-sonnet-5.5",
           "object": "chat.completion.chunk",
           "system_fingerprint": "fp_parity"
         }
@@ -274,7 +275,7 @@
           ],
           "created": 1792540800,
           "id": "chatcmpl-parity",
-          "model": "z-ai/glm-5.3",
+          "model": "anthropic/claude-sonnet-5.5",
           "object": "chat.completion.chunk",
           "system_fingerprint": "fp_parity"
         }
@@ -284,7 +285,7 @@
           "choices": [],
           "created": 1792540800,
           "id": "chatcmpl-parity",
-          "model": "z-ai/glm-5.3",
+          "model": "anthropic/claude-sonnet-5.5",
           "object": "chat.completion.chunk",
           "system_fingerprint": "fp_parity",
           "usage": {
@@ -295,6 +296,7 @@
             "cost": 0.00021,
             "prompt_tokens": 42,
             "prompt_tokens_details": {
+              "cache_write_tokens": 8,
               "cached_tokens": 30
             },
             "total_tokens": 54
