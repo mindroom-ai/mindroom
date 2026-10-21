@@ -9,7 +9,7 @@ import pytest
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.helper import complete_once
+from mindroom.agent_loop.helper import complete_once, complete_prompt
 from mindroom.agent_loop.prompt import PromptSpec, render_system_message
 from mindroom.agent_loop.structured import select_response_format
 from mindroom.llm.errors import ProviderError
@@ -26,14 +26,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics
-from tests.agent_loop.prompt_parity_support import run_scenario
-from tests.agno_parity.prompt_scenarios import (
-    SCENARIOS,
-    load_golden,
-    message_dict,
-    normalize,
-    response_format_dict,
-)
+from tests.agno_parity.prompt_scenarios import SCENARIOS, Recorder, call_dict, load_golden, message_dict, normalize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -79,25 +72,69 @@ def _messages(spec: PromptSpec, prompt: str) -> list[Message]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", HELPER_GOLDENS)
 async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
-    """A helper's owned request carries the golden's messages and response format on every structured-output path."""
-    [expected] = load_golden(name)["requests"]
-    run = await run_scenario(name, tmp_path)
-    [prompt] = run.prompts
-    [call] = run.calls
-    response_format = (
-        None if prompt.output_schema is None else select_response_format(prompt.capabilities, prompt.output_schema)
+    """Each helper's production call site sends its golden request byte for byte, through the owned provider layer."""
+    golden = load_golden(name)
+    scenario = SCENARIOS[name]
+    recorder = Recorder(responder=scenario.responder)
+
+    with recorder.installed():
+        output = await scenario.run(tmp_path)
+
+    assert normalize(output.input, tmp_path) == golden["input"]
+    assert recorder.calls
+    # Owned messages show the request went through the provider registry rather than an Agno model.
+    assert all(isinstance(message, Message) for call in recorder.calls for message in call.messages)
+    assert normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path) == golden["requests"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("structured_output", "json_prompt"),
+    [("native", False), ("json_schema", False), ("json_mode", True)],
+)
+async def test_a_prompt_is_sent_under_its_rendered_system_message(structured_output: str, *, json_prompt: bool) -> None:
+    """The role and instructions render as the system message, which ends with the JSON prompt on JSON-mode routes."""
+    capabilities = Capabilities(structured_output=structured_output)
+    provider = _RecordingProvider(answer='{"answer": "yes"}', capabilities=capabilities)
+
+    result = await complete_prompt(
+        provider,
+        "Is it raining?",
+        role="Decide.",
+        instructions=["Answer briefly.", "Use the evidence."],
+        schema=_Verdict,
+        run_id="decide-1",
     )
-    provider = _RecordingProvider(answer="ok", capabilities=prompt.capabilities)
-    # The helper's call site writes its user message; the request takes it as the Agno-era call site sent it.
-    prompts = [Message.from_dict(message.to_dict()) for message in call.messages[1:]]
 
-    await complete_once(provider, [render_system_message(prompt.spec), *prompts], response_format=response_format)
-
+    assert result.content == _Verdict(answer="yes")
+    assert result.record.run_id == "decide-1"
     [request] = provider.requests
-    assert normalize([message_dict(message) for message in request.messages], tmp_path) == expected["messages"]
-    assert response_format_dict(request.response_format) == expected["response_format"]
-    assert (request.tools, request.tool_choice) == ((), None)
-    assert request.stream is expected["stream"]
+    selected = select_response_format(capabilities, _Verdict)
+    spec = PromptSpec(
+        role="Decide.",
+        instructions=("Answer briefly.", "Use the evidence."),
+        output_format_prompt=selected.prompt,
+    )
+    assert [message_dict(message) for message in request.messages] == [
+        message_dict(render_system_message(spec)),
+        message_dict(Message(role="user", content="Is it raining?")),
+    ]
+    assert request.response_format == selected.request_format
+    assert ("Provide your output as a JSON" in str(request.messages[0].content)) is json_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_without_a_schema_returns_text_with_the_callers_overrides() -> None:
+    """Without a schema nothing asks for JSON, and the caller's overrides reach the request."""
+    provider = _RecordingProvider(answer="Noted.")
+    overrides = RequestOverrides(temperature=0.2)
+
+    result = await complete_prompt(provider, "Remember aisle seats.", role="Extract memories.", overrides=overrides)
+
+    assert result.content == "Noted."
+    [request] = provider.requests
+    assert request.messages[0].content == "<your_role>\nExtract memories.\n</your_role>"
+    assert (request.response_format, request.overrides) == (None, overrides)
 
 
 @pytest.mark.asyncio

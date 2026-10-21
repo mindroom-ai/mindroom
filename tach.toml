@@ -1165,8 +1165,6 @@ visibility = [
     "mindroom.response_lifecycle",
     "mindroom.response_turn",
     "mindroom.teams",
-    "mindroom.thread_summary",
-    "mindroom.topic_generator",
 ]
 
 [[modules]]
@@ -1208,22 +1206,15 @@ depends_on = [
     "mindroom.providers.prompt_cache_key",
     "mindroom.providers.vertex_claude_compat",
 ]
-visibility = ["mindroom.judgment.llm",
+visibility = [
     "mindroom.ai",
     "mindroom.api.provider_setup",
     "mindroom.cli.config",
     "mindroom.cli.doctor",
     "mindroom.agents",
     "mindroom.history.runtime",
-    "mindroom.memory.auto_flush",
-    "mindroom.routing",
-    "mindroom.scheduling.tasks",
     "mindroom.teams",
-    "mindroom.thread_summary",
-    "mindroom.topic_generator",
-    "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
-    "mindroom.knowledge_graph.clients",
 ]
 
 [[modules]]
@@ -3300,7 +3291,8 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
     "mindroom.tool_system.events",
 ]
 
@@ -3339,6 +3331,8 @@ depends_on = [
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
     "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
     "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.team_exact_members",
@@ -3524,7 +3518,8 @@ depends_on = [
     "mindroom.memory._prompting",
     "mindroom.memory.functions",
     "mindroom.memory.legacy_auto_flush",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
     "mindroom.requester_identity",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
@@ -3674,11 +3669,11 @@ path = "mindroom.topic_generator"
 depends_on = [
     "mindroom.helper_usage",
     "mindroom.matrix.room_reconciliation",
-    "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.state",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
 ]
 
 [[modules]]
@@ -5119,7 +5114,9 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.matrix.conversation_reads",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
+    "mindroom.llm",
     "mindroom.scheduling.executor",
     "mindroom.scheduling.recurring_schedule",
     "mindroom.requester_identity",
@@ -5466,7 +5463,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.agent_loop.helper"
-depends_on = ["mindroom.agent_loop.structured", "mindroom.llm", "mindroom.logging_config"]
+depends_on = ["mindroom.agent_loop.prompt", "mindroom.agent_loop.structured", "mindroom.llm", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
@@ -5599,12 +5596,12 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.requester_identity",
     "mindroom.matrix.room_history_reads",
-    "mindroom.ai_runtime",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_reads",
-    "mindroom.providers.model_instance_checks",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
+    "mindroom.llm",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.events",
@@ -5622,7 +5619,8 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.model_defaults",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
     "mindroom.matrix.media",
     "mindroom.matrix.mentions",
 ]
@@ -9104,7 +9102,7 @@ depends_on = ["mindroom.judgment.answers", "mindroom.judgment.state"]
 
 [[modules]]
 path = "mindroom.judgment.llm"
-depends_on = ["mindroom.providers.model_loading", "mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.providers.tool_policy"]
+depends_on = ["mindroom.providers.registry", "mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.llm", "mindroom.providers.tool_policy"]
 
 [[modules]]
 path = "mindroom.judgment.evaluator"
@@ -9460,7 +9458,8 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.registry",
+    "mindroom.agent_loop.helper",
     "mindroom.session_storage.agent_storage",
 ]
 visibility = ["mindroom.knowledge_graph.store"]

@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
 
 import mindroom.commands.handler as handler_module
 import mindroom.routing
@@ -31,6 +30,7 @@ from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -350,18 +350,11 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
     )
     selected_models: list[str] = []
 
-    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> MagicMock:
+    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> ScriptedModel:
         selected_models.append(model_name)
-        return MagicMock(id=f"{model_name}-model")
+        return ScriptedModel([answer(json.dumps({"entity_name": "assistant", "reasoning": "Only candidate"}))])
 
-    router = AsyncMock()
-    router.arun.return_value = RunOutput(
-        content={"entity_name": "assistant", "reasoning": "Only candidate"},
-    )
-    with (
-        patch("mindroom.routing.model_loading.get_model_instance", side_effect=load_model),
-        patch("mindroom.routing.Agent", return_value=router),
-    ):
+    with patch("mindroom.routing.build_model_provider", side_effect=load_model):
         result = await mindroom.routing.suggest_responder(
             "Help me",
             ["assistant"],

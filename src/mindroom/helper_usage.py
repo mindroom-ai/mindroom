@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
+    from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.usage.storage import IndependentUsageKind
@@ -82,7 +83,7 @@ def helper_usage_owner_context(owner: HelperUsageOwner | None) -> Iterator[None]
 
 
 async def record_helper_usage(
-    response: RunOutput,
+    response: RunOutput | RunRecord,
     *,
     owner: HelperUsageOwner,
     invocation_id: str,
@@ -107,7 +108,7 @@ async def record_helper_usage(
 
 
 async def record_system_usage(
-    response: RunOutput,
+    response: RunOutput | RunRecord,
     *,
     runtime_paths: RuntimePaths,
     kind: IndependentUsageKind,

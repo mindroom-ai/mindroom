@@ -376,7 +376,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware to its outcome: injection, synchronous offload, generator draining, error text |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_message`: an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent |
 | `agent_loop/structured.py` | Structured-output response formats and JSON prompt per provider capability, and lenient parsing of answers into the schema |
-| `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from |
+| `agent_loop/helper.py` | `complete_once`: one tool-less helper request, optionally read into a schema, with the run record its usage is saved from; `complete_prompt` renders the helper's system message for it |
 | `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py`; dispatch, approval, and cancellation ownership stay with the tool runtime |
 | `agno_compat_*.py` and subsystem-local `agno_compat_*.py` | Agno SDK repairs and private bindings; see `docs/architecture/agno-compatibility.md` for the boundary inventory and upstream tracking |
 | `constants.py` | Shared constants, paths, and environment variable defaults |

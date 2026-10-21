@@ -22,6 +22,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -250,49 +251,30 @@ class TestDynamicConfigUpdate:
         )
         persist_entity_accounts(updated_config, runtime_paths)
 
-        # Mock the AI model to return a proper workflow
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_get_model:
-            mock_agent = MagicMock()
-            mock_response = MagicMock()
-
-            # Create a mock workflow that references both agents
-            mock_workflow = ScheduledWorkflow(
-                schedule_type="cron",
-                cron_schedule=CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*"),
-                message="@email_assistant Check for emails with 'urgent' in the title. If found, @callagent notify the user by sending a text.",
-                description="Monitor for urgent emails and send text notification",
+        # The parser model answers with a workflow that references both agents.
+        workflow = ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=CronSchedule(minute="*/2", hour="*", day="*", month="*", weekday="*"),
+            message="@email_assistant Check for emails with 'urgent' in the title. If found, @callagent notify the user by sending a text.",
+            description="Monitor for urgent emails and send text notification",
+        )
+        model = ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
+        with patch("mindroom.scheduling.tasks.build_model_provider", return_value=model):
+            result = await _parse_workflow_schedule(
+                request,
+                updated_config,
+                runtime_paths,
+                available_responders=[
+                    MatrixID(username="email_assistant", domain="localhost"),
+                    MatrixID(username="callagent", domain="localhost"),
+                ],
             )
-            mock_response.content = mock_workflow
 
-            # Make the arun method async
-            async def async_arun(*args, **kwargs) -> MagicMock:  # noqa: ARG001, ANN002, ANN003
-                return mock_response
-
-            mock_agent.arun = async_arun
-
-            # Create a mock model that returns our mock agent
-            mock_model = MagicMock()
-            mock_get_model.return_value = mock_model
-
-            with patch("mindroom.scheduling.tasks.Agent") as mock_agent_class:
-                mock_agent_class.return_value = mock_agent
-
-                # Parse with the updated config
-                result = await _parse_workflow_schedule(
-                    request,
-                    updated_config,
-                    runtime_paths,
-                    available_responders=[
-                        MatrixID(username="email_assistant", domain="localhost"),
-                        MatrixID(username="callagent", domain="localhost"),
-                    ],
-                )
-
-                # Verify the workflow was parsed correctly and includes both agents
-                assert hasattr(result, "message")
-                assert "@email_assistant" in result.message
-                assert "@callagent" in result.message
-                assert result.description == "Monitor for urgent emails and send text notification"
+        # Verify the workflow was parsed correctly and includes both agents
+        assert isinstance(result, ScheduledWorkflow)
+        assert "@email_assistant" in result.message
+        assert "@callagent" in result.message
+        assert result.description == "Monitor for urgent emails and send text notification"
 
     @pytest.mark.asyncio
     async def test_defaults_streaming_toggle_updates_existing_bots_without_restart(

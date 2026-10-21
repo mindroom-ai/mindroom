@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import nio
 import pytest
@@ -19,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
@@ -30,6 +32,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -210,6 +213,22 @@ def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:
         config_get_closure("alpha", visiting=set())
 
 
+def _router_model(suggestion: dict[str, str]) -> ScriptedModel:
+    """Return a router model that answers with one routing suggestion."""
+    return ScriptedModel([answer(json.dumps(suggestion))])
+
+
+def _routing_prompt(model: ScriptedModel) -> str:
+    """Return the user prompt of the router's only request."""
+    [request] = model.requests
+    return request.messages[-1].get_content_string()
+
+
+async def _raise_provider_error() -> None:
+    msg = "Model error"
+    raise ProviderError(msg, provider="Synthetic")
+
+
 class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""
 
@@ -227,27 +246,17 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            # Mock the Agent and response
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {
-                "entity_name": "calculator",
-                "reasoning": "User is asking about math calculation",
-            }
-            mock_agent.arun.return_value = mock_response
+        model = _router_model({"entity_name": "calculator", "reasoning": "User is asking about math calculation"})
+        with patch("mindroom.routing.build_model_provider", return_value=model):
+            agents = [
+                MatrixID(username="mindroom_calculator", domain="localhost"),
+                MatrixID(username="mindroom_general", domain="localhost"),
+            ]
+            result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
-
-                assert result == "calculator"
-                assert "calculator" in mock_agent.arun.call_args[0][0]
-                assert "general" in mock_agent.arun.call_args[0][0]
+        assert result == "calculator"
+        assert "calculator" in _routing_prompt(model)
+        assert "general" in _routing_prompt(model)
 
     @pytest.mark.asyncio
     async def test_suggest_responder_uses_router_prompt_override(self) -> None:
@@ -267,22 +276,17 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {"entity_name": "general", "reasoning": "Custom route"}
-            mock_agent.arun.return_value = mock_response
-
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message("Hello", agents, config)
+        model = _router_model({"entity_name": "general", "reasoning": "Custom route"})
+        with patch("mindroom.routing.build_model_provider", return_value=model):
+            agents = [
+                MatrixID(username="mindroom_calculator", domain="localhost"),
+                MatrixID(username="mindroom_general", domain="localhost"),
+            ]
+            result = await suggest_responder_for_message("Hello", agents, config)
 
         assert result == "general"
-        assert mock_agent.arun.call_args.args[0].startswith("CUSTOM ROUTER")
-        assert "Message=Hello" in mock_agent.arun.call_args.args[0]
+        assert _routing_prompt(model).startswith("CUSTOM ROUTER")
+        assert "Message=Hello" in _routing_prompt(model)
 
     @pytest.mark.asyncio
     async def test_suggest_responder_with_thread_context(self) -> None:
@@ -303,34 +307,25 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {
-                "entity_name": "finance",
-                "reasoning": "Continuing financial discussion",
-            }
-            mock_agent.arun.return_value = mock_response
+        model = _router_model({"entity_name": "finance", "reasoning": "Continuing financial discussion"})
+        with patch("mindroom.routing.build_model_provider", return_value=model):
+            agents = [
+                MatrixID(username="mindroom_calculator", domain="localhost"),
+                MatrixID(username="mindroom_finance", domain="localhost"),
+                MatrixID(username="mindroom_general", domain="localhost"),
+            ]
+            result = await suggest_responder_for_message(
+                "How do I calculate deductions?",
+                agents,
+                config,
+                thread_context,
+            )
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_finance", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message(
-                    "How do I calculate deductions?",
-                    agents,
-                    config,
-                    thread_context,
-                )
-
-                assert result == "finance"
-                # Check that context was included in prompt
-                prompt = mock_agent.arun.call_args[0][0]
-                assert "taxes" in prompt
-                assert "Previous messages:" in prompt
+        assert result == "finance"
+        # Check that context was included in prompt
+        prompt = _routing_prompt(model)
+        assert "taxes" in prompt
+        assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
     async def test_suggest_responder_unavailable_returns_none(self) -> None:
@@ -346,29 +341,20 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            # AI suggests an agent not in available list
-            mock_response.content = {
-                "entity_name": "code",  # Not available
-                "reasoning": "User asking about programming",
-            }
-            mock_agent.arun.return_value = mock_response
+        # The model suggests an agent that is not available.
+        model = _router_model({"entity_name": "code", "reasoning": "User asking about programming"})
+        with patch("mindroom.routing.build_model_provider", return_value=model):
+            agents = [
+                MatrixID(username="mindroom_calculator", domain="localhost"),
+                MatrixID(username="mindroom_general", domain="localhost"),
+            ]
+            result = await suggest_responder_for_message(
+                "How do I write a Python function?",
+                agents,
+                config,
+            )
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]  # code not available
-                result = await suggest_responder_for_message(
-                    "How do I write a Python function?",
-                    agents,
-                    config,
-                )
-                # Should return None when agent is not available
-                assert result is None
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_suggest_responder_error_handling(self) -> None:
@@ -383,13 +369,13 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_model:
-            mock_model.side_effect = Exception("Model error")
-
+        failing = ScriptedModel([[Await(_raise_provider_error)]])
+        with patch("mindroom.routing.build_model_provider", return_value=failing):
             agents = [MatrixID(username="mindroom_general", domain="localhost")]
             result = await suggest_responder_for_message("Test message", agents, config)
 
-            assert result is None
+        assert result is None
+        assert len(failing.requests) == 1
 
     @pytest.mark.asyncio
     async def test_only_router_agent_routes(self, tmp_path: Path) -> None:

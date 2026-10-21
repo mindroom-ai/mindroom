@@ -2,6 +2,8 @@
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
 recorder keeps every request the model received: messages, tools, tool choice, and response format.
+Requests MindRoom sends through its own provider layer, the helper calls, are recorded below the request pipeline,
+where the provider adapter would receive them; the rest are still recorded at the Agno model call.
 `tests/fixtures/agno_parity/README.md` (Prompt goldens) describes the goldens these scenarios pin.
 """
 
@@ -45,12 +47,14 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
+from mindroom.llm.messages import Message as OwnedMessage
+from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
-from mindroom.providers import model_loading
+from mindroom.providers import model_loading, registry
 from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
@@ -83,14 +87,14 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from agno.models.base import Model
     from agno.models.message import Message
 
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message as OwnedMessage
+    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -145,11 +149,13 @@ _HEX_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 class ModelCall:
     """One request the recording model received, as the provider adapter would see it."""
 
-    model: Model
+    # The stored ``model`` and ``model_provider`` of the model that received the request.
+    model_id: str
+    model_provider: str
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
     stream: bool
-    messages: list[Message]
+    messages: list[Message] | list[OwnedMessage]
     tools: list[dict[str, Any]] | None
     tool_choice: str | dict[str, Any] | None
     response_format: dict[str, Any] | type[BaseModel] | None
@@ -190,7 +196,8 @@ class Recorder:
         kwargs: dict[str, Any],
     ) -> ModelResponse:
         call = ModelCall(
-            model=model,
+            model_id=model.id,
+            model_provider=model.provider,
             model_index=index,
             stream=stream,
             # The loop keeps mutating its list after the request, so the record keeps copies.
@@ -203,9 +210,30 @@ class Recorder:
         self.calls.append(call)
         return self.responder(call)
 
-    def _bind(self, model: Model) -> Model:
-        respond = partial(self._respond, model, self._built_models)
+    def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> ModelResponse:
+        # Helper requests offer no tools; recording tool definitions here waits for the agent requests.
+        assert not request.tools, request.tools
+        call = ModelCall(
+            model_id=identity.id,
+            model_provider=identity.provider,
+            model_index=index,
+            stream=request.stream,
+            messages=deepcopy(list(request.messages)),
+            tools=[],
+            tool_choice=deepcopy(request.tool_choice),
+            response_format=request.response_format,
+            deferred_tool_names=sorted(request.deferred_tool_names),
+        )
+        self.calls.append(call)
+        return self.responder(call)
+
+    def _next_index(self) -> int:
+        index = self._built_models
         self._built_models += 1
+        return index
+
+    def _bind(self, model: Model) -> Model:
+        respond = partial(self._respond, model, self._next_index())
 
         async def ainvoke(messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
             return respond(stream=False, messages=messages, kwargs=kwargs)
@@ -217,16 +245,65 @@ class Recorder:
         model.__dict__.update(ainvoke=ainvoke, ainvoke_stream=ainvoke_stream)
         return model
 
+    def _bind_adapter(self, adapter: Any) -> _RecordingAdapter:  # noqa: ANN401 - any family's adapter
+        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter.identity, self._next_index()))
+
     @contextmanager
     def installed(self) -> Iterator[None]:
-        """Record every model that ``model_loading.get_model_instance`` builds while active."""
+        """Record every model ``model_loading.get_model_instance`` and every adapter the provider registry builds."""
         create_model = model_loading._create_model_for_provider
+        build_adapter = registry._build_adapter
 
         def create_recording_model(*args: Any, **kwargs: Any) -> Model:  # noqa: ANN401
             return self._bind(create_model(*args, **kwargs))
 
-        with patch.object(model_loading, "_create_model_for_provider", create_recording_model):
+        def build_recording_adapter(*args: Any, **kwargs: Any) -> _RecordingAdapter:  # noqa: ANN401
+            return self._bind_adapter(build_adapter(*args, **kwargs))
+
+        with (
+            patch.object(model_loading, "_create_model_for_provider", create_recording_model),
+            patch.object(registry, "_build_adapter", build_recording_adapter),
+        ):
             yield
+
+
+@dataclass(frozen=True)
+class _RecordingAdapter:
+    """A built provider adapter whose requests the recorder answers instead of the provider.
+
+    The registry wraps it in the request pipeline as it wraps the adapter, so every request is recorded as the
+    adapter would receive it, and the identity, capabilities, and settings are the configured route's own.
+    """
+
+    adapter: Any
+    respond: Callable[[ModelRequest], ModelResponse]
+
+    @property
+    def identity(self) -> ModelIdentity:
+        """The adapter's identity."""
+        return self.adapter.identity
+
+    @property
+    def capabilities(self) -> Capabilities:
+        """The adapter's capabilities."""
+        return self.adapter.capabilities
+
+    @property
+    def settings(self) -> object:
+        """The adapter's settings, which the request log records."""
+        return self.adapter.settings
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Answer the request with the responder's message as one finished turn."""
+        response = self.respond(request)
+        if response.content:
+            yield TextDelta(response.content)
+        message = OwnedMessage(role="assistant", content=response.content, tool_calls=response.tool_calls or None)
+        yield TurnCompleted(message=message, stop_reason="tool_use" if response.tool_calls else "end")
+
+    def format_tool_results(self, messages: Sequence[OwnedMessage], results: Sequence[OwnedMessage]) -> list[Any]:
+        """Format tool results the adapter's way."""
+        return self.adapter.format_tool_results(messages, results)
 
 
 @dataclass(frozen=True)
@@ -264,7 +341,7 @@ def response_format_dict(response_format: object) -> object:
 def call_dict(call: ModelCall) -> dict[str, Any]:
     """Return one recorded request as the prompt goldens record it."""
     return {
-        "model": {"id": call.model.id, "provider": call.model.provider},
+        "model": {"id": call.model_id, "provider": call.model_provider},
         "stream": call.stream,
         "messages": [message_dict(message) for message in call.messages],
         "tools": call.tools,

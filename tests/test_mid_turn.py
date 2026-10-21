@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
@@ -28,12 +29,12 @@ from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
-from mindroom.providers import model_loading
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_lifecycle import _QueuedMessageState
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
@@ -657,14 +658,18 @@ async def test_configured_backends_control_resumed_turns(
         ).encode()
 
     monkeypatch.setattr(JudgmentClient, "_post", post)
-    judge = ParticipationModel(
-        TimeoutError()
-        if outcome == "timeout"
-        else ModelResponse(
-            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
-        ),
+
+    async def time_out() -> None:
+        raise TimeoutError
+
+    judge = ScriptedModel(
+        [
+            [Await(time_out)]
+            if outcome == "timeout"
+            else answer("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
+        ],
     )
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
     settings = {"provider": backend, "timeout_seconds": 0.02}
     if backend == "llm":
         settings["model"] = "cheap"

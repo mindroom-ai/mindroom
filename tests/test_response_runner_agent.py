@@ -119,6 +119,7 @@ from tests.conftest import (
     seed_session,
     unwrap_extracted_collaborator,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.journal_membership_helpers import admit_room_membership
 from tests.participation_helpers import ParticipationModel
 from tests.reply_span_helpers import reply_span, response_span
@@ -3309,7 +3310,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     )
     @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
     @pytest.mark.parametrize("reaction", [None, "👍"])
-    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0912, PLR0915 - full delivery lifecycle assertions
+    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -3356,14 +3357,21 @@ class TestAdaptiveResponse(AgentBotTestBase):
             ).encode()
 
         monkeypatch.setattr(JudgmentClient, "_post", post)
-        judge = ParticipationModel(
-            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-            if action == "sync_restart"
-            else ModelResponse(content=json.dumps({"decision": action == "respond"})),
+
+        async def fail_judge() -> None:
+            if action == "sync_restart":
+                raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            msg = "Decision provider unavailable"
+            raise RuntimeError(msg)
+
+        judge = ScriptedModel(
+            [
+                [Await(fail_judge)]
+                if action in {"sync_restart", "decision_failure"}
+                else answer(json.dumps({"decision": action == "respond"})),
+            ],
         )
-        if action == "decision_failure":
-            judge.decision = RuntimeError("Decision provider unavailable")
-        monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_: judge)
+        monkeypatch.setattr("mindroom.judgment.llm.build_model_provider", lambda *_: judge)
         if backend != "model" and action != "decision_failure":
             model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True
