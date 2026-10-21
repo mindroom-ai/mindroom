@@ -46,6 +46,13 @@ def test_edited_or_deleted_lines_load_the_file_again() -> None:
     assert _preamble("a2\nb") == "preamble of 'a2'"
 
 
+def test_empty_copy_loads_the_file_once_it_gains_lines() -> None:
+    """An emptied file sends no header, so its first new line must load the header that points at the file."""
+    _preamble("")
+    assert _preamble("a") == "preamble of 'a'"
+    assert _preamble("a\nb") == "preamble of 'a'"
+
+
 def test_idle_conversation_loads_the_file_again() -> None:
     """Once the cache has gone cold, a fresh file costs nothing, so the conversation catches up."""
     _preamble("a", now=0)

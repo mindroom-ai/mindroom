@@ -43,7 +43,7 @@ _snapshots: dict[tuple[str, str, Path], _Snapshot] = {}
 
 
 def _only_added_lines(snapshot: str, fresh: str) -> bool:
-    return fresh == snapshot or not snapshot or fresh.startswith(f"{snapshot}\n")
+    return fresh == snapshot or fresh.startswith(f"{snapshot}\n")
 
 
 def stable_entrypoint_preamble(
