@@ -31,8 +31,6 @@ PENDING = {
 }
 TEAM = [name for name in GOLDENS if name.startswith("team_")]
 RECORDED = [name for name in GOLDENS if name not in PENDING and name not in TEAM]
-# Requests an Agno model still sends, by position in the golden: F7 moves the compaction summarizer.
-AGNO_REQUESTS = {"compaction_summary": {3}}
 
 
 def test_every_golden_is_compared_here_or_assigned_an_owner() -> None:
@@ -56,8 +54,8 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
     assert normalize(output.input, tmp_path) == golden["input"]
     assert recorder.calls
     ordered = recorder.ordered_calls()
-    # Every other request went through the provider registry rather than an Agno model.
-    assert {index for index, call in enumerate(ordered) if not call.owned} == AGNO_REQUESTS.get(name, set())
+    # Every request, the compaction summary included, went through the provider registry rather than an Agno model.
+    assert all(call.owned for call in ordered)
     assert all(isinstance(message, Message) for call in ordered if call.owned for message in call.messages)
     assert normalize([call_dict(call) for call in ordered], tmp_path) == golden["requests"]
 
