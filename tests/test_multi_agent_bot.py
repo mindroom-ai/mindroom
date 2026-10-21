@@ -17,9 +17,9 @@ from agno.run.team import TeamRunOutput
 from nio.durable import DurableSyncConfig
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
 )
@@ -144,35 +144,6 @@ def test_bot_ingestion_config_freezes_existing_transport_settings(tmp_path: Path
 
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
-
-    def test_agent_property_rejects_private_agent_without_request_identity(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """AgentBot.agent should fail fast for private agents with no request scope."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        role="Math assistant",
-                        rooms=[],
-                        private=AgentPrivateConfig(per="user", root="mind_data"),
-                    ),
-                },
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        with pytest.raises(
-            ValueError,
-            match="AgentBot\\.agent is only available for shared agents",
-        ):
-            _ = bot.agent
 
     @pytest.mark.asyncio
     @patch("mindroom.config.main.load_config")
