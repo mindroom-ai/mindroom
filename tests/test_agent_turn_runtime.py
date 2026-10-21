@@ -2,7 +2,8 @@
 
 The seam is ``run_agent`` fed by a scripted provider behind a real ``create_agent`` build: what a reply streams,
 what it stores, which tool-call policy runs around every call, and how it ends when it is paused, cancelled,
-failed, empty, or silent.
+failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner that
+writes the interrupted-turn record after the loop stored its own terminal record.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai
+from mindroom import agents, ai, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -32,6 +33,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    MessageEnvelope,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     hook,
@@ -41,8 +43,11 @@ from mindroom.llm.events import ContentDelta, RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, TextDelta, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
+from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -52,16 +57,24 @@ from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCate
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.usage.storage import quote_identifier
+from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    TEST_PASSWORD,
     bind_runtime_paths,
+    install_runtime_journal_support,
     make_conversation_reader_mock,
+    make_matrix_client_mock,
     make_relation_lookup,
     make_turn_context,
+    message_origin,
     seed_session,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.reply_span_helpers import response_span
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -70,6 +83,7 @@ if TYPE_CHECKING:
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.constants import RuntimePaths
+    from mindroom.response_runner import ResponseRunner
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -961,3 +975,140 @@ async def test_the_skill_review_capture_keeps_the_final_request(
     assert capture.latest.messages[-1].role == "assistant"
     assert capture.latest.messages[-1].content == "Final answer."
     assert {"remember", "touch"} <= {tool.name for tool in capture.latest.tools}
+
+
+def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
+    """Build the agent's bot on the reply's config, with a mocked Matrix client, and return its response runner."""
+    with_current_room_member_access(reply.config)
+    agent_user = AgentMatrixUser(
+        agent_name="assistant",
+        password=TEST_PASSWORD,
+        display_name="Assistant",
+        user_id="@mindroom_assistant:localhost",
+    )
+    bot = make_test_agent_bot(agent_user, tmp_path, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
+    install_direct_response_admission(bot)
+    bot.client = make_matrix_client_mock(user_id="@mindroom_assistant:localhost")
+    unique_room_send_responses(bot.client)
+    install_runtime_journal_support(bot)
+    return bot._response_runner
+
+
+def _request(prompt: str = "Hello") -> ResponseRequest:
+    """Return one admitted reply request for the thread the ``ai`` seam tests use."""
+    target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
+    return ResponseRequest(
+        thread_history=[],
+        prompt=prompt,
+        user_id=REQUESTER_ID,
+        response_envelope=MessageEnvelope(
+            source_event_id=EVENT_ID,
+            target=target,
+            body=prompt,
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="assistant",
+            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind="message"),
+        ),
+        sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
+    )
+
+
+async def _respond_through_runner(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    *,
+    streaming: bool,
+) -> tuple[Any, list[str]]:
+    """Run one reply through the runner's turn, in its reply span, and return the outcome and the attempt run ids."""
+    run_ids: list[str] = []
+    respond = runner._process_and_respond_streaming if streaming else runner._process_and_respond
+    async with response_span(runner, request):
+        outcome = await respond(request, attempt_run_id_collector=run_ids)
+    return outcome, run_ids
+
+
+def _interrupted_record_spy(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunStatus | None]:
+    """Record the stored status of the run each time the runner writes its interrupted-turn record."""
+    statuses: list[RunStatus | None] = []
+    original = response_runner.persist_interrupted_replay_snapshot
+
+    def spy(**kwargs: Any) -> None:  # noqa: ANN401
+        stored = storage.get_run(kwargs["run_id"])
+        statuses.append(stored.status if stored is not None else None)
+        original(**kwargs)
+
+    monkeypatch.setattr(response_runner, "persist_interrupted_replay_snapshot", spy)
+    return statuses
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_the_cancelled_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, a stop mid-stream stores the ``CANCELLED`` run before the interrupted record.
+
+    The lifecycle owner writes the interrupted-turn record over the cancelled run the loop stored, and the cut-off
+    request's usage counts once.
+    """
+    del probe
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
+    )
+    runner = _runner(reply, tmp_path)
+    statuses_when_interrupted_record_written = _interrupted_record_spy(monkeypatch, reply.storage)
+
+    task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
+    [result] = await asyncio.gather(task, return_exceptions=True)
+
+    assert not isinstance(result, BaseException), result
+    outcome, run_ids = result
+    assert outcome.delivery.terminal_status == "cancelled"
+    assert outcome.run_succeeded is False
+    [run_id] = run_ids
+    assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
+    record = reply.storage.get_run(run_id)
+    assert record is not None
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
+    [row] = _usage_rows(reply.storage, run_id)
+    assert row["metrics"]["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Through ``ResponseRunner``, an approval pause propagates with its ``PAUSED`` row intact.
+
+    The lifecycle owner writes no interrupted-turn record over a suspended turn.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    runner = _runner(reply, tmp_path)
+    statuses_when_interrupted_record_written = _interrupted_record_spy(monkeypatch, reply.storage)
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await _respond_through_runner(runner, _request(), streaming=False)
+
+    assert probe.calls == []
+    assert statuses_when_interrupted_record_written == []
+    paused = raised.value.paused
+    record = reply.storage.get_run(paused.run_id)
+    assert record is not None
+    assert record.status is RunStatus.paused
+    assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
+    [row] = _usage_rows(reply.storage, paused.run_id)
+    assert row["metrics"]["input_tokens"] == 7
