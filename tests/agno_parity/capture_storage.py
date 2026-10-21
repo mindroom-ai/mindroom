@@ -1,8 +1,8 @@
 """Capture the conversation stores, run dicts, history selections, and run events Agno 3.0.9 produces in MindRoom.
 
 Every scenario runs MindRoom's real code path (``ai_response``, ``stream_agent_response``, ``team_response``,
-``team_response_stream``, the OpenAI-compatible API, and MindRoom's storage and compaction functions) with real Agno
-agents and teams; only the provider is replaced by a scripted model.
+``team_response_stream``, the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions)
+with real Agno agents and teams; only the provider is replaced by a scripted model.
 ``python -m tests.agno_parity.capture_storage`` rewrites the fixtures, and
 ``tests/fixtures/agno_parity/README.md`` describes them.
 Task B8 deletes this module together with Agno.
@@ -27,6 +27,7 @@ import types
 import zlib
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -37,6 +38,8 @@ from agno.media import Audio, File, Image, Video
 from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
+from agno.run.agent import RunOutput
+from agno.run.cancel import acancel_run
 from agno.session.summary import SessionSummary
 from agno.utils.message import copy_history_message, filter_tool_calls
 from fastapi import FastAPI
@@ -50,7 +53,9 @@ from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import prompt_roles_for_history_storage, resolve_runtime_paths
+from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.delegation.state import DelegationChild, DelegationState
 from mindroom.event_journal import ApprovalDecision
 from mindroom.event_journal.approval_continuations import ApprovalContinuation
 from mindroom.history import summary_rows
@@ -65,6 +70,7 @@ from mindroom.history.storage import (
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import KnowledgeAccessSupport
+from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
@@ -186,11 +192,12 @@ _CONFIG: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class StoreSpec:
-    """One conversation database and its layout under the storage root."""
+    """One conversation database, its layout under the storage root, and the history scope its runs belong to."""
 
     label: str
     state_dir: str
     name: str
+    scope: HistoryScope
 
     @property
     def session_table(self) -> str:
@@ -207,9 +214,14 @@ def _session(thread: str) -> str:
     return create_session_id(ROOM, thread)
 
 
+def _agent_store(label: str, state_dir: str, agent_name: str) -> StoreSpec:
+    return StoreSpec(label, state_dir, agent_name, HistoryScope(kind="agent", scope_id=agent_name))
+
+
 def _team_store(label: str, team_name: str) -> StoreSpec:
-    name = _scope_session_storage_name(HistoryScope(kind="team", scope_id=team_name))
-    return StoreSpec(label, f"teams/{name}", name)
+    scope = HistoryScope(kind="team", scope_id=team_name)
+    name = _scope_session_storage_name(scope)
+    return StoreSpec(label, f"teams/{name}", name, scope)
 
 
 CONVERSATION = _session("$conversation")
@@ -223,13 +235,22 @@ REJECTED = _session("$rejected")
 DELEGATION_APPROVED = _session("$delegation-approved")
 SQUAD_APPROVED = _session("$squad-approved")
 
+AGNO_CANCELLED = _session("$agno-cancelled")
+AGNO_CANCELLED_BLOCKING = _session("$agno-cancelled-blocking")
+
 STORES = (
-    StoreSpec("agent_code", "agents/code", "code"),
-    StoreSpec("agent_helper", "agents/helper", "helper"),
+    _agent_store("agent_code", "agents/code", "code"),
+    _agent_store("agent_helper", "agents/helper", "helper"),
     _team_store("team_squad", "squad"),
     _team_store("team_panel", "panel"),
-    StoreSpec("agno2_migrated", "agno2/agents/code", "code"),
+    _agent_store("agno2_migrated", "agno2/agents/code", "code"),
 )
+
+
+def _live_store(entity: str) -> StoreSpec:
+    """Return the store an agent or team writes during the capture; agno2_migrated is a migrated copy."""
+    return next(spec for spec in STORES if spec.scope.scope_id == entity and not spec.state_dir.startswith("agno2/"))
+
 
 HISTORY_SELECTIONS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("all", {}),
@@ -245,6 +266,18 @@ HISTORY_SELECTIONS: tuple[tuple[str, dict[str, Any]], ...] = (
     ("every_status", {"skip_statuses": []}),
 )
 TOOL_CALL_FILTERS: tuple[tuple[str, int], ...] = (("all", 0), ("all", 1), ("all", 2), ("every_status", 1))
+# History replay selects a scope's runs with its agent_id or team_id, the replay policy's run and message limits,
+# and the prompt roles stored history never holds (history/replay.py, _session_history_messages).
+# Each selection names the store's own scope or another scope of the same kind, which owns no run in the store,
+# so the goldens show what the filter excludes.
+_REPLAY_SKIP_ROLES = sorted(prompt_roles_for_history_storage())
+SCOPED_SELECTIONS: tuple[tuple[str, bool, dict[str, Any]], ...] = (
+    ("scope", True, {"last_n_runs": None, "limit": None, "skip_roles": _REPLAY_SKIP_ROLES}),
+    ("scope_last_two_runs", True, {"last_n_runs": 2, "limit": None, "skip_roles": _REPLAY_SKIP_ROLES}),
+    ("scope_limit_4", True, {"last_n_runs": None, "limit": 4, "skip_roles": _REPLAY_SKIP_ROLES}),
+    ("other_scope", False, {"last_n_runs": None, "limit": None, "skip_roles": _REPLAY_SKIP_ROLES}),
+)
+_OTHER_SCOPE_IDS = {"code": "helper", "helper": "code", "squad": "panel", "panel": "squad"}
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +396,10 @@ def _frozen_clock(clock: _Clock) -> Iterator[None]:
 # Scripted provider
 # ---------------------------------------------------------------------------
 
-type _Turn = tuple[ModelResponse, ...] | Exception | str
+# A step inside a scripted turn that requests Agno's run cancellation, as a Stop's graceful cancel does.
+_REQUEST_CANCEL = "request-cancel"
+
+type _Turn = tuple[ModelResponse | str, ...] | Exception | str
 
 
 @dataclass
@@ -381,7 +417,7 @@ class _Script:
         assert not self.turns, f"unconsumed turns: {self.turns}"
         self.turns.extend(turns)
 
-    async def next(self) -> tuple[ModelResponse, ...]:
+    async def next(self) -> tuple[ModelResponse | str, ...]:
         turn = self.turns.popleft()
         if turn == _HANG:
             self.hanging.set()
@@ -399,15 +435,27 @@ class _ScriptedModel(SyntheticModel):
         super().__init__(id=model_id)
         self._script = script
 
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
+    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
         """Return the next scripted turn, which must be a single response."""
-        (response,) = await self._script.next()
+        (response,) = [step async for step in self._steps(kwargs)]
         return response
 
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
+    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
         """Yield the next scripted turn's deltas."""
-        for delta in await self._script.next():
+        async for delta in self._steps(kwargs):
             yield delta
+
+    async def _steps(self, kwargs: Mapping[str, object]) -> AsyncIterator[ModelResponse]:
+        """Yield the next scripted turn's responses, requesting Agno's run cancellation where the script says."""
+        for step in await self._script.next():
+            if step == _REQUEST_CANCEL:
+                run_response = kwargs["run_response"]
+                assert isinstance(run_response, RunOutput)
+                assert run_response.run_id is not None
+                assert await acancel_run(run_response.run_id)
+                continue
+            assert isinstance(step, ModelResponse)
+            yield step
 
 
 def _usage(input_tokens: int, output_tokens: int, **counters: int) -> MessageMetrics:
@@ -488,6 +536,10 @@ class _Capture:
     scripts: dict[str, _Script]
     ai_run: dict[str, dict[str, Any]] = field(default_factory=dict)
     openai_compat: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Run events of turns Agno's run cancellation ended, captured after the first goldens.
+    ai_run_cancelled: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Fixture path to the raw dump of each approval resume's sessions, taken just before the resume.
+    pre_resume: dict[str, str] = field(default_factory=dict)
     minute: int = 0
 
     def tick(self) -> None:
@@ -552,12 +604,14 @@ class _Capture:
         stream: bool = False,
         stop: bool = False,
         pauses: bool = False,
+        cancels: bool = False,
         media: MediaInputs | None = None,
     ) -> PausedAttempt | None:
         """Run one turn of the ``code`` agent through ``ai_response`` or ``stream_agent_response``.
 
         With ``stop``, the turn streams and is cancelled while its provider request hangs, as a Stop does.
         ``pauses`` says whether the turn must end waiting for an approval, whose pause is returned.
+        ``cancels`` says the script requests Agno's run cancellation, so the turn must end cancelled.
         """
         self.tick()
         collector: dict[str, Any] = {}
@@ -582,10 +636,15 @@ class _Capture:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            elif cancels:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await response
+                    msg = f"{run_id} was not cancelled"
+                    raise AssertionError(msg)
             else:
                 paused = await _until_pause(run_id, response, pauses=pauses)
         if collector:
-            self.ai_run[run_id] = collector
+            (self.ai_run_cancelled if cancels else self.ai_run)[run_id] = collector
         return paused
 
     async def team_turn(
@@ -636,6 +695,7 @@ class _Capture:
         ``ResponseRunner._continue_entity_call`` calls, with the continuation, decisions, and receipt it passes them.
         """
         assert paused is not None
+        self.dump_before_resume(entity, paused)
         self.tick()
         thread = paused.session_id.removeprefix(f"{ROOM}:")
         team_config = self.config.teams.get(entity)
@@ -731,6 +791,19 @@ class _Capture:
                 )
         assert isinstance(result, CompletedApprovalRun), f"{paused.run_id} did not complete after its approval"
         self.ai_run[paused.run_id] = result.metadata_content
+
+    def dump_before_resume(self, entity: str, paused: PausedAttempt) -> None:
+        """Dump the sessions an approval resume reads: the paused run's session and its delegated children's."""
+        spec = _live_store(entity)
+        db_file = self.paths.storage_root / spec.db_path
+        self.pre_resume[_pre_resume_path(spec, paused.run_id)] = _sessions_dump(db_file, {paused.session_id})
+        children: dict[str, set[str]] = {}
+        for child in _delegation_children(db_file, spec, paused.run_id):
+            children.setdefault(child.child_agent_name, set()).add(child.session_id)
+        for child_name, session_ids in sorted(children.items()):
+            child_spec = _live_store(child_name)
+            child_db = self.paths.storage_root / child_spec.db_path
+            self.pre_resume[_pre_resume_path(child_spec, paused.run_id)] = _sessions_dump(child_db, session_ids)
 
     def approval_execution(self) -> AgentApprovalExecution:
         """Return the agent approval executor a response runner builds, around this capture's runtime."""
@@ -1119,6 +1192,68 @@ def _openai_compat(capture: _Capture) -> None:
             }
 
 
+async def _response_linkage(capture: _Capture) -> dict[str, Any]:
+    """Re-save delivered runs with their Matrix reply's event id, as the state writer does after delivery.
+
+    Runs after the stores are dumped, so the store goldens keep the rows as the turns saved them.
+    """
+    cases: dict[str, Any] = {}
+    for entity, session_id, run_id in (("code", CONVERSATION, "run-media"), ("squad", SQUAD, "team-completed")):
+        capture.tick()
+        spec = _live_store(entity)
+        db_file = capture.paths.storage_root / spec.db_path
+        before = run_row(spec, db_file, run_id)
+        writer = ConversationStateWriter(
+            ConversationStateWriterDeps(
+                runtime=MagicMock(config=capture.config),
+                logger=get_logger(__name__),
+                runtime_paths=capture.paths,
+                agent_name=entity,
+            ),
+        )
+        scope = writer.history_scope()
+        response_event_id = f"$reply-{run_id}"
+        await writer.apersist_response_event_id_in_session_run(
+            create_storage=partial(writer.create_storage, capture.identity(entity, session_id), scope=scope),
+            session_id=session_id,
+            session_type=writer.session_type_for_scope(scope),
+            run_id=run_id,
+            response_event_id=response_event_id,
+        )
+        cases[f"{spec.label}:{run_id}"] = {
+            "session_id": session_id,
+            "response_event_id": response_event_id,
+            "before": before,
+            "after": run_row(spec, db_file, run_id),
+        }
+    return cases
+
+
+async def _agno_cancelled_turns(capture: _Capture) -> None:
+    """End a streamed and a blocking turn through Agno's run cancellation after a completed tool call.
+
+    MindRoom's Stop cancels the reply task and then requests this cancellation; here the request comes while the
+    turn still runs, so the turn publishes the run event it builds for a cancelled run.
+    """
+    code = capture.scripts["code"]
+    for session_id, run_id, stream in (
+        (AGNO_CANCELLED, "run-agno-cancelled", True),
+        (AGNO_CANCELLED_BLOCKING, "run-agno-cancelled-blocking", False),
+    ):
+        answer: tuple[ModelResponse | str, ...] = (
+            (
+                ModelResponse(content="2 + 3 "),
+                _REQUEST_CANCEL,
+                ModelResponse(content="= 5.", response_usage=_usage(180, 4)),
+            )
+            if stream
+            else (_REQUEST_CANCEL, ModelResponse(content="2 + 3 = 5.", response_usage=_usage(180, 6)))
+        )
+        code.load(_calls(_usage(160, 7), _call("add", f"call-{run_id}", a=2, b=3)), answer)
+        await capture.agent_turn(session_id, run_id, "Add 2 and 3.", stream=stream, cancels=True)
+    assert not code.turns, f"code left unconsumed turns: {code.turns}"
+
+
 async def _run_scenarios(capture: _Capture) -> None:
     attachment = capture.root / "attachments" / "data.csv"
     attachment.parent.mkdir(parents=True, exist_ok=True)
@@ -1201,6 +1336,66 @@ def _dump(db_file: Path) -> str:
     return _DUMP_HEADER + "\n".join([*rest[:-1], *indexes, rest[-1]]) + "\n"
 
 
+_SESSIONS_DUMP_HEADER = (
+    "-- The sessions one approval resume reads, from a conversation database written by Agno 3.0.9 through\n"
+    "-- MindRoom's storage path just before the resume, dumped and normalized like the full stores (see\n"
+    "-- tests/fixtures/agno_parity/README.md). Regenerate with `python -m tests.agno_parity.capture_storage`.\n"
+)
+
+
+def _pre_resume_path(spec: StoreSpec, run_id: str) -> str:
+    return f"storage/{spec.label}__before_{run_id}.sql"
+
+
+def _sessions_dump(db_file: Path, session_ids: set[str]) -> str:
+    """Dump ``db_file`` with only the rows of ``session_ids`` in every table keyed by session."""
+    with tempfile.TemporaryDirectory(prefix="agno-parity-sessions-") as scratch:
+        copy = Path(scratch) / db_file.name
+        source, target = sqlite3.connect(db_file), sqlite3.connect(copy)
+        try:
+            source.backup(target)
+            tables = [name for (name,) in target.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+            for table in tables:
+                columns = {column for (_cid, column, *_rest) in target.execute(f'PRAGMA table_info("{table}")')}
+                if "session_id" in columns:
+                    target.execute(
+                        f'DELETE FROM "{table}" WHERE session_id NOT IN (SELECT value FROM json_each(?))',  # noqa: S608
+                        (json.dumps(sorted(session_ids)),),
+                    )
+            target.commit()
+        finally:
+            source.close()
+            target.close()
+        return _SESSIONS_DUMP_HEADER + _dump(copy).removeprefix(_DUMP_HEADER)
+
+
+def _delegation_children(db_file: Path, spec: StoreSpec, run_id: str) -> list[DelegationChild]:
+    """Return the delegated children recorded on one stored run."""
+    connection = sqlite3.connect(db_file)
+    try:
+        (run_data,) = connection.execute(
+            f'SELECT run_data FROM "{spec.session_table}_runs" WHERE run_id = ?',  # noqa: S608
+            (run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return DelegationState.from_metadata(json.loads(run_data).get("metadata")).children
+
+
+def run_row(spec: StoreSpec, db_file: Path, run_id: str) -> dict[str, Any]:
+    """Return one runs-table row by column, with its run data decoded."""
+    connection = sqlite3.connect(db_file)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute(
+            f'SELECT * FROM "{spec.session_table}_runs" WHERE run_id = ?',  # noqa: S608
+            (run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    return {**dict(row), "run_data": json.loads(row["run_data"])}
+
+
 def _dump_stores(storage_root: Path) -> dict[str, str]:
     written = {path.relative_to(storage_root).as_posix() for path in storage_root.rglob("*.db")}
     dumps = {spec.label: _dump(storage_root / spec.db_path) for spec in STORES}
@@ -1220,7 +1415,7 @@ def _has_rows(db_file: Path) -> bool:
         connection.close()
 
 
-def _restore_store(spec: StoreSpec, dump: str, storage_root: Path) -> Path:
+def restore_store(spec: StoreSpec, dump: str, storage_root: Path) -> Path:
     """Write ``dump`` as ``spec``'s database under ``storage_root`` and return the database file."""
     db_file = storage_root / spec.db_path
     db_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1369,6 +1564,18 @@ def _history(session: AgentSession | TeamSession) -> dict[str, Any]:
     return {"get_messages": selections, "filter_tool_calls": filtered}
 
 
+def _scoped_history(spec: StoreSpec, session: AgentSession | TeamSession) -> dict[str, Any]:
+    """Select the session's messages as history replay does, by the store's scope id and by another scope's id."""
+    scope_key = "team_id" if spec.scope.kind == "team" else "agent_id"
+    selections: dict[str, Any] = {}
+    for name, own_scope, params in SCOPED_SELECTIONS:
+        scope_id = spec.scope.scope_id if own_scope else _OTHER_SCOPE_IDS[spec.scope.scope_id]
+        selection = {scope_key: scope_id, **params}
+        messages = session.get_messages(**selection)
+        selections[name] = {"params": selection, "messages": [message.to_dict() for message in messages]}
+    return selections
+
+
 def _history_name(spec: StoreSpec, session_id: str) -> str:
     thread = re.sub(r"[^A-Za-z0-9-]+", "_", session_id.removeprefix(f"{ROOM}:")).strip("_")
     return f"history/{spec.label}__{thread}.json"
@@ -1380,9 +1587,10 @@ def derive_goldens(dumps: Mapping[str, str], work_dir: Path) -> dict[str, str]:
     collector = _Collector()
     stores: dict[str, Any] = {}
     loaded: dict[str, Any] = {}
+    scoped: dict[str, Any] = {}
     goldens: dict[str, str] = {}
     for spec in STORES:
-        session_types = _collect_stored_values(collector, spec, _restore_store(spec, dumps[spec.label], storage_root))
+        session_types = _collect_stored_values(collector, spec, restore_store(spec, dumps[spec.label], storage_root))
         stores[spec.label] = {"db_path": spec.db_path, "session_table": spec.session_table, "sessions": session_types}
         storage = _open_store(spec, storage_root)
         try:
@@ -1397,6 +1605,8 @@ def derive_goldens(dumps: Mapping[str, str], work_dir: Path) -> dict[str, str]:
             goldens[_history_name(spec, session_id)] = _json(
                 {"store": spec.label, "session_id": session_id, **_history(session)},
             )
+            scoped[f"{spec.label}:{session_id}"] = _scoped_history(spec, session)
+    goldens["history/scoped_selections.json"] = _json(scoped)
     goldens["storage/stores.json"] = _json(stores)
     goldens["storage/loaded_sessions.json"] = _json(loaded)
     return goldens | {f"runs/{kind}.json": _json(cases) for kind, cases in sorted(collector.cases.items())}
@@ -1434,11 +1644,19 @@ async def capture(work_dir: Path) -> dict[str, str]:
         _frozen_clock(clock),
     ):
         await _run_scenarios(recorder)
+        store_dumps = _dump_stores(paths.storage_root)
+        # These change the stores after their dumps, and write goldens of their own.
+        linkage = await _response_linkage(recorder)
+        await _agno_cancelled_turns(recorder)
     normalize = _Normalizer((str(work_dir.resolve()), str(work_dir)))
-    dumps = {label: normalize(text) for label, text in _dump_stores(paths.storage_root).items()}
+    dumps = {label: normalize(text) for label, text in store_dumps.items()}
     files = {f"storage/{label}.sql": text for label, text in dumps.items()}
     files["events/ai_run.json"] = normalize(_json(recorder.ai_run))
     files["events/openai_compat.json"] = normalize(_json(recorder.openai_compat))
+    # Normalized after the files above, so ids they share keep the numbers those files gave them.
+    files |= {path: normalize(text) for path, text in recorder.pre_resume.items()}
+    files["storage/response_linkage.json"] = normalize(_json(linkage))
+    files["events/ai_run_cancelled.json"] = normalize(_json(recorder.ai_run_cancelled))
     return files | derive_goldens(dumps, work_dir)
 
 

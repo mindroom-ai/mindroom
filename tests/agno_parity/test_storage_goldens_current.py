@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from copy import deepcopy
@@ -20,7 +21,16 @@ from agno.run.agent import RunOutput
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
 
-from tests.agno_parity.capture_storage import FIXTURES, STORES, derive_goldens, owned_goldens
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from tests.agno_parity.capture_storage import (
+    FIXTURES,
+    STORES,
+    StoreSpec,
+    derive_goldens,
+    owned_goldens,
+    restore_store,
+    run_row,
+)
 
 _REPOSITORY = Path(__file__).resolve().parents[2]
 _AGNO_TYPES: dict[str, Any] = {
@@ -115,3 +125,55 @@ def test_agno_rereads_every_run_fixture_with_only_its_known_losses() -> None:
         if _agno_reread(path.stem, value) != _expected_agno_reread(path.stem, value)
     ]
     assert mismatches == []
+
+
+def _committed_store(label: str, storage_root: Path) -> tuple[StoreSpec, Path]:
+    spec = next(spec for spec in STORES if spec.label == label)
+    return spec, restore_store(spec, (FIXTURES / "storage" / f"{label}.sql").read_text(encoding="utf-8"), storage_root)
+
+
+def _run_statuses(db_file: Path, runs_table: str) -> dict[str, str]:
+    connection = sqlite3.connect(db_file)
+    try:
+        return dict(connection.execute(f'SELECT run_id, status FROM "{runs_table}"'))  # noqa: S608
+    finally:
+        connection.close()
+
+
+def test_pre_resume_dumps_hold_the_runs_the_stores_hold_resumed(tmp_path: Path) -> None:
+    """Each dump taken before an approval resume holds paused exactly the runs its committed store holds completed."""
+    dumps = sorted((FIXTURES / "storage").glob("*__before_*.sql"))
+    assert [path.stem for path in dumps] == [
+        "agent_code__before_run-approved",
+        "agent_code__before_run-delegation-approved",
+        "agent_code__before_run-rejected",
+        "agent_helper__before_run-delegation-approved",
+        "team_squad__before_team-approved",
+    ]
+    for path in dumps:
+        label = path.stem.partition("__before_")[0]
+        spec, resumed_db = _committed_store(label, tmp_path / "resumed" / path.stem)
+        paused_db = restore_store(spec, path.read_text(encoding="utf-8"), tmp_path / "paused" / path.stem)
+        paused = _run_statuses(paused_db, f"{spec.session_table}_runs")
+        resumed = _run_statuses(resumed_db, f"{spec.session_table}_runs")
+        assert set(paused.values()) == {"PAUSED"}, path.name
+        assert {resumed[run_id] for run_id in paused} == {"COMPLETED"}, path.name
+
+
+def test_response_linkage_resaves_the_stored_row_as_agno_rereads_it(tmp_path: Path) -> None:
+    """A delivered run is re-saved as Agno re-reads it, plus the reply's event id and a new update time."""
+    cases = json.loads((FIXTURES / "storage" / "response_linkage.json").read_text(encoding="utf-8"))
+    assert sorted(cases) == ["agent_code:run-media", "team_squad:team-completed"]
+    for key, case in cases.items():
+        label, _, run_id = key.partition(":")
+        spec, db_file = _committed_store(label, tmp_path / label)
+        before = case["before"]
+        assert run_row(spec, db_file, run_id) == before
+        kind = "run_output" if "agent_id" in before["run_data"] else "team_run_output"
+        expected = _expected_agno_reread(kind, before["run_data"])
+        expected["metadata"] = {
+            **expected["metadata"],
+            MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: case["response_event_id"],
+        }
+        assert {**case["after"], "updated_at": None} == {**before, "run_data": expected, "updated_at": None}
+        assert case["after"]["updated_at"] > before["updated_at"]
