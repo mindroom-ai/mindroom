@@ -447,7 +447,31 @@ def test_people_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch:
     assert _raw_path(graph.requests[0]) == "/v1.0/users/kim%2Btest@example.com/directReports"
 
 
-@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb", 7, None])
+def test_guest_sign_in_names_reach_graph_with_encoded_hashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guest = "dana_partner.example#EXT#@example.onmicrosoft.com"
+    encoded = "/v1.0/users/dana_partner.example%23EXT%23@example.onmicrosoft.com"
+    tools, graph = _tools(
+        tmp_path,
+        monkeypatch,
+        _routes(
+            {
+                encoded: httpx.Response(200, json=_user()),
+                f"/v1.0/users/{DANA}/manager": _not_found(),
+                f"{encoded}/directReports": httpx.Response(200, json={"value": []}),
+            },
+        ),
+    )
+
+    assert _payload(tools.microsoft_people_get_profile(guest))["status"] == "ok"
+    assert _payload(tools.microsoft_people_list_direct_reports(guest))["status"] == "ok"
+    assert [_raw_path(request) for request in graph.requests] == [
+        encoded,
+        f"/v1.0/users/{DANA}/manager",
+        f"{encoded}/directReports",
+    ]
+
+
+@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "#", "a##b", "a\nb", 7, None])
 def test_malformed_people_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -57,8 +57,14 @@ def _top(limit: object) -> str:
 
 
 def _user_path(person: object) -> str:
+    """Return the Graph path of a user named by id, sign-in name, or email address.
+
+    A guest's sign-in name holds `#EXT#`, which Graph takes with each `#` percent-encoded, so the parts between
+    hashes are checked and escaped one by one.
+    """
+    parts = person.split("#") if isinstance(person, str) else [person]
     try:
-        return f"/users/{path_segment(person, 'person')}"
+        return "/users/" + "%23".join(path_segment(part, "person") for part in parts)
     except MicrosoftGraphError:
         msg = "person must be a user id, an email address, or a sign-in name."
         raise MicrosoftGraphError(code="invalid_argument", message=msg) from None
