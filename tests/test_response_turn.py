@@ -314,35 +314,42 @@ def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
         requires_confirmation=True,
     )
 
+    paused_record = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        tools=[invalid_tool, valid_tool],
+        requirements=[invalid_requirement],
+    )
+
     with pytest.raises(RuntimeError, match="missing its exact tool-call ID"):
-        response_turn_module.paused_attempt_from_pause(
-            tools=(invalid_tool, valid_tool),
-            requirements=(invalid_requirement,),
-            session_id="session-1",
-            run_id="run-1",
+        response_turn_module.paused_attempt_from_response(
+            paused_record,
+            fallback_session_id=None,
+            fallback_run_id=None,
             toolkit_owners={},
         )
 
 
 def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
     """One approval decision must never authorize two requirements sharing an ID."""
-    requirements = tuple(
-        RunRequirement(
-            ToolExecution(
-                tool_call_id="duplicate-call",
-                tool_name=tool_name,
-                requires_confirmation=True,
-            ),
-        )
+    requirements = [
+        RunRequirement(ToolExecution(tool_call_id="duplicate-call", tool_name=tool_name, requires_confirmation=True))
         for tool_name in ("first", "second")
+    ]
+
+    paused_record = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.paused,
+        requirements=requirements,
     )
 
     with pytest.raises(RuntimeError, match="duplicate tool-call IDs"):
-        response_turn_module.paused_attempt_from_pause(
-            tools=(),
-            requirements=requirements,
-            session_id="session-1",
-            run_id="run-1",
+        response_turn_module.paused_attempt_from_response(
+            paused_record,
+            fallback_session_id=None,
+            fallback_run_id=None,
             toolkit_owners={},
         )
 
