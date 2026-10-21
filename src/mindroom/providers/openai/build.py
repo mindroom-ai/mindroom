@@ -20,6 +20,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
+    OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
@@ -114,7 +115,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "openrouter": _ChatRoute(
         provider="OpenRouter",
         provider_name="OpenRouter",
-        base_url="https://openrouter.ai/api/v1",
+        base_url=OPENROUTER_BASE_URL_DEFAULT,
         api_key_env="OPENROUTER_API_KEY",
         dialect="openai",
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
