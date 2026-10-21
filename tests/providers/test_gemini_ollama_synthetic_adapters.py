@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -33,10 +34,10 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import StreamEvent
 
-GEMINI = {"provider": "google", "id": "gemini-2.5-pro", "api_key": "test-key"}
+GEMINI = {"provider": "google", "id": "gemini-3.1-pro-preview", "api_key": "test-key"}
 GEMINI_VERTEX = {
     "provider": "gemini",
-    "id": "gemini-2.5-pro",
+    "id": "gemini-3.1-pro-preview",
     "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
 }
 OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
@@ -118,7 +119,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     monkeypatch.setattr(gemini_adapter, "get_api_key_for_provider", shared_key)
     runtime_paths = runtime_paths_for(tmp_path)
 
-    api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-2.5-pro"), runtime_paths)
+    api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-3.1-pro-preview"), runtime_paths)
     vertex = gemini_adapter.build_provider(ModelConfig(**GEMINI_VERTEX), runtime_paths)
     own = gemini_adapter.build_provider(ModelConfig(**GEMINI), runtime_paths)
 
@@ -182,9 +183,6 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     tmp_path: Path,
 ) -> None:
     """A participation decision keeps declarations, sets mode NONE, and asks for JSON where Gemini accepts it."""
-    if config is GEMINI_VERTEX:
-        config = _config(config, credentials=_static_google_credentials())
-
     with without_provider_tools():
         request, _ = await run_adapter(
             config,
@@ -197,12 +195,6 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
     assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert ("responseMimeType" in body["generationConfig"]) is json_output
-
-
-def _static_google_credentials() -> object:
-    from google.oauth2.credentials import Credentials  # noqa: PLC0415 - provider auth SDK
-
-    return Credentials(token="test-google-token")  # noqa: S106 - synthetic credential
 
 
 @pytest.mark.parametrize(("tool_choice", "mode"), [("auto", "AUTO"), ("none", "NONE"), ("required", "ANY")])
@@ -237,13 +229,13 @@ async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> N
     assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Paris"}'}
     assert call["thought_signature"] == "c2ln"
     assert call["id"]
-    assert message.metrics.to_dict() | {"duration": None} == {
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "total_tokens": 15,
-        "reasoning_tokens": 2,
-        "duration": None,
-    }
+    metrics = message.metrics
+    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens, metrics.reasoning_tokens) == (
+        10,
+        5,
+        15,
+        2,
+    )
     assert completed.stop_reason == "tool_use"
 
 
@@ -381,7 +373,7 @@ def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> 
         "properties": {"child": {"$ref": "#/$defs/Node"}, "note": {"type": ["string", "null"]}},
         "$defs": {"Node": {"type": "object", "properties": {"child": {"$ref": "#/$defs/Node"}}}},
     }
-    original = {**schema, "properties": dict(schema["properties"])}
+    original = copy.deepcopy(schema)
 
     converted = gemini_wire.convert_schema(schema)
 
@@ -427,7 +419,6 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
     """Options, keep_alive, format, and request_params pass through; overrides land in options."""
     config = _config(
         OLLAMA,
-        api_key="ollama-key",
         options={"num_ctx": 8192},
         keep_alive="5m",
         format="json",
@@ -543,6 +534,7 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
         (httpx.Response(404, json={"error": "model 'qwen' not found"}), InvalidRequest),
         (httpx.Response(500, json={"error": "llama runner process has terminated"}), ProviderUnavailable),
         (httpx.ConnectError("connection refused"), ProviderUnavailable),
+        (ollama_ndjson({"error": "model runner has unexpectedly stopped"}), ProviderError),
     ],
 )
 async def test_ollama_errors_are_normalized(

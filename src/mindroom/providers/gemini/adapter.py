@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Gemini provider adapter over google-genai, for the Gemini API and Vertex AI (``vertexai: true``).
 
 The SDK is imported on first use, so importing this module stays cheap.
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
     from google.genai import Client
-    from google.genai.types import GenerateContentResponse
+    from google.genai.types import GenerateContentConfig, GenerateContentResponse
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
@@ -108,6 +109,7 @@ class GeminiProvider:
         try:
             chunks = await self._sdk_client().aio.models.generate_content_stream(
                 model=self.identity.id,
+                # The request dicts use google-genai's field names; the SDK validates them into its types.
                 contents=cast("Any", contents),
                 config=cast("Any", config or None),
             )
@@ -143,7 +145,11 @@ class GeminiProvider:
         )
         yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
 
-    def _request_config(self, request: ModelRequest, system_instruction: str | list[Any] | None) -> dict[str, Any]:
+    def _request_config(
+        self,
+        request: ModelRequest,
+        system_instruction: str | list[Any] | None,
+    ) -> dict[str, Any] | GenerateContentConfig:
         """Return the generation config of one request, in the order Agno's Gemini built it."""
         settings = self.settings
         overrides = request.overrides
@@ -200,7 +206,7 @@ class GeminiProvider:
             return self._decision_config(config)
         return config
 
-    def _decision_config(self, config: dict[str, Any]) -> Any:  # noqa: ANN401 - google-genai's config type
+    def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:
         """Keep function schemas but disable function calling and native tools for a decision request."""
         from google.genai.types import HttpOptions  # noqa: PLC0415 - provider SDK loads on first request
 

@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Map a provider's HTTP status failures and transport failures to the normalized provider errors."""
 
 from __future__ import annotations

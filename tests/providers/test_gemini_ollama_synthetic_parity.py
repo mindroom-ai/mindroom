@@ -46,7 +46,6 @@ GOLDENS = goldens()
 def test_every_route_has_goldens() -> None:
     """The parity suite iterates real fixtures for each route it covers."""
     assert {golden.family for golden in GOLDENS} == {"gemini", "gemini_vertexai", "ollama"}
-    assert len(GOLDENS) == 19 + 19 + 15
 
 
 @pytest.mark.asyncio

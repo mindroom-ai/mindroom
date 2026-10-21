@@ -105,10 +105,11 @@ class OllamaProvider:
                             first_text_at = time.perf_counter()
                         yield event
         except ResponseError as error:
+            # The SDK reports an error the server streams after a 200 response with status -1.
             raise provider_error_for_status(
                 str(error),
                 provider=self.identity.provider_name,
-                status_code=error.status_code,
+                status_code=error.status_code if error.status_code > 0 else None,
             ) from error
         except (httpx.TransportError, OSError) as error:
             raise provider_unavailable(error, provider=self.identity.provider_name) from error
