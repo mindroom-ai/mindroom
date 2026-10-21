@@ -219,6 +219,10 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
+| `providers/gemini/` | Owned stream-only Gemini adapter for the Gemini API and Vertex AI: contents, schema conversion, and stream parsing (not wired yet) |
+| `providers/ollama_adapter.py` | Owned stream-only Ollama adapter over the native chat API (not wired yet) |
+| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls (not wired yet) |
+| `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
