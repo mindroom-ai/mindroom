@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from agno.models.message import Message
 from agno.utils.message import filter_tool_calls
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from agno.team import Team
 
+    from mindroom.llm.messages import Message as OwnedMessage
     from mindroom.native_compaction import NativeCompactionModel
 
 
@@ -164,23 +165,37 @@ _SCOPE_SUMMARY = "scope"
 _RUN_LOCAL_SUMMARY = "run"
 
 
-def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
-    """Render one compaction summary as the user message that replaces the history it covers.
+class _CompactionSummaryFields(TypedDict):
+    """The fields of the user message one compaction summary renders as."""
+
+    role: str
+    content: str
+    provider_data: dict[str, Any]
+    from_history: bool
+
+
+def compaction_summary_fields(summary: str, *, run_local: bool) -> _CompactionSummaryFields:
+    """Return the fields of the user message that replaces the history one compaction summary covers.
 
     The scope's summary is rebuilt from its latest summary row for every request, so it is history; a run-local summary is
     stored with its run. The marker keeps that kind when Agno later replays the run and marks its messages history.
     """
-    return Message(
-        role="user",
-        content=(
+    return {
+        "role": "user",
+        "content": (
             "The earlier part of this conversation was compacted into this summary:\n\n"
             f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
             "The conversation continues after this summary. If it records progress on the current request, "
             "continue that work from its next steps instead of starting over."
         ),
-        provider_data={_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
-        from_history=not run_local,
-    )
+        "provider_data": {_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
+        "from_history": not run_local,
+    }
+
+
+def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
+    """Render one compaction summary as the user message that replaces the history it covers."""
+    return Message(**compaction_summary_fields(summary, run_local=run_local))
 
 
 def compaction_summary_text(message: Message) -> str:
@@ -195,7 +210,7 @@ def is_compaction_summary(message: Message) -> bool:
     return _summary_kind(message) in {_SCOPE_SUMMARY, _RUN_LOCAL_SUMMARY}
 
 
-def is_scope_summary(message: Message) -> bool:
+def is_scope_summary(message: Message | OwnedMessage) -> bool:
     """Return whether one message is the scope's summary, as opposed to one run's own."""
     return _summary_kind(message) == _SCOPE_SUMMARY
 
@@ -208,12 +223,12 @@ def mark_summary_follows(prompt: Message) -> None:
     prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
 
 
-def summary_follows(message: Message) -> bool:
+def summary_follows(message: Message | OwnedMessage) -> bool:
     """Return whether the scope's summary replays right after this message."""
     return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
 
 
-def _summary_kind(message: Message) -> object:
+def _summary_kind(message: Message | OwnedMessage) -> object:
     return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None
 
 

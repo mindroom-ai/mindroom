@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from agno.media import Image
     from agno.models.message import Message
 
+    from mindroom.llm.media import Image as OwnedImage
+    from mindroom.llm.messages import Message as OwnedMessage
+
 
 _MAX_HISTORY_VIEWED_IMAGES = 4
 _MAX_HISTORY_VIEWED_IMAGE_BYTES = 10 * 1024 * 1024
@@ -45,8 +48,8 @@ def media_payload_snapshot(media_value: object) -> object:
     return media_value
 
 
-def project_history_media_for_replay(messages: Sequence[Message]) -> list[Message]:
-    """Copy changed history messages and retain only bounded newest viewed images."""
+def retained_viewed_images(messages: Sequence[Message | OwnedMessage]) -> set[tuple[int, int]]:
+    """Return ``(message, image)`` indexes of the newest viewed images replay keeps within its count and byte caps."""
     retained: set[tuple[int, int]] = set()
     retained_count = 0
     retained_bytes = 0
@@ -55,7 +58,7 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
         for image_index in range(len(images) - 1, -1, -1):
             image = images[image_index]
             content = image.content
-            if not _is_viewed_image(image) or not isinstance(content, bytes) or not content:
+            if not is_viewed_image(image) or not isinstance(content, bytes) or not content:
                 continue
             image_bytes = len(content)
             if (
@@ -66,7 +69,12 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
             retained.add((message_index, image_index))
             retained_count += 1
             retained_bytes += image_bytes
+    return retained
 
+
+def project_history_media_for_replay(messages: Sequence[Message]) -> list[Message]:
+    """Copy changed history messages and retain only bounded newest viewed images."""
+    retained = retained_viewed_images(messages)
     projected: list[Message] = []
     for message_index, message in enumerate(messages):
         source_images = message.images or []
@@ -74,7 +82,7 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
             image for image_index, image in enumerate(source_images) if (message_index, image_index) in retained
         ]
         omitted_viewed = sum(
-            _is_viewed_image(image) and (message_index, image_index) not in retained
+            is_viewed_image(image) and (message_index, image_index) not in retained
             for image_index, image in enumerate(source_images)
         )
         updates: dict[str, object] = {
@@ -84,19 +92,21 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
             "videos": None,
         }
         if omitted_viewed:
-            updates["content"] = _content_with_viewed_image_omission(message, omitted_viewed)
+            updates["content"] = content_with_viewed_image_omission(message, omitted_viewed)
             updates["compressed_content"] = None
         changed = bool(message.audio or message.images or message.files or message.videos or omitted_viewed)
         projected.append(message.model_copy(update=updates) if changed else message)
     return projected
 
 
-def _is_viewed_image(image: Image) -> bool:
+def is_viewed_image(image: Image | OwnedImage) -> bool:
+    """Return whether an image is one ``view_file`` attached, the only historical media history replays."""
     image_id = image.id
     return isinstance(image_id, str) and image_id.startswith(VIEWED_IMAGE_ID_PREFIX)
 
 
-def _content_with_viewed_image_omission(message: Message, omitted: int) -> str:
+def content_with_viewed_image_omission(message: Message | OwnedMessage, omitted: int) -> str:
+    """Return the message's content followed by the notice that ``omitted`` of its viewed images do not replay."""
     noun = "image" if omitted == 1 else "images"
     notice = (
         f"[{omitted} historical viewed {noun} omitted from replay to keep history within the "
@@ -116,7 +126,7 @@ def image_content_for_token_estimation(value: object) -> object:
     return value
 
 
-def render_message_content(message: Message) -> str:
+def render_message_content(message: Message | OwnedMessage) -> str:
     """Render one replayable string form of a message body."""
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):

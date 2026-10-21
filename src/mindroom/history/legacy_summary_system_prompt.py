@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 
     from agno.models.message import Message
 
+    from mindroom.llm.messages import Message as OwnedMessage
+
 _LEGACY_SUMMARY_TAG = "<summary_of_previous_interactions>"
 _LEGACY_SUMMARY_BLOCK = re.compile(
     r"Here is a brief summary of your previous interactions:\n\n<summary_of_previous_interactions>\n.*?"
@@ -30,7 +32,7 @@ _LEGACY_SUMMARY_BLOCK = re.compile(
 # Coverage: tests/test_history_summary_message.py::test_resuming_a_pre_release_pause_keeps_its_single_summary;
 # tests/test_mid_turn_compaction.py::test_legacy_resume_then_mid_turn_compaction_leaves_one_summary;
 # tests/test_approval_receipt.py::test_publishing_keeps_a_legacy_summary_strip_made_on_the_outbound_copy.
-def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
+def system_message_embeds_summary(messages: Sequence[Message | OwnedMessage]) -> bool:
     """Return whether a leading system or developer message already carries Agno's summary block."""
     for message in messages:
         if message.role not in {"system", "developer"}:
