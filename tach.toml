@@ -5752,6 +5752,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.llm"
+depends_on = []
+
+[[modules]]
 path = "mindroom.knowledge"
 depends_on = []
 
