@@ -94,6 +94,7 @@ def adapt_function(function: Function) -> ToolFunction:
         show_result=prepared.show_result,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameter_names(function.entrypoint),
+        entrypoint_processed=not function.skip_entrypoint_processing,
     )
 
 

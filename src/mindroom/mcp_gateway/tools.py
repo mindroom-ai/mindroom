@@ -5,10 +5,10 @@ from __future__ import annotations
 import inspect
 import json
 from contextlib import suppress
+from dataclasses import replace
 from functools import wraps
 from typing import TYPE_CHECKING, Any
-
-from agno.tools.function import FunctionCall
+from uuid import uuid4
 
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.hooks import HookRegistry
@@ -29,8 +29,10 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -38,8 +40,8 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
     worker_runtime_context,
 )
-from mindroom.tool_system.tool_access import function_schema, search_tool_metadata, validate_tool_arguments
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MESSAGES: dict[GatewayErrorCode, str] = {
     GatewayErrorCode.CONNECTION_REQUIRED: "Connect this service to continue.",
@@ -118,13 +121,13 @@ def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Functio
     return function
 
 
-def _schema_payload(agent: str, toolkit: str, function: Function) -> ToolSchemaResponse:
+def _schema_payload(agent: str, toolkit: str, function: ToolFunction) -> ToolSchemaResponse:
     payload: ToolSchemaResponse = {
         "agent": agent,
         "toolkit": toolkit,
         "function": function.name,
         "description": function.description or "",
-        "inputSchema": function_schema(function),
+        "inputSchema": dict(function.parameters),
     }
     if _json_size(payload) > 32768:
         raise GatewayError(code=GatewayErrorCode.SCHEMA_TOO_LARGE)
@@ -284,7 +287,7 @@ async def get_tool(
         return _error(context, GatewayErrorCode.TOOL_NOT_FOUND)
 
     async def selected(built: Toolkit) -> ToolSchemaResponse:
-        return _schema_payload(context.agent_name, toolkit, _function(context, built, function))
+        return _schema_payload(context.agent_name, toolkit, adapt_function(_function(context, built, function)))
 
     return await _guard(context, _selected_operation(context, toolkit, manager, selected, require_current_access))
 
@@ -298,11 +301,9 @@ def _connection_required(result: object) -> bool:
     )
 
 
-def _guard_dispatch(function: Function, require_current_config: Callable[[], None]) -> None:
+def _guard_dispatch(function: ToolFunction, require_current_config: Callable[[], None]) -> ToolFunction:
     """Check the publication at the provider entrypoint, after hooks and thread scheduling."""
     entrypoint = function.entrypoint
-    if entrypoint is None:
-        raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
 
     @wraps(entrypoint)
     def guarded_sync(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -314,7 +315,7 @@ def _guard_dispatch(function: Function, require_current_config: Callable[[], Non
         await run_gateway_sync(require_current_config)
         return await entrypoint(*args, **kwargs)
 
-    function.entrypoint = guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync
+    return replace(function, entrypoint=guarded_async if inspect.iscoroutinefunction(entrypoint) else guarded_sync)
 
 
 async def invoke_tool(
@@ -336,30 +337,32 @@ async def invoke_tool(
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
     async def selected(built: Toolkit) -> InvocationResponse:
-        target = _function(context, built, function)
-        if inspect.isgeneratorfunction(target.entrypoint) or inspect.isasyncgenfunction(target.entrypoint):
+        source = _function(context, built, function)
+        if inspect.isgeneratorfunction(source.entrypoint) or inspect.isasyncgenfunction(source.entrypoint):
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
-        schema = _schema_payload(context.agent_name, toolkit, target)["inputSchema"]
-        _validate_arguments(schema, arguments)
+        target = adapt_function(source)
+        _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
-        bridge = build_tool_hook_bridge(
+        policy = build_tool_hook_middleware(
             HookRegistry.from_plugins(plugins),
             agent_name=context.agent_name,
             dispatch_context=ToolDispatchContext(execution_identity=context.execution_identity),
             config=context.config,
             runtime_paths=context.runtime_paths,
         )
-        prepend_tool_hook_bridge(built, bridge)
-        target.cache_results = False
         if require_current_config is not None:
-            _guard_dispatch(target, require_current_config)
-        execution = await run_with_tool_execution_identity(
-            context.execution_identity,
-            operation=lambda: FunctionCall(function=target, arguments=arguments).aexecute(),
-        )
-        if execution.status != "success":
-            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
-        result = to_json_compatible(execution.result)
+            target = _guard_dispatch(target, require_current_config)
+        # Each invocation is its own run: it belongs to no conversation and shares no session state.
+        invocation_id = f"mcp-gateway:{uuid4().hex}"
+        call_context = ToolCallContext(run_id=invocation_id, session_id=invocation_id, user_id=context.requester_id)
+        try:
+            value = await run_with_tool_execution_identity(
+                context.execution_identity,
+                operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
+            )
+        except Exception as exc:
+            raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE) from exc
+        result = to_json_compatible(value)
         if _connection_required(result):
             raise GatewayError(code=GatewayErrorCode.CONNECTION_REQUIRED)
         payload: InvocationResponse = {"result": result}

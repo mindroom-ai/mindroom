@@ -31,6 +31,7 @@ from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import (
@@ -499,8 +500,8 @@ async def test_authored_confirmation_never_runs_body(
     assert result["error"]["code"] == "approval_required"
 
 
-def test_schema_cache_fallback_allows_required_list_rebuild() -> None:
-    """Uncacheable input must still reach normal preparation that rebuilds required fields."""
+def test_schema_preparation_rebuilds_an_unusable_required_list() -> None:
+    """A self-referencing authored ``required`` list is rebuilt from the signature, and the source keeps its own."""
 
     def echo(text: str) -> str:
         return text
@@ -513,7 +514,7 @@ def test_schema_cache_fallback_allows_required_list_rebuild() -> None:
         parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": required},
     )
 
-    payload = gateway._schema_payload("helper", "example", function)
+    payload = gateway._schema_payload("helper", "example", adapt_function(function))
 
     assert payload["inputSchema"]["required"] == ["text"]
     assert function.parameters["required"][0] is function.parameters["required"]
@@ -534,6 +535,7 @@ async def test_schema_and_result_bounds(context: AgentToolContext, monkeypatch: 
     assert result["error"]["code"] == "result_too_large"
     toolkit.functions["large"] = Function(
         name="large",
+        entrypoint=large,
         parameters={"description": "x" * 32768},
         skip_entrypoint_processing=True,
     )
@@ -884,7 +886,7 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cache cannot skip hooks or tool body."""
+    """A function that asks Agno to cache its results still runs its hooks and its body on every call."""
     events = []
 
     @hook("tool:before_call")
@@ -915,11 +917,11 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
             ),
         ],
     )
-    assert await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={}) == {
-        "result": "fresh",
-    }
-    assert toolkit.functions["account"].cache_results is False
-    assert events == [("before", "@alice:example.org"), ("body", "called"), ("after", "@alice:example.org")]
+    for _ in range(2):
+        assert await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={}) == {
+            "result": "fresh",
+        }
+    assert events == [("before", "@alice:example.org"), ("body", "called"), ("after", "@alice:example.org")] * 2
 
 
 @pytest.mark.asyncio

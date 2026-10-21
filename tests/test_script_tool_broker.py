@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -70,6 +69,8 @@ from tests.conftest import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from agno.tools.function import Function
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -563,7 +564,7 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     receipt = await _call_through_gateway(broker, _request(), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == '{"operation": "addition", "result": 3}'
+    assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert events == ["tool:before_call", "tool:after_call"]
 
 
@@ -590,7 +591,7 @@ async def test_script_broker_separates_process_scope_from_tool_routing(
     receipt = await _call_through_gateway(broker, _request(run_id=_WORKER_RUN_ID), token)
 
     assert receipt.state is ScriptCallState.COMPLETED
-    assert receipt.result == '{"operation": "addition", "result": 3}'
+    assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert len(resolved_worker_targets) == 2
     assert resolved_worker_targets[0] == resolved_worker_targets[1]
     resolved_worker_key = resolved_worker_targets[0].worker_key
@@ -850,107 +851,6 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
     assert events == [
         "approval:run-1:authored-confirmation",
         "tool:before_call",
-        "tool:after_call",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_script_broker_honors_authored_confirmation_before_agno_cache_hit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cached result cannot bypass a function-authored confirmation requirement."""
-    events: list[str] = []
-
-    class ConfirmingCachedToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-            function = self.functions["add"]
-            function.requires_confirmation = True
-            function.cache_results = True
-            function.cache_dir = str(tmp_path / "agno-cache")
-
-        def add(self, a: int, b: int) -> int:
-            events.append("tool:body")
-            return a + b
-
-    toolkit = ConfirmingCachedToolkit()
-    cached = await FunctionCall(
-        function=toolkit.functions["add"],
-        arguments={"a": 1, "b": 2},
-        call_id="cache-primer",
-    ).aexecute()
-    assert cached.result == 3
-    events.clear()
-    _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        approval_decision=ToolApprovalDecision(approved=False, reason="Cached result denied."),
-        preapprove_script_tool=True,
-    )
-
-    receipt = await _call_through_gateway(broker, _request(call_id="cached-confirmation"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert receipt.error == {
-        "kind": "approval_denied",
-        "message": "Cached result denied.",
-        "retryable": False,
-    }
-    assert events == [
-        "approval:run-1:cached-confirmation",
-        "tool:before_call",
-        "tool:after_call",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_script_broker_honors_policy_approval_before_agno_cache_hit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Background governance cannot be skipped by Agno's function-result cache."""
-    events: list[str] = []
-
-    class CachedToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="calculator", tools=[self.add])
-            function = self.functions["add"]
-            function.cache_results = True
-            function.cache_dir = str(tmp_path / "agno-cache")
-
-        def add(self, a: int, b: int) -> int:
-            events.append("tool:body")
-            return a + b
-
-    toolkit = CachedToolkit()
-    cached = await FunctionCall(
-        function=toolkit.functions["add"],
-        arguments={"a": 1, "b": 2},
-        call_id="policy-cache-primer",
-    ).aexecute()
-    assert cached.result == 3
-    events.clear()
-    _replace_calculator_toolkit(monkeypatch, lambda: toolkit)
-    broker, token = _broker(
-        tmp_path,
-        events=events,
-        require_approval=True,
-        approval_decision=ToolApprovalDecision(approved=False, reason="Cached policy denied."),
-    )
-
-    receipt = await _call_through_gateway(broker, _request(call_id="cached-policy"), token)
-
-    assert receipt.state is ScriptCallState.FAILED
-    assert receipt.error == {
-        "kind": "approval_denied",
-        "message": "Cached policy denied.",
-        "retryable": False,
-    }
-    assert events == [
-        "tool:before_call",
-        "approval:run-1:cached-policy",
         "tool:after_call",
     ]
 

@@ -21,6 +21,9 @@ class ToolFunction:
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
+    ``entrypoint_processed`` marks a schema Agno's entrypoint processing produced, as it does for every Agno function
+    that does not set ``skip_entrypoint_processing`` to supply its schema as is, as MCP tools do; realtime calls
+    repeat the second processing pass Agno ran on such a schema.
     """
 
     name: str
@@ -35,6 +38,7 @@ class ToolFunction:
     show_result: bool = False
     entrypoint: Callable[..., Any]
     injected_params: frozenset[str] = frozenset()
+    entrypoint_processed: bool = False
 
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats: every field Agno serialized, None kept."""

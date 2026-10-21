@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import nio
 import pytest
-from agno.media import Audio
 
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
@@ -19,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.media import Audio
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.voice import handler as voice_handler
 from tests.access_schema_support import with_current_room_member_access

@@ -13,7 +13,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from agno.agent._tools import determine_tools_for_model, parse_tools
+from agno.agent._tools import determine_tools_for_model
 from agno.tools.function import Function, FunctionCall
 from pydantic import PrivateAttr
 
@@ -53,16 +53,14 @@ def temporary_tool_instructions(entity: Agent, instructions: Sequence[str]) -> I
 
 
 # AGNO_COMPAT: Executable tool preparation lacks public run-context and media bindings.
-# Reason: RTC and live-turn calls need prepared Functions with Agno's run context and media bindings,
+# Reason: The CLI catalog's live-turn calls need prepared Functions with Agno's run context and media bindings,
 # which Agent.aget_tools alone does not supply through a public preparation API.
 # Upstream issue: https://github.com/agno-agi/agno/issues/7806
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807 is related inspection work;
 # it must also support executable run-context/media bindings to replace this path.
 # Remove when: A public Agent preparation API returns the same effective Functions
 # for execution; channel filtering and requester authorization remain with the owner.
-# Coverage: tests/test_matrix_rtc_call_tools.py::test_build_call_tools_returns_same_agent_prompt_and_tools;
-# tests/test_matrix_rtc_call_tools.py::test_build_call_tools_includes_async_only_toolkit_functions;
-# tests/test_agent_cli_turn.py::test_real_cli_call_wait_completes_inside_outer_bash.
+# Coverage: tests/test_agent_cli_turn.py::test_real_cli_call_wait_completes_inside_outer_bash.
 def prepare_agent_tools(
     agent: Agent,
     *,
@@ -82,25 +80,6 @@ def prepare_agent_tools(
         session=session,
         async_mode=True,
     )
-
-
-# AGNO_COMPAT: One configured function must run inside a live turn outside the model's tool loop.
-# Reason: Agno prepares the per-run Function a call executes (bound Agent, processed schema,
-# hooks) only through private parse_tools, which also resets the Agent's tool instructions,
-# and binds the run context only in private determine_tools_for_model.
-# Upstream issue: Tracking gap; no public API prepares one Function for execution in a running turn.
-# Upstream PR: None identified.
-# Remove when: Agno exposes public per-run Function preparation that leaves live instruction state intact.
-# Coverage: tests/test_scheduled_tool_approval.py::test_live_function_runs_with_its_hooks_and_keeps_tool_instructions.
-def prepare_live_agent_function(agent: Agent, function: Function, run_context: RunContext) -> Function:
-    """Prepare one of a running Agent's own Functions for execution, as Agno prepares it for the model."""
-    assert agent.model is not None
-    with temporary_tool_instructions(agent, ()):
-        prepared = parse_tools(agent, tools=[function], model=agent.model, run_context=run_context, async_mode=True)
-    [function_copy] = prepared
-    assert isinstance(function_copy, Function)
-    function_copy._run_context = run_context
-    return function_copy
 
 
 # AGNO_COMPAT: Model generator consumers and synchronous leaf threads outlive their call owner.

@@ -1,8 +1,9 @@
-"""The owned path reproduces the prompt goldens: every request of each helper call and each Matrix reply.
+"""The owned path reproduces the prompt goldens: every request of each helper call, Matrix reply, and voice call.
 
-Helper call sites and Matrix replies send their requests through the owned provider layer, so one recorder compares
-every request they send, byte for byte, with the golden. The goldens of the entry points that do not run on the
-owned path yet are listed with the step that will compare them.
+Helper call sites, Matrix replies, and voice calls send their requests through the owned provider layer, so one
+recorder compares every request they send, byte for byte, with the golden, beside whatever a voice call exports to
+the realtime model. The goldens of the entry points that do not run on the owned path yet are listed with the step
+that will compare them.
 """
 
 from __future__ import annotations
@@ -25,8 +26,6 @@ PENDING = {
     "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
     "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
     "skill_review_fork": "F6 runs the skill review fork on the owned loop from the captured final request",
-    "voice_call_cascaded": "F4 builds voice calls on the owned loop",
-    "voice_call_realtime": "F4 builds voice calls on the owned loop",
 }
 TEAM = [name for name in GOLDENS if name.startswith("team_")]
 RECORDED = [name for name in GOLDENS if name not in PENDING and name not in TEAM]
@@ -51,7 +50,10 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
 
     assert scenario.description == golden["description"]
     assert normalize(output.input, tmp_path) == golden["input"]
-    assert recorder.calls
+    # What a scenario hands a model outside MindRoom's loop, such as a realtime call's instructions and tools.
+    assert normalize(output.exported, tmp_path) == golden.get("exported")
+    # The realtime call's model is LiveKit's, so its golden pins only what the call exports to it.
+    assert recorder.calls or output.exported is not None
     ordered = recorder.ordered_calls()
     # Every request, the compaction summary included, went through the provider registry rather than an Agno model.
     assert all(call.owned for call in ordered)

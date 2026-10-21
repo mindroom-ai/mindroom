@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.media import Audio
 
 from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
 from mindroom.background_tasks import wait_for_background_tasks
@@ -34,6 +33,7 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_S
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.inbound_turn_normalizer import _VoiceNormalizationResult
+from mindroom.llm.media import Audio
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget

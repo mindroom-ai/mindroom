@@ -49,8 +49,8 @@ class AgentBuild:
     ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
     authored toolkit it came from, None for a generated one, which approvals check. ``tool_middleware`` is the
-    tool-call policy the loop runs around every call, outermost first: plugin before and after hooks, call
-    recording, and the computer announcement.
+    tool-call policy the loop runs around every call, outermost first: the binding through which a scheduled call
+    runs one of the build's functions, plugin before and after hooks, call recording, and the computer announcement.
     """
 
     spec: AgentSpec
