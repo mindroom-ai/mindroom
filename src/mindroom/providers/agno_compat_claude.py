@@ -44,8 +44,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # parsed responses and run outputs, streamed or not.
 # Remove when: The pinned Agno parser exposes stop_reason for streamed and non-streamed responses through
 # provider_data or another stable terminal-metadata interface.
-# Coverage: tests/test_compaction_claude_summary.py::test_summary_uses_stop_reason_and_raw_body_precedence;
-# tests/test_claude_output_limit.py::test_cut_off_tool_call_is_answered_instead_of_run.
+# Coverage: tests/test_claude_compat.py::test_parsed_responses_keep_the_terminal_stop_reason.
 
 # AGNO_COMPAT: Claude tool calls cut off by the output limit are dropped or run with partial arguments.
 # Reason: Agno 3.0.9 extracts tool calls from a non-streaming response only when stop_reason is "tool_use",

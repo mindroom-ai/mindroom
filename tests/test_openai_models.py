@@ -16,6 +16,7 @@ from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 from openai import OpenAI
+from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.attachments.media import attachment_records_to_media
@@ -287,6 +288,32 @@ def _sparse_tool_call_delta() -> ChoiceDeltaToolCall:
         type="function",
         function=ChoiceDeltaToolCallFunction(name="get_status", arguments="{}"),
     )
+
+
+@pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "content_filter"])
+def test_chat_models_keep_the_terminal_finish_reason(
+    model_cls: type[OpenAIChat],
+    _agno_cls: type[OpenAIChat],
+    finish_reason: str,
+) -> None:
+    """Agno drops the finish reason while parsing; it stays in provider_data, so a cut-off response shows."""
+    completion = ChatCompletion.model_validate(
+        {
+            "id": "chatcmpl_test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-6-astra",
+            "choices": [
+                {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": "Part"}},
+            ],
+        },
+    )
+
+    parsed = model_cls(id="gpt-6-astra", api_key="test-key")._parse_provider_response(completion)
+
+    assert parsed.provider_data is not None
+    assert parsed.provider_data["finish_reason"] == finish_reason
 
 
 @pytest.mark.parametrize(("model_cls", "_agno_cls"), _CHAT_WIRE_PAIRS)

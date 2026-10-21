@@ -29,8 +29,7 @@ if TYPE_CHECKING:
 # for Chat Completions, streamed or not, and for Claude and four other providers.
 # Remove when: The pinned Agno parser exposes finish_reason in provider_data or
 # another stable terminal-metadata interface.
-# Coverage: tests/test_compaction_openai_summary.py::test_summary_rejects_explicit_output_limit_below_usage_cap;
-# tests/test_compaction_openai_summary.py::test_summary_rejects_partial_text_stopped_by_content_filter.
+# Coverage: tests/test_openai_models.py::test_chat_models_keep_the_terminal_finish_reason.
 
 # AGNO_COMPAT: Chat usage parsing drops cache-write input tokens.
 # Reason: Agno 3.0.9 copies cached, audio, and reasoning token details but

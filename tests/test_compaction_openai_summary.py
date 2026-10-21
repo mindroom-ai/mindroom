@@ -16,6 +16,8 @@ from mindroom.history.summary_call import (
     generate_compaction_summary,
 )
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from tests.providers.golden_support import pipeline_provider
 
@@ -187,3 +189,42 @@ async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors
             timeout_seconds=10,
         )
     assert len(requests) == 1
+
+
+async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) -> None:
+    """An OpenRouter route to Claude marks cache breakpoints on replies, but never on a one-off summary."""
+    bodies: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        response = _response("chat", complete=True)
+        return httpx.Response(200, json={**json.loads(response.content), "model": "anthropic/claude-sonnet-5"})
+
+    config = ModelConfig(
+        provider="openrouter",
+        id="anthropic/claude-sonnet-5",
+        extra_kwargs={"api_key": "test-key", "cache_system_prompt": True, "max_retries": 2},
+    )
+    runtime = ProviderRuntime(
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={},
+        ),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    model = pipeline_provider(build_provider(config, runtime))
+    messages = (Message(role="system", content="Summarize"), Message(role="user", content="Conversation"))
+
+    await complete(model, ModelRequest(messages=messages, stream=False))
+    summary = await generate_compaction_summary(
+        model=model,
+        summary_input="Conversation",
+        summary_prompt="Summarize",
+        timeout_seconds=10,
+    )
+
+    assert summary == "Project facts"
+    reply_body, summary_body = bodies
+    assert "cache_control" in json.dumps(reply_body)
+    assert "cache_control" not in json.dumps(summary_body)
