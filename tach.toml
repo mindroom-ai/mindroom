@@ -2604,9 +2604,6 @@ depends_on = [
 path = "mindroom.history.prompt_tokens"
 depends_on = [
     "mindroom.agno_compat_prepared_tools",
-    "mindroom.providers.claude_prompt_cache",
-    "mindroom.providers.openai_tool_search",
-    "mindroom.providers.portable_tool_search",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.tool_schema_cache",

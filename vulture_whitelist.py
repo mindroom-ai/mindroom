@@ -415,5 +415,4 @@ _.child_run_id  # Stored tool-execution field read by the owned team runtime whe
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
 _.save_run  # Store method the runtime cutover calls for a run saved with its usage outside persist_to (src/mindroom/session_storage/store.py)
 _.minimal_required  # EnrichmentItem field minimal mode's renderer reads once F3 renders it from the build surface (src/mindroom/hooks/types.py)
-agent_static_token_estimator  # Static-token estimator over an Agno agent; the team path and its tests use it until S4 and F7 (src/mindroom/history/prompt_tokens.py)
 install_request_preparation  # Agno request hook the team path's mid-turn compaction tests still install until S4 and F7 (src/mindroom/agno_compat_model_hooks.py)

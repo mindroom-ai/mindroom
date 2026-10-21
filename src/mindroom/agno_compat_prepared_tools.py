@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807
 # Remove when: Public prepared-request inspection supplies the actual messages, tools,
 # and tool instructions without persisting a run or mutating live instruction state.
-# Coverage: tests/test_agno_compat_prompt.py::test_prompt_builder_failure_restores_original_instruction_list;
-# tests/test_history_prompt_tokens.py.
+# Coverage: tests/test_history_team_scope.py::test_team_static_token_estimator_preserves_tool_instructions;
+# tests/test_history_team_scope.py::test_team_static_token_estimator_includes_agentic_state_tool.
 
 
 @contextmanager
