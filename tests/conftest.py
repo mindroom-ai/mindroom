@@ -3056,11 +3056,15 @@ def _refuse_connection(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError(message, request=request)
 
 
+# Captured before any test patches them, so the offline clients below still start from the production ones.
+_PRODUCTION_EMBEDDER_CLIENT = MindRoomOpenAIEmbedder.client
+_PRODUCTION_EMBEDDER_ACLIENT = MindRoomOpenAIEmbedder.aclient
+
+
 def _offline_sync_client(embedder: MindRoomOpenAIEmbedder) -> OpenAI:
     if embedder.openai_client is None:
-        # The production property lives on a base class, which the patch on this subclass leaves in place.
         # Without retries, because the SDK would back off for seconds before reporting the refusal.
-        embedder.openai_client = super(MindRoomOpenAIEmbedder, embedder).client.with_options(
+        embedder.openai_client = _PRODUCTION_EMBEDDER_CLIENT.fget(embedder).with_options(
             http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
             max_retries=0,
         )
@@ -3069,7 +3073,7 @@ def _offline_sync_client(embedder: MindRoomOpenAIEmbedder) -> OpenAI:
 
 def _offline_async_client(embedder: MindRoomOpenAIEmbedder) -> AsyncOpenAI:
     if embedder.async_client is None:
-        embedder.async_client = super(MindRoomOpenAIEmbedder, embedder).aclient.with_options(
+        embedder.async_client = _PRODUCTION_EMBEDDER_ACLIENT.fget(embedder).with_options(
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
             max_retries=0,
         )
@@ -3103,19 +3107,23 @@ _OLLAMA_DEFAULT_PORT = urlsplit(OLLAMA_HOST_DEFAULT).port
 
 
 def _dial_leaves_the_test(host: str, port: int) -> bool:
-    """Return whether to refuse dialing ``host:port``: any host off this machine, or Ollama's default port on it."""
+    """Return whether to refuse dialing ``host:port``.
+
+    Refused: any host except localhost, ``*.localhost``, or a loopback or unspecified IP literal, plus port 11434,
+    where a locally running Ollama listens, on every host. Hostnames are never resolved, so every other name is
+    refused, and so are this machine's non-loopback addresses.
+    """
     if host == "localhost" or host.endswith(".localhost"):
-        on_this_machine = True
+        local = True
     else:
         try:
             address = ipaddress.ip_address(host.strip("[]"))
         except ValueError:
-            on_this_machine = False
+            local = False
         else:
-            on_this_machine = address.is_loopback or address.is_unspecified
-    # Refused: every host off this machine, plus loopback port 11434, where a locally running Ollama listens.
-    # Test servers on other loopback ports stay reachable.
-    return not on_this_machine or port == _OLLAMA_DEFAULT_PORT
+            local = address.is_loopback or address.is_unspecified
+    # Test servers on other local ports stay reachable.
+    return not local or port == _OLLAMA_DEFAULT_PORT
 
 
 @dataclass
@@ -3134,8 +3142,10 @@ def _refuse_dial_off_the_test(
     dials: list[_RefusedDial],
 ) -> None:
     if _dial_leaves_the_test(host, port):
-        dials.append(_RefusedDial(f"{host}:{port}", threading.current_thread().name))
-        message = f"network disabled in tests: {host}:{port}"
+        # httpcore passes IPv6 hosts unbracketed.
+        address = f"[{host.strip('[]')}]:{port}" if ":" in host else f"{host}:{port}"
+        dials.append(_RefusedDial(address, threading.current_thread().name))
+        message = f"network disabled in tests: {address}"
         raise connect_error(message)
 
 
@@ -3196,7 +3206,7 @@ def _refusing_async_connect[R](
 
 @pytest.fixture(autouse=True, scope="session")
 def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
-    """Refuse HTTP client dials off this machine or to Ollama's default local port, for the whole session.
+    """Refuse every HTTP client dial that ``_dial_leaves_the_test`` rejects, for the whole session.
 
     The patch outlives each test so that a background thread or task finishing after its test is still refused.
     A dial no test reported, made between tests or after the last one, fails the session at teardown.
@@ -3222,7 +3232,7 @@ def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
 
 @pytest.fixture(autouse=True)
 def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None, None, None]:
-    """Fail a test whose HTTP client dialed a host off this machine or Ollama's default local port.
+    """Fail a test whose HTTP client made a dial that ``_dial_leaves_the_test`` rejects.
 
     The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
     is recorded and checked here. This covers clients built on httpx and httpx2, which include the
