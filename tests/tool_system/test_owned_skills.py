@@ -8,13 +8,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.exceptions import PathSecurityError
+from agno.utils.path_safety import safe_join_relative_path
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.invocation import ToolArgumentError, ToolCallContext, execute_tool_call, parse_tool_arguments
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, adapt_tool_functions
-from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, SkillsToolkit, build_skills_toolkit
+from mindroom.tool_system.skills import (
+    SKILL_FUNCTION_NAMES,
+    SkillsToolkit,
+    _configured_skill_file,
+    build_skills_toolkit,
+)
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:
@@ -234,6 +241,43 @@ async def test_configured_skill_files_linked_outside_their_directory_are_refused
         False,
         {"error": "Invalid reference path: 'outside.md'", "skill_name": "shared"},
     )
+
+
+@pytest.mark.parametrize(
+    "subpath",
+    [
+        "guide.md",
+        "nested/guide.md",
+        "./nested/../guide.md",
+        "nested\\guide.md",
+        "guide.md. ",
+        # Fullwidth letters that NFKC folds to "guide.md".
+        "\uff47\uff55\uff49\uff44\uff45.md",
+        "../outside.md",
+        "nested/../../outside.md",
+        "..",
+        "/etc/passwd",
+        "C:/guide.md",
+        "C:guide.md",
+        "\\\\server\\share",
+        "nested/CON",
+        "nul.txt",
+        "guide\x00.md",
+        "line\nbreak.md",
+        "   ",
+        "...",
+    ],
+)
+def test_configured_skill_paths_join_as_agno_joined_them(tmp_path: Path, subpath: str) -> None:
+    """A configured skill accepts and resolves exactly the file paths Agno's skills loader accepted."""
+    directory = tmp_path / "skill" / "references"
+    (directory / "nested").mkdir(parents=True)
+    try:
+        expected = safe_join_relative_path(directory, subpath)
+    except PathSecurityError:
+        expected = None
+
+    assert _configured_skill_file(directory, subpath) == expected
 
 
 @pytest.mark.asyncio

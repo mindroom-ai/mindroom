@@ -9,20 +9,19 @@ import os
 import platform
 import re
 import shutil
+import unicodedata
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import islice
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
 import json5
-from agno.exceptions import PathSecurityError
 from agno.skills import Skills
 from agno.skills.skill import Skill as AgnoSkill
 from agno.tools import Toolkit
 from agno.tools.function import Function
-from agno.utils.path_safety import safe_join_relative_path
 
 from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
@@ -335,9 +334,8 @@ class SkillsToolkit(Toolkit):
         if workspace_root is not None:
             content = self._read_workspace_skill_file(workspace_root, skill, kind.dirname, filename)
             return json.dumps({"skill_name": skill_name, kind.path_key: filename, **content})
-        try:
-            path = safe_join_relative_path(skill.source_path / kind.dirname, filename)
-        except PathSecurityError:
+        path = _configured_skill_file(skill.source_path / kind.dirname, filename)
+        if path is None:
             return json.dumps({"error": f"Invalid {kind.noun} path: '{filename}'", "skill_name": skill_name})
         try:
             content = path.read_text(encoding="utf-8")
@@ -427,6 +425,56 @@ def _unlisted_file_error(
         "error": f"{kind.noun.capitalize()} '{filename}' not found in skill '{skill_name}'",
         kind.listing_key: listed,
     }
+
+
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# Configured skill roots read files by path, accepting exactly the paths Agno's skills loader accepted.
+_WINDOWS_RESERVED_NAME = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)", re.IGNORECASE)
+_WINDOWS_PATH_PREFIX = re.compile(r"^([A-Za-z]:|\\\\)")
+
+
+def _has_control_characters(text: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in text)
+
+
+def _has_windows_path_prefix(text: str) -> bool:
+    windows_path = PureWindowsPath(text)
+    return bool(_WINDOWS_PATH_PREFIX.match(text) or windows_path.drive or windows_path.is_absolute())
+
+
+def _path_segment(segment: str) -> str | None:
+    """Return one path segment without trailing dots and spaces, or None for a segment no platform may name."""
+    if _has_control_characters(segment) or _has_windows_path_prefix(segment):
+        return None
+    stripped = segment.rstrip(". ")
+    if not stripped or _WINDOWS_RESERVED_NAME.match(stripped):
+        return None
+    return stripped
+
+
+def _configured_skill_file(directory: Path, subpath: str) -> Path | None:
+    """Return ``subpath`` resolved under ``directory``, or None when it is unsafe or resolves outside it."""
+    if not subpath.strip():
+        return None
+    normalized = unicodedata.normalize("NFKC", subpath)
+    if _has_control_characters(normalized):
+        return None
+    windows_path = PureWindowsPath(normalized)
+    if windows_path.drive or windows_path.is_absolute():
+        return None
+    parts: list[str] = []
+    for segment in normalized.replace("\\", "/").split("/"):
+        # The empty and relative segments stay for the resolution below to judge.
+        cleaned = segment if segment in {"", ".", ".."} else _path_segment(segment)
+        if cleaned is None:
+            return None
+        parts.append(cleaned)
+    try:
+        root = directory.resolve()
+        target = (directory / "/".join(parts)).resolve()
+    except (OSError, UnicodeEncodeError):
+        return None
+    return target if target.is_relative_to(root) else None
 
 
 class _AgnoSkills(Skills):
