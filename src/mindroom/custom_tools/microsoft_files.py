@@ -519,7 +519,8 @@ class MicrosoftFilesTools(Toolkit):
             folder: Graph item path or OneDrive or SharePoint link of the target folder; omit for the requester's
                 OneDrive root.
             name: The new file's name; defaults to the local file's name.
-            expected_web_url: The folder's web_url from its details or listing; required with folder.
+            expected_web_url: The folder's web_url as microsoft_files_get_file or microsoft_files_list_folder
+                returns it; search results show a different form of it. Required with folder.
 
         """
         try:
@@ -620,7 +621,8 @@ class MicrosoftFilesTools(Toolkit):
             worksheet: The worksheet name.
             address: The range to write, such as A1:C2, matching the shape of values.
             values: Rows of cell values; a string starting with = is written as a formula.
-            expected_web_url: The workbook's web_url from its details or listing; required.
+            expected_web_url: The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder
+                returns it; search results show a different form of it. Required.
 
         """
         try:
