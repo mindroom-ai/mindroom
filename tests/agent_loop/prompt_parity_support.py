@@ -1,9 +1,8 @@
 """Run the prompt-golden scenarios through MindRoom's production entry points and record what they send.
 
 `tests/fixtures/agno_parity/README.md` (Prompt goldens) describes the goldens.
-The scenarios are the ones `tests/agno_parity/capture_prompts.py` captured them with, which goes with Agno's runtime,
-so the owned prompt code is compared with the goldens through the same production builders; the team scenarios are
-left to the teams runtime.
+The scenarios are the ones the goldens were captured with, so owned prompt code is compared with them through the same
+production builders; the team scenarios are left to the teams runtime.
 While Agno still runs these entry points, `PromptCapture` reads the inputs MindRoom hands Agno's system-message builder.
 """
 

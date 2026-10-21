@@ -293,7 +293,7 @@ async def test_workspace_loads_record_usage_and_configured_skills_do_not(tmp_pat
 
 
 def test_skills_from_later_sources_win_a_name(tmp_path: Path) -> None:
-    """Explicit skill roots win a name over the workspace, and the workspace skill is then read as a configured one."""
+    """A skill from an explicit root wins its name over a workspace skill, so the explicit skill is the one offered."""
     _write_skill(_workspace(tmp_path) / "skills", "alpha", "Workspace alpha")
     _write_skill(tmp_path / "global", "alpha", "Explicit alpha")
 

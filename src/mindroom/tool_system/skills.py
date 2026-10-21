@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """OpenClaw-compatible skills: loading from skill roots and agent workspaces, and the toolkit that offers them."""
 
 from __future__ import annotations
@@ -65,7 +66,6 @@ _GET_SKILL_REFERENCE_DESCRIPTION = (
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 # Agno's skills prompt, with get_skill_script offered only for reading.
 _PROMPT_HEADER = (
     "<skills_system>",
@@ -899,7 +899,6 @@ def _load_root_skills(root: Path) -> list[Skill]:
     return skills
 
 
-# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 # Operator skill roots load as Agno's LocalSkills(validate=False) loaded them, so their skills keep loading the same.
 def _read_skill_root(root: Path) -> list[Skill]:
     """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
