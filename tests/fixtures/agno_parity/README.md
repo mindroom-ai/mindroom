@@ -176,3 +176,32 @@ The probes import no Agno code, so owned implementations keep using them after A
 
 Normalization: the pydantic version in error links (`https://errors.pydantic.dev/2.13/v/...`) is replaced by `<PYDANTIC_VERSION>`.
 Decoding errors embed the message of Python's `ast.literal_eval`, and probes that skip validation fail with Python's own `TypeError` text, so both depend on the interpreter version (Python 3.13).
+
+## Knowledge goldens (`knowledge/`)
+
+`.venv/bin/python -m tests.agno_parity.capture_knowledge` writes `knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` from the Agno-backed knowledge path, and the owned knowledge code's parity tests read them.
+All three are pretty JSON with sorted keys and are compared by value.
+
+### `knowledge/embedders.json`
+
+The file maps an embedder case to `{"embedder", "calls"}`, where `embedder` is the authored `memory.embedder` block and each call names the Agno-era method (`agno_method`), the purpose that method implied (`query` or `document`), and its `texts`.
+OpenAI-compatible and Ollama calls record each HTTP request's `method`, `url`, and JSON `body`; sentence-transformers calls record each call to the local model (`encode_query` or `encode_document`, its input, and its keyword arguments).
+Each embedder is built by `create_configured_embedder`; mock transports answer every request, and a recording model stands in for the sentence-transformers weights.
+
+### `knowledge/rows.json`
+
+`input` holds the authored config, every source file, the fixed mtime they get, and the embedding rule: each chunk's vector is `tests.agno_parity.knowledge_vectors.parity_vector` of its text.
+Each base is refreshed through the production refresh path into a real Chroma store, and `bases.<base_id>` records the published collection's `metadata`, its `configuration_json`, and every row's id, document, metadata, and embedding.
+Rows are sorted by source path, page, row number, chunk, and document.
+
+Normalization:
+
+- Row ids, which hash a per-read uuid4 with the content hash, become `<md5>`.
+- `content_hash`, which hashes the source metadata with a temporary snapshot path, becomes `<sha256>`, and `content_id`, its uuid5, becomes `<uuid5>`.
+
+### `knowledge/search.json`
+
+Each search sends one query through Agno's `search_knowledge_base` tool for an agent of `input.config`: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the last search fails its query embedding.
+A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
+Agno renders each document from an unordered set and Chroma returns metadata in hash order, so the result's key order varies between processes; its values and its layout (`indent=2`, `ensure_ascii=False`) do not.
+`content_hash` in each document's `meta_data` becomes `<sha256>`.
