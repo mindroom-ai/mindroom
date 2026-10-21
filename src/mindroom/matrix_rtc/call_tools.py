@@ -60,7 +60,7 @@ from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from agno.tools.function import Function
@@ -90,6 +90,8 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 
 _MAX_TOOL_RESULT_CHARS = 8000
 _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
+# Agno's default function schema; a second processing pass leaves a schema equal to it open.
+_AGNO_EMPTY_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 
 
 async def _save_call_usage(
@@ -934,16 +936,18 @@ def _function_available_during_call(
     return not unavailable
 
 
-def _realtime_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the parameters schema the realtime model gets: one with properties is closed to other keys.
+def _realtime_parameters(function: ToolFunction) -> dict[str, Any]:
+    """Return the realtime model's parameters schema: the function's schema after a second Agno processing pass.
 
-    Agno prepared each realtime tool's schema a second time, and that pass marks a schema whose function takes
-    arguments ``additionalProperties: false``; the realtime model keeps receiving that shape, which the
-    voice_call_realtime golden pins. A schema that already decides it keeps its own value.
+    A second pass closes a schema Agno's processing produced to other keys once it differs from Agno's empty schema,
+    which the voice_call_realtime golden pins, and leaves a schema the tool supplies as is
+    (``skip_entrypoint_processing``, as MCP tools do) unchanged. An empty schema becomes an object without properties.
     """
-    schema = dict(parameters)
-    if schema.get("properties"):
-        schema.setdefault("additionalProperties", False)
+    schema = dict(function.parameters)
+    if not schema:
+        return {"type": "object", "properties": {}}
+    if function.entrypoint_processed and schema != _AGNO_EMPTY_PARAMETERS:
+        schema["additionalProperties"] = False
     return schema
 
 
@@ -963,7 +967,7 @@ def _wrap_tool_function(
     raw_schema = {
         "name": function.name,
         "description": function.description or function.name,
-        "parameters": _realtime_parameters(function.parameters),
+        "parameters": _realtime_parameters(function),
     }
 
     async def _handler(raw_arguments: dict[str, Any]) -> str:

@@ -45,7 +45,6 @@ from mindroom.matrix_rtc.call_tools import (
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
-    _realtime_parameters,
     _wrap_tool_function,
     build_call_tools,
     matrix_message_available_during_call,
@@ -458,16 +457,65 @@ async def test_wrapped_tool_reports_failures_to_the_model() -> None:
     assert "database on fire" in result
 
 
-def test_realtime_schemas_close_a_function_with_arguments_to_other_keys() -> None:
-    """A schema with properties gets ``additionalProperties: false``; one without, or one that decides, keeps its own."""
-    with_arguments = {"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]}
-    without_arguments = {"type": "object", "properties": {}, "required": []}
-    open_schema = {"type": "object", "properties": {"a": {"type": "integer"}}, "additionalProperties": True}
+def _add_numbers(a: int, b: int) -> int:
+    """Add two numbers.
 
-    assert _realtime_parameters(with_arguments) == {**with_arguments, "additionalProperties": False}
-    assert "additionalProperties" not in with_arguments
-    assert _realtime_parameters(without_arguments) == without_arguments
-    assert _realtime_parameters(open_schema) == open_schema
+    Args:
+        a: First number.
+        b: Second number.
+
+    """
+    return a + b
+
+
+def _ping() -> str:
+    """Check that the service answers."""
+    return "pong"
+
+
+def _mcp_function(parameters: dict[str, Any]) -> Function:
+    """Return a function built the way the MCP toolkit builds one: the server's schema, used as is."""
+
+    async def call_tool(**_kwargs: object) -> str:
+        return "ok"
+
+    return Function(
+        name="docs_search",
+        description="Search the docs.",
+        parameters=parameters,
+        entrypoint=call_tool,
+        skip_entrypoint_processing=True,
+    )
+
+
+_SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+
+
+@pytest.mark.parametrize(
+    ("function", "closed"),
+    [
+        pytest.param(Function(name="add", entrypoint=_add_numbers), True, id="processed-with-arguments"),
+        pytest.param(Function(name="ping", entrypoint=_ping), False, id="processed-without-arguments"),
+        pytest.param(_mcp_function(_SEARCH_SCHEMA), False, id="mcp-schema"),
+    ],
+)
+def test_realtime_schemas_match_agnos_second_processing_pass(function: Function, *, closed: bool) -> None:
+    """Agno's second pass closes a schema it produced from an entrypoint; an MCP tool's schema reaches the model as sent."""
+    twice_processed = function.model_copy(deep=True)
+    twice_processed.process_entrypoint()
+    twice_processed.process_entrypoint()
+
+    parameters = _wrap(function).info.raw_schema["parameters"]
+
+    assert parameters == twice_processed.parameters
+    assert ("additionalProperties" in parameters) is closed
+    if function.skip_entrypoint_processing:
+        assert parameters == _SEARCH_SCHEMA
+
+
+def test_realtime_schemas_send_an_empty_schema_as_an_object_without_properties() -> None:
+    """A tool that supplies an empty schema reaches the realtime model as an object without properties."""
+    assert _wrap(_mcp_function({})).info.raw_schema["parameters"] == {"type": "object", "properties": {}}
 
 
 @pytest.mark.asyncio
