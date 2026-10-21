@@ -104,8 +104,19 @@ def _completed(output: list[dict[str, Any]] | None = None) -> dict[str, Any]:
 
 
 class _Built:
-    def __init__(self, tmp_path: Path, model_config: dict[str, Any], reply: dict[str, Any]) -> None:
-        built = golden_provider({"input": {"model_config": model_config}, "response_raw": reply}, tmp_path)
+    def __init__(
+        self,
+        tmp_path: Path,
+        model_config: dict[str, Any],
+        reply: dict[str, Any],
+        *,
+        idle_timeout_seconds: float | None = None,
+    ) -> None:
+        built = golden_provider(
+            {"input": {"model_config": model_config}, "response_raw": reply},
+            tmp_path,
+            idle_timeout_seconds=idle_timeout_seconds,
+        )
         self.provider: ModelProvider = built.provider
         self.adapter: ModelProvider = built.adapter
         self.requests = built.requests
@@ -429,6 +440,58 @@ async def test_responses_failure_after_exposed_output_is_final(
 
     assert (info.value.retryable, len(built.requests)) == (retryable, requests)
     assert (info.value.code == "incomplete_stream") is not retryable
+
+
+_IDLE_LIMIT_SECONDS = 0.5
+# Each pause stays far below the idle limit while the whole stream outlasts it.
+_EVENT_PAUSE_SECONDS = 0.04
+_SILENT_EVENTS = 25
+
+
+def _chat_tool_argument_stream() -> dict[str, Any]:
+    opening = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
+    pieces = [_chunk({"tool_calls": [{"index": 0, "function": {"arguments": "x"}}]}) for _ in range(_SILENT_EVENTS)]
+    return _chat_reply(_chunk({"tool_calls": [opening]}), *pieces, _chunk({}, finish_reason="tool_calls"))
+
+
+def _responses_hosted_tool_stream() -> dict[str, Any]:
+    searching = {
+        "type": "response.web_search_call.searching",
+        "sequence_number": 2,
+        "item_id": "ws_1",
+        "output_index": 0,
+    }
+    return _responses_reply(
+        _text_events("")[0],
+        _item_event("added", _SEARCH_CALL),
+        *[searching] * _SILENT_EVENTS,
+        _item_event("done", {**_SEARCH_CALL, "status": "completed"}),
+        _completed(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "reply", "stop_reason"),
+    [
+        (_OPENAI_CHAT, _chat_tool_argument_stream(), "tool_use"),
+        (_OPENAI_RESPONSES, _responses_hosted_tool_stream(), "end"),
+    ],
+    ids=["chat-tool-arguments", "responses-hosted-tool"],
+)
+async def test_provider_events_without_output_keep_a_stream_inside_the_idle_limit(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    stop_reason: str,
+) -> None:
+    """The idle limit measures the gap between provider events, including those that carry no output."""
+    paced = {**reply, "pause_seconds": _EVENT_PAUSE_SECONDS}
+    built = _Built(tmp_path, model_config, paced, idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert (turn.stop_reason, len(built.requests)) == (stop_reason, 1)
 
 
 @pytest.mark.asyncio

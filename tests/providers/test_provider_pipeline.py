@@ -20,6 +20,7 @@ from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
     ModelRequest,
+    StreamProgress,
     TextDelta,
     ToolCallReady,
     ToolSpec,
@@ -154,6 +155,16 @@ async def test_tool_call_counts_as_visible_output() -> None:
         await _drain(provider, ModelRequest(messages=[_user()]))
 
     assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_progress_events_are_not_visible_output() -> None:
+    inner = _ScriptedProvider([[StreamProgress(), _transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    events = await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (len(inner.requests), events[0]) == (2, StreamProgress())
 
 
 @pytest.mark.asyncio

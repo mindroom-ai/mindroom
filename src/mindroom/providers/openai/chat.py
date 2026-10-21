@@ -11,7 +11,14 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    ReasoningDelta,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
@@ -97,8 +104,13 @@ class ChatAdapter:
                 sdk_stream = await client.chat.completions.create(**kwargs)
                 try:
                     async for chunk in sdk_stream:
-                        for event in accumulator.add(chunk):
-                            first_token = first_token or time.monotonic()
+                        events = accumulator.add(chunk)
+                        if not events:
+                            # A chunk without deltas, such as a tool-call argument piece, is still activity.
+                            yield StreamProgress()
+                            continue
+                        first_token = first_token or time.monotonic()
+                        for event in events:
                             yield event
                 finally:
                     await sdk_stream.close()

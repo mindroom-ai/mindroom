@@ -145,6 +145,14 @@ class UsageReported:
     final: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class StreamProgress:
+    """Provider stream data that carried no other event, such as tool-call arguments or hosted-tool progress.
+
+    It only shows that the provider is still sending: idle limits count it as activity, and output consumers skip it.
+    """
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TurnCompleted:
     """The last stream event: the finished assistant message with its metrics and provider data."""
@@ -153,7 +161,7 @@ class TurnCompleted:
     stop_reason: StopReason | None = None
 
 
-type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | TurnCompleted
+type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | TurnCompleted
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -225,6 +233,7 @@ __all__ = [
     "RequestOverrides",
     "StopReason",
     "StreamEvent",
+    "StreamProgress",
     "TextDelta",
     "ToolCallReady",
     "ToolChoice",

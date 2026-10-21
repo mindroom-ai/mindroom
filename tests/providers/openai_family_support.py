@@ -259,6 +259,7 @@ def golden_provider(
     root: Path,
     *,
     response_raw: dict[str, Any] | None = None,
+    idle_timeout_seconds: float | None = None,
 ) -> GoldenProvider:
     """Build the owned adapter and pipeline for a golden's model config under ``root``."""
     placeholders = write_cli_logins(root)
@@ -283,7 +284,7 @@ def golden_provider(
     adapter = build_provider(ModelConfig(**config), runtime)
     provider = wrap_provider(
         adapter,
-        idle_timeout_seconds=None,
+        idle_timeout_seconds=idle_timeout_seconds,
         media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
         request_log=None,
     )

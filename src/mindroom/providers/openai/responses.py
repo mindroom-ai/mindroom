@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    ReasoningDelta,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.responses_wire import (
@@ -90,8 +97,12 @@ class ResponsesAdapter:
             raise provider_error(error, provider=self.identity.provider_name) from error
         try:
             async for event in sdk_stream:
-                for delta in accumulator.add(event):
+                deltas = accumulator.add(event)
+                for delta in deltas:
                     yield delta
+                if not deltas:
+                    # An event without deltas, such as hosted-tool progress or tool-call arguments, is still activity.
+                    yield StreamProgress()
         except sdk_failures() as error:
             raise accumulator.attempt_error(provider_error(error, provider=self.identity.provider_name)) from error
         finally:
@@ -134,7 +145,8 @@ class ResponsesAdapter:
                 events = self._streamed(client, kwargs, accumulator)
                 async with closing_async_stream(events):
                     async for event in events:
-                        first_token = first_token or time.monotonic()
+                        if not isinstance(event, StreamProgress):
+                            first_token = first_token or time.monotonic()
                         yield event
             except ProviderError:
                 # Usage the provider reported for a failed attempt is still billed.

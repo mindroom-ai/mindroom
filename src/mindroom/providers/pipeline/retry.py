@@ -4,9 +4,10 @@ SDK HTTP retries cannot recover errors delivered inside an established SSE strea
 is reissued here while it has produced nothing the caller could have shown. Earlier tool calls and their
 results stay in the conversation; only the failed request repeats.
 
-The idle limit ends attempts whose provider sends no event for too long. HTTP read timeouts cannot catch
-this: proxies such as OpenRouter send SSE keepalive comments while an upstream hangs, and the SDK drops
-those comments before they become events.
+The idle limit ends attempts whose provider sends no event for too long. Adapters report provider data
+without output as ``StreamProgress``, so long tool-call arguments or hosted-tool work keep an attempt alive.
+HTTP read timeouts cannot catch a stall: proxies such as OpenRouter send SSE keepalive comments while an
+upstream hangs, and the SDK drops those comments before they become events.
 """
 
 from __future__ import annotations
