@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
 
 Selection follows what Agno's ``get_messages`` and ``filter_tool_calls`` returned for MindRoom's replay limits, and the
