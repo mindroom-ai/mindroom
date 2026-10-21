@@ -7100,7 +7100,7 @@ A name the toolkit does not provide fails when the tool loads with `Included too
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
-- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail and calendars, To Do tasks, and Teams channels and chats through Microsoft Graph.
+- [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, Outlook mail and calendars, To Do tasks, Teams channels and chats, and Teams meeting transcripts through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
 - [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - Delegation, Dynamic Workflows, report publishing, config tools, and Claude Agent sessions.
@@ -12557,6 +12557,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
+| `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -12572,6 +12573,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
 
 `ChannelMessage.Read.All`, which `microsoft_teams` requests, always needs administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
+`OnlineMeetingTranscript.Read.All`, which `microsoft_meetings` requests, likewise always needs administrator consent.
 
 For a local installation, the redirect URIs are `http://localhost:8765/api/oauth/<provider ID>/callback`, such as `http://localhost:8765/api/oauth/microsoft_files/callback`.
 A hosted installation must set `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL`, from which MindRoom derives each redirect URI, and the URIs registered on the app must match exactly.
@@ -12613,6 +12615,7 @@ agents:
       - outlook_calendar
       - microsoft_todo
       - microsoft_teams
+      - microsoft_meetings
 ```
 
 | Option | Tool | Type | Default | Notes |
@@ -12624,6 +12627,7 @@ agents:
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
+`microsoft_meetings` only reads, so it has no `write` option.
 
 ## Connect An Account
 
@@ -12752,6 +12756,24 @@ A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
+## Teams Meetings
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_meetings_find` | no | Find the Teams meeting behind a join link, with its subject, times, organizer, and expiry. |
+| `microsoft_meetings_list_transcripts` | no | List the transcripts of one meeting, with when each was created and ended. |
+| `microsoft_meetings_get_transcript` | no | Read one transcript as timestamped lines labeled with their speaker, up to 30,000 characters per call. |
+
+To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_list_events` or `outlook_calendar_get_event`, finds the meeting, lists its transcripts, and reads one.
+Transcript lines look like `00:12:03 Alex Doe: text`, timed from the start of transcription, with each speaker's consecutive sentences on one line.
+A long transcript comes back in chunks with a `next_page_token`; passing it back continues the same transcript, and transcript listings page the same way.
+A recurring meeting series is one meeting, so its listing holds a transcript for each occurrence that was transcribed.
+
+Transcripts exist only for meetings in which someone turned on transcription.
+Microsoft Graph serves them only to the meeting's organizer and the people its calendar invite names, only for meetings scheduled with a calendar event, and not for live events.
+Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_find` reports when a meeting expires.
+Two Teams administrator settings also govern transcripts: with Graph access to transcripts turned off, listing and reading transcripts return `transcripts_disabled`, and with speaker attribution turned off, reading a transcript returns `speaker_attribution_disabled`.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
@@ -12804,16 +12826,21 @@ To give an agent read access only, set `write: false` on the tool.
 | Result | Cause and fix |
 | --- | --- |
 | `AADSTS50011` on the Microsoft sign-in page | The redirect URI is not registered on the app; add the exact URI from [Set Up The Microsoft Entra App](#set-up-the-microsoft-entra-app). |
-| `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent, which Teams always does; an administrator grants it on the app's **API permissions** page. |
+| `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent, which Teams and Teams meeting transcripts always do; an administrator grants it on the app's **API permissions** page. |
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
 | `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
-| `not_found` | The item does not exist or the connected account cannot see it. |
+| `not_found` | The item does not exist or the connected account cannot see it, or the Teams meeting expired. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |
 | `invalid_local_path` | An upload or attachment path is not an existing file the agent's `file_access` allows. |
 | `online_meeting_unavailable` | The calendar has no default online meeting provider, such as Teams, so the event cannot get a join link; create it without an online meeting. |
 | `online_meeting_body` | The update tried to replace an online meeting's description; change the other fields, or edit the description in Outlook. |
+| `meeting_not_found` | No Teams meeting with that join link is visible to the requester, such as a meeting they neither organized nor were invited to. |
+| `no_transcripts` | Nobody turned on transcription in the meeting, or Teams has not finished saving the transcript yet. |
+| `no_calendar_event` | The meeting was created without a calendar event, such as by an app, and Microsoft Graph serves no transcripts for it. |
+| `transcripts_disabled` | A Teams administrator turned off Microsoft Graph access to meeting transcripts; only an administrator can turn it back on. |
+| `speaker_attribution_disabled` | A Teams administrator turned off speaker attribution for transcripts, and `microsoft_meetings` reads transcripts only with their speakers. |
 | `not_a_file_attachment` | The mail attachment is an attached Outlook item or a cloud link, which cannot be downloaded. |
 | `etag_mismatch` | The file changed since the `etag` was read; download it again and redo the edit. |
 | `locked` | The file is checked out or locked; try again later. |
