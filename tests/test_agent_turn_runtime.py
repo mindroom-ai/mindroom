@@ -29,7 +29,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -56,7 +56,7 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.usage.storage import quote_identifier
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, quote_identifier
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
@@ -73,6 +73,8 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.fakes.summary_model import summary_model
+from tests.history_helpers import RecordingCompactionLifecycle
 from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
@@ -194,18 +196,26 @@ def _reply(
     capabilities: Capabilities | None = None,
     plugins: Sequence[object] = (),
     max_tool_calls_per_turn: int | None = None,
+    context_window: int | None = None,
 ) -> _Reply:
-    """Build the reply of a one-agent config whose model is the scripted provider."""
+    """Build the reply of a one-agent config whose model is the scripted provider.
+
+    A ``context_window`` turns on compaction with a ``summary`` model, which the test supplies.
+    """
     agent: dict[str, Any] = {"display_name": "Assistant", "role": "Answer questions.", "tools": list(tools)}
     if max_tool_calls_per_turn is not None:
         agent["max_tool_calls_per_turn"] = max_tool_calls_per_turn
-    authored = {
+    authored: dict[str, Any] = {
         "defaults": {"tools": []},
         "agents": {"assistant": agent},
         "memory": {"backend": "none"},
         "models": {"default": {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}}},
         "timezone": "UTC",
     }
+    if context_window is not None:
+        authored["models"]["default"]["context_window"] = context_window
+        authored["models"]["summary"] = {"provider": "openai", "id": "summary-model", "context_window": 100_000}
+        authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     if approval_rules:
@@ -268,7 +278,7 @@ async def _stream(
         run_id=run_id,
         **{
             k: kwargs.pop(k)
-            for k in ("participation", "skill_review_capture", "scheduled_history_budget")
+            for k in ("participation", "skill_review_capture", "scheduled_history_budget", "matrix_run_metadata")
             if k in kwargs
         },
     )
@@ -872,6 +882,42 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
     else:
         assert bound["session"] is None
         assert bound["scope"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlier_fold_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A fold during the reply reaches its notices and its turn recorder through the owned summarizer.
+
+    The run's metadata keeps what the turn seeded but none of the folded usage of the run it follows.
+    """
+    del probe
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), answer("done")],
+        context_window=4000,
+    )
+    summarizer = summary_model("SUMMARY")
+    monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summarizer)
+    lifecycle = RecordingCompactionLifecycle()
+    seeded = {COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}], "room_topic": "kept"}
+
+    chunks = await _stream(reply, compaction_lifecycle=lifecycle, matrix_run_metadata=seeded)
+
+    assert _text(chunks) == "done"
+    assert len(summarizer.requests) == 1
+    assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
+    # An interrupted record of this run would leave out the calls the fold summarized.
+    assert "call_1" in reply.recorder.folded_tool_call_ids
+    metadata = _stored(reply).metadata
+    assert metadata is not None
+    assert metadata["room_topic"] == "kept"
+    assert [request["metrics"]["input_tokens"] for request in metadata[COMPACTED_REQUESTS_METADATA_KEY]] == [1_000_000]
 
 
 @pytest.mark.asyncio
