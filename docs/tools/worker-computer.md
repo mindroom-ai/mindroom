@@ -139,9 +139,9 @@ Expose only this gateway; the worker's display has no public listener.
 
 ## Watch, take control, and resume
 
-<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
-  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/f22ef271-53a8-4000-950c-28b2344de13b" data-poster-light="https://github.com/user-attachments/assets/f22ef271-53a8-4000-950c-28b2344de13b" data-poster-dark="https://github.com/user-attachments/assets/be8be64a-6b82-453f-b294-c888bc8bcda0">
+  <source src="https://github.com/user-attachments/assets/5fc87c49-f21b-4a23-8eeb-d66becd2289c" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/db2b13b5-35c0-4b15-bbc9-93dec148f666" type="video/mp4">
 </video>
 
 - **Watch** shows the browser without input rights.
