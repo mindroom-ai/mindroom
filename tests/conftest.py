@@ -31,7 +31,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
@@ -3036,6 +3036,11 @@ def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
 
 
+def _refuse_connection(request: httpx.Request) -> NoReturn:
+    message = "network disabled in tests"
+    raise httpx.ConnectError(message, request=request)
+
+
 @pytest.fixture(autouse=True)
 def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep bot startup and room creation from fetching stock avatars over the network.
@@ -3045,15 +3050,9 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     async def offline(url: str) -> bytes:
-        message = "network disabled in tests"
-        raise httpx.ConnectError(message, request=httpx.Request("GET", url))
+        _refuse_connection(httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
-
-
-def _refuse_connection(request: httpx.Request) -> httpx.Response:
-    message = "network disabled in tests"
-    raise httpx.ConnectError(message, request=request)
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.
@@ -3236,8 +3235,8 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
 
     The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
     is recorded and checked here. This covers clients built on httpx and httpx2, which include the
-    model and embedder SDKs. Raw sockets, aiohttp and requests are not covered; tiktoken, for one,
-    downloads its encodings through requests when its cache is cold.
+    OpenAI, Anthropic, and Ollama SDKs. Raw sockets, aiohttp, and requests are not covered: google-genai's
+    async path uses aiohttp, and tiktoken downloads its encodings through requests when its cache is cold.
     """
     start = len(_refused_dials)
     yield
