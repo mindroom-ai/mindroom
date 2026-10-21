@@ -1,0 +1,173 @@
+{
+  "agent_code:run-text.messages[1].metrics": {
+    "input_tokens": 120,
+    "output_tokens": 8,
+    "total_tokens": 128,
+    "cache_read_tokens": 100,
+    "cache_write_tokens": 20,
+    "reasoning_tokens": 3,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-tools.messages[1].metrics": {
+    "input_tokens": 150,
+    "output_tokens": 12,
+    "total_tokens": 162,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-tools.messages[3].metrics": {
+    "input_tokens": 170,
+    "output_tokens": 14,
+    "total_tokens": 184
+  },
+  "agent_code:run-tools.messages[6].metrics": {
+    "input_tokens": 190,
+    "output_tokens": 20,
+    "total_tokens": 210,
+    "cache_read_tokens": 150,
+    "reasoning_tokens": 6,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-media.messages[1].metrics": {
+    "input_tokens": 300,
+    "output_tokens": 15,
+    "total_tokens": 315,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-view.messages[1].metrics": {
+    "input_tokens": 210,
+    "output_tokens": 9,
+    "total_tokens": 219
+  },
+  "agent_code:run-view.messages[4].metrics": {
+    "input_tokens": 260,
+    "output_tokens": 10,
+    "total_tokens": 270,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-paused-approval.messages[2].metrics": {
+    "input_tokens": 240,
+    "output_tokens": 7,
+    "total_tokens": 247,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-paused-delegation.messages[2].metrics": {
+    "input_tokens": 310,
+    "output_tokens": 11,
+    "total_tokens": 321
+  },
+  "agent_code:run-native-cancelled.messages[1].metrics": {
+    "input_tokens": 140,
+    "output_tokens": 4,
+    "total_tokens": 144
+  },
+  "agent_code:run-c1.messages[1].metrics": {
+    "input_tokens": 101,
+    "output_tokens": 1,
+    "total_tokens": 102,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-c2.messages[1].metrics": {
+    "input_tokens": 102,
+    "output_tokens": 2,
+    "total_tokens": 104,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-c3.messages[1].metrics": {
+    "input_tokens": 103,
+    "output_tokens": 3,
+    "total_tokens": 106,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:run-c5.messages[1].metrics": {
+    "input_tokens": 180,
+    "output_tokens": 8,
+    "total_tokens": 188
+  },
+  "agent_code:run-c5.messages[3].metrics": {
+    "input_tokens": 200,
+    "output_tokens": 6,
+    "total_tokens": 206,
+    "time_to_first_token": 0.25
+  },
+  "agent_code:segment:2.messages[0].metrics": {
+    "input_tokens": 180,
+    "output_tokens": 8,
+    "total_tokens": 188
+  },
+  "agent_helper:00000000000000000000000000000003.messages[2].metrics": {
+    "input_tokens": 90,
+    "output_tokens": 5,
+    "total_tokens": 95
+  },
+  "team_squad:00000000-0000-4000-8000-000000000037.messages[1].metrics": {
+    "input_tokens": 80,
+    "output_tokens": 4,
+    "total_tokens": 84
+  },
+  "team_squad:00000000-0000-4000-8000-000000000037.messages[3].metrics": {
+    "input_tokens": 95,
+    "output_tokens": 1,
+    "total_tokens": 96,
+    "time_to_first_token": 0.25
+  },
+  "team_squad:team-completed.messages[1].metrics": {
+    "input_tokens": 400,
+    "output_tokens": 12,
+    "total_tokens": 412
+  },
+  "team_squad:team-completed.messages[3].metrics": {
+    "input_tokens": 450,
+    "output_tokens": 9,
+    "total_tokens": 459,
+    "time_to_first_token": 0.25
+  },
+  "team_squad:team-member-error.messages[1].metrics": {
+    "input_tokens": 420,
+    "output_tokens": 12,
+    "total_tokens": 432
+  },
+  "team_squad:team-member-error.messages[3].metrics": {
+    "input_tokens": 470,
+    "output_tokens": 8,
+    "total_tokens": 478,
+    "time_to_first_token": 0.25
+  },
+  "team_squad:00000000-0000-4000-8000-000000000046.messages[2].metrics": {
+    "input_tokens": 85,
+    "output_tokens": 5,
+    "total_tokens": 90
+  },
+  "team_squad:team-paused.messages[2].metrics": {
+    "input_tokens": 430,
+    "output_tokens": 12,
+    "total_tokens": 442
+  },
+  "team_squad:team-paused.member_responses[0].messages[2].metrics": {
+    "input_tokens": 85,
+    "output_tokens": 5,
+    "total_tokens": 90
+  },
+  "team_panel:00000000-0000-4000-8000-00000000004f.messages[1].metrics": {
+    "input_tokens": 60,
+    "output_tokens": 3,
+    "total_tokens": 63,
+    "time_to_first_token": 0.25
+  },
+  "team_panel:00000000-0000-4000-8000-000000000052.messages[1].metrics": {
+    "input_tokens": 61,
+    "output_tokens": 3,
+    "total_tokens": 64,
+    "time_to_first_token": 0.25
+  },
+  "team_panel:panel-completed.messages[1].metrics": {
+    "input_tokens": 380,
+    "output_tokens": 10,
+    "total_tokens": 390
+  },
+  "team_panel:panel-completed.messages[3].metrics": {
+    "input_tokens": 410,
+    "output_tokens": 7,
+    "total_tokens": 417,
+    "time_to_first_token": 0.25
+  }
+}

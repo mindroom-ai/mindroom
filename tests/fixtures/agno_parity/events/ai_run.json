@@ -1,0 +1,562 @@
+{
+  "run-text": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-text",
+      "session_id": "!room:example.org:$conversation",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 120,
+        "output_tokens": 8,
+        "total_tokens": 128,
+        "cache_read_tokens": 100,
+        "cache_write_tokens": 20,
+        "reasoning_tokens": 3,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 120,
+        "window_tokens": 200000,
+        "cache_read_input_tokens": 100,
+        "uncached_input_tokens": 20,
+        "cache_write_input_tokens": 20
+      },
+      "prepared_context": {
+        "tokens": 4299
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "missing_session",
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 0
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-tools": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-tools",
+      "session_id": "!room:example.org:$conversation",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 510,
+        "output_tokens": 46,
+        "total_tokens": 556,
+        "cache_read_tokens": 150,
+        "reasoning_tokens": 6,
+        "time_to_first_token": "0.25",
+        "duration": "0.5",
+        "cache_write_tokens": 0
+      },
+      "context": {
+        "input_tokens": 190,
+        "window_tokens": 200000,
+        "cache_read_input_tokens": 150,
+        "uncached_input_tokens": 40
+      },
+      "prepared_context": {
+        "tokens": 4332
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 27,
+        "trigger_budget_tokens": 155695,
+        "hard_budget_tokens": 179311,
+        "fitted_replay_tokens": 27,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 27
+        }
+      },
+      "tools": {
+        "count": 3
+      }
+    }
+  },
+  "run-media": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-media",
+      "session_id": "!room:example.org:$conversation",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 300,
+        "output_tokens": 15,
+        "total_tokens": 315,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 300,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4479
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 176,
+        "trigger_budget_tokens": 155697,
+        "hard_budget_tokens": 179313,
+        "fitted_replay_tokens": 176,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 176
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-view": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-view",
+      "session_id": "!room:example.org:$conversation",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 470,
+        "output_tokens": 19,
+        "total_tokens": 489,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 470,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4518
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 218,
+        "trigger_budget_tokens": 155700,
+        "hard_budget_tokens": 179316,
+        "fitted_replay_tokens": 218,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 218
+        }
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "run-error": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-error",
+      "session_id": "!room:example.org:$conversation",
+      "status": "error",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 9647,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 9647
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 5346,
+        "trigger_budget_tokens": 155699,
+        "hard_budget_tokens": 179315,
+        "fitted_replay_tokens": 5346,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 5346
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-c1": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-c1",
+      "session_id": "!room:example.org:$compacted",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 101,
+        "output_tokens": 1,
+        "total_tokens": 102,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 101,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4299
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "missing_session",
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 0
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-c2": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-c2",
+      "session_id": "!room:example.org:$compacted",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 102,
+        "output_tokens": 2,
+        "total_tokens": 104,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 102,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4325
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 26,
+        "trigger_budget_tokens": 155701,
+        "hard_budget_tokens": 179317,
+        "fitted_replay_tokens": 26,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 26
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-c3": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-c3",
+      "session_id": "!room:example.org:$compacted",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 103,
+        "output_tokens": 3,
+        "total_tokens": 106,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 103,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4351
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 52,
+        "trigger_budget_tokens": 155701,
+        "hard_budget_tokens": 179317,
+        "fitted_replay_tokens": 52,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 52
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-c4": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-c4",
+      "session_id": "!room:example.org:$compacted",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 104,
+        "output_tokens": 4,
+        "total_tokens": 108,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 104,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4377
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 78,
+        "trigger_budget_tokens": 155701,
+        "hard_budget_tokens": 179317,
+        "fitted_replay_tokens": 78,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 78
+        }
+      },
+      "tools": {
+        "count": 0
+      }
+    }
+  },
+  "run-c5": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-c5",
+      "session_id": "!room:example.org:$compacted",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 380,
+        "output_tokens": 14,
+        "total_tokens": 394,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 380,
+        "window_tokens": 200000
+      },
+      "prepared_context": {
+        "tokens": 4405
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 106,
+        "trigger_budget_tokens": 155701,
+        "hard_budget_tokens": 179317,
+        "fitted_replay_tokens": 106,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 106
+        }
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "team-completed": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "team-completed",
+      "session_id": "!room:example.org:$squad",
+      "status": "completed",
+      "model": {
+        "config": "leader",
+        "id": "leader-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 1025,
+        "output_tokens": 26,
+        "total_tokens": 1051,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 1025,
+        "window_tokens": 100000
+      },
+      "prepared_context": {
+        "tokens": 2106
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "missing_session",
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 0
+        }
+      },
+      "tools": {
+        "count": 2
+      }
+    }
+  },
+  "team-member-error": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "team-member-error",
+      "session_id": "!room:example.org:$squad",
+      "status": "completed",
+      "model": {
+        "config": "leader",
+        "id": "leader-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 890,
+        "output_tokens": 20,
+        "total_tokens": 910,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 890,
+        "window_tokens": 100000
+      },
+      "prepared_context": {
+        "tokens": 2179
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "under_trigger",
+        "current_history_tokens": 71,
+        "trigger_budget_tokens": 77892,
+        "hard_budget_tokens": 81508,
+        "fitted_replay_tokens": 71,
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 71
+        }
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "panel-completed": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "panel-completed",
+      "session_id": "!room:example.org:$panel",
+      "status": "completed",
+      "model": {
+        "config": "leader",
+        "id": "leader-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 911,
+        "output_tokens": 23,
+        "total_tokens": 934,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 911,
+        "window_tokens": 100000
+      },
+      "prepared_context": {
+        "tokens": 2049
+      },
+      "compaction": {
+        "decision": "none",
+        "outcome": "none",
+        "reason": "missing_session",
+        "replay_plan": {
+          "mode": "configured",
+          "estimated_tokens": 0
+        }
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  }
+}

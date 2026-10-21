@@ -1,0 +1,995 @@
+{
+  "store": "team_panel",
+  "session_id": "!room:example.org:$panel",
+  "get_messages": {
+    "all": {
+      "params": {},
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "last_run": {
+      "params": {
+        "last_n_runs": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "last_two_runs": {
+      "params": {
+        "last_n_runs": 2
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "no_runs": {
+      "params": {
+        "last_n_runs": 0
+      },
+      "messages": []
+    },
+    "limit_1": {
+      "params": {
+        "limit": 1
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "limit_3": {
+      "params": {
+        "limit": 3
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "limit_4": {
+      "params": {
+        "limit": 4
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "last_three_runs_limit_5": {
+      "params": {
+        "last_n_runs": 3,
+        "limit": 5
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "skip_prompt_roles": {
+      "params": {
+        "skip_roles": [
+          "system",
+          "developer"
+        ]
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "every_status_limit_6": {
+      "params": {
+        "skip_statuses": [],
+        "limit": 6
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "every_status": {
+      "params": {
+        "skip_statuses": []
+      },
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": false,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    }
+  },
+  "filter_tool_calls": {
+    "all/max_tool_calls_0": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 0,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "all/max_tool_calls_1": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "all/max_tool_calls_2": {
+      "selection": "all",
+      "copy": "copy_history_message",
+      "max_tool_calls": 2,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    },
+    "every_status/max_tool_calls_1": {
+      "selection": "every_status",
+      "copy": "copy_history_message",
+      "max_tool_calls": 1,
+      "messages": [
+        {
+          "id": "00000000-0000-4000-8000-000000000055",
+          "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "user",
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000056",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call-panel",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_members",
+                "arguments": "{\"task\": \"Give one fact about the number 5.\"}"
+              }
+            }
+          ],
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 380,
+            "output_tokens": 10,
+            "total_tokens": 390
+          },
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000057",
+          "content": "Five is prime.Five is odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "tool",
+          "tool_call_id": "call-panel",
+          "tool_name": "delegate_task_to_members",
+          "tool_args": {
+            "task": "Give one fact about the number 5."
+          },
+          "tool_call_error": false,
+          "created_at": 1800001260
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000058",
+          "content": "Five is prime and odd.",
+          "from_history": true,
+          "stop_after_tool_call": false,
+          "role": "assistant",
+          "provider_data": {
+            "mindroom_model": {
+              "id": "leader-model",
+              "provider": "Synthetic"
+            }
+          },
+          "metrics": {
+            "input_tokens": 410,
+            "output_tokens": 7,
+            "total_tokens": 417,
+            "time_to_first_token": 0.25
+          },
+          "created_at": 1800001260
+        }
+      ]
+    }
+  }
+}

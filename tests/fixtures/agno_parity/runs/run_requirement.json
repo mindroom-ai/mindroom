@@ -1,0 +1,208 @@
+{
+  "agent_code:run-paused-approval.requirements[0]": {
+    "id": "00000000-0000-4000-8000-00000000001e",
+    "created_at": "2027-01-15T08:07:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800000420,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  },
+  "agent_code:run-paused-delegation.requirements[0]": {
+    "id": "00000000-0000-4000-8000-000000000022",
+    "created_at": "2027-01-15T08:08:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call-delegate",
+      "tool_name": "run_subagent",
+      "tool_args": {
+        "agent_name": "helper",
+        "task": "Multiply 6 by 7"
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800000480,
+      "requires_confirmation": null,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": true,
+      "external_execution_silent": true,
+      "approval_type": null,
+      "approval_id": null
+    }
+  },
+  "agent_code:run-paused-delegation.metadata.mindroom_delegation.pending_requirements[0]": {
+    "id": "00000000-0000-4000-8000-000000000023",
+    "created_at": "2027-01-15T08:08:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "00000000000000000000000000000002:call-helper-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800000480,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  },
+  "agent_helper:00000000000000000000000000000003.requirements[0]": {
+    "id": "00000000-0000-4000-8000-000000000036",
+    "created_at": "2027-01-15T08:08:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call-helper-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800000480,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  },
+  "team_squad:00000000-0000-4000-8000-000000000046.requirements[0]": {
+    "id": "00000000-0000-4000-8000-00000000004a",
+    "created_at": "2027-01-15T08:20:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call-checker-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800001200,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  },
+  "team_squad:team-paused.requirements[0]": {
+    "id": "00000000-0000-4000-8000-00000000004a",
+    "created_at": "2027-01-15T08:20:00+00:00",
+    "member_agent_id": "checker",
+    "member_agent_name": "Checker",
+    "member_run_id": "00000000-0000-4000-8000-000000000046",
+    "tool_execution": {
+      "tool_call_id": "call-checker-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800001200,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  },
+  "team_squad:team-paused.member_responses[0].requirements[0]": {
+    "id": "00000000-0000-4000-8000-00000000004a",
+    "created_at": "2027-01-15T08:20:00+00:00",
+    "tool_execution": {
+      "tool_call_id": "call-checker-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+        "a": 6,
+        "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "metrics": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "created_at": 1800001200,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "requires_user_input": null,
+      "user_input_schema": null,
+      "user_feedback_schema": null,
+      "answered": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy",
+      "approval_id": null
+    }
+  }
+}

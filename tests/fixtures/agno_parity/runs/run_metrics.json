@@ -1,0 +1,411 @@
+{
+  "agent_code:run-text.metrics": {
+    "input_tokens": 120,
+    "output_tokens": 8,
+    "total_tokens": 128,
+    "cache_read_tokens": 100,
+    "cache_write_tokens": 20,
+    "reasoning_tokens": 3,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 120,
+          "output_tokens": 8,
+          "total_tokens": 128,
+          "cache_read_tokens": 100,
+          "cache_write_tokens": 20,
+          "reasoning_tokens": 3,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-tools.metrics": {
+    "input_tokens": 510,
+    "output_tokens": 46,
+    "total_tokens": 556,
+    "cache_read_tokens": 150,
+    "reasoning_tokens": 6,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 510,
+          "output_tokens": 46,
+          "total_tokens": 556,
+          "cache_read_tokens": 150,
+          "reasoning_tokens": 6,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-media.metrics": {
+    "input_tokens": 300,
+    "output_tokens": 15,
+    "total_tokens": 315,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 300,
+          "output_tokens": 15,
+          "total_tokens": 315,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-view.metrics": {
+    "input_tokens": 470,
+    "output_tokens": 19,
+    "total_tokens": 489,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 470,
+          "output_tokens": 19,
+          "total_tokens": 489,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-paused-approval.metrics": {
+    "input_tokens": 240,
+    "output_tokens": 7,
+    "total_tokens": 247,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 240,
+          "output_tokens": 7,
+          "total_tokens": 247,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-paused-delegation.metrics": {
+    "input_tokens": 310,
+    "output_tokens": 11,
+    "total_tokens": 321,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 310,
+          "output_tokens": 11,
+          "total_tokens": 321,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-native-error.metrics": {
+    "duration": 0.5
+  },
+  "agent_code:run-native-cancelled.metrics": {
+    "input_tokens": 140,
+    "output_tokens": 4,
+    "total_tokens": 144,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 140,
+          "output_tokens": 4,
+          "total_tokens": 144,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-c1.metrics": {
+    "input_tokens": 101,
+    "output_tokens": 1,
+    "total_tokens": 102,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 101,
+          "output_tokens": 1,
+          "total_tokens": 102,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-c2.metrics": {
+    "input_tokens": 102,
+    "output_tokens": 2,
+    "total_tokens": 104,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 102,
+          "output_tokens": 2,
+          "total_tokens": 104,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-c3.metrics": {
+    "input_tokens": 103,
+    "output_tokens": 3,
+    "total_tokens": 106,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 103,
+          "output_tokens": 3,
+          "total_tokens": 106,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-c5.metrics": {
+    "input_tokens": 380,
+    "output_tokens": 14,
+    "total_tokens": 394,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 380,
+          "output_tokens": 14,
+          "total_tokens": 394,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_helper:00000000000000000000000000000003.metrics": {
+    "input_tokens": 90,
+    "output_tokens": 5,
+    "total_tokens": 95,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 90,
+          "output_tokens": 5,
+          "total_tokens": 95,
+          "id": "helper-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:00000000-0000-4000-8000-000000000037.metrics": {
+    "input_tokens": 175,
+    "output_tokens": 5,
+    "total_tokens": 180,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 175,
+          "output_tokens": 5,
+          "total_tokens": 180,
+          "id": "writer-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:team-completed.metrics": {
+    "input_tokens": 850,
+    "output_tokens": 21,
+    "total_tokens": 871,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 850,
+          "output_tokens": 21,
+          "total_tokens": 871,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:00000000-0000-4000-8000-000000000040.metrics": {
+    "duration": 0.5
+  },
+  "team_squad:team-member-error.metrics": {
+    "input_tokens": 890,
+    "output_tokens": 20,
+    "total_tokens": 910,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 890,
+          "output_tokens": 20,
+          "total_tokens": 910,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:00000000-0000-4000-8000-000000000046.metrics": {
+    "input_tokens": 85,
+    "output_tokens": 5,
+    "total_tokens": 90,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 85,
+          "output_tokens": 5,
+          "total_tokens": 90,
+          "id": "checker-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:team-paused.metrics": {
+    "input_tokens": 430,
+    "output_tokens": 12,
+    "total_tokens": 442,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 430,
+          "output_tokens": 12,
+          "total_tokens": 442,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:team-paused.member_responses[0].metrics": {
+    "input_tokens": 85,
+    "output_tokens": 5,
+    "total_tokens": 90,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 85,
+          "output_tokens": 5,
+          "total_tokens": 90,
+          "id": "checker-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_panel:00000000-0000-4000-8000-00000000004f.metrics": {
+    "input_tokens": 60,
+    "output_tokens": 3,
+    "total_tokens": 63,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 60,
+          "output_tokens": 3,
+          "total_tokens": 63,
+          "id": "writer-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_panel:00000000-0000-4000-8000-000000000052.metrics": {
+    "input_tokens": 61,
+    "output_tokens": 3,
+    "total_tokens": 64,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 61,
+          "output_tokens": 3,
+          "total_tokens": 64,
+          "id": "checker-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_panel:panel-completed.metrics": {
+    "input_tokens": 790,
+    "output_tokens": 17,
+    "total_tokens": 807,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 790,
+          "output_tokens": 17,
+          "total_tokens": 807,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agno2_migrated:run-1.metrics": {
+    "input_tokens": 1,
+    "output_tokens": 1,
+    "total_tokens": 2
+  },
+  "agno2_migrated:run-2.metrics": {
+    "input_tokens": 2,
+    "output_tokens": 2,
+    "total_tokens": 4
+  },
+  "agno2_migrated:run-3.metrics": {
+    "input_tokens": 3,
+    "output_tokens": 3,
+    "total_tokens": 6
+  }
+}
