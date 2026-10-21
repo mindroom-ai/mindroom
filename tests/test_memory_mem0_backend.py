@@ -205,10 +205,14 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
     failure_detail = "embedder authentication failed (HTTP 401)"
 
     class FailingEmbedder:
-        def get_embedding(self, _text: str) -> list[float]:
+        sends_batches = True
+
+        def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+            del purpose
             raise EmbedderRequestError(failure_detail)
 
-        def get_embeddings_batch(self, _texts: list[str]) -> list[list[float]]:
+        async def aembed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+            del purpose
             raise EmbedderRequestError(failure_detail)
 
     class SwallowingMemory:

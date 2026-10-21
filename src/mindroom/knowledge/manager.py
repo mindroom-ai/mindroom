@@ -560,7 +560,9 @@ class KnowledgeManager:
             # must construct no embedder at all. Deferring puts the cost only
             # where a handle is really built -- for a cleanup sweep, once per
             # collection it actually deletes, and nothing when it deletes none.
-            embedder_factory=lambda: create_configured_embedder(self.config, self.runtime_paths),
+            embedder_factory=lambda: BatchPrefetchEmbedder(
+                inner=create_configured_embedder(self.config, self.runtime_paths),
+            ),
         )
         persisted_state = load_published_index_state(self._indexing_settings_path)
         if not _semantic_indexing_enabled(self.config, self.base_id):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 from contextlib import closing
 from dataclasses import asdict, dataclass
@@ -17,8 +16,7 @@ from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
-
+    from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
 
 logger = get_logger(__name__)
@@ -90,7 +88,7 @@ class ChromaReadProxy:
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
         """Embed under the caller's credentials, then query outside this process."""
-        embedding = self.embedder.get_embedding(query)
+        embedding = self.embedder.embed([query], purpose="query")[0]
         result = read_chroma(
             ReadRequest(
                 path=self.path,
@@ -115,10 +113,7 @@ class ChromaReadProxy:
         """Start native imports while the parent obtains the query embedding."""
 
         async def prepare_request() -> ReadRequest:
-            try:
-                embedding = await self.embedder.async_get_embedding(query)
-            except NotImplementedError:
-                embedding = await asyncio.to_thread(self.embedder.get_embedding, query)
+            embedding = (await self.embedder.aembed([query], purpose="query"))[0]
             return ReadRequest(
                 path=self.path,
                 collection=self.collection_name,

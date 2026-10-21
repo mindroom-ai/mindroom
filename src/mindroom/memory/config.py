@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings.factory import resolve_embedder_settings
@@ -24,24 +24,17 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder, EmbeddingPurpose
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
-
-
-class _StrictOpenAIEmbedder(Protocol):
-    def get_embedding(self, text: str) -> list[float]: ...
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]: ...
-
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]: ...
 
 
 @dataclass
 class _Mem0StrictOpenAIEmbedder:
     """Adapt MindRoom's strict OpenAI embedder to Mem0's embedding interface."""
 
-    embedder: _StrictOpenAIEmbedder
+    embedder: Embedder
     _operation_failure: Exception | None = field(default=None, init=False, repr=False)
 
     def _remember_operation_failure(self, exc: Exception) -> None:
@@ -67,9 +60,8 @@ class _Mem0StrictOpenAIEmbedder:
         text = text.replace("\n", " ")
         try:
             # Stored memories are documents; anything else is a search query.
-            if memory_action in {"add", "update"}:
-                return self.embedder.get_embedding_and_usage(text)[0]
-            return self.embedder.get_embedding(text)
+            purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
+            return self.embedder.embed([text], purpose=purpose)[0]
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
@@ -81,7 +73,7 @@ class _Mem0StrictOpenAIEmbedder:
     ) -> list[list[float]]:
         del memory_action
         try:
-            return self.embedder.get_embeddings_batch([text.replace("\n", " ") for text in texts])
+            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose="document")
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
@@ -296,7 +288,7 @@ async def create_memory_instance(
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
         from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
-        strict_embedder = cast("_StrictOpenAIEmbedder", create_configured_embedder(config, runtime_paths))
+        strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
     _install_chroma_similarity_scores(memory.vector_store)
 

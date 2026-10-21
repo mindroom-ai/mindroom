@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from threading import Event
 from typing import TYPE_CHECKING
 
@@ -36,11 +36,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-@dataclass
-class _Embedder(Embedder):
-    def get_embedding(self, text: str) -> list[float]:
-        del text
-        return [1.0, 0.0]
+class _Embedder:
+    sends_batches = False
+
+    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        return [[1.0, 0.0] for _text in texts]
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture
@@ -52,7 +56,7 @@ def publication(
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=paths)
-    space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key), _Embedder)
+    space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key), Embedder)
     collection = _publish(space, key, "original")
     state = state_for_publication(
         settings=key.indexing_settings,

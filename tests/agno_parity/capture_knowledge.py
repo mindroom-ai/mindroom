@@ -4,6 +4,7 @@ Run ``.venv/bin/python -m tests.agno_parity.capture_knowledge`` from the reposit
 ``tests/fixtures/agno_parity/knowledge/``.
 Every embedder request is answered by a mock transport or a fake model, refreshes run against a real Chroma store in a
 temporary directory, and searches run through Agno's own ``search_knowledge_base`` tool.
+The owned knowledge code replaced the Agno-backed path this drives, so it runs only on the commit that added it.
 """
 
 from __future__ import annotations

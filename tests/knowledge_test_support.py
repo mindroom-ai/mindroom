@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
 from agno.knowledge.document.base import Document
-from agno.knowledge.embedder.base import Embedder
 
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
@@ -24,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
 
 
@@ -281,18 +281,18 @@ class _Knowledge:
         return self.vector_db.search(query=query, limit=max_results or 5)
 
 
-class _FakeEmbedder(Embedder):
+class _FakeEmbedder:
     """Typed stand-in for the configured embedder; never issues requests."""
 
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
+    sends_batches = False
+
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        _ = (texts, purpose)
         msg = "fake embedder must not be asked for vectors"
         raise AssertionError(msg)
 
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "fake embedder must not be asked for vectors"
-        raise AssertionError(msg)
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture

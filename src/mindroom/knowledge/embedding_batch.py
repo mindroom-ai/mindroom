@@ -22,9 +22,9 @@ changed between planning and insertion, and for query-time embedding.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
-from agno.knowledge.embedder.base import Embedder
+from agno.knowledge.embedder.base import Embedder as AgnoEmbedder
 
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
@@ -39,6 +39,8 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from mindroom.embeddings.base import Embedder
+
 logger = get_logger(__name__)
 
 #: Provider request limits. Both bounds matter: item count keeps a request from
@@ -46,15 +48,6 @@ logger = get_logger(__name__)
 #: chunks from producing a request the provider rejects outright.
 DEFAULT_MAX_EMBEDDING_BATCH_ITEMS = 64
 DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES = 512_000
-
-
-@runtime_checkable
-class _SupportsBatchEmbedding(Protocol):
-    """Embedder surface that can embed several texts in one provider request."""
-
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Return one embedding per input text, in input order."""
-        ...
 
 
 def plan_embedding_batches(
@@ -88,22 +81,17 @@ def plan_embedding_batches(
 
 
 @dataclass
-class BatchPrefetchEmbedder(Embedder):
-    """Embedder that serves prefetched chunk embeddings from a bounded cache."""
+class BatchPrefetchEmbedder(AgnoEmbedder):
+    """Agno embedder for the knowledge write path that serves prefetched chunk embeddings from a bounded cache."""
 
-    inner: Embedder = field(default_factory=Embedder)
+    inner: Embedder = field(kw_only=True)
     _cache: dict[str, list[float]] = field(default_factory=dict, init=False, repr=False)
     _batching_disabled: bool = field(default=False, init=False, repr=False)
     _observed_dimensions: int | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """Mirror the wrapped embedder's dimensions so vector writes stay consistent."""
-        self.dimensions = self.inner.dimensions
-        self.batch_size = self.inner.batch_size
-
     def supports_batching(self) -> bool:
         """Return whether the wrapped embedder can still embed a batch in one request."""
-        return not self._batching_disabled and isinstance(self.inner, _SupportsBatchEmbedding)
+        return not self._batching_disabled and self.inner.sends_batches
 
     def clear_cache(self) -> None:
         """Drop prefetched vectors once their batch has been written."""
@@ -117,9 +105,8 @@ class BatchPrefetchEmbedder(Embedder):
         """Reject a vector that is empty or inconsistent with the ones before it.
 
         Width is checked against the first vector this adapter actually saw,
-        not against ``Embedder.dimensions``: that field is a declared default
-        (agno ships 1536) which real providers routinely contradict, so
-        trusting it would reject correct vectors. Consistency still catches the
+        not against a declared width, which real providers routinely
+        contradict, so trusting it would reject correct vectors. Consistency still catches the
         case that matters here, a provider changing width mid-run.
         """
         if not embedding:
@@ -146,8 +133,7 @@ class BatchPrefetchEmbedder(Embedder):
         cached = 0
         for text in pending:
             try:
-                # Chunks are documents; ``get_embedding`` is the query path, which prompted models embed differently.
-                self._cache[text] = self._validated(self.inner.get_embedding_and_usage(text)[0])
+                self._cache[text] = self._validated(self.inner.embed([text], purpose="document")[0])
             except Exception as exc:
                 if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
                     raise
@@ -179,12 +165,8 @@ class BatchPrefetchEmbedder(Embedder):
             # is never allowed to retire batching.
             return self._embed_each_into_cache(pending)
 
-        inner = self.inner
-        if not isinstance(inner, _SupportsBatchEmbedding):  # pragma: no cover - guarded by supports_batching
-            return self._embed_each_into_cache(pending)
-
         try:
-            embeddings = inner.get_embeddings_batch(list(pending))
+            embeddings = self.inner.embed(pending, purpose="document")
         except Exception as exc:
             if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
                 # Transient faults keep their retry, and everything else
@@ -216,11 +198,11 @@ class BatchPrefetchEmbedder(Embedder):
         logger.warning("Knowledge embedder does not support batching; using one request per chunk", reason=reason)
 
     def get_embedding(self, text: str) -> list[float]:
-        """Return a prefetched embedding, or delegate to the wrapped embedder."""
+        """Return a prefetched embedding, or embed ``text`` as a query."""
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        return self._validated(self.inner.get_embedding(text))
+        return self._validated(self.inner.embed([text], purpose="query")[0])
 
     def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Return a prefetched embedding without usage, or delegate for a miss.
@@ -234,20 +216,18 @@ class BatchPrefetchEmbedder(Embedder):
             return cached, None
         # Validated here too: this is the path Agno's writer uses, so skipping
         # it would let an unusable vector reach the collection.
-        embedding, usage = self.inner.get_embedding_and_usage(text)
-        return self._validated(embedding), usage
+        return self._validated(self.inner.embed([text], purpose="document")[0]), None
 
     async def async_get_embedding(self, text: str) -> list[float]:
         """Async variant of ``get_embedding``."""
         cached = self._cache.get(text)
         if cached is not None:
             return cached
-        return self._validated(await self.inner.async_get_embedding(text))
+        return self._validated((await self.inner.aembed([text], purpose="query"))[0])
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
         """Async variant of ``get_embedding_and_usage``."""
         cached = self._cache.get(text)
         if cached is not None:
             return cached, None
-        embedding, usage = await self.inner.async_get_embedding_and_usage(text)
-        return self._validated(embedding), usage
+        return self._validated((await self.inner.aembed([text], purpose="document"))[0]), None

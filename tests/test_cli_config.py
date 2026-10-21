@@ -4465,9 +4465,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         class _FakeEmbedder:
-            def get_embedding(self, text: str) -> list[float]:
-                assert text == "mindroom doctor embedder check"
-                return [0.1, 0.2, 0.3]
+            def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+                assert texts == ["mindroom doctor embedder check"]
+                assert purpose == "query"
+                return [[0.1, 0.2, 0.3]]
 
         monkeypatch.setattr(
             "mindroom.cli.doctor.create_sentence_transformers_embedder",

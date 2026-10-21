@@ -48,11 +48,17 @@ MAR = datetime(2026, 3, 9, tzinfo=UTC)
 class _HashEmbedder:
     """Deterministic bag-of-words vectors, so related texts land near each other without a model."""
 
-    async def async_get_embedding(self, text: str) -> list[float]:
-        vector = [0.0] * 32
-        for word in text.lower().split():
-            vector[int(hashlib.sha256(word.encode()).hexdigest(), 16) % 32] += 1.0
-        return vector
+    sends_batches = False
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        vectors = []
+        for text in texts:
+            vector = [0.0] * 32
+            for word in text.lower().split():
+                vector[int(hashlib.sha256(word.encode()).hexdigest(), 16) % 32] += 1.0
+            vectors.append(vector)
+        return vectors
 
 
 @pytest_asyncio.fixture

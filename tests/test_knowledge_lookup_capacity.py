@@ -6,12 +6,10 @@ import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.knowledge.embedder.base import Embedder
 from chromadb.api.client import Client
 from chromadb.config import Settings
 
@@ -29,11 +27,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-@dataclass
-class _Embedder(Embedder):
-    def get_embedding(self, text: str) -> list[float]:
-        message = f"An existence lookup must not request an embedding ({len(text)} characters)"
+class _Embedder:
+    sends_batches = False
+
+    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        message = f"An existence lookup must not request a {purpose} embedding ({len(texts)} texts)"
         raise AssertionError(message)
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 async def _wait_until(condition: Callable[[], bool]) -> None:

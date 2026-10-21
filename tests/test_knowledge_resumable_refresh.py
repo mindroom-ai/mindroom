@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 import pytest
 from agno.knowledge.document.base import Document
-from agno.knowledge.embedder.base import Embedder
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -82,6 +81,8 @@ from tests.knowledge_test_support import chroma_get_result, metadata_matches, va
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+
+    from agno.knowledge.embedder.base import Embedder
 
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.indexing_config import IndexingSettings
@@ -358,7 +359,7 @@ def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
 
     monkeypatch.setattr(_FakeVectorDb, "lock", _SignalingLock())
     collection = "concurrent-cleanup"
-    vector_db = _FakeVectorDb(collection=collection, embedder=embedder)
+    vector_db = _FakeVectorDb(collection=collection, embedder=BatchPrefetchEmbedder(inner=embedder))
     _FakeVectorDb.store[collection] = _PausingRecordList(
         [
             _Record(
@@ -409,15 +410,10 @@ class _AutoCreatingFakeKnowledge(_FakeKnowledge):
             vector_db.create()
 
 
-class _RecordingNonBatchEmbedder(Embedder):
-    """Recording embedder with no batch surface at all, like Ollama.
-
-    The absence of ``get_embeddings_batch`` is the point: a boolean flag cannot
-    model it, because the capability check tests for the method's existence.
-    """
+class _RecordingNonBatchEmbedder:
+    """Recording embedder that embeds one text per request, like Ollama."""
 
     def __init__(self) -> None:
-        super().__init__()
         self.batch_requests: list[tuple[str, ...]] = []
         self.single_requests: list[str] = []
         self.embedded_texts: list[str] = []
@@ -429,8 +425,12 @@ class _RecordingNonBatchEmbedder(Embedder):
         #: does not really implement it.
         self.short_batch = False
         #: Raise this on any multi-input call (the classified error the real
-        #: MindRoomOpenAIEmbedder raises for a short response).
+        #: OpenAIEmbedder raises for a short response).
         self.batch_error: BaseException | None = None
+
+    @property
+    def sends_batches(self) -> bool:
+        return False
 
     @property
     def request_count(self) -> int:
@@ -447,28 +447,21 @@ class _RecordingNonBatchEmbedder(Embedder):
             if queued:
                 raise queued.pop(0)
 
-    def get_embedding(self, text: str) -> list[float]:
-        return self.get_embedding_and_usage(text)[0]
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+    def single_request(self, text: str) -> list[float]:
         self.single_requests.append(text)
         self._maybe_fail([text])
         self.embedded_texts.append(text)
-        return [float(len(text)), 1.0], None
+        return [float(len(text)), 1.0]
 
-
-class _RecordingEmbedder(_RecordingNonBatchEmbedder):
-    """Recording embedder that also advertises multi-input support."""
-
-    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+    def batch_request(self, texts: list[str]) -> list[list[float]]:
         if not self.supports_batch:
             msg = "batch embedding is disabled for this test"
             raise AssertionError(msg)
         self.batch_requests.append(tuple(texts))
-        if len(texts) > 1 and self.batch_error is not None:
+        if self.batch_error is not None:
             raise self.batch_error
         embeddings = [[float(len(text)), 1.0] for text in texts]
-        if len(texts) > 1 and self.short_batch:
+        if self.short_batch:
             # A short response is a cardinality fault: it happens before the
             # backend would have reported anything about individual inputs.
             self.embedded_texts.extend(texts[:-1])
@@ -476,6 +469,24 @@ class _RecordingEmbedder(_RecordingNonBatchEmbedder):
         self._maybe_fail(texts)
         self.embedded_texts.extend(texts)
         return embeddings
+
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        if len(texts) == 1:
+            return [self.single_request(texts[0])]
+        assert self.sends_batches, "an embedder without batch requests was sent several texts"
+        return self.batch_request(list(texts))
+
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
+
+
+class _RecordingEmbedder(_RecordingNonBatchEmbedder):
+    """Recording embedder that also sends several texts in one request."""
+
+    @property
+    def sends_batches(self) -> bool:
+        return True
 
 
 def _use_non_batching_embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingNonBatchEmbedder:
@@ -485,19 +496,22 @@ def _use_non_batching_embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingNon
     return plain
 
 
-class _NonBatchingEmbedder(Embedder):
-    """Embedder without a batch surface, to prove the adapter degrades safely."""
+class _NonBatchingEmbedder:
+    """Embedder without batch requests, to prove the adapter degrades safely."""
+
+    sends_batches = False
 
     def __init__(self) -> None:
-        super().__init__()
         self.single_requests: list[str] = []
 
-    def get_embedding(self, text: str) -> list[float]:
-        return self.get_embedding_and_usage(text)[0]
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        (text,) = texts
         self.single_requests.append(text)
-        return [float(len(text)), 1.0], None
+        return [[float(len(text)), 1.0]]
+
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture
@@ -1359,9 +1373,10 @@ def test_batch_prefetch_embedder_degrades_for_providers_without_batching() -> No
 class _QueryPromptedEmbedder(_NonBatchingEmbedder):
     """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
 
-    def get_embedding(self, text: str) -> list[float]:
-        del text
-        return [0.0, 0.0]
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        if purpose == "query":
+            return [[0.0, 0.0] for _text in texts]
+        return super().embed(texts, purpose=purpose)
 
 
 def test_batch_prefetch_embeds_chunks_as_documents() -> None:
@@ -2303,8 +2318,8 @@ def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
     widening.supports_batch = False
     adapter = BatchPrefetchEmbedder(inner=widening)
     assert adapter.embed_batch_into_cache(["one"]) == 1
-    original_get = widening.get_embedding_and_usage
-    widening.get_embedding_and_usage = lambda text: ([*original_get(text)[0], 9.0], None)  # type: ignore[method-assign]
+    original_single = widening.single_request
+    widening.single_request = lambda text: [*original_single(text), 9.0]  # type: ignore[method-assign]
     # Validation guards the path Agno's writer uses, so a widened vector cannot
     # reach the collection even though prefetch treats its own faults as best effort.
     with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
@@ -2315,7 +2330,7 @@ def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
     """An empty vector is never cached, whatever path produced it."""
     inner = _RecordingEmbedder()
     inner.supports_batch = False
-    inner.get_embedding_and_usage = lambda _text: ([], None)  # type: ignore[method-assign]
+    inner.single_request = lambda _text: []  # type: ignore[method-assign]
     adapter = BatchPrefetchEmbedder(inner=inner)
 
     assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"
@@ -2512,7 +2527,7 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
     _write_corpus(docs_path, 12)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
-    original_batch = _RecordingEmbedder.get_embeddings_batch
+    original_batch = _RecordingEmbedder.batch_request
     calls = {"count": 0}
 
     def _short_after_first_batch(self: _RecordingEmbedder, texts: list[str]) -> list[list[float]]:
@@ -2521,7 +2536,7 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
         self.short_batch = calls["count"] > 1
         return original_batch(self, texts)
 
-    monkeypatch.setattr(_RecordingEmbedder, "get_embeddings_batch", _short_after_first_batch)
+    monkeypatch.setattr(_RecordingEmbedder, "batch_request", _short_after_first_batch)
 
     assert (await _manager(config).reindex_all()).indexed_count == 12
 
@@ -2685,7 +2700,7 @@ async def test_globally_failing_embedder_stops_a_non_batching_refresh(
 ) -> None:
     """A rejected credential must stop the pass even with no batch surface.
 
-    Providers without ``get_embeddings_batch`` skip prefetch entirely, so the
+    Providers without batch requests skip prefetch entirely, so the
     batch-path stop never runs and every remaining file issued the same doomed
     request.
     """

@@ -8,7 +8,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from threading import Event
 from typing import TYPE_CHECKING
 
@@ -16,7 +15,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
-from agno.knowledge.embedder.base import Embedder
 from chromadb.api.client import Client
 from chromadb.config import Settings
 
@@ -29,11 +27,15 @@ from mindroom.knowledge.read_proxy import ChromaReadProxy
 from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
 
 
-@dataclass
-class _Embedder(Embedder):
-    def get_embedding(self, text: str) -> list[float]:
-        assert text == "alpha"
-        return [1.0, 0.0]
+class _Embedder:
+    sends_batches = False
+
+    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        assert (texts, purpose) == (["alpha"], "query")
+        return [[1.0, 0.0]]
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture
@@ -259,9 +261,9 @@ async def test_embedding_failure_reaps_started_child(
 ) -> None:
     """Provider errors stay in the parent and clean up the child started during embedding."""
 
-    class FailingEmbedder(Embedder):
-        def get_embedding(self, text: str) -> list[float]:
-            assert text == "alpha"
+    class FailingEmbedder(_Embedder):
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+            assert (texts, purpose) == (["alpha"], "query")
             message = "embedding credentials expired"
             raise PermissionError(message)
 
@@ -281,12 +283,12 @@ async def test_async_embedding_overlaps_child_startup(
     embedding_started = asyncio.Event()
     release_embedding = asyncio.Event()
 
-    class BlockingEmbedder(Embedder):
-        async def async_get_embedding(self, text: str) -> list[float]:
-            assert text == "alpha"
+    class BlockingEmbedder(_Embedder):
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+            assert (texts, purpose) == (["alpha"], "query")
             embedding_started.set()
             await release_embedding.wait()
-            return [1.0, 0.0]
+            return [[1.0, 0.0]]
 
     proxy = ChromaReadProxy("published", str(published_index), BlockingEmbedder())
     task = asyncio.create_task(proxy.async_search("alpha", limit=1))
@@ -309,12 +311,12 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
     """Cancelled provider requests must not leave children or consume reader slots."""
     embedding_started = asyncio.Event()
 
-    class BlockingEmbedder(Embedder):
-        async def async_get_embedding(self, text: str) -> list[float]:
-            assert text == "alpha"
+    class BlockingEmbedder(_Embedder):
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+            assert (texts, purpose) == (["alpha"], "query")
             embedding_started.set()
             await asyncio.Event().wait()
-            return [1.0, 0.0]
+            return [[1.0, 0.0]]
 
     for _ in range(5):
         embedding_started.clear()
@@ -349,7 +351,7 @@ async def test_stalled_embedding_deadline_reaps_child(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_sync_embedder_fallback_reaps_child_before_provider_returns(
+async def test_cancelled_threaded_embedder_reaps_child_before_provider_returns(
     published_index: Path,
     capture_read_processes: list[subprocess.Popen[bytes]],
 ) -> None:
@@ -358,12 +360,17 @@ async def test_cancelled_sync_embedder_fallback_reaps_child_before_provider_retu
     release = Event()
     loop = asyncio.get_running_loop()
 
-    class BlockingEmbedder(Embedder):
-        def get_embedding(self, text: str) -> list[float]:
-            assert text == "alpha"
+    class BlockingEmbedder(_Embedder):
+        """Embeds on a worker thread, as local models do, so the provider call cannot be cancelled."""
+
+        def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+            assert (texts, purpose) == (["alpha"], "query")
             loop.call_soon_threadsafe(started.set)
             assert release.wait(timeout=5)
-            return [1.0, 0.0]
+            return [[1.0, 0.0]]
+
+        async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+            return await asyncio.to_thread(self.embed, texts, purpose=purpose)
 
     task = asyncio.create_task(
         ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),

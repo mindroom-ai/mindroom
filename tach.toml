@@ -47,9 +47,29 @@ depends_on = []
 path = "mindroom.embeddings.factory"
 depends_on = [
     "mindroom.credentials.sync",
+    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.ollama_embedder",
+    "mindroom.embeddings.openai_embedder",
+    "mindroom.embeddings.sentence_transformers_embedder",
+    "mindroom.model_defaults",
+]
+
+[[modules]]
+path = "mindroom.embeddings.base"
+depends_on = []
+
+[[modules]]
+path = "mindroom.embeddings.ollama_embedder"
+depends_on = ["mindroom.embeddings.errors"]
+visibility = ["mindroom.embeddings.factory"]
+
+[[modules]]
+path = "mindroom.embeddings.sentence_transformers_embedder"
+depends_on = [
+    "mindroom.embeddings.errors",
     "mindroom.embeddings.signatures",
     "mindroom.model_defaults",
-    "mindroom.embeddings.openai_embedder",
+    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -74,10 +94,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.embeddings.openai_embedder"
 depends_on = [
-    "mindroom.embeddings.agno_compat_openai_embedder",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
     "mindroom.model_defaults",
+    "mindroom.providers.model_http_client",
 ]
 
 [[modules]]
@@ -4679,7 +4699,7 @@ depends_on = [
     "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
-    "mindroom.embeddings.signatures",
+    "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.providers.google_adc",
     "mindroom.matrix.client_session",
     "mindroom.matrix.health",
@@ -8092,16 +8112,6 @@ expose = ["search", "asearch", "insert_documents"]
 
 
 [[modules]]
-path = "mindroom.embeddings.agno_compat_openai_embedder"
-depends_on = []
-visibility = ["mindroom.embeddings.openai_embedder"]
-
-[[interfaces]]
-from = ["mindroom.embeddings.agno_compat_openai_embedder"]
-expose = ["OpenAIEmbedderWithHooks"]
-
-
-[[modules]]
 path = "mindroom.tool_system.agno_compat_function_schema"
 depends_on = []
 visibility = ["mindroom.tool_system.output_files"]
@@ -9179,7 +9189,6 @@ visibility = ["mindroom.knowledge_graph.store"]
 path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
-    "mindroom.embeddings.openai_embedder",
     "mindroom.helper_usage",
     "mindroom.knowledge_graph.store",
     "mindroom.knowledge_graph.usage",

@@ -179,7 +179,8 @@ Decoding errors embed the message of Python's `ast.literal_eval`, and probes tha
 
 ## Knowledge goldens (`knowledge/`)
 
-`.venv/bin/python -m tests.agno_parity.capture_knowledge` writes `knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` from the Agno-backed knowledge path, and the owned knowledge code's parity tests read them.
+`.venv/bin/python -m tests.agno_parity.capture_knowledge` writes `knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` from the Agno-backed knowledge path, and the owned knowledge code's parity tests in `tests/test_knowledge_goldens.py` read them.
+The owned knowledge code replaced the path the capture drives, so the capture runs only on the commit that added it.
 All three are pretty JSON with sorted keys and are compared by value.
 
 ### `knowledge/embedders.json`
