@@ -119,7 +119,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
     from agno.run.agent import RunOutputEvent
     from agno.run.team import TeamRunOutputEvent
     from agno.team import Team
@@ -129,6 +128,7 @@ if TYPE_CHECKING:
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
@@ -843,7 +843,7 @@ async def _non_stream_completion(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     *,
     model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -903,7 +903,7 @@ async def _stream_completion(  # noqa: C901, PLR0915
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     *,
     model_name: str,
     execution_identity: ToolExecutionIdentity | None = None,

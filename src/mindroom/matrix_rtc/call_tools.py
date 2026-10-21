@@ -74,12 +74,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from agno.agent import Agent as AgnoAgent
-    from agno.knowledge.protocol import KnowledgeProtocol
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
@@ -441,7 +441,7 @@ class _CallAgentCache:
     async def run(
         self,
         *,
-        knowledge: KnowledgeProtocol | None,
+        knowledge: AgentKnowledge | None,
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         active_model_name: str | None,
@@ -496,7 +496,7 @@ class _CallAgentCache:
     async def _get_agent(
         self,
         *,
-        knowledge: KnowledgeProtocol | None,
+        knowledge: AgentKnowledge | None,
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         active_model_name: str | None,
@@ -535,7 +535,7 @@ class _CallAgentCache:
     def _build_agent(
         self,
         *,
-        knowledge: KnowledgeProtocol | None,
+        knowledge: AgentKnowledge | None,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgnoAgent:
         """Build one cached agent with canonical prompt-sanitizing history storage."""

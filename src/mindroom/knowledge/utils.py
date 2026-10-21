@@ -23,7 +23,6 @@ from mindroom.knowledge.refresh_policy import (
 )
 from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
@@ -70,7 +69,7 @@ class KnowledgeAvailabilityDetail:
 class _KnowledgeResolution:
     """Resolved knowledge plus availability diagnostics for one agent."""
 
-    knowledge: StrictSearchKnowledge | None
+    knowledge: AgentKnowledge | None
     unavailable: Mapping[str, KnowledgeAvailabilityDetail] = field(default_factory=dict)
 
 
@@ -405,7 +404,7 @@ def _merge_agent_knowledge_resolutions(
             availability={base_id: unavailable_bases[base_id].availability.value for base_id in missing_base_ids},
         )
     return _KnowledgeResolution(
-        knowledge=StrictSearchKnowledge(AgentKnowledge(sources=tuple(sources))) if sources else None,
+        knowledge=AgentKnowledge(sources=tuple(sources)) if sources else None,
         unavailable=unavailable_bases,
     )
 
@@ -521,33 +520,6 @@ class KnowledgeAccessSupport:
     runtime: SupportsConfigOrchestrator
     runtime_paths: RuntimePaths
 
-    def for_agent(
-        self,
-        agent_name: str,
-        *,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> StrictSearchKnowledge | None:
-        """Return the current knowledge assigned to one or more agent bases."""
-        return self.resolve_for_agent(agent_name, execution_identity=execution_identity).knowledge
-
-    def resolve_for_agent(
-        self,
-        agent_name: str,
-        *,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> _KnowledgeResolution:
-        """Return current knowledge and availability diagnostics for one agent."""
-        orchestrator = self.runtime.orchestrator
-        refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
-
-        return resolve_agent_knowledge_access(
-            agent_name,
-            self.runtime.config,
-            self.runtime_paths,
-            refresh_scheduler=refresh_scheduler,
-            execution_identity=execution_identity,
-        )
-
     async def resolve_for_agent_async(
         self,
         agent_name: str,
@@ -567,8 +539,8 @@ class KnowledgeAccessSupport:
         )
 
 
-def knowledge_runtime_identity(knowledge: StrictSearchKnowledge | None) -> tuple[int, ...]:
+def knowledge_runtime_identity(knowledge: AgentKnowledge | None) -> tuple[int, ...]:
     """Identify the stable published index handles behind one resolved knowledge view."""
     if knowledge is None:
         return ()
-    return tuple(id(source.index) for source in knowledge.agent_knowledge.sources)
+    return tuple(id(source.index) for source in knowledge.sources)

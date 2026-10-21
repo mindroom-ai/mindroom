@@ -72,7 +72,6 @@ if TYPE_CHECKING:
 
     import nio
     from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
 
@@ -80,6 +79,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.media_inputs import MediaInputs
     from mindroom.streaming import ProgressPublisher
@@ -184,7 +184,7 @@ async def _continue_persisted_agent(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
-    knowledge: Knowledge | None,
+    knowledge: AgentKnowledge | None,
     tool_trace_collector: list[ToolTraceEntry],
     run_id_callback: Callable[[str], None] | None,
     tool_dispatch: ToolDispatchContext,
@@ -322,7 +322,7 @@ async def _stream_continuation_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-    knowledge: Knowledge | None,
+    knowledge: AgentKnowledge | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry],
     run_id_callback: Callable[[str], None] | None,

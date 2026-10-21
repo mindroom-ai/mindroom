@@ -1,0 +1,82 @@
+"""What ``create_agent`` builds for the owned loop: the agent's spec, prompt, request settings, store, and surface."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+from mindroom.agent_loop.prompt import render_system_message
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.agent_loop.prompt import PromptSpec
+    from mindroom.agent_loop.spec import AgentSpec
+    from mindroom.agent_modes import AgentMode
+    from mindroom.history.types import ResolvedHistorySettings
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelRequest
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSurface:
+    """How the agent presents its tools to the model.
+
+    Standard mode offers the spec's tools; ``cli_shell`` says the agent's shell commands can call its other tools
+    through ``mindroom-agent``. Minimal mode offers one Bash function through which the agent reaches the spec's
+    tools and the toolkits in ``deferred`` once it materializes them, and reads ``context_documents``, the complete
+    preload files before the prompt cap, listed as ``context_files`` relative to its workspace.
+    """
+
+    mode: AgentMode
+    cli_shell: bool
+    deferred: tuple[DeferredAgentToolkit, ...] = ()
+    context_documents: tuple[str, ...] = ()
+    context_files: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentBuild:
+    """One configured agent as ``create_agent`` built it.
+
+    ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
+    ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
+    settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
+    authored toolkit it came from, which approvals check.
+    """
+
+    spec: AgentSpec
+    prompt: PromptSpec
+    request_template: ModelRequest
+    history_settings: ResolvedHistorySettings
+    store: ConversationStore | None
+    tool_owners: Mapping[str, str]
+    surface: AgentSurface
+
+
+def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
+    """Render the system message of one turn: the build's prompt with the turn's context blocks appended in order.
+
+    Each block follows the context so far after one blank line, trailing whitespace of the earlier text dropped;
+    an empty block adds nothing.
+    """
+    additional_context = build.prompt.additional_context
+    for block in context:
+        additional_context = _appended(additional_context, block)
+    return render_system_message(replace(build.prompt, additional_context=additional_context))
+
+
+def _appended(existing: str | None, block: str) -> str | None:
+    if not block:
+        return existing
+    stripped = existing.strip() if existing else ""
+    return f"{stripped}\n\n{block}" if stripped else block
+
+
+__all__ = [
+    "AgentBuild",
+    "AgentSurface",
+    "prompt_for_turn",
+]

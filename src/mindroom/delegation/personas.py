@@ -22,7 +22,7 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillMarkdownError,
-    build_agent_skills,
+    build_skills_toolkit,
     parse_skill_markdown,
     workspace_entry_names,
 )
@@ -287,8 +287,8 @@ def caller_skill_names(
     """Return every skill this agent may use: its configured skills and the skills in its workspace."""
     if agent_name not in config.agents:
         return []
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=workspace_root)
-    return [] if skills is None else skills.get_skill_names()
+    toolkit = build_skills_toolkit(agent_name, config, runtime_paths, workspace_root=workspace_root)
+    return [] if toolkit is None else [skill.name for skill in toolkit.skills]
 
 
 def caller_knowledge_names(agent_name: str, config: Config) -> list[str]:

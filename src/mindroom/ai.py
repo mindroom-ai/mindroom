@@ -130,7 +130,6 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
-    from agno.knowledge.knowledge import Knowledge
     from agno.models.response import ToolExecution
     from agno.tools.function import Function
 
@@ -140,6 +139,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import (
         EmptyRunDiscard,
@@ -1077,7 +1077,7 @@ async def _prepare_agent_and_prompt(
     config: Config,
     scope_context: ScopeSessionContext | None = None,
     thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -1290,7 +1290,7 @@ async def _prepare_agent_run_context(
     config: Config,
     scope_context: ScopeSessionContext | None,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: Knowledge | None,
+    knowledge: AgentKnowledge | None,
     include_interactive_questions: bool,
     tool_function_filter: Callable[[Function], bool] | None,
     include_openai_compat_guidance: bool,
@@ -1484,7 +1484,7 @@ async def ai_response(  # noqa: C901, PLR0915
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,
@@ -2020,7 +2020,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     model_prompt: str | None = None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
-    knowledge: Knowledge | None = None,
+    knowledge: AgentKnowledge | None = None,
     run_id_callback: Callable[[str], None] | None = None,
     include_interactive_questions: bool = True,
     tool_function_filter: Callable[[Function], bool] | None = None,

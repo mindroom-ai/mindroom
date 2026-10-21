@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from agno.agent import Agent
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
@@ -12,7 +13,6 @@ from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -27,13 +27,15 @@ if TYPE_CHECKING:
     from agno.session import AgentSession
 
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import KnowledgeSourceDescription
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
 
 
-class MinimalAgent(KnowledgeToolDescribingAgent):
+class MinimalAgent(Agent):
     """Keep complete agent state while presenting exactly one Bash function."""
 
+    knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
     context_documents: dict[str, str]
     bootstrap_message: str = ""
     deferred_toolkits: tuple[DeferredAgentToolkit, ...] = ()

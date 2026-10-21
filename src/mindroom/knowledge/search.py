@@ -151,10 +151,6 @@ class AgentKnowledge:
         """Return how many hits one search returns, enough for every source to contribute."""
         return max(min(len(self.sources), _MAX_MERGED_SOURCE_COVERAGE_RESULTS), _DEFAULT_MAX_RESULTS)
 
-    def source_descriptions(self) -> tuple[KnowledgeSourceDescription, ...]:
-        """Return what the model is told about each source."""
-        return tuple(source.description for source in self.sources)
-
     def search(self, query: str, limit: int | None = None) -> list[SearchHit]:
         """Search every source in turn and interleave their hits."""
         effective_limit = limit or self.max_results
@@ -186,10 +182,11 @@ class AgentKnowledge:
             return f"Error searching knowledge base: {type(exc).__name__}"
         return _format_search_hits(hits)
 
-    # The owned agent loop registers this tool once it replaces Agno's; until then an Agno agent builds its own
-    # tool over ``StrictSearchKnowledge``, which searches through this same object.
-    def search_function(self, *, memory_search_available: bool = False) -> Function:  # privata: ignore
-        """Return the ``search_knowledge_base`` tool, authored as an Agno function so Agno generates its schema."""
+    def search_function(self, *, memory_search_available: bool = False) -> Function:
+        """Return the ``search_knowledge_base`` tool, authored as an Agno function so Agno generates its schema.
+
+        ``adapt_function`` turns it into the ``ToolFunction`` an agent offers.
+        """
 
         async def search_knowledge_base(query: str) -> str:
             """Use this function to search the knowledge base for information about a query.
@@ -205,7 +202,7 @@ class AgentKnowledge:
 
         function = Function.from_callable(search_knowledge_base, name=KNOWLEDGE_SEARCH_TOOL_NAME)
         function.description = knowledge_search_tool_description(
-            self.source_descriptions(),
+            tuple(source.description for source in self.sources),
             memory_search_available=memory_search_available,
         )
         return function

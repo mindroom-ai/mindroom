@@ -449,10 +449,6 @@ class _AgnoSkills(Skills):
         """Return every loaded skill."""
         return [_agno_skill(skill) for skill in self.toolkit.skills]
 
-    def get_skill_names(self) -> list[str]:
-        """Return the loaded skill names."""
-        return [skill.name for skill in self.toolkit.skills]
-
     def get_system_prompt_snippet(self) -> str:
         """Return the skills section of the system prompt."""
         return self.toolkit.prompt_block()

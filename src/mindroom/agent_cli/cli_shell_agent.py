@@ -5,11 +5,12 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING, Any
 
+from agno.agent import Agent
+
 from mindroom.agent_cli.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.shell_access import minimal_shell_problems
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.approval.tool_approval import approval_gated
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
@@ -102,7 +103,7 @@ def _cli_callable(function: Function) -> bool:
     )
 
 
-class CliShellAgent(KnowledgeToolDescribingAgent):
+class CliShellAgent(Agent):
     """Standard agent that binds the response's CLI owner to its own tools each attempt."""
 
     response_context: ResponseTurnContext | None = None

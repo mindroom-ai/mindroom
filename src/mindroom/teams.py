@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from mindroom import ai_runtime
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import create_agent, enable_all_history_replay, team_background_jobs
+from mindroom.agents import create_agent, team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
     accumulate_model_request_metrics,
@@ -2304,7 +2304,8 @@ def _create_team_instance(
         # Agno will automatically list members with their names, roles, and tools
     )
     if history_settings.policy.mode == "all":
-        enable_all_history_replay(team)
+        # Undo Agno's default three-run history fallback.
+        team.num_history_runs = None
     install_mid_turn_compaction(
         team,
         config=config,

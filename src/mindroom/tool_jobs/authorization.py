@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def bind_actor_authority[Actor: Agent | Team](actor: Actor, snapshot: dict[str, Any]) -> Actor:
+def bind_actor_authority[Actor: Agent | Team](actor: Actor, snapshot: dict[str, Any]) -> Actor:  # privata: ignore
     """Bind current construction evidence outside SDK-persisted session metadata."""
     vars(actor)["mindroom_tool_authority"] = snapshot
     return actor
@@ -37,7 +37,7 @@ def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str) -> None:
         function.source_toolkit = toolkit
 
 
-def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
+def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:  # privata: ignore
     """Freeze the actor's execution scope and file access without constructing tools."""
     policy = resolve_agent_policy_from_data(
         agent_name,

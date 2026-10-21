@@ -886,12 +886,9 @@ depends_on = [
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.delegation.personas",
     "mindroom.path_confinement",
-    "mindroom.agent_cli.minimal_agent",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
-    "mindroom.agent_knowledge_descriptions",
     "mindroom.session_storage.agent_storage",
-    "mindroom.providers.claude_prompt_cache",
     "mindroom.constants",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.computer_announcement",
@@ -901,19 +898,14 @@ depends_on = [
     "mindroom.custom_tools.memory",
     "mindroom.delegation.lifecycle",
     "mindroom.entity_resolution",
-    "mindroom.history.agno_compat_message_builder",
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
     "mindroom.mcp.toolkit",
-    "mindroom.providers.model_loading",
-    "mindroom.providers.openai_tool_search",
-    "mindroom.providers.portable_tool_search",
     "mindroom.prompt_templates",
     "mindroom.runtime_resolution",
     "mindroom.timing",
     "mindroom.approval.tool_approval",
-    "mindroom.tool_call_budget",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.agno_execution",
@@ -934,7 +926,12 @@ depends_on = [
     "mindroom.workers.runtime",
     "mindroom.workspaces",
     "mindroom.custom_tools.knowledge_graph",
-    "mindroom.history.mid_turn_compaction",
+    "mindroom.agent_loop",
+    "mindroom.agent_loop.build",
+    "mindroom.agent_loop.prompt",
+    "mindroom.llm",
+    "mindroom.providers.registry",
+    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
@@ -949,29 +946,8 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.agent_knowledge_descriptions"
-depends_on = [
-    "mindroom.knowledge.search",
-    "mindroom.knowledge.strict_knowledge",
-    "mindroom.tool_system.tool_hooks",
-]
-visibility = [
-    "mindroom.agent_cli.minimal_agent",
-    "mindroom.agents",
-    "mindroom.agent_cli.cli_shell_agent",
-]
-
-[[modules]]
 path = "mindroom.knowledge.search"
 depends_on = ["mindroom.logging_config"]
-
-[[modules]]
-path = "mindroom.knowledge.strict_knowledge"
-depends_on = []
-visibility = [
-    "mindroom.agent_knowledge_descriptions",
-    "mindroom.knowledge.utils",
-]
 
 [[modules]]
 path = "mindroom.session_storage.agent_storage"
@@ -5454,6 +5430,10 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.agent_loop.build"
+depends_on = ["mindroom.agent_loop.prompt"]
+
+[[modules]]
 path = "mindroom.agent_loop.prompt"
 depends_on = ["mindroom.llm"]
 
@@ -6227,7 +6207,6 @@ depends_on = [
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
     "mindroom.knowledge.search",
-    "mindroom.knowledge.strict_knowledge",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
@@ -8817,7 +8796,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_access",
-    "mindroom.agent_knowledge_descriptions",
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
@@ -8839,7 +8817,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_knowledge_descriptions",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
