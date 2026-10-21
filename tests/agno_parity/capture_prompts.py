@@ -156,7 +156,7 @@ class Recorder:
 
     responder: Responder = answer_ok
     calls: list[ModelCall] = field(default_factory=list)
-    built_models: int = 0
+    _built_models: int = field(default=0, init=False)
 
     def ordered_calls(self) -> list[ModelCall]:
         """Return the calls grouped by model in build order, each model's calls in the order it received them.
@@ -188,8 +188,8 @@ class Recorder:
         return self.responder(call)
 
     def _bind(self, model: Model) -> Model:
-        respond = partial(self._respond, model, self.built_models)
-        self.built_models += 1
+        respond = partial(self._respond, model, self._built_models)
+        self._built_models += 1
 
         async def ainvoke(messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
             return respond(stream=False, messages=messages, kwargs=kwargs)
@@ -380,7 +380,7 @@ def _write_workspace_files(runtime_paths: RuntimePaths, agent_name: str) -> None
         path.write_text(text, encoding="utf-8")
 
 
-def _turn_input(prompt: str, **extra: object) -> dict[str, Any]:
+def _turn_input(prompt: str) -> dict[str, Any]:
     return {
         "entry_point": "mindroom.ai.stream_agent_response",
         "api_server": "127.0.0.1:8765",
@@ -389,7 +389,6 @@ def _turn_input(prompt: str, **extra: object) -> dict[str, Any]:
         "requester_id": _REQUESTER_ID,
         "thread_history": [_EARLIER_MESSAGE],
         "prompt": prompt,
-        **extra,
     }
 
 
@@ -490,7 +489,7 @@ def answer_as_team(call: ModelCall) -> ModelResponse:
     """Delegate once as the team leader, then answer; members answer their task directly."""
     names = _tool_names(call)
     if _answers_tools(call) or not names & {"delegate_task_to_member", "delegate_task_to_members"}:
-        return ModelResponse(role="assistant", content="ok")
+        return answer_ok(call)
     if "delegate_task_to_members" in names:
         return ModelResponse(
             role="assistant",
@@ -557,7 +556,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         correlation_id=_CORRELATION_ID,
     )
     recorder = TurnRecorder(user_message=prompt)
-    with tool_runtime_context(runtime):
+    with _api_server(), tool_runtime_context(runtime):
         async for _chunk in team_response_stream(
             agent_ids=[member_ids["planner"], member_ids["writer"]],
             message=prompt,
@@ -595,7 +594,7 @@ def answer_after_one_tool_call(name: str, arguments: dict[str, object]) -> Respo
 
     def respond(call: ModelCall) -> ModelResponse:
         if _answers_tools(call):
-            return ModelResponse(role="assistant", content="ok")
+            return answer_ok(call)
         return ModelResponse(role="assistant", tool_calls=[_tool_call("call_1", name, arguments)])
 
     return respond
