@@ -34,7 +34,7 @@
     "end_time": 1800000960,
     "duration": 0.5
   },
-  "team_squad:00000000-0000-4000-8000-000000000037.tools[0].metrics": {
+  "team_squad:00000000-0000-4000-8000-00000000004b.tools[0].metrics": {
     "start_time": 1800001079.5,
     "end_time": 1800001080,
     "duration": 0.5
@@ -52,6 +52,11 @@
   "team_squad:team-paused.tools[0].metrics": {
     "start_time": 1800001199.5,
     "end_time": 1800001200,
+    "duration": 0.5
+  },
+  "team_squad:team-approved.tools[0].metrics": {
+    "start_time": 1800001679.5,
+    "end_time": 1800001680,
     "duration": 0.5
   },
   "team_panel:panel-completed.tools[0].metrics": {

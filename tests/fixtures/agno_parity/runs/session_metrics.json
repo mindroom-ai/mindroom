@@ -69,6 +69,54 @@
       ]
     }
   },
+  "agent_code:!room:example.org:$approved.session_data.session_metrics": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:!room:example.org:$rejected.session_data.session_metrics": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:!room:example.org:$delegation-approved.session_data.session_metrics": {
+    "input_tokens": 640,
+    "output_tokens": 17,
+    "total_tokens": 657,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 640,
+          "output_tokens": 17,
+          "total_tokens": 657,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
   "agent_helper:delegate:code:helper:00000000000000000000000000000002.session_data.session_metrics": {
     "input_tokens": 90,
     "output_tokens": 5,
@@ -79,6 +127,22 @@
           "input_tokens": 90,
           "output_tokens": 5,
           "total_tokens": 95,
+          "id": "helper-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_helper:delegate:code:helper:00000000000000000000000000000004.session_data.session_metrics": {
+    "input_tokens": 190,
+    "output_tokens": 6,
+    "total_tokens": 196,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 190,
+          "output_tokens": 6,
+          "total_tokens": 196,
           "id": "helper-model",
           "provider": "Synthetic"
         }
@@ -109,6 +173,29 @@
           "input_tokens": 85,
           "output_tokens": 5,
           "total_tokens": 90,
+          "id": "checker-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:!room:example.org:$squad-approved.session_data.session_metrics": {
+    "input_tokens": 1080,
+    "output_tokens": 25,
+    "total_tokens": 1105,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 900,
+          "output_tokens": 19,
+          "total_tokens": 919,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        },
+        {
+          "input_tokens": 180,
+          "output_tokens": 6,
+          "total_tokens": 186,
           "id": "checker-model",
           "provider": "Synthetic"
         }

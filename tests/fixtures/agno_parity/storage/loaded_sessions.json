@@ -2246,6 +2246,922 @@
       },
       "created_at": 1800000660,
       "updated_at": 1800000960
+    },
+    "!room:example.org:$approved": {
+      "session_id": "!room:example.org:$approved",
+      "agent_id": "code",
+      "team_id": null,
+      "user_id": "@alice:example.org",
+      "workflow_id": null,
+      "session_data": {
+        "session_state": {},
+        "session_metrics": {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "details": {
+            "model": [
+              {
+                "input_tokens": 500,
+                "output_tokens": 16,
+                "total_tokens": 516,
+                "id": "code-model",
+                "provider": "Synthetic"
+              }
+            ]
+          }
+        }
+      },
+      "metadata": null,
+      "agent_data": {
+        "name": "Code",
+        "agent_id": "code",
+        "model": {
+          "id": "code-model",
+          "provider": "Synthetic",
+          "name": "Synthetic"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "run-approved",
+          "agent_id": "code",
+          "agent_name": "Code",
+          "session_id": "!room:example.org:$approved",
+          "user_id": "@alice:example.org",
+          "content": "6 x 7 = 42.",
+          "content_type": "str",
+          "model": "code-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "!room:example.org:$approved",
+            "current_run_id": "run-approved"
+          },
+          "created_at": 1800001320,
+          "status": "COMPLETED",
+          "metrics": {
+            "input_tokens": 500,
+            "output_tokens": 16,
+            "total_tokens": 516,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 500,
+                  "output_tokens": 16,
+                  "total_tokens": 516,
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "events": [],
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-000000000032",
+              "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001320
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000033",
+              "content": "Checking first.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-run-approved",
+                  "type": "function",
+                  "function": {
+                    "name": "multiply",
+                    "arguments": "{\"a\": 6, \"b\": 7}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 240,
+                "output_tokens": 7,
+                "total_tokens": 247,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001320
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000034",
+              "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-run-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "created_at": 1800001380
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000035",
+              "content": "6 x 7 = 42.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 260,
+                "output_tokens": 9,
+                "total_tokens": 269,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001380
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 4301
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$approved",
+            "reply_to_event_id": "$run-approved",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "corr-run-approved",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            },
+            "matrix_event_id": "$run-approved",
+            "matrix_seen_event_ids": [
+              "$run-approved"
+            ]
+          },
+          "tools": [
+            {
+              "tool_call_id": "call-run-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "metrics": null,
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001320,
+              "requires_confirmation": false,
+              "confirmed": true,
+              "confirmation_note": null,
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": null,
+              "external_execution_silent": null,
+              "approval_type": "mindroom_policy",
+              "approval_id": null
+            }
+          ],
+          "requirements": [
+            {
+              "id": "00000000-0000-4000-8000-000000000036",
+              "created_at": "2027-01-15T08:22:00+00:00",
+              "confirmation": true,
+              "tool_execution": {
+                "tool_call_id": "call-run-approved",
+                "tool_name": "multiply",
+                "tool_args": {
+                  "a": 6,
+                  "b": 7
+                },
+                "tool_call_error": false,
+                "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+                "metrics": null,
+                "child_run_id": null,
+                "stop_after_tool_call": false,
+                "created_at": 1800001320,
+                "requires_confirmation": false,
+                "confirmed": true,
+                "confirmation_note": null,
+                "requires_user_input": null,
+                "user_input_schema": null,
+                "user_feedback_schema": null,
+                "answered": null,
+                "external_execution_required": null,
+                "external_execution_silent": null,
+                "approval_type": "mindroom_policy",
+                "approval_id": null
+              }
+            }
+          ],
+          "input": {
+            "input_content": [
+              {
+                "id": "00000000-0000-4000-8000-000000000032",
+                "content": "Current message:\n<msg event_id=\"$run-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+                "from_history": false,
+                "stop_after_tool_call": false,
+                "role": "user",
+                "created_at": 1800001320
+              }
+            ]
+          }
+        }
+      ],
+      "summary": null,
+      "created_at": 1800001320,
+      "updated_at": 1800001380
+    },
+    "!room:example.org:$rejected": {
+      "session_id": "!room:example.org:$rejected",
+      "agent_id": "code",
+      "team_id": null,
+      "user_id": "@alice:example.org",
+      "workflow_id": null,
+      "session_data": {
+        "session_state": {},
+        "session_metrics": {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "details": {
+            "model": [
+              {
+                "input_tokens": 500,
+                "output_tokens": 16,
+                "total_tokens": 516,
+                "id": "code-model",
+                "provider": "Synthetic"
+              }
+            ]
+          }
+        }
+      },
+      "metadata": null,
+      "agent_data": {
+        "name": "Code",
+        "agent_id": "code",
+        "model": {
+          "id": "code-model",
+          "provider": "Synthetic",
+          "name": "Synthetic"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "run-rejected",
+          "agent_id": "code",
+          "agent_name": "Code",
+          "session_id": "!room:example.org:$rejected",
+          "user_id": "@alice:example.org",
+          "content": "I did not multiply, because the call was declined.",
+          "content_type": "str",
+          "model": "code-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "!room:example.org:$rejected",
+            "current_run_id": "run-rejected"
+          },
+          "created_at": 1800001440,
+          "status": "COMPLETED",
+          "metrics": {
+            "input_tokens": 500,
+            "output_tokens": 16,
+            "total_tokens": 516,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 500,
+                  "output_tokens": 16,
+                  "total_tokens": 516,
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "events": [],
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-000000000037",
+              "content": "Current message:\n<msg event_id=\"$run-rejected\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001440
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000038",
+              "content": "Checking first.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-run-rejected",
+                  "type": "function",
+                  "function": {
+                    "name": "multiply",
+                    "arguments": "{\"a\": 6, \"b\": 7}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 240,
+                "output_tokens": 7,
+                "total_tokens": 247,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001440
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000039",
+              "content": "Alice declined the multiplication.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-run-rejected",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": true,
+              "created_at": 1800001500
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000003a",
+              "content": "I did not multiply, because the call was declined.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 260,
+                "output_tokens": 9,
+                "total_tokens": 269,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001500
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 4301
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$rejected",
+            "reply_to_event_id": "$run-rejected",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "corr-run-rejected",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            },
+            "matrix_event_id": "$run-rejected",
+            "matrix_seen_event_ids": [
+              "$run-rejected"
+            ]
+          },
+          "tools": [
+            {
+              "tool_call_id": "call-run-rejected",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": true,
+              "result": null,
+              "metrics": null,
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001440,
+              "requires_confirmation": false,
+              "confirmed": false,
+              "confirmation_note": "Alice declined the multiplication.",
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": null,
+              "external_execution_silent": null,
+              "approval_type": "mindroom_policy",
+              "approval_id": null
+            }
+          ],
+          "requirements": [
+            {
+              "id": "00000000-0000-4000-8000-00000000003b",
+              "created_at": "2027-01-15T08:24:00+00:00",
+              "confirmation": false,
+              "confirmation_note": "Alice declined the multiplication.",
+              "tool_execution": {
+                "tool_call_id": "call-run-rejected",
+                "tool_name": "multiply",
+                "tool_args": {
+                  "a": 6,
+                  "b": 7
+                },
+                "tool_call_error": true,
+                "result": null,
+                "metrics": null,
+                "child_run_id": null,
+                "stop_after_tool_call": false,
+                "created_at": 1800001440,
+                "requires_confirmation": false,
+                "confirmed": false,
+                "confirmation_note": "Alice declined the multiplication.",
+                "requires_user_input": null,
+                "user_input_schema": null,
+                "user_feedback_schema": null,
+                "answered": null,
+                "external_execution_required": null,
+                "external_execution_silent": null,
+                "approval_type": "mindroom_policy",
+                "approval_id": null
+              }
+            }
+          ],
+          "input": {
+            "input_content": [
+              {
+                "id": "00000000-0000-4000-8000-000000000037",
+                "content": "Current message:\n<msg event_id=\"$run-rejected\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+                "from_history": false,
+                "stop_after_tool_call": false,
+                "role": "user",
+                "created_at": 1800001440
+              }
+            ]
+          }
+        }
+      ],
+      "summary": null,
+      "created_at": 1800001440,
+      "updated_at": 1800001500
+    },
+    "!room:example.org:$delegation-approved": {
+      "session_id": "!room:example.org:$delegation-approved",
+      "agent_id": "code",
+      "team_id": null,
+      "user_id": "@alice:example.org",
+      "workflow_id": null,
+      "session_data": {
+        "session_state": {},
+        "session_metrics": {
+          "input_tokens": 640,
+          "output_tokens": 17,
+          "total_tokens": 657,
+          "details": {
+            "model": [
+              {
+                "input_tokens": 640,
+                "output_tokens": 17,
+                "total_tokens": 657,
+                "id": "code-model",
+                "provider": "Synthetic"
+              }
+            ]
+          }
+        }
+      },
+      "metadata": null,
+      "agent_data": {
+        "name": "Code",
+        "agent_id": "code",
+        "model": {
+          "id": "code-model",
+          "provider": "Synthetic",
+          "name": "Synthetic"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "run-delegation-approved",
+          "agent_id": "code",
+          "agent_name": "Code",
+          "session_id": "!room:example.org:$delegation-approved",
+          "user_id": "@alice:example.org",
+          "content": "The helper found 42.",
+          "content_type": "str",
+          "model": "code-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "!room:example.org:$delegation-approved",
+            "current_run_id": "run-delegation-approved"
+          },
+          "created_at": 1800001560,
+          "status": "COMPLETED",
+          "metrics": {
+            "input_tokens": 640,
+            "output_tokens": 17,
+            "total_tokens": 657,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 640,
+                  "output_tokens": 17,
+                  "total_tokens": 657,
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "events": [],
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-00000000003c",
+              "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001560
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000003d",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-delegate-approved",
+                  "type": "function",
+                  "function": {
+                    "name": "run_subagent",
+                    "arguments": "{\"agent_name\": \"helper\", \"task\": \"Multiply 6 by 7\"}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 310,
+                "output_tokens": 11,
+                "total_tokens": 321
+              },
+              "created_at": 1800001560
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000003e",
+              "content": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-delegate-approved",
+              "tool_name": "run_subagent",
+              "tool_args": {
+                "agent_name": "helper",
+                "task": "Multiply 6 by 7"
+              },
+              "created_at": 1800001620
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000003f",
+              "content": "The helper found 42.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "code-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 330,
+                "output_tokens": 6,
+                "total_tokens": 336,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001620
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 4309
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$delegation-approved",
+            "reply_to_event_id": "$run-delegation-approved",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "corr-run-delegation-approved",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            },
+            "matrix_event_id": "$run-delegation-approved",
+            "matrix_seen_event_ids": [
+              "$run-delegation-approved"
+            ],
+            "mindroom_delegation": {
+              "children": [
+                {
+                  "delegation_id": "00000000000000000000000000000004",
+                  "parent_tool_call_id": "call-delegate-approved",
+                  "caller_agent_name": "code",
+                  "child_agent_name": "helper",
+                  "task": "Multiply 6 by 7",
+                  "session_id": "delegate:code:helper:00000000000000000000000000000004",
+                  "run_id": "00000000000000000000000000000005",
+                  "model_name": "helper",
+                  "depth": 1,
+                  "execution_identity": {
+                    "channel": "matrix",
+                    "agent_name": "helper",
+                    "requester_id": "@alice:example.org",
+                    "room_id": "!room:example.org",
+                    "thread_id": "$delegation-approved",
+                    "resolved_thread_id": "$delegation-approved",
+                    "session_id": "delegate:code:helper:00000000000000000000000000000004",
+                    "tenant_id": null,
+                    "account_id": null,
+                    "transport_agent_name": null
+                  },
+                  "subagent_id": "00000000000000000000000000000004",
+                  "previous_delegation_id": null,
+                  "parent_requirement_id": "00000000-0000-4000-8000-000000000040",
+                  "storage_bindings": {
+                    "code": {
+                      "display_name": "code",
+                      "private": null,
+                      "worker_scope": null
+                    },
+                    "helper": {
+                      "display_name": "helper",
+                      "private": null,
+                      "worker_scope": null
+                    }
+                  },
+                  "record_locator": {
+                    "delegation_id": "00000000000000000000000000000004",
+                    "started_date": "2027-01-15",
+                    "caller_agent_name": "code",
+                    "child_agent_name": "helper",
+                    "caller_execution_identity": {
+                      "channel": "matrix",
+                      "agent_name": "code",
+                      "requester_id": "@alice:example.org",
+                      "room_id": "!room:example.org",
+                      "thread_id": "$delegation-approved",
+                      "resolved_thread_id": "$delegation-approved",
+                      "session_id": "!room:example.org:$delegation-approved",
+                      "tenant_id": null,
+                      "account_id": null,
+                      "transport_agent_name": null
+                    },
+                    "child_execution_identity": {
+                      "channel": "matrix",
+                      "agent_name": "helper",
+                      "requester_id": "@alice:example.org",
+                      "room_id": "!room:example.org",
+                      "thread_id": "$delegation-approved",
+                      "resolved_thread_id": "$delegation-approved",
+                      "session_id": "delegate:code:helper:00000000000000000000000000000004",
+                      "tenant_id": null,
+                      "account_id": null,
+                      "transport_agent_name": null
+                    }
+                  },
+                  "status": "completed",
+                  "result": "42",
+                  "agent_mode": "standard",
+                  "requested_model_name": "helper",
+                  "persona": null
+                }
+              ],
+              "gates": {},
+              "hooks": {
+                "00000000-0000-4000-8000-000000000040": {
+                  "execution_identity": {
+                    "channel": "matrix",
+                    "agent_name": "code",
+                    "requester_id": "@alice:example.org",
+                    "room_id": "!room:example.org",
+                    "thread_id": "$delegation-approved",
+                    "resolved_thread_id": "$delegation-approved",
+                    "session_id": "!room:example.org:$delegation-approved",
+                    "tenant_id": null,
+                    "account_id": null,
+                    "transport_agent_name": null
+                  },
+                  "arguments": {
+                    "agent_name": "helper",
+                    "task": "Multiply 6 by 7"
+                  },
+                  "started_at": 1800001560,
+                  "tool_name": "run_subagent",
+                  "blocked_result": null,
+                  "after_called": true
+                }
+              },
+              "pending_tools": [],
+              "pending_tool_sources": {},
+              "pending_requirements": [],
+              "pending_agent_name": null,
+              "pending_child_id": null,
+              "storage_bindings": {
+                "code": {
+                  "display_name": "code",
+                  "private": null,
+                  "worker_scope": null
+                }
+              }
+            }
+          },
+          "tools": [
+            {
+              "tool_call_id": "call-delegate-approved",
+              "tool_name": "run_subagent",
+              "tool_args": {
+                "agent_name": "helper",
+                "task": "Multiply 6 by 7"
+              },
+              "tool_call_error": null,
+              "result": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+              "metrics": null,
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001560,
+              "requires_confirmation": null,
+              "confirmed": null,
+              "confirmation_note": null,
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": false,
+              "external_execution_silent": true,
+              "approval_type": null,
+              "approval_id": null
+            }
+          ],
+          "requirements": [
+            {
+              "id": "00000000-0000-4000-8000-000000000040",
+              "created_at": "2027-01-15T08:26:00+00:00",
+              "external_execution_result": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+              "tool_execution": {
+                "tool_call_id": "call-delegate-approved",
+                "tool_name": "run_subagent",
+                "tool_args": {
+                  "agent_name": "helper",
+                  "task": "Multiply 6 by 7"
+                },
+                "tool_call_error": null,
+                "result": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+                "metrics": null,
+                "child_run_id": null,
+                "stop_after_tool_call": false,
+                "created_at": 1800001560,
+                "requires_confirmation": null,
+                "confirmed": null,
+                "confirmation_note": null,
+                "requires_user_input": null,
+                "user_input_schema": null,
+                "user_feedback_schema": null,
+                "answered": null,
+                "external_execution_required": false,
+                "external_execution_silent": true,
+                "approval_type": null,
+                "approval_id": null
+              }
+            }
+          ],
+          "input": {
+            "input_content": [
+              {
+                "id": "00000000-0000-4000-8000-00000000003c",
+                "content": "Current message:\n<msg event_id=\"$run-delegation-approved\" from=\"@alice:example.org\"><![CDATA[Ask the helper to multiply 6 by 7.]]></msg>",
+                "from_history": false,
+                "stop_after_tool_call": false,
+                "role": "user",
+                "created_at": 1800001560
+              }
+            ]
+          }
+        }
+      ],
+      "summary": null,
+      "created_at": 1800001560,
+      "updated_at": 1800001620
     }
   },
   "agent_helper": {
@@ -2323,7 +3239,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000033",
+              "id": "00000000-0000-4000-8000-000000000042",
               "content": "<your_role>\n## Your Identity\nYou are Helper (Matrix ID: @mindroom_helper:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: helper-model.\nWhen working in teams with other agents, you should identify yourself as Helper and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Runs calculations for other agents.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2331,7 +3247,7 @@
               "created_at": 1800000480
             },
             {
-              "id": "00000000-0000-4000-8000-000000000034",
+              "id": "00000000-0000-4000-8000-000000000043",
               "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2339,7 +3255,7 @@
               "created_at": 1800000480
             },
             {
-              "id": "00000000-0000-4000-8000-000000000035",
+              "id": "00000000-0000-4000-8000-000000000044",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -2386,7 +3302,7 @@
             "room_id": "!room:example.org",
             "thread_id": "$delegation",
             "requester_id": "@alice:example.org",
-            "correlation_id": "00000000000000000000000000000004",
+            "correlation_id": "00000000000000000000000000000006",
             "model_params": {
               "supports_native_structured_outputs": false,
               "supports_json_schema_outputs": false,
@@ -2435,7 +3351,7 @@
           ],
           "requirements": [
             {
-              "id": "00000000-0000-4000-8000-000000000036",
+              "id": "00000000-0000-4000-8000-000000000045",
               "created_at": "2027-01-15T08:08:00+00:00",
               "tool_execution": {
                 "tool_call_id": "call-helper-multiply",
@@ -2467,7 +3383,7 @@
           "input": {
             "input_content": [
               {
-                "id": "00000000-0000-4000-8000-000000000034",
+                "id": "00000000-0000-4000-8000-000000000043",
                 "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
                 "from_history": false,
                 "stop_after_tool_call": false,
@@ -2481,6 +3397,267 @@
       "summary": null,
       "created_at": 1800000480,
       "updated_at": 1800000480
+    },
+    "delegate:code:helper:00000000000000000000000000000004": {
+      "session_id": "delegate:code:helper:00000000000000000000000000000004",
+      "agent_id": "helper",
+      "team_id": null,
+      "user_id": "@alice:example.org",
+      "workflow_id": null,
+      "session_data": {
+        "session_state": {},
+        "session_metrics": {
+          "input_tokens": 190,
+          "output_tokens": 6,
+          "total_tokens": 196,
+          "details": {
+            "model": [
+              {
+                "input_tokens": 190,
+                "output_tokens": 6,
+                "total_tokens": 196,
+                "id": "helper-model",
+                "provider": "Synthetic"
+              }
+            ]
+          }
+        }
+      },
+      "metadata": null,
+      "agent_data": {
+        "name": "Helper",
+        "agent_id": "helper",
+        "model": {
+          "id": "helper-model",
+          "provider": "Synthetic",
+          "name": "Synthetic"
+        }
+      },
+      "runs": [
+        {
+          "run_id": "00000000000000000000000000000005",
+          "agent_id": "helper",
+          "agent_name": "Helper",
+          "session_id": "delegate:code:helper:00000000000000000000000000000004",
+          "user_id": "@alice:example.org",
+          "content": "42",
+          "content_type": "str",
+          "model": "helper-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "delegate:code:helper:00000000000000000000000000000004",
+            "current_run_id": "00000000000000000000000000000005"
+          },
+          "created_at": 1800001560,
+          "status": "COMPLETED",
+          "metrics": {
+            "input_tokens": 190,
+            "output_tokens": 6,
+            "total_tokens": 196,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 190,
+                  "output_tokens": 6,
+                  "total_tokens": 196,
+                  "id": "helper-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "events": [],
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-000000000046",
+              "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001560
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000047",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-helper-multiply-approved",
+                  "type": "function",
+                  "function": {
+                    "name": "multiply",
+                    "arguments": "{\"a\": 6, \"b\": 7}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "helper-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 90,
+                "output_tokens": 5,
+                "total_tokens": 95
+              },
+              "created_at": 1800001560
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000048",
+              "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-helper-multiply-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "created_at": 1800001620
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000049",
+              "content": "42",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "helper-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 100,
+                "output_tokens": 1,
+                "total_tokens": 101,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001620
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 1432
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$delegation-approved",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "00000000000000000000000000000007",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            }
+          },
+          "tools": [
+            {
+              "tool_call_id": "call-helper-multiply-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "metrics": null,
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001560,
+              "requires_confirmation": false,
+              "confirmed": true,
+              "confirmation_note": null,
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": null,
+              "external_execution_silent": null,
+              "approval_type": "mindroom_policy",
+              "approval_id": null
+            }
+          ],
+          "requirements": [
+            {
+              "id": "00000000-0000-4000-8000-00000000004a",
+              "created_at": "2027-01-15T08:26:00+00:00",
+              "confirmation": true,
+              "tool_execution": {
+                "tool_call_id": "call-helper-multiply-approved",
+                "tool_name": "multiply",
+                "tool_args": {
+                  "a": 6,
+                  "b": 7
+                },
+                "tool_call_error": false,
+                "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+                "metrics": null,
+                "child_run_id": null,
+                "stop_after_tool_call": false,
+                "created_at": 1800001560,
+                "requires_confirmation": false,
+                "confirmed": true,
+                "confirmation_note": null,
+                "requires_user_input": null,
+                "user_input_schema": null,
+                "user_feedback_schema": null,
+                "answered": null,
+                "external_execution_required": null,
+                "external_execution_silent": null,
+                "approval_type": "mindroom_policy",
+                "approval_id": null
+              }
+            }
+          ],
+          "input": {
+            "input_content": [
+              {
+                "id": "00000000-0000-4000-8000-000000000046",
+                "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
+                "from_history": false,
+                "stop_after_tool_call": false,
+                "role": "user",
+                "created_at": 1800001560
+              }
+            ]
+          }
+        }
+      ],
+      "summary": null,
+      "created_at": 1800001560,
+      "updated_at": 1800001620
     }
   },
   "team_squad": {
@@ -2546,7 +3723,7 @@
       },
       "runs": [
         {
-          "run_id": "00000000-0000-4000-8000-000000000037",
+          "run_id": "00000000-0000-4000-8000-00000000004b",
           "agent_id": "writer",
           "agent_name": "Writer",
           "session_id": "!room:example.org:$squad",
@@ -2559,7 +3736,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$squad",
-            "current_run_id": "00000000-0000-4000-8000-000000000037"
+            "current_run_id": "00000000-0000-4000-8000-00000000004b"
           },
           "created_at": 1800001080,
           "status": "COMPLETED",
@@ -2584,7 +3761,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000038",
+              "id": "00000000-0000-4000-8000-00000000004c",
               "content": "Add 2 and 3",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2592,7 +3769,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-000000000039",
+              "id": "00000000-0000-4000-8000-00000000004d",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -2620,7 +3797,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-00000000003a",
+              "id": "00000000-0000-4000-8000-00000000004e",
               "content": "{\"operation\": \"addition\", \"result\": 5.0}",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2635,7 +3812,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-00000000003b",
+              "id": "00000000-0000-4000-8000-00000000004f",
               "content": "5",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2767,7 +3944,7 @@
           "status": "COMPLETED",
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-00000000003c",
+              "id": "00000000-0000-4000-8000-000000000050",
               "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2775,7 +3952,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-00000000003d",
+              "id": "00000000-0000-4000-8000-000000000051",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -2803,7 +3980,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-00000000003e",
+              "id": "00000000-0000-4000-8000-000000000052",
               "content": "5",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2818,7 +3995,7 @@
               "created_at": 1800001080
             },
             {
-              "id": "00000000-0000-4000-8000-00000000003f",
+              "id": "00000000-0000-4000-8000-000000000053",
               "content": "The writer found 5.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -2917,7 +4094,7 @@
           "input": {
             "input_content": [
               {
-                "id": "00000000-0000-4000-8000-00000000003c",
+                "id": "00000000-0000-4000-8000-000000000050",
                 "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
                 "from_history": false,
                 "stop_after_tool_call": false,
@@ -2928,7 +4105,7 @@
           }
         },
         {
-          "run_id": "00000000-0000-4000-8000-000000000040",
+          "run_id": "00000000-0000-4000-8000-000000000054",
           "agent_id": "checker",
           "agent_name": "Checker",
           "session_id": "!room:example.org:$squad",
@@ -2941,7 +4118,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$squad",
-            "current_run_id": "00000000-0000-4000-8000-000000000040"
+            "current_run_id": "00000000-0000-4000-8000-000000000054"
           },
           "created_at": 1800001140,
           "status": "ERROR",
@@ -2951,7 +4128,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000041",
+              "id": "00000000-0000-4000-8000-000000000055",
               "content": "Check that 2 + 3 = 5",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3044,7 +4221,7 @@
           "status": "COMPLETED",
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000042",
+              "id": "00000000-0000-4000-8000-000000000056",
               "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3052,7 +4229,7 @@
               "created_at": 1800001140
             },
             {
-              "id": "00000000-0000-4000-8000-000000000043",
+              "id": "00000000-0000-4000-8000-000000000057",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -3080,7 +4257,7 @@
               "created_at": 1800001140
             },
             {
-              "id": "00000000-0000-4000-8000-000000000044",
+              "id": "00000000-0000-4000-8000-000000000058",
               "content": "Checker overloaded",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3095,7 +4272,7 @@
               "created_at": 1800001140
             },
             {
-              "id": "00000000-0000-4000-8000-000000000045",
+              "id": "00000000-0000-4000-8000-000000000059",
               "content": "The checker could not answer.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3198,7 +4375,7 @@
           "input": {
             "input_content": [
               {
-                "id": "00000000-0000-4000-8000-000000000042",
+                "id": "00000000-0000-4000-8000-000000000056",
                 "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
                 "from_history": false,
                 "stop_after_tool_call": false,
@@ -3209,7 +4386,7 @@
           }
         },
         {
-          "run_id": "00000000-0000-4000-8000-000000000046",
+          "run_id": "00000000-0000-4000-8000-00000000005a",
           "agent_id": "checker",
           "agent_name": "Checker",
           "session_id": "!room:example.org:$squad",
@@ -3222,7 +4399,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$squad",
-            "current_run_id": "00000000-0000-4000-8000-000000000046"
+            "current_run_id": "00000000-0000-4000-8000-00000000005a"
           },
           "created_at": 1800001200,
           "status": "PAUSED",
@@ -3247,7 +4424,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000047",
+              "id": "00000000-0000-4000-8000-00000000005b",
               "content": "<your_role>\n## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3255,7 +4432,7 @@
               "created_at": 1800001200
             },
             {
-              "id": "00000000-0000-4000-8000-000000000048",
+              "id": "00000000-0000-4000-8000-00000000005c",
               "content": "Multiply 6 by 7",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3263,7 +4440,7 @@
               "created_at": 1800001200
             },
             {
-              "id": "00000000-0000-4000-8000-000000000049",
+              "id": "00000000-0000-4000-8000-00000000005d",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -3368,7 +4545,7 @@
           ],
           "requirements": [
             {
-              "id": "00000000-0000-4000-8000-00000000004a",
+              "id": "00000000-0000-4000-8000-00000000005e",
               "created_at": "2027-01-15T08:20:00+00:00",
               "tool_execution": {
                 "tool_call_id": "call-checker-multiply",
@@ -3414,7 +4591,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$squad",
-            "current_run_id": "00000000-0000-4000-8000-000000000046"
+            "current_run_id": "00000000-0000-4000-8000-00000000005a"
           },
           "created_at": 1800001200,
           "events": [],
@@ -3439,7 +4616,7 @@
           "status": "PAUSED",
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-00000000004b",
+              "id": "00000000-0000-4000-8000-00000000005f",
               "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: writer-model.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Writes answers.\n</member>\n<member id=\"checker\" name=\"Checker\">\n  Role: ## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>\n\n<additional_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n</additional_context>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3447,7 +4624,7 @@
               "created_at": 1800001200
             },
             {
-              "id": "00000000-0000-4000-8000-00000000004c",
+              "id": "00000000-0000-4000-8000-000000000060",
               "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3455,7 +4632,7 @@
               "created_at": 1800001200
             },
             {
-              "id": "00000000-0000-4000-8000-00000000004d",
+              "id": "00000000-0000-4000-8000-000000000061",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -3483,7 +4660,7 @@
               "created_at": 1800001200
             },
             {
-              "id": "00000000-0000-4000-8000-00000000004e",
+              "id": "00000000-0000-4000-8000-000000000062",
               "content": "Member 'Checker' requires human input before continuing.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3548,7 +4725,7 @@
           },
           "member_responses": [
             {
-              "run_id": "00000000-0000-4000-8000-000000000046",
+              "run_id": "00000000-0000-4000-8000-00000000005a",
               "agent_id": "checker",
               "agent_name": "Checker",
               "session_id": "!room:example.org:$squad",
@@ -3561,7 +4738,7 @@
               "session_state": {
                 "current_user_id": "@alice:example.org",
                 "current_session_id": "!room:example.org:$squad",
-                "current_run_id": "00000000-0000-4000-8000-000000000046"
+                "current_run_id": "00000000-0000-4000-8000-00000000005a"
               },
               "created_at": 1800001200,
               "status": "PAUSED",
@@ -3586,7 +4763,7 @@
               "events": [],
               "messages": [
                 {
-                  "id": "00000000-0000-4000-8000-000000000047",
+                  "id": "00000000-0000-4000-8000-00000000005b",
                   "content": "<your_role>\n## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
                   "from_history": false,
                   "stop_after_tool_call": false,
@@ -3594,7 +4771,7 @@
                   "created_at": 1800001200
                 },
                 {
-                  "id": "00000000-0000-4000-8000-000000000048",
+                  "id": "00000000-0000-4000-8000-00000000005c",
                   "content": "Multiply 6 by 7",
                   "from_history": false,
                   "stop_after_tool_call": false,
@@ -3602,7 +4779,7 @@
                   "created_at": 1800001200
                 },
                 {
-                  "id": "00000000-0000-4000-8000-000000000049",
+                  "id": "00000000-0000-4000-8000-00000000005d",
                   "from_history": false,
                   "stop_after_tool_call": false,
                   "role": "assistant",
@@ -3707,7 +4884,7 @@
               ],
               "requirements": [
                 {
-                  "id": "00000000-0000-4000-8000-00000000004a",
+                  "id": "00000000-0000-4000-8000-00000000005e",
                   "created_at": "2027-01-15T08:20:00+00:00",
                   "tool_execution": {
                     "tool_call_id": "call-checker-multiply",
@@ -3743,11 +4920,11 @@
           ],
           "requirements": [
             {
-              "id": "00000000-0000-4000-8000-00000000004a",
+              "id": "00000000-0000-4000-8000-00000000005e",
               "created_at": "2027-01-15T08:20:00+00:00",
               "member_agent_id": "checker",
               "member_agent_name": "Checker",
-              "member_run_id": "00000000-0000-4000-8000-000000000046",
+              "member_run_id": "00000000-0000-4000-8000-00000000005a",
               "tool_execution": {
                 "tool_call_id": "call-checker-multiply",
                 "tool_name": "multiply",
@@ -3809,7 +4986,7 @@
           "input": {
             "input_content": [
               {
-                "id": "00000000-0000-4000-8000-00000000004c",
+                "id": "00000000-0000-4000-8000-000000000060",
                 "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
                 "from_history": false,
                 "stop_after_tool_call": false,
@@ -3823,6 +5000,472 @@
       "summary": null,
       "created_at": 1800001080,
       "updated_at": 1800001200
+    },
+    "!room:example.org:$squad-approved": {
+      "session_id": "!room:example.org:$squad-approved",
+      "team_id": "squad",
+      "user_id": "@alice:example.org",
+      "workflow_id": null,
+      "team_data": {
+        "name": "Team-writer-checker",
+        "team_id": "squad",
+        "model": {
+          "id": "leader-model",
+          "provider": "Synthetic",
+          "name": "Synthetic"
+        }
+      },
+      "session_data": {
+        "session_state": {},
+        "session_metrics": {
+          "input_tokens": 1080,
+          "output_tokens": 25,
+          "total_tokens": 1105,
+          "details": {
+            "model": [
+              {
+                "input_tokens": 900,
+                "output_tokens": 19,
+                "total_tokens": 919,
+                "id": "leader-model",
+                "provider": "Synthetic"
+              },
+              {
+                "input_tokens": 180,
+                "output_tokens": 6,
+                "total_tokens": 186,
+                "id": "checker-model",
+                "provider": "Synthetic"
+              }
+            ]
+          }
+        }
+      },
+      "metadata": null,
+      "runs": [
+        {
+          "run_id": "00000000-0000-4000-8000-000000000063",
+          "agent_id": "checker",
+          "agent_name": "Checker",
+          "session_id": "!room:example.org:$squad-approved",
+          "parent_run_id": "team-approved",
+          "user_id": "@alice:example.org",
+          "content": "42",
+          "content_type": "str",
+          "model": "checker-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "!room:example.org:$squad-approved",
+            "current_run_id": "00000000-0000-4000-8000-000000000063"
+          },
+          "created_at": 1800001680,
+          "status": "COMPLETED",
+          "metrics": {
+            "input_tokens": 180,
+            "output_tokens": 6,
+            "total_tokens": 186,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 180,
+                  "output_tokens": 6,
+                  "total_tokens": 186,
+                  "id": "checker-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "events": [],
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-000000000064",
+              "content": "Multiply 6 by 7.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001680
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000065",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-checker-multiply-approved",
+                  "type": "function",
+                  "function": {
+                    "name": "multiply",
+                    "arguments": "{\"a\": 6, \"b\": 7}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "checker-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 85,
+                "output_tokens": 5,
+                "total_tokens": 90
+              },
+              "created_at": 1800001680
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000066",
+              "content": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-checker-multiply-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "created_at": 1800001740
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000067",
+              "content": "42",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "checker-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 95,
+                "output_tokens": 1,
+                "total_tokens": 96,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001740
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 2107
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$squad-approved",
+            "reply_to_event_id": "$team-approved",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "corr-team-approved",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            },
+            "matrix_event_id": "$team-approved",
+            "matrix_seen_event_ids": [
+              "$team-approved"
+            ]
+          },
+          "tools": [
+            {
+              "tool_call_id": "call-checker-multiply-approved",
+              "tool_name": "multiply",
+              "tool_args": {
+                "a": 6,
+                "b": 7
+              },
+              "tool_call_error": false,
+              "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+              "metrics": null,
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001680,
+              "requires_confirmation": false,
+              "confirmed": true,
+              "confirmation_note": null,
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": null,
+              "external_execution_silent": null,
+              "approval_type": "mindroom_policy",
+              "approval_id": null
+            }
+          ],
+          "requirements": [
+            {
+              "id": "00000000-0000-4000-8000-000000000068",
+              "created_at": "2027-01-15T08:28:00+00:00",
+              "confirmation": true,
+              "member_agent_id": "checker",
+              "member_agent_name": "Checker",
+              "member_run_id": "00000000-0000-4000-8000-000000000063",
+              "tool_execution": {
+                "tool_call_id": "call-checker-multiply-approved",
+                "tool_name": "multiply",
+                "tool_args": {
+                  "a": 6,
+                  "b": 7
+                },
+                "tool_call_error": false,
+                "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+                "metrics": null,
+                "child_run_id": null,
+                "stop_after_tool_call": false,
+                "created_at": 1800001680,
+                "requires_confirmation": false,
+                "confirmed": true,
+                "confirmation_note": null,
+                "requires_user_input": null,
+                "user_input_schema": null,
+                "user_feedback_schema": null,
+                "answered": null,
+                "external_execution_required": null,
+                "external_execution_silent": null,
+                "approval_type": "mindroom_policy",
+                "approval_id": null
+              }
+            }
+          ],
+          "input": {
+            "input_content": "Multiply 6 by 7."
+          }
+        },
+        {
+          "run_id": "team-approved",
+          "team_id": "squad",
+          "team_name": "Team-writer-checker",
+          "session_id": "!room:example.org:$squad-approved",
+          "user_id": "@alice:example.org",
+          "content": "The checker found 42.",
+          "content_type": "str",
+          "model": "leader-model",
+          "model_provider": "Synthetic",
+          "session_state": {
+            "current_user_id": "@alice:example.org",
+            "current_session_id": "!room:example.org:$squad-approved",
+            "current_run_id": "00000000-0000-4000-8000-000000000063"
+          },
+          "created_at": 1800001680,
+          "events": [],
+          "metrics": {
+            "input_tokens": 900,
+            "output_tokens": 19,
+            "total_tokens": 919,
+            "time_to_first_token": 0.25,
+            "duration": 0.5,
+            "details": {
+              "model": [
+                {
+                  "input_tokens": 900,
+                  "output_tokens": 19,
+                  "total_tokens": 919,
+                  "id": "leader-model",
+                  "provider": "Synthetic"
+                }
+              ]
+            }
+          },
+          "status": "COMPLETED",
+          "messages": [
+            {
+              "id": "00000000-0000-4000-8000-000000000069",
+              "content": "Current message:\n<msg event_id=\"$team-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "user",
+              "created_at": 1800001680
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000006a",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "id": "call-team-multiply-approved",
+                  "type": "function",
+                  "function": {
+                    "name": "delegate_task_to_member",
+                    "arguments": "{\"member_id\": \"checker\", \"task\": \"Multiply 6 by 7.\"}"
+                  }
+                }
+              ],
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "leader-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 430,
+                "output_tokens": 12,
+                "total_tokens": 442
+              },
+              "created_at": 1800001680
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000006b",
+              "content": "Member results after human-in-the-loop resolution:\n[Checker]: 42",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "tool",
+              "tool_call_id": "call-team-multiply-approved",
+              "tool_name": "delegate_task_to_member",
+              "tool_args": {
+                "member_id": "checker",
+                "task": "Multiply 6 by 7."
+              },
+              "tool_call_error": false,
+              "created_at": 1800001680
+            },
+            {
+              "id": "00000000-0000-4000-8000-00000000006c",
+              "content": "The checker found 42.",
+              "from_history": false,
+              "stop_after_tool_call": false,
+              "role": "assistant",
+              "provider_data": {
+                "mindroom_model": {
+                  "id": "leader-model",
+                  "provider": "Synthetic"
+                }
+              },
+              "metrics": {
+                "input_tokens": 470,
+                "output_tokens": 7,
+                "total_tokens": 477,
+                "time_to_first_token": 0.25
+              },
+              "created_at": 1800001740
+            }
+          ],
+          "metadata": {
+            "io.mindroom.ai_run": {
+              "version": 1,
+              "prepared_context": {
+                "tokens": 2107
+              },
+              "compaction": {
+                "decision": "none",
+                "outcome": "none",
+                "reason": "missing_session",
+                "replay_plan": {
+                  "mode": "configured",
+                  "estimated_tokens": 0
+                }
+              }
+            },
+            "room_id": "!room:example.org",
+            "thread_id": "$squad-approved",
+            "reply_to_event_id": "$team-approved",
+            "requester_id": "@alice:example.org",
+            "correlation_id": "corr-team-approved",
+            "model_params": {
+              "supports_native_structured_outputs": false,
+              "supports_json_schema_outputs": false,
+              "tool_message_role": "tool",
+              "assistant_message_role": "assistant",
+              "cache_response": false,
+              "retries": 0,
+              "delay_between_retries": 1,
+              "exponential_backoff": false,
+              "retry_with_guidance": true,
+              "retry_with_guidance_limit": 1,
+              "seed": 1,
+              "min_response_chars": 320,
+              "max_response_chars": 960,
+              "chunk_chars": 40,
+              "chars_per_second": 80.0,
+              "tool_call_probability": 0.2
+            },
+            "matrix_event_id": "$team-approved",
+            "matrix_seen_event_ids": [
+              "$team-approved"
+            ]
+          },
+          "member_responses": [],
+          "requirements": [],
+          "tools": [
+            {
+              "tool_call_id": "call-team-multiply-approved",
+              "tool_name": "delegate_task_to_member",
+              "tool_args": {
+                "member_id": "checker",
+                "task": "Multiply 6 by 7."
+              },
+              "tool_call_error": false,
+              "result": "Member results after human-in-the-loop resolution:\n[Checker]: 42",
+              "metrics": {
+                "start_time": 1800001679.5,
+                "end_time": 1800001680,
+                "duration": 0.5
+              },
+              "child_run_id": null,
+              "stop_after_tool_call": false,
+              "created_at": 1800001680,
+              "requires_confirmation": null,
+              "confirmed": null,
+              "confirmation_note": null,
+              "requires_user_input": null,
+              "user_input_schema": null,
+              "user_feedback_schema": null,
+              "answered": null,
+              "external_execution_required": null,
+              "external_execution_silent": null,
+              "approval_type": null,
+              "approval_id": null
+            }
+          ],
+          "input": {
+            "input_content": [
+              {
+                "id": "00000000-0000-4000-8000-000000000069",
+                "content": "Current message:\n<msg event_id=\"$team-approved\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+                "from_history": false,
+                "stop_after_tool_call": false,
+                "role": "user",
+                "created_at": 1800001680
+              }
+            ]
+          }
+        }
+      ],
+      "summary": null,
+      "created_at": 1800001680,
+      "updated_at": 1800001740
     }
   },
   "team_panel": {
@@ -3887,7 +5530,7 @@
       },
       "runs": [
         {
-          "run_id": "00000000-0000-4000-8000-00000000004f",
+          "run_id": "00000000-0000-4000-8000-00000000006d",
           "agent_id": "writer",
           "agent_name": "Writer",
           "session_id": "!room:example.org:$panel",
@@ -3900,7 +5543,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$panel",
-            "current_run_id": "00000000-0000-4000-8000-00000000004f"
+            "current_run_id": "00000000-0000-4000-8000-00000000006d"
           },
           "created_at": 1800001260,
           "status": "COMPLETED",
@@ -3925,7 +5568,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000050",
+              "id": "00000000-0000-4000-8000-00000000006e",
               "content": "Give one fact about the number 5.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -3933,7 +5576,7 @@
               "created_at": 1800001260
             },
             {
-              "id": "00000000-0000-4000-8000-000000000051",
+              "id": "00000000-0000-4000-8000-00000000006f",
               "content": "Five is prime.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4002,7 +5645,7 @@
           }
         },
         {
-          "run_id": "00000000-0000-4000-8000-000000000052",
+          "run_id": "00000000-0000-4000-8000-000000000070",
           "agent_id": "checker",
           "agent_name": "Checker",
           "session_id": "!room:example.org:$panel",
@@ -4015,7 +5658,7 @@
           "session_state": {
             "current_user_id": "@alice:example.org",
             "current_session_id": "!room:example.org:$panel",
-            "current_run_id": "00000000-0000-4000-8000-000000000052"
+            "current_run_id": "00000000-0000-4000-8000-000000000070"
           },
           "created_at": 1800001260,
           "status": "COMPLETED",
@@ -4040,7 +5683,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000053",
+              "id": "00000000-0000-4000-8000-000000000071",
               "content": "Give one fact about the number 5.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4048,7 +5691,7 @@
               "created_at": 1800001260
             },
             {
-              "id": "00000000-0000-4000-8000-000000000054",
+              "id": "00000000-0000-4000-8000-000000000072",
               "content": "Five is odd.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4149,7 +5792,7 @@
           "status": "COMPLETED",
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000055",
+              "id": "00000000-0000-4000-8000-000000000073",
               "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4157,7 +5800,7 @@
               "created_at": 1800001260
             },
             {
-              "id": "00000000-0000-4000-8000-000000000056",
+              "id": "00000000-0000-4000-8000-000000000074",
               "from_history": false,
               "stop_after_tool_call": false,
               "role": "assistant",
@@ -4185,7 +5828,7 @@
               "created_at": 1800001260
             },
             {
-              "id": "00000000-0000-4000-8000-000000000057",
+              "id": "00000000-0000-4000-8000-000000000075",
               "content": "Five is prime.Five is odd.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4199,7 +5842,7 @@
               "created_at": 1800001260
             },
             {
-              "id": "00000000-0000-4000-8000-000000000058",
+              "id": "00000000-0000-4000-8000-000000000076",
               "content": "Five is prime and odd.",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4297,7 +5940,7 @@
           "input": {
             "input_content": [
               {
-                "id": "00000000-0000-4000-8000-000000000055",
+                "id": "00000000-0000-4000-8000-000000000073",
                 "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
                 "from_history": false,
                 "stop_after_tool_call": false,
@@ -4342,7 +5985,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-000000000059",
+              "id": "00000000-0000-4000-8000-000000000077",
               "content": "q1",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4350,7 +5993,7 @@
               "created_at": 1788430272
             },
             {
-              "id": "00000000-0000-4000-8000-00000000005a",
+              "id": "00000000-0000-4000-8000-000000000078",
               "content": "a1",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4375,7 +6018,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-00000000005b",
+              "id": "00000000-0000-4000-8000-000000000079",
               "content": "q2",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4383,7 +6026,7 @@
               "created_at": 1788430272
             },
             {
-              "id": "00000000-0000-4000-8000-00000000005c",
+              "id": "00000000-0000-4000-8000-00000000007a",
               "content": "a2",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4408,7 +6051,7 @@
           "events": [],
           "messages": [
             {
-              "id": "00000000-0000-4000-8000-00000000005d",
+              "id": "00000000-0000-4000-8000-00000000007b",
               "content": "q3",
               "from_history": false,
               "stop_after_tool_call": false,
@@ -4416,7 +6059,7 @@
               "created_at": 1788430272
             },
             {
-              "id": "00000000-0000-4000-8000-00000000005e",
+              "id": "00000000-0000-4000-8000-00000000007c",
               "content": "a3",
               "from_history": false,
               "stop_after_tool_call": false,

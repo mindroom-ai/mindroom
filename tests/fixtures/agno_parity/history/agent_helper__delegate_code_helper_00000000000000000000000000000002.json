@@ -65,7 +65,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000033",
+          "id": "00000000-0000-4000-8000-000000000042",
           "content": "<your_role>\n## Your Identity\nYou are Helper (Matrix ID: @mindroom_helper:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: helper-model.\nWhen working in teams with other agents, you should identify yourself as Helper and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Runs calculations for other agents.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -73,7 +73,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000034",
+          "id": "00000000-0000-4000-8000-000000000043",
           "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -81,7 +81,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000035",
+          "id": "00000000-0000-4000-8000-000000000044",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -116,7 +116,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000033",
+          "id": "00000000-0000-4000-8000-000000000042",
           "content": "<your_role>\n## Your Identity\nYou are Helper (Matrix ID: @mindroom_helper:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: helper-model.\nWhen working in teams with other agents, you should identify yourself as Helper and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Runs calculations for other agents.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -124,7 +124,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000034",
+          "id": "00000000-0000-4000-8000-000000000043",
           "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -132,7 +132,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000035",
+          "id": "00000000-0000-4000-8000-000000000044",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -187,7 +187,7 @@
       "max_tool_calls": 1,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000033",
+          "id": "00000000-0000-4000-8000-000000000042",
           "content": "<your_role>\n## Your Identity\nYou are Helper (Matrix ID: @mindroom_helper:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: helper-model.\nWhen working in teams with other agents, you should identify yourself as Helper and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Runs calculations for other agents.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -195,7 +195,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000034",
+          "id": "00000000-0000-4000-8000-000000000043",
           "content": "Current message:\n<msg from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -203,7 +203,7 @@
           "created_at": 1800000480
         },
         {
-          "id": "00000000-0000-4000-8000-000000000035",
+          "id": "00000000-0000-4000-8000-000000000044",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",

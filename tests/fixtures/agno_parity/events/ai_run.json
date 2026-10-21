@@ -558,5 +558,116 @@
         "count": 1
       }
     }
+  },
+  "run-approved": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-approved",
+      "session_id": "!room:example.org:$approved",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 500,
+        "output_tokens": 16,
+        "total_tokens": 516,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 500,
+        "window_tokens": 200000
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "run-rejected": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-rejected",
+      "session_id": "!room:example.org:$rejected",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 500,
+        "output_tokens": 16,
+        "total_tokens": 516,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 500,
+        "window_tokens": 200000
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "run-delegation-approved": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "run-delegation-approved",
+      "session_id": "!room:example.org:$delegation-approved",
+      "status": "completed",
+      "model": {
+        "config": "code",
+        "display_name": "Code Model",
+        "id": "code-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 640,
+        "output_tokens": 17,
+        "total_tokens": 657,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 640,
+        "window_tokens": 200000
+      },
+      "tools": {
+        "count": 1
+      }
+    }
+  },
+  "team-approved": {
+    "io.mindroom.ai_run": {
+      "version": 1,
+      "run_id": "team-approved",
+      "session_id": "!room:example.org:$squad-approved",
+      "status": "completed",
+      "model": {
+        "config": "leader",
+        "id": "leader-model",
+        "provider": "Synthetic"
+      },
+      "usage": {
+        "input_tokens": 1080,
+        "output_tokens": 25,
+        "total_tokens": 1105,
+        "time_to_first_token": "0.25",
+        "duration": "0.5"
+      },
+      "context": {
+        "input_tokens": 1080,
+        "window_tokens": 100000
+      },
+      "tools": {
+        "count": 2
+      }
+    }
   }
 }

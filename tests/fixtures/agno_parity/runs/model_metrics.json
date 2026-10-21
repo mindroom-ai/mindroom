@@ -81,6 +81,27 @@
     "id": "code-model",
     "provider": "Synthetic"
   },
+  "agent_code:run-approved.metrics.details.model[0]": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "id": "code-model",
+    "provider": "Synthetic"
+  },
+  "agent_code:run-rejected.metrics.details.model[0]": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "id": "code-model",
+    "provider": "Synthetic"
+  },
+  "agent_code:run-delegation-approved.metrics.details.model[0]": {
+    "input_tokens": 640,
+    "output_tokens": 17,
+    "total_tokens": 657,
+    "id": "code-model",
+    "provider": "Synthetic"
+  },
   "agent_helper:00000000000000000000000000000003.metrics.details.model[0]": {
     "input_tokens": 90,
     "output_tokens": 5,
@@ -88,7 +109,14 @@
     "id": "helper-model",
     "provider": "Synthetic"
   },
-  "team_squad:00000000-0000-4000-8000-000000000037.metrics.details.model[0]": {
+  "agent_helper:00000000000000000000000000000005.metrics.details.model[0]": {
+    "input_tokens": 190,
+    "output_tokens": 6,
+    "total_tokens": 196,
+    "id": "helper-model",
+    "provider": "Synthetic"
+  },
+  "team_squad:00000000-0000-4000-8000-00000000004b.metrics.details.model[0]": {
     "input_tokens": 175,
     "output_tokens": 5,
     "total_tokens": 180,
@@ -109,7 +137,7 @@
     "id": "leader-model",
     "provider": "Synthetic"
   },
-  "team_squad:00000000-0000-4000-8000-000000000046.metrics.details.model[0]": {
+  "team_squad:00000000-0000-4000-8000-00000000005a.metrics.details.model[0]": {
     "input_tokens": 85,
     "output_tokens": 5,
     "total_tokens": 90,
@@ -130,14 +158,28 @@
     "id": "checker-model",
     "provider": "Synthetic"
   },
-  "team_panel:00000000-0000-4000-8000-00000000004f.metrics.details.model[0]": {
+  "team_squad:00000000-0000-4000-8000-000000000063.metrics.details.model[0]": {
+    "input_tokens": 180,
+    "output_tokens": 6,
+    "total_tokens": 186,
+    "id": "checker-model",
+    "provider": "Synthetic"
+  },
+  "team_squad:team-approved.metrics.details.model[0]": {
+    "input_tokens": 900,
+    "output_tokens": 19,
+    "total_tokens": 919,
+    "id": "leader-model",
+    "provider": "Synthetic"
+  },
+  "team_panel:00000000-0000-4000-8000-00000000006d.metrics.details.model[0]": {
     "input_tokens": 60,
     "output_tokens": 3,
     "total_tokens": 63,
     "id": "writer-model",
     "provider": "Synthetic"
   },
-  "team_panel:00000000-0000-4000-8000-000000000052.metrics.details.model[0]": {
+  "team_panel:00000000-0000-4000-8000-000000000070.metrics.details.model[0]": {
     "input_tokens": 61,
     "output_tokens": 3,
     "total_tokens": 64,

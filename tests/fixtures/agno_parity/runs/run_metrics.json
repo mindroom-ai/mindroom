@@ -210,6 +210,60 @@
       ]
     }
   },
+  "agent_code:run-approved.metrics": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-rejected.metrics": {
+    "input_tokens": 500,
+    "output_tokens": 16,
+    "total_tokens": 516,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 500,
+          "output_tokens": 16,
+          "total_tokens": 516,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "agent_code:run-delegation-approved.metrics": {
+    "input_tokens": 640,
+    "output_tokens": 17,
+    "total_tokens": 657,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 640,
+          "output_tokens": 17,
+          "total_tokens": 657,
+          "id": "code-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
   "agent_helper:00000000000000000000000000000003.metrics": {
     "input_tokens": 90,
     "output_tokens": 5,
@@ -228,7 +282,25 @@
       ]
     }
   },
-  "team_squad:00000000-0000-4000-8000-000000000037.metrics": {
+  "agent_helper:00000000000000000000000000000005.metrics": {
+    "input_tokens": 190,
+    "output_tokens": 6,
+    "total_tokens": 196,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 190,
+          "output_tokens": 6,
+          "total_tokens": 196,
+          "id": "helper-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:00000000-0000-4000-8000-00000000004b.metrics": {
     "input_tokens": 175,
     "output_tokens": 5,
     "total_tokens": 180,
@@ -264,7 +336,7 @@
       ]
     }
   },
-  "team_squad:00000000-0000-4000-8000-000000000040.metrics": {
+  "team_squad:00000000-0000-4000-8000-000000000054.metrics": {
     "duration": 0.5
   },
   "team_squad:team-member-error.metrics": {
@@ -285,7 +357,7 @@
       ]
     }
   },
-  "team_squad:00000000-0000-4000-8000-000000000046.metrics": {
+  "team_squad:00000000-0000-4000-8000-00000000005a.metrics": {
     "input_tokens": 85,
     "output_tokens": 5,
     "total_tokens": 90,
@@ -339,7 +411,43 @@
       ]
     }
   },
-  "team_panel:00000000-0000-4000-8000-00000000004f.metrics": {
+  "team_squad:00000000-0000-4000-8000-000000000063.metrics": {
+    "input_tokens": 180,
+    "output_tokens": 6,
+    "total_tokens": 186,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 180,
+          "output_tokens": 6,
+          "total_tokens": 186,
+          "id": "checker-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_squad:team-approved.metrics": {
+    "input_tokens": 900,
+    "output_tokens": 19,
+    "total_tokens": 919,
+    "time_to_first_token": 0.25,
+    "duration": 0.5,
+    "details": {
+      "model": [
+        {
+          "input_tokens": 900,
+          "output_tokens": 19,
+          "total_tokens": 919,
+          "id": "leader-model",
+          "provider": "Synthetic"
+        }
+      ]
+    }
+  },
+  "team_panel:00000000-0000-4000-8000-00000000006d.metrics": {
     "input_tokens": 60,
     "output_tokens": 3,
     "total_tokens": 63,
@@ -357,7 +465,7 @@
       ]
     }
   },
-  "team_panel:00000000-0000-4000-8000-000000000052.metrics": {
+  "team_panel:00000000-0000-4000-8000-000000000070.metrics": {
     "input_tokens": 61,
     "output_tokens": 3,
     "total_tokens": 64,

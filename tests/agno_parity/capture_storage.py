@@ -26,10 +26,10 @@ import time
 import types
 import zlib
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import agno.utils.timer
 from agno.exceptions import ModelProviderError
@@ -46,8 +46,13 @@ from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.api import openai_compat
 from mindroom.api.main import initialize_api_app
+from mindroom.approval.execution import AgentApprovalExecution
+from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.event_journal import ApprovalDecision
+from mindroom.event_journal.approval_continuations import ApprovalContinuation
 from mindroom.history import summary_rows
 from mindroom.history.session_context import _scope_session_storage_name
 from mindroom.history.storage import (
@@ -59,10 +64,17 @@ from mindroom.history.storage import (
 )
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
-from mindroom.response_turn import ResponsePausedForApproval, build_matrix_run_metadata
+from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAnswer,
+    ResponsePausedForApproval,
+    build_matrix_run_metadata,
+)
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import (
     create_session_storage,
@@ -72,9 +84,19 @@ from mindroom.session_storage.agent_storage import (
     save_compaction_usage,
 )
 from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
-from mindroom.teams import TeamMode, team_response, team_response_stream
-from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.teams import (
+    TeamMode,
+    continue_paused_team_run,
+    select_model_for_team,
+    team_response,
+    team_response_stream,
+)
+from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    run_with_tool_execution_identity,
+    serialize_tool_execution_identity,
+)
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -82,11 +104,12 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_relation_lookup,
     make_turn_context,
+    message_origin,
 )
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 
     from agno.db.base import BaseDb
     from agno.session.agent import AgentSession
@@ -94,6 +117,8 @@ if TYPE_CHECKING:
 
     from mindroom.ai import ResponseTurnContext
     from mindroom.constants import RuntimePaths
+    from mindroom.response_turn import PausedAttempt
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
 OWNED_DIRS = ("storage", "runs", "history", "events")
@@ -193,6 +218,10 @@ NATIVE = _session("$native")
 COMPACTED = _session("$compacted")
 SQUAD = _session("$squad")
 PANEL = _session("$panel")
+APPROVED = _session("$approved")
+REJECTED = _session("$rejected")
+DELEGATION_APPROVED = _session("$delegation-approved")
+SQUAD_APPROVED = _session("$squad-approved")
 
 STORES = (
     StoreSpec("agent_code", "agents/code", "code"),
@@ -422,15 +451,30 @@ def _png_pixel() -> bytes:
 # ---------------------------------------------------------------------------
 
 
-@contextlib.contextmanager
-def _expect_pause(run_id: str, *, pauses: bool) -> Iterator[None]:
-    """Let a turn end waiting for approval only when the scenario expects it to."""
+async def _until_pause(run_id: str, response: Awaitable[object], *, pauses: bool) -> PausedAttempt | None:
+    """Await a turn, letting it end waiting for approval only when the scenario expects it to; return its pause."""
     try:
-        yield
-    except ResponsePausedForApproval:
+        await response
+    except ResponsePausedForApproval as suspension:
         assert pauses, f"{run_id} paused for approval unexpectedly"
-    else:
-        assert not pauses, f"{run_id} did not pause for approval"
+        return suspension.paused
+    assert not pauses, f"{run_id} did not pause for approval"
+    return None
+
+
+async def _drain(stream: AsyncIterator[object]) -> None:
+    async for _chunk in stream:
+        pass
+
+
+async def _run_in_tool_context[T](
+    *,
+    tool_context: ToolRuntimeContext | None,
+    operation: Callable[[], Awaitable[T]],
+) -> T:
+    """Run ``operation`` with ``tool_context`` bound, as the bot's tool runtime does."""
+    with tool_runtime_context(tool_context):
+        return await operation()
 
 
 @dataclass
@@ -463,10 +507,9 @@ class _Capture:
             session_id=session_id,
         )
 
-    @contextlib.contextmanager
-    def tool_context(self, agent_name: str, session_id: str) -> Iterator[None]:
+    def runtime_context(self, agent_name: str, session_id: str) -> ToolRuntimeContext:
         thread = session_id.removeprefix(f"{ROOM}:")
-        context = make_test_tool_runtime_context(
+        return make_test_tool_runtime_context(
             agent_name=agent_name,
             target=MessageTarget(
                 room_id=ROOM,
@@ -482,7 +525,10 @@ class _Capture:
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
         )
-        with tool_runtime_context(context):
+
+    @contextlib.contextmanager
+    def tool_context(self, agent_name: str, session_id: str) -> Iterator[None]:
+        with tool_runtime_context(self.runtime_context(agent_name, session_id)):
             yield
 
     def turn_context(self, entity: str, session_id: str, run_id: str, event_id: str) -> ResponseTurnContext:
@@ -507,11 +553,11 @@ class _Capture:
         stop: bool = False,
         pauses: bool = False,
         media: MediaInputs | None = None,
-    ) -> None:
+    ) -> PausedAttempt | None:
         """Run one turn of the ``code`` agent through ``ai_response`` or ``stream_agent_response``.
 
         With ``stop``, the turn streams and is cancelled while its provider request hangs, as a Stop does.
-        ``pauses`` says whether the turn must end waiting for an approval.
+        ``pauses`` says whether the turn must end waiting for an approval, whose pause is returned.
         """
         self.tick()
         collector: dict[str, Any] = {}
@@ -525,28 +571,22 @@ class _Capture:
             "supports_native_tool_approval": True,
         }
         ctx = self.turn_context("code", session_id, run_id, f"${run_id}")
-
-        async def respond() -> None:
-            with _expect_pause(run_id, pauses=pauses):
-                if stream or stop:
-                    async for _chunk in stream_agent_response(ctx, **options):
-                        pass
-                else:
-                    await ai_response(ctx, **options)
-
+        response = _drain(stream_agent_response(ctx, **options)) if stream or stop else ai_response(ctx, **options)
+        paused = None
         with self.tool_context("code", session_id):
             if stop:
                 script = self.scripts["code"]
                 script.hanging.clear()
-                task = asyncio.create_task(respond())
+                task = asyncio.create_task(_until_pause(run_id, response, pauses=pauses))
                 await script.hanging.wait()
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             else:
-                await respond()
+                paused = await _until_pause(run_id, response, pauses=pauses)
         if collector:
             self.ai_run[run_id] = collector
+        return paused
 
     async def team_turn(
         self,
@@ -557,7 +597,7 @@ class _Capture:
         *,
         stream: bool = False,
         pauses: bool = False,
-    ) -> None:
+    ) -> PausedAttempt | None:
         """Run one turn of a configured team through ``team_response`` or ``team_response_stream``."""
         self.tick()
         collector: dict[str, Any] = {}
@@ -577,16 +617,134 @@ class _Capture:
             "run_metadata_collector": collector,
             "turn_recorder": TurnRecorder(user_message=prompt),
         }
-        with self.tool_context(team_name, session_id), _expect_pause(run_id, pauses=pauses):
-            if stream:
-                ids = entity_ids(self.config, self.paths)
-                agent_ids = [ids[name] for name in team_config.agents]
-                async for _chunk in team_response_stream(agent_ids=agent_ids, mode=mode, **options):
-                    pass
-            else:
-                await team_response(agent_names=list(team_config.agents), mode=mode, **options)
+        if stream:
+            ids = entity_ids(self.config, self.paths)
+            agent_ids = [ids[name] for name in team_config.agents]
+            response = _drain(team_response_stream(agent_ids=agent_ids, mode=mode, **options))
+        else:
+            response = team_response(agent_names=list(team_config.agents), mode=mode, **options)
+        with self.tool_context(team_name, session_id):
+            paused = await _until_pause(run_id, response, pauses=pauses)
         if collector:
             self.ai_run[run_id] = collector
+        return paused
+
+    async def resume(self, entity: str, paused: PausedAttempt | None, prompt: str, *, approve: bool) -> None:
+        """Decide every call ``paused`` waits on and continue its run, as an approval resume does.
+
+        The calls are planned as a pause plans them, and the run continues through the collaborators
+        ``ResponseRunner._continue_entity_call`` calls, with the continuation, decisions, and receipt it passes them.
+        """
+        assert paused is not None
+        self.tick()
+        thread = paused.session_id.removeprefix(f"{ROOM}:")
+        team_config = self.config.teams.get(entity)
+        identity = self.identity(entity, paused.session_id)
+        plan = await plan_approval_calls(
+            identify_approval_tools(paused, default_agent_name=entity),
+            config=self.config,
+            runtime_paths=self.paths,
+            requester_id=REQUESTER,
+            toolkit_owners=paused.toolkit_owners,
+        )
+        assert all(call.decision is None for call in plan.calls), plan.calls
+        decision = ApprovalDecision.APPROVED if approve else ApprovalDecision.DENIED
+        reason = None if approve else "Alice declined the multiplication."
+        continuation = ApprovalContinuation(
+            approval_id=f"approval-{paused.run_id}",
+            run_id=paused.run_id,
+            session_id=paused.session_id,
+            entity_kind="agent" if team_config is None else "team",
+            entity_name=entity,
+            room_id=ROOM,
+            thread_id=thread,
+            requester_id=REQUESTER,
+            response_event_id=f"$reply-{paused.run_id}",
+            sources=ResponseSources((f"${paused.run_id}",), (f"${paused.run_id}",)),
+            calls=tuple(replace(call, decision=decision, reason=reason) for call in plan.calls),
+            state="claimed",
+            delegation_storage_bindings=paused.delegation_storage_bindings,
+            execution_identity=serialize_tool_execution_identity(identity),
+            runtime_model_name=paused.runtime_model_name,
+            continuation_count=paused.continuation_count,
+            team_member_names=() if team_config is None else tuple(team_config.agents),
+            team_member_model_names=paused.team_member_model_names,
+            team_mode=None if team_config is None else team_config.mode,
+            request_body=prompt,
+            correlation_id=f"corr-{paused.run_id}",
+            history_scope=HistoryScope(kind="agent" if team_config is None else "team", scope_id=entity),
+            origin=message_origin(sender_id=REQUESTER),
+        )
+        decisions = {call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in continuation.calls}
+        denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
+        paused_answer = PausedAnswer(
+            text=paused.response_text,
+            tool_trace=paused.tool_trace,
+            team_state=paused.response_presentation_state or None,
+        )
+        runtime_context = self.runtime_context(entity, paused.session_id)
+        dispatch = LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime_context)
+        with approval_receipt_context(build_approval_receipt(continuation.calls)):
+            if team_config is None:
+                result = await self.approval_execution().continue_run(
+                    continuation,
+                    paused_answer=paused_answer,
+                    execution_identity=identity,
+                    tool_dispatch=dispatch,
+                    decisions=decisions,
+                    denial_reasons=denial_reasons,
+                    tool_trace_collector=[],
+                    typing_log_context={},
+                    progress=None,
+                )
+            else:
+
+                async def continue_team() -> CompletedApprovalRun | PausedAttempt:
+                    return await continue_paused_team_run(
+                        member_names=continuation.team_member_names,
+                        mode=TeamMode(continuation.team_mode or "coordinate"),
+                        config=self.config,
+                        runtime_paths=self.paths,
+                        execution_identity=identity,
+                        session_id=continuation.session_id,
+                        run_id=continuation.run_id,
+                        user_id=continuation.requester_id,
+                        configured_team_name=entity,
+                        model_name=continuation.runtime_model_name
+                        or select_model_for_team(entity, ROOM, self.config, self.paths, thread_id=thread),
+                        decisions=decisions,
+                        denial_reasons=denial_reasons,
+                        refresh_scheduler=None,
+                        member_model_names=dict(continuation.team_member_model_names) or None,
+                        approval_calls=continuation.calls,
+                        history_scope=continuation.history_scope,
+                        prior_tool_trace=paused_answer.tool_trace,
+                        prior_presentation_state=paused_answer.team_state,
+                        show_tool_calls=continuation.show_tool_calls,
+                        tool_trace_collector=[],
+                        progress=None,
+                    )
+
+                result = await _run_in_tool_context(
+                    tool_context=runtime_context,
+                    operation=lambda: run_with_tool_execution_identity(identity, operation=continue_team),
+                )
+        assert isinstance(result, CompletedApprovalRun), f"{paused.run_id} did not complete after its approval"
+        self.ai_run[paused.run_id] = result.metadata_content
+
+    def approval_execution(self) -> AgentApprovalExecution:
+        """Return the agent approval executor a response runner builds, around this capture's runtime."""
+        return AgentApprovalExecution(
+            config=lambda: self.config,
+            runtime_paths=self.paths,
+            client=AsyncMock,
+            tool_runtime=MagicMock(run_in_context=_run_in_tool_context),
+            knowledge_access=KnowledgeAccessSupport(
+                runtime=MagicMock(config=self.config, orchestrator=None),
+                runtime_paths=self.paths,
+            ),
+            refresh_scheduler=lambda: None,
+        )
 
 
 async def _conversation(capture: _Capture, attachment: Path) -> None:
@@ -835,6 +993,49 @@ async def _teams(capture: _Capture) -> None:
     await capture.team_turn("panel", PANEL, "panel-completed", "Tell me about 5.", stream=True)
 
 
+async def _resumed_approvals(capture: _Capture) -> None:
+    """Approve or deny paused calls and continue each run, in sessions of their own beside the paused ones.
+
+    An agent's approved and denied calls, a delegation whose child waits for approval, and a team member's call.
+    """
+    code, helper, leader, checker = (capture.scripts[name] for name in ("code", "helper", "leader", "checker"))
+    for session_id, run_id, approve, answer in (
+        (APPROVED, "run-approved", True, "6 x 7 = 42."),
+        (REJECTED, "run-rejected", False, "I did not multiply, because the call was declined."),
+    ):
+        prompt = "Multiply 6 by 7."
+        code.load(_calls(_usage(240, 7), _call("multiply", f"call-{run_id}", a=6, b=7), content="Checking first."))
+        paused = await capture.agent_turn(session_id, run_id, prompt, pauses=True)
+        code.load(_answer(answer, _usage(260, 9)))
+        await capture.resume("code", paused, prompt, approve=approve)
+
+    prompt = "Ask the helper to multiply 6 by 7."
+    code.load(
+        _calls(
+            _usage(310, 11),
+            _call("run_subagent", "call-delegate-approved", agent_name="helper", task="Multiply 6 by 7"),
+        ),
+    )
+    helper.load(_calls(_usage(90, 5), _call("multiply", "call-helper-multiply-approved", a=6, b=7)))
+    paused = await capture.agent_turn(DELEGATION_APPROVED, "run-delegation-approved", prompt, pauses=True)
+    helper.load(_answer("42", _usage(100, 1)))
+    code.load(_answer("The helper found 42.", _usage(330, 6)))
+    await capture.resume("code", paused, prompt, approve=True)
+
+    prompt = "Multiply 6 by 7."
+    leader.load(
+        _calls(
+            _usage(430, 12),
+            _call("delegate_task_to_member", "call-team-multiply-approved", member_id="checker", task=prompt),
+        ),
+    )
+    checker.load(_calls(_usage(85, 5), _call("multiply", "call-checker-multiply-approved", a=6, b=7)))
+    paused = await capture.team_turn("squad", SQUAD_APPROVED, "team-approved", prompt, pauses=True)
+    checker.load(_answer("42", _usage(95, 1)))
+    leader.load(_answer("The checker found 42.", _usage(470, 7)))
+    await capture.resume("squad", paused, prompt, approve=True)
+
+
 def _openai_compat(capture: _Capture) -> None:
     """Record the OpenAI-compatible API's blocking and streamed bodies for an agent and a team."""
     root = capture.root / "openai"
@@ -926,6 +1127,7 @@ async def _run_scenarios(capture: _Capture) -> None:
     await _native_statuses(capture)
     await _compacted(capture)
     await _teams(capture)
+    await _resumed_approvals(capture)
     await asyncio.to_thread(_openai_compat, capture)
     for name, script in capture.scripts.items():
         assert not script.turns, f"{name} left unconsumed turns: {script.turns}"

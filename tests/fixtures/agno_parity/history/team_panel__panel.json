@@ -6,7 +6,7 @@
       "params": {},
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -14,7 +14,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -42,7 +42,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -56,7 +56,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -83,7 +83,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -91,7 +91,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -119,7 +119,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -133,7 +133,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -160,7 +160,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -168,7 +168,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -196,7 +196,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -210,7 +210,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -243,7 +243,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -270,7 +270,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -298,7 +298,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -312,7 +312,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -339,7 +339,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -347,7 +347,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -375,7 +375,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -389,7 +389,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -417,7 +417,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -425,7 +425,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -453,7 +453,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -467,7 +467,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -497,7 +497,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -505,7 +505,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -533,7 +533,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -547,7 +547,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -575,7 +575,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -583,7 +583,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -611,7 +611,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -625,7 +625,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -652,7 +652,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -660,7 +660,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -688,7 +688,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -702,7 +702,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -731,7 +731,7 @@
       "max_tool_calls": 0,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -739,7 +739,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -766,7 +766,7 @@
       "max_tool_calls": 1,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -774,7 +774,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -802,7 +802,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -816,7 +816,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -843,7 +843,7 @@
       "max_tool_calls": 2,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -851,7 +851,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -879,7 +879,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -893,7 +893,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -920,7 +920,7 @@
       "max_tool_calls": 1,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000055",
+          "id": "00000000-0000-4000-8000-000000000073",
           "content": "Current message:\n<msg event_id=\"$panel-completed\" from=\"@alice:example.org\"><![CDATA[Tell me about 5.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -928,7 +928,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000056",
+          "id": "00000000-0000-4000-8000-000000000074",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -956,7 +956,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000057",
+          "id": "00000000-0000-4000-8000-000000000075",
           "content": "Five is prime.Five is odd.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -970,7 +970,7 @@
           "created_at": 1800001260
         },
         {
-          "id": "00000000-0000-4000-8000-000000000058",
+          "id": "00000000-0000-4000-8000-000000000076",
           "content": "Five is prime and odd.",
           "from_history": true,
           "stop_after_tool_call": false,

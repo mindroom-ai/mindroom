@@ -6,7 +6,7 @@
       "params": {},
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -14,7 +14,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003d",
+          "id": "00000000-0000-4000-8000-000000000051",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -42,7 +42,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003e",
+          "id": "00000000-0000-4000-8000-000000000052",
           "content": "5",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -57,7 +57,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -77,7 +77,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -85,7 +85,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -113,7 +113,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -128,7 +128,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -155,7 +155,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -163,7 +163,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -191,7 +191,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -206,7 +206,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -233,7 +233,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -241,7 +241,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003d",
+          "id": "00000000-0000-4000-8000-000000000051",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -269,7 +269,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003e",
+          "id": "00000000-0000-4000-8000-000000000052",
           "content": "5",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -284,7 +284,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -304,7 +304,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -312,7 +312,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -340,7 +340,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -355,7 +355,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -388,7 +388,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -415,7 +415,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -443,7 +443,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -458,7 +458,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -485,7 +485,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -493,7 +493,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -521,7 +521,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -536,7 +536,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -564,7 +564,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -584,7 +584,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -592,7 +592,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -620,7 +620,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -635,7 +635,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -665,7 +665,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -673,7 +673,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003d",
+          "id": "00000000-0000-4000-8000-000000000051",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -701,7 +701,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003e",
+          "id": "00000000-0000-4000-8000-000000000052",
           "content": "5",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -716,7 +716,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -736,7 +736,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -744,7 +744,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -772,7 +772,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -787,7 +787,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -815,7 +815,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000004b",
+          "id": "00000000-0000-4000-8000-00000000005f",
           "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: writer-model.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Writes answers.\n</member>\n<member id=\"checker\" name=\"Checker\">\n  Role: ## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>\n\n<additional_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n</additional_context>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -823,7 +823,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -838,7 +838,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -858,7 +858,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004c",
+          "id": "00000000-0000-4000-8000-000000000060",
           "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -866,7 +866,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004d",
+          "id": "00000000-0000-4000-8000-000000000061",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -894,7 +894,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004e",
+          "id": "00000000-0000-4000-8000-000000000062",
           "content": "Member 'Checker' requires human input before continuing.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -916,7 +916,7 @@
       },
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -924,7 +924,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003d",
+          "id": "00000000-0000-4000-8000-000000000051",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -952,7 +952,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003e",
+          "id": "00000000-0000-4000-8000-000000000052",
           "content": "5",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -967,7 +967,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -987,7 +987,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -995,7 +995,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1023,7 +1023,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -1038,7 +1038,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -1058,7 +1058,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004b",
+          "id": "00000000-0000-4000-8000-00000000005f",
           "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: writer-model.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Writes answers.\n</member>\n<member id=\"checker\" name=\"Checker\">\n  Role: ## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>\n\n<additional_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n</additional_context>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -1066,7 +1066,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004c",
+          "id": "00000000-0000-4000-8000-000000000060",
           "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -1074,7 +1074,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004d",
+          "id": "00000000-0000-4000-8000-000000000061",
           "from_history": false,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1102,7 +1102,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004e",
+          "id": "00000000-0000-4000-8000-000000000062",
           "content": "Member 'Checker' requires human input before continuing.",
           "from_history": false,
           "stop_after_tool_call": false,
@@ -1126,7 +1126,7 @@
       "max_tool_calls": 0,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1134,7 +1134,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1154,7 +1154,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1162,7 +1162,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1189,7 +1189,7 @@
       "max_tool_calls": 1,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1197,7 +1197,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1217,7 +1217,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1225,7 +1225,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1253,7 +1253,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1268,7 +1268,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1295,7 +1295,7 @@
       "max_tool_calls": 2,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1303,7 +1303,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003d",
+          "id": "00000000-0000-4000-8000-000000000051",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1331,7 +1331,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003e",
+          "id": "00000000-0000-4000-8000-000000000052",
           "content": "5",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1346,7 +1346,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1366,7 +1366,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1374,7 +1374,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000043",
+          "id": "00000000-0000-4000-8000-000000000057",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1402,7 +1402,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000044",
+          "id": "00000000-0000-4000-8000-000000000058",
           "content": "Checker overloaded",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1417,7 +1417,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1444,7 +1444,7 @@
       "max_tool_calls": 1,
       "messages": [
         {
-          "id": "00000000-0000-4000-8000-00000000003c",
+          "id": "00000000-0000-4000-8000-000000000050",
           "content": "Current message:\n<msg event_id=\"$team-completed\" from=\"@alice:example.org\"><![CDATA[What is 2 + 3?]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1452,7 +1452,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-00000000003f",
+          "id": "00000000-0000-4000-8000-000000000053",
           "content": "The writer found 5.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1472,7 +1472,7 @@
           "created_at": 1800001080
         },
         {
-          "id": "00000000-0000-4000-8000-000000000042",
+          "id": "00000000-0000-4000-8000-000000000056",
           "content": "Current message:\n<msg event_id=\"$team-member-error\" from=\"@alice:example.org\"><![CDATA[Check the answer.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1480,7 +1480,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-000000000045",
+          "id": "00000000-0000-4000-8000-000000000059",
           "content": "The checker could not answer.",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1500,7 +1500,7 @@
           "created_at": 1800001140
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004b",
+          "id": "00000000-0000-4000-8000-00000000005f",
           "content": "<team>\nYou coordinate this team to fulfill the user's request. You have a team of specialists, listed below. Delegate to members when their expertise or tools are needed; answer directly — including with your own tools — when they are not.\n\n<team_members>\n<member id=\"writer\" name=\"Writer\">\n  Role: ## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: writer-model.\nWhen working in teams with other agents, you should identify yourself as Writer and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Writes answers.\n</member>\n<member id=\"checker\" name=\"Checker\">\n  Role: ## Your Identity\nYou are Checker (Matrix ID: @mindroom_checker:mindroom.chat), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Synthetic model: checker-model.\nWhen working in teams with other agents, you should identify yourself as Checker and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Checks answers.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>\n\n<additional_context>\n## Current Date and Time\nToday is Friday, January 15, 2027.\nTimezone: UTC (UTC)\n</additional_context>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1508,7 +1508,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004c",
+          "id": "00000000-0000-4000-8000-000000000060",
           "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
           "from_history": true,
           "stop_after_tool_call": false,
@@ -1516,7 +1516,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004d",
+          "id": "00000000-0000-4000-8000-000000000061",
           "from_history": true,
           "stop_after_tool_call": false,
           "role": "assistant",
@@ -1544,7 +1544,7 @@
           "created_at": 1800001200
         },
         {
-          "id": "00000000-0000-4000-8000-00000000004e",
+          "id": "00000000-0000-4000-8000-000000000062",
           "content": "Member 'Checker' requires human input before continuing.",
           "from_history": true,
           "stop_after_tool_call": false,

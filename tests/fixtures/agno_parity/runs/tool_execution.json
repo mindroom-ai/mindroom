@@ -322,6 +322,156 @@
     "approval_type": null,
     "approval_id": null
   },
+  "agent_code:run-approved.tools[0]": {
+    "tool_call_id": "call-run-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001320,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "agent_code:run-approved.requirements[0].tool_execution": {
+    "tool_call_id": "call-run-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001320,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "agent_code:run-rejected.tools[0]": {
+    "tool_call_id": "call-run-rejected",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": true,
+    "result": null,
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001440,
+    "requires_confirmation": false,
+    "confirmed": false,
+    "confirmation_note": "Alice declined the multiplication.",
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "agent_code:run-rejected.requirements[0].tool_execution": {
+    "tool_call_id": "call-run-rejected",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": true,
+    "result": null,
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001440,
+    "requires_confirmation": false,
+    "confirmed": false,
+    "confirmation_note": "Alice declined the multiplication.",
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "agent_code:run-delegation-approved.tools[0]": {
+    "tool_call_id": "call-delegate-approved",
+    "tool_name": "run_subagent",
+    "tool_args": {
+      "agent_name": "helper",
+      "task": "Multiply 6 by 7"
+    },
+    "tool_call_error": null,
+    "result": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001560,
+    "requires_confirmation": null,
+    "confirmed": null,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": false,
+    "external_execution_silent": true,
+    "approval_type": null,
+    "approval_id": null
+  },
+  "agent_code:run-delegation-approved.requirements[0].tool_execution": {
+    "tool_call_id": "call-delegate-approved",
+    "tool_name": "run_subagent",
+    "tool_args": {
+      "agent_name": "helper",
+      "task": "Multiply 6 by 7"
+    },
+    "tool_call_error": null,
+    "result": "42\n\nDelegation 00000000000000000000000000000004 record: helper:.mindroom/delegations/2027-01-15/00000000000000000000000000000004\nSubagent ID: 00000000000000000000000000000004",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001560,
+    "requires_confirmation": null,
+    "confirmed": null,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": false,
+    "external_execution_silent": true,
+    "approval_type": null,
+    "approval_id": null
+  },
   "agent_code:segment:2.tools[0]": {
     "tool_call_id": "call-fold-add",
     "tool_name": "add",
@@ -401,7 +551,57 @@
     "approval_type": "mindroom_policy",
     "approval_id": null
   },
-  "team_squad:00000000-0000-4000-8000-000000000037.tools[0]": {
+  "agent_helper:00000000000000000000000000000005.tools[0]": {
+    "tool_call_id": "call-helper-multiply-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001560,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "agent_helper:00000000000000000000000000000005.requirements[0].tool_execution": {
+    "tool_call_id": "call-helper-multiply-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001560,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "team_squad:00000000-0000-4000-8000-00000000004b.tools[0]": {
     "tool_call_id": "call-writer-add",
     "tool_name": "add",
     "tool_args": {
@@ -488,7 +688,7 @@
     "approval_type": null,
     "approval_id": null
   },
-  "team_squad:00000000-0000-4000-8000-000000000046.tools[0]": {
+  "team_squad:00000000-0000-4000-8000-00000000005a.tools[0]": {
     "tool_call_id": "call-checker-multiply",
     "tool_name": "multiply",
     "tool_args": {
@@ -513,7 +713,7 @@
     "approval_type": "mindroom_policy",
     "approval_id": null
   },
-  "team_squad:00000000-0000-4000-8000-000000000046.requirements[0].tool_execution": {
+  "team_squad:00000000-0000-4000-8000-00000000005a.requirements[0].tool_execution": {
     "tool_call_id": "call-checker-multiply",
     "tool_name": "multiply",
     "tool_args": {
@@ -640,6 +840,85 @@
     "external_execution_required": null,
     "external_execution_silent": null,
     "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "team_squad:00000000-0000-4000-8000-000000000063.tools[0]": {
+    "tool_call_id": "call-checker-multiply-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001680,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "team_squad:00000000-0000-4000-8000-000000000063.requirements[0].tool_execution": {
+    "tool_call_id": "call-checker-multiply-approved",
+    "tool_name": "multiply",
+    "tool_args": {
+      "a": 6,
+      "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"operation\": \"multiplication\", \"result\": 42.0}",
+    "metrics": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001680,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy",
+    "approval_id": null
+  },
+  "team_squad:team-approved.tools[0]": {
+    "tool_call_id": "call-team-multiply-approved",
+    "tool_name": "delegate_task_to_member",
+    "tool_args": {
+      "member_id": "checker",
+      "task": "Multiply 6 by 7."
+    },
+    "tool_call_error": false,
+    "result": "Member results after human-in-the-loop resolution:\n[Checker]: 42",
+    "metrics": {
+      "start_time": 1800001679.5,
+      "end_time": 1800001680,
+      "duration": 0.5
+    },
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "created_at": 1800001680,
+    "requires_confirmation": null,
+    "confirmed": null,
+    "confirmation_note": null,
+    "requires_user_input": null,
+    "user_input_schema": null,
+    "user_feedback_schema": null,
+    "answered": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": null,
     "approval_id": null
   },
   "team_panel:panel-completed.tools[0]": {
