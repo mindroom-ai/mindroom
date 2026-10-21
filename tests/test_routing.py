@@ -164,7 +164,7 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     hidden_attrs = {
         "mindroom.agents": (
             "create_state_storage",
-            "get_agent_runtime_state_dbs",
+            "get_agent_runtime_state_db",
             "build_agent_tool_init_context",
         ),
         "mindroom.ai": (

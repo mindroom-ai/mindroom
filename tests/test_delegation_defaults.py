@@ -51,7 +51,7 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
             "leader": AgentConfig(display_name="Leader", tools=["calculator"], delegate_to=allowed),
             "other": AgentConfig(display_name="Other"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}]} if execution != "direct" else {},
     )

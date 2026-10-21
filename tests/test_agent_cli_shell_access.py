@@ -88,7 +88,6 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
             "calculator",
         ],
         memory_backend="file",
-        learning=False,
     )
     runtime = replace(
         runtime,

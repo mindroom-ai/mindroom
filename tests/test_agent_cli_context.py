@@ -41,7 +41,6 @@ async def test_context_uses_same_agent_learning_and_replays_summary_as_history(
         display_name="Helper",
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
     agent = agents.create_agent(
         "helper",
@@ -110,7 +109,6 @@ async def test_hidden_generated_learning_keeps_authenticated_requester(tmp_path:
         display_name="Helper",
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
     agent = agents.create_agent(
         "helper",

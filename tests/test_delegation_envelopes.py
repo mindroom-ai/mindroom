@@ -80,7 +80,7 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
@@ -116,7 +116,7 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
@@ -282,7 +282,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                 delegate_to=["child"],
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         prompts={"INTERACTIVE_QUESTION_PROMPT": "UNSUPPORTED_INTERACTIVE_MARKER"},

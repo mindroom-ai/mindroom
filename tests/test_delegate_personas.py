@@ -73,7 +73,7 @@ def _config(
             "child": AgentConfig(display_name="Child"),
         },
         knowledge_bases={base_id: KnowledgeBaseConfig(path=f"./{base_id}") for base_id in knowledge_bases},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         models={

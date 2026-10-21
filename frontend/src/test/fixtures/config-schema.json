@@ -164,19 +164,6 @@
           "description": "Whether to use markdown formatting",
           "title": "Markdown"
         },
-        "learning": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Enable Agno Learning (defaults to true when omitted)",
-          "title": "Learning"
-        },
         "knowledge_graph": {
           "anyOf": [
             {
@@ -189,23 +176,6 @@
           "default": null,
           "description": "Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
           "title": "Knowledge Graph"
-        },
-        "learning_mode": {
-          "anyOf": [
-            {
-              "enum": [
-                "always",
-                "agentic"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
-          "title": "Learning Mode"
         },
         "model": {
           "default": "default",
@@ -369,19 +339,6 @@
           "default": null,
           "description": "Max messages from history (mutually exclusive with num_history_runs)",
           "title": "Num History Messages"
-        },
-        "compress_tool_results": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Compress tool results in history to save context (per-agent override). On Anthropic/Vertex Claude, setting this to true can mutate replayed tool messages and invalidate prompt-cache prefixes.",
-          "title": "Compress Tool Results"
         },
         "max_tool_calls_from_history": {
           "anyOf": [
@@ -1383,27 +1340,11 @@
           "title": "Max Consecutive Agent Replies",
           "type": "integer"
         },
-        "learning": {
-          "default": true,
-          "description": "Default Agno Learning setting",
-          "title": "Learning",
-          "type": "boolean"
-        },
         "knowledge_graph": {
           "default": false,
           "description": "Default knowledge graph setting",
           "title": "Knowledge Graph",
           "type": "boolean"
-        },
-        "learning_mode": {
-          "default": "always",
-          "description": "Default Agno Learning mode",
-          "enum": [
-            "always",
-            "agentic"
-          ],
-          "title": "Learning Mode",
-          "type": "string"
         },
         "cheap_model": {
           "anyOf": [
@@ -1469,12 +1410,6 @@
           "default": null,
           "description": "Default max messages from history (mutually exclusive with num_history_runs)",
           "title": "Num History Messages"
-        },
-        "compress_tool_results": {
-          "default": false,
-          "description": "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes.",
-          "title": "Compress Tool Results",
-          "type": "boolean"
         },
         "max_tool_calls_from_history": {
           "anyOf": [
@@ -5260,9 +5195,7 @@
         },
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
-        "learning": true,
         "knowledge_graph": false,
-        "learning_mode": "always",
         "cheap_model": null,
         "compaction": {
           "enabled": true,
@@ -5276,7 +5209,6 @@
         },
         "num_history_runs": null,
         "num_history_messages": null,
-        "compress_tool_results": false,
         "max_tool_calls_from_history": null,
         "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,

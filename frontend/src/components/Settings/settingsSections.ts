@@ -62,18 +62,14 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "history",
     title: "History and context",
-    description:
-      "What agents replay, learn, and summarize from earlier conversation.",
+    description: "What agents replay and summarize from earlier conversation.",
     entries: [
       {
         root: "defaults",
         keys: [
-          "learning",
-          "learning_mode",
           "num_history_runs",
           "num_history_messages",
           "max_tool_calls_from_history",
-          "compress_tool_results",
           "compaction",
           "max_preload_chars",
           "thread_summary_model",

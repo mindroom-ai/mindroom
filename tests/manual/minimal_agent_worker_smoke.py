@@ -285,10 +285,9 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             display_name="Helper",
             tools=["shell", "file", "parity"],
             delegate_to=["code", "helper"],
-            learning=False,
             memory_backend="file",
         )
-        config.agents["code"] = AgentConfig(display_name="Code", tools=[], learning=False, memory_backend="file")
+        config.agents["code"] = AgentConfig(display_name="Code", tools=[], memory_backend="file")
         bind_runtime_paths(config, paths)
         paths.config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
         persist_entity_accounts(config, paths)

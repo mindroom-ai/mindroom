@@ -40,7 +40,7 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
 ) -> None:
     """Every action runs at once, even when every call needs approval, and emits its before/after pair."""
     config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=[], learning=False)},
+        agents={"leader": AgentConfig(display_name="Leader", tools=[])},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
     )
     config.memory.backend = "none"

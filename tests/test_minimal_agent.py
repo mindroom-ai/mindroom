@@ -122,7 +122,6 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         display_name="Helper",
         tools=["shell", "calculator"],
         memory_backend="file",
-        learning=False,
     )
     original = agents.get_tool_by_name
 
@@ -340,7 +339,6 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
         display_name="Helper",
         tools=["shell"],
         memory_backend="file",
-        learning=False,
     )
     registry = TurnToolRegistry()
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
@@ -596,7 +594,6 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         role="optional long role " * 500,
         tools=["shell", "thread_model", {"calculator": {"defer": True}}],
         memory_backend="file",
-        learning=False,
     )
     registry = TurnToolRegistry()
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))

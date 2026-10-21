@@ -169,13 +169,7 @@ def _fork(
     catalog: SkillCatalog,
 ) -> _ReviewRequest | None:
     """Return the fork of the response's final request, or None when the review cannot reuse it."""
-    # Resending compressed tool results would need Agno's compression manager, which also compresses more during the
-    # review, so such a response is replayed as a digest instead.
-    if (
-        captured is None
-        or captured.compressed_tool_results
-        or config.agents[agent_name].skill_learning.model not in {None, captured.model_name}
-    ):
+    if captured is None or config.agents[agent_name].skill_learning.model not in {None, captured.model_name}:
         return None
     final = captured.messages[-1] if captured.messages else None
     # A loop that stopped after a tool call, or whose last request was refused, left no final answer to continue.

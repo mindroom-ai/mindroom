@@ -48,7 +48,7 @@ def _config(
                 memory_backend="file",
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(provider="test", id="default-model"),
             "haiku": ModelConfig(provider="test", id="haiku-model"),

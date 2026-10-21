@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from functools import cache
+
+from mindroom.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
 # Last legacy release: v2026.2.32; replacement: v2026.2.33 removed the scalar field.
@@ -96,3 +102,48 @@ def reject_legacy_defaults_fields(value: object) -> object:
             msg = "defaults.initial_toolkits was removed. Use defaults.tools instead."
             raise ValueError(msg)
     return value
+
+
+# LEGACY_COMPAT: Retired Agno Learning switch.
+# Legacy format: Agent and defaults config accepted learning to enable Agno Learning.
+# Last legacy release: v2026.10.418, the newest tag when written; replacement: unreleased, bump both at merge.
+# Handling: Warn once per process and drop the value; existing learning databases stay on disk unread.
+# Coverage: tests/test_agents.py::test_config_ignores_retired_learning_with_one_warning.
+
+# LEGACY_COMPAT: Retired Agno Learning mode.
+# Legacy format: Agent and defaults config accepted learning_mode (always or agentic) for Agno Learning.
+# Last legacy release: v2026.10.418, the newest tag when written; replacement: unreleased, bump both at merge.
+# Handling: Warn once per process and drop the value.
+# Coverage: tests/test_agents.py::test_config_ignores_retired_learning_mode_with_one_warning.
+
+# LEGACY_COMPAT: Retired tool-result compression switch.
+# Legacy format: Agent and defaults config accepted compress_tool_results to compress replayed tool results.
+# Last legacy release: v2026.10.418, the newest tag when written; replacement: unreleased, bump both at merge.
+# Handling: Warn once per process and drop the value; tool results replay uncompressed.
+# Coverage: tests/test_agents.py::test_config_ignores_retired_compress_tool_results_with_one_warning.
+_RETIRED_FIELD_REASONS = {
+    "learning": "Agno Learning was retired; existing learning databases stay on disk unused",
+    "learning_mode": "Agno Learning was retired",
+    "compress_tool_results": "Tool-result compression was retired",
+}
+
+
+@cache
+def _warn_retired_field(field: str) -> None:
+    logger.warning(
+        "Ignoring a retired config field; remove it from the config",
+        field=field,
+        reason=_RETIRED_FIELD_REASONS[field],
+    )
+
+
+def drop_retired_fields(value: object) -> object:
+    """Drop retired agent and default fields that older configs still set, warning once per field."""
+    if not isinstance(value, dict):
+        return value
+    retired = _RETIRED_FIELD_REASONS.keys() & value.keys()
+    if not retired:
+        return value
+    for field in sorted(retired):
+        _warn_retired_field(field)
+    return {key: item for key, item in value.items() if key not in retired}

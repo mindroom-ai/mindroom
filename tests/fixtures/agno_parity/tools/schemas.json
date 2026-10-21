@@ -5354,23 +5354,6 @@
                 }
               ]
             },
-            "learning": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "learning_mode": {
-              "type": "string",
-              "enum": [
-                "always",
-                "agentic"
-              ]
-            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -22390,23 +22373,6 @@
                 }
               ]
             },
-            "learning": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "learning_mode": {
-              "type": "string",
-              "enum": [
-                "always",
-                "agentic"
-              ]
-            },
             "knowledge_bases": {
               "anyOf": [
                 {
@@ -22474,16 +22440,6 @@
               "anyOf": [
                 {
                   "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "compress_tool_results": {
-              "anyOf": [
-                {
-                  "type": "boolean"
                 },
                 {
                   "type": "null"

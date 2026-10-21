@@ -369,7 +369,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     config = bind_runtime_paths(
         Config.model_validate(
             {
-                "defaults": {"tools": [], "learning": False},
+                "defaults": {"tools": []},
                 "plugins": [str(plugin_path)] if plugin_path is not None else [],
                 "agents": {
                     "general": {

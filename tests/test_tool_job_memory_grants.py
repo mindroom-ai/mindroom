@@ -50,11 +50,10 @@ def memory_context(tmp_path: Path) -> ToolRuntimeContext:
             "leader": AgentConfig(
                 display_name="Leader",
                 tools=["memory"],
-                learning=False,
                 access=ResponderAccessConfig(users=["@alice:example.org"], current_room_members=False),
             ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "file"},
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
     )

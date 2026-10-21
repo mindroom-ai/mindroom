@@ -58,7 +58,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=execution == "excluded", exclude_toolkits=["delegate"]),
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"], tools=["calculator"])},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
             "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
@@ -231,7 +231,7 @@ async def test_cancellation_during_direct_reservation_settles_claim(
     """Cancellation waits for the registry write and never tries to finish a nonexistent audit."""
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)

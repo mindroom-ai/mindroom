@@ -49,7 +49,7 @@ def delegation_context(tmp_path: Path) -> ToolRuntimeContext:
             "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
             "code": AgentConfig(display_name="Code"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)

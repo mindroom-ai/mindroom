@@ -124,8 +124,6 @@ export interface AgentPrivateConfig {
   knowledge?: AgentPrivateKnowledgeConfig | null;
 }
 
-export type LearningMode = "always" | "agentic";
-
 export type ThreadMode = "thread" | "room";
 
 export interface ResponderAccessConfig {
@@ -244,8 +242,6 @@ export interface Agent {
   knowledge_bases?: string[];
   context_files?: string[]; // Workspace-relative files loaded into each freshly built agent instance
   markdown?: boolean; // Per-agent markdown override
-  learning?: boolean; // Defaults to true when omitted
-  learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
   compaction?: CompactionConfig | null; // Per-agent required-compaction overrides
   model?: string; // Reference to a model in the models section
@@ -258,7 +254,6 @@ export interface Agent {
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
-  compress_tool_results?: boolean; // Compress tool results in history
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
@@ -339,8 +334,6 @@ export interface Config {
   agents: Record<string, Omit<Agent, "id">>;
   defaults?: {
     markdown: boolean;
-    learning?: boolean;
-    learning_mode?: LearningMode;
     compaction?: CompactionConfig;
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
@@ -351,7 +344,6 @@ export interface Config {
     show_stop_button?: boolean;
     num_history_runs?: number | null;
     num_history_messages?: number | null;
-    compress_tool_results?: boolean;
     max_tool_calls_from_history?: number | null;
     max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (1000)
     allow_self_config?: boolean;

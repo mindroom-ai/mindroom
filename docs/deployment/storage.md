@@ -11,7 +11,6 @@ This page covers where MindRoom keeps its data, what to back up, how to configur
 MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `MINDROOM_STORAGE_PATH` to use another directory.
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
-- `agents/*/learning/` - Per-agent Agno Learning state when learning is enabled
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
@@ -29,7 +28,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 - `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
-Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
+Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; memory stays under the storage directory.
 
 ### Backups
 

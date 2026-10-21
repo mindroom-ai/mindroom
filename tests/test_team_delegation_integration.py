@@ -48,7 +48,7 @@ async def test_disabled_real_team_keeps_canonical_terminal_format(
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", model="leader")},
         models={name: ModelConfig(provider="test", id=name) for name in ("default", "leader")},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
@@ -118,7 +118,7 @@ async def test_real_streaming_team_preserves_child_approval_identity(
             ),
         },
         models={name: ModelConfig(provider="test", id=name) for name in ("default", "leader", "child")},
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "script": str(policy)}]},
     )

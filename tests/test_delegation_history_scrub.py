@@ -47,7 +47,7 @@ async def test_delegating_run_is_stored_without_replayed_history(
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
         tool_approval={"default": "require_approval"} if outcome == "policy_denied" else {},
     )

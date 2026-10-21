@@ -269,8 +269,6 @@ function deriveRooms(
 function deriveConfigCollections(
   config: Config,
 ): Pick<ConfigState, "agents" | "teams" | "rooms"> {
-  const defaultLearning = config.defaults?.learning ?? true;
-  const defaultLearningMode = config.defaults?.learning_mode ?? "always";
   const agents = Object.entries(config.agents).map(([id, agent]) => ({
     id,
     ...agent,
@@ -278,8 +276,6 @@ function deriveConfigCollections(
     knowledge_bases: agent.knowledge_bases || [],
     delegate_to: agent.delegate_to || [],
     context_files: agent.context_files ?? [],
-    learning: agent.learning ?? defaultLearning,
-    learning_mode: agent.learning_mode ?? defaultLearningMode,
   }));
   const teams = config.teams
     ? Object.entries(config.teams).map(([id, team]) => ({
@@ -1569,16 +1565,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Create a new agent
   createAgent: (agentData) => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, "_");
-    const defaultLearning = get().config?.defaults?.learning ?? true;
-    const defaultLearningMode =
-      get().config?.defaults?.learning_mode ?? "always";
     const newAgent: Agent = {
       id,
       ...agentData,
       knowledge_bases: agentData.knowledge_bases ?? [],
       delegate_to: agentData.delegate_to ?? [],
-      learning: agentData.learning ?? defaultLearning,
-      learning_mode: agentData.learning_mode ?? defaultLearningMode,
     };
     set((state) => ({
       agents: [...state.agents, newAgent],

@@ -19,7 +19,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import (
     create_session_storage,
     create_state_storage,
-    get_agent_runtime_state_dbs,
+    get_agent_runtime_state_db,
     get_agent_session,
     get_team_session,
 )
@@ -263,12 +263,12 @@ def close_agent_runtime_state_dbs(
     *,
     shared_scope_storage: BaseDb | None = None,
 ) -> None:
-    """Close one agent's runtime-owned state DB handles except a shared scope storage."""
+    """Close one agent's runtime-owned state DB handle unless it is a shared scope storage."""
     if agent is None:
         return
-    _close_unique_state_dbs(
-        *(storage for storage in get_agent_runtime_state_dbs(agent) if storage is not shared_scope_storage),
-    )
+    storage = get_agent_runtime_state_db(agent)
+    if storage is not None and storage is not shared_scope_storage:
+        close_execution_storage(storage)
 
 
 def close_team_runtime_state_dbs(
@@ -279,12 +279,7 @@ def close_team_runtime_state_dbs(
 ) -> None:
     """Close all runtime-owned state DB handles for one team request."""
     _close_unique_state_dbs(
-        *(
-            storage
-            for agent in agents
-            for storage in get_agent_runtime_state_dbs(agent)
-            if storage is not shared_scope_storage
-        ),
+        *(storage for agent in agents if (storage := get_agent_runtime_state_db(agent)) is not shared_scope_storage),
         team_db if team_db is not shared_scope_storage else None,
     )
 

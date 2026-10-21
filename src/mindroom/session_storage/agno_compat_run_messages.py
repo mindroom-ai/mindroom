@@ -286,34 +286,6 @@ def _with_request_model[T](original: Callable[..., T]) -> Callable[..., T]:
     return populate
 
 
-# AGNO_COMPAT: A tool loop called without a run reports only its last request's usage.
-# Reason: Model.aresponse replaces ModelResponse.response_usage with each request's usage and
-# adds it to metrics only when a run is passed. Agno Learning extraction passes no run and meters
-# the returned response once, so each request before the last in its tool loop goes uncounted.
-# Upstream issue: Tracking gap; no issue identified.
-# Upstream PR: None identified.
-# Remove when: Model.aresponse without a run returns the usage of every request in its tool loop,
-# or Agno Learning meters each extraction request.
-# Coverage: tests/test_agno_compat_run_messages.py::test_tool_loop_without_a_run_reports_every_request;
-# tests/test_agno_compat_run_messages.py::test_default_learning_counts_every_extraction_request.
-def _with_loop_usage(original: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
-    @wraps(original)
-    async def process(
-        model: Model,
-        *args: object,
-        model_response: ModelResponse,
-        run_response: RunOutput | TeamRunOutput | None = None,
-        **kwargs: object,
-    ) -> None:
-        previous = model_response.response_usage if run_response is None else None
-        await original(model, *args, model_response=model_response, run_response=run_response, **kwargs)
-        current = model_response.response_usage
-        if previous is not None and current is not None and current is not previous:
-            model_response.response_usage = previous + current
-
-    return process
-
-
 def _begin_request(request: _ModelRequest) -> None:
     _record_request_model(request.model, request.assistant_message)
     if request.run_response is not None:
@@ -432,7 +404,6 @@ def install_patch() -> None:
         team_run._acleanup_and_store = cast("Any", _with_member_runs(team_run._acleanup_and_store))
         Model.process_response_stream = cast("Any", _with_metered_messages(Model.process_response_stream))
         Model.aprocess_response_stream = cast("Any", _with_metered_messages_async(Model.aprocess_response_stream))
-        Model._aprocess_model_response = cast("Any", _with_loop_usage(Model._aprocess_model_response))
         Model._populate_assistant_message = cast("Any", _with_request_model(Model._populate_assistant_message))
         Model._populate_assistant_message_from_stream_data = cast(
             "Any",

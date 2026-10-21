@@ -104,7 +104,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     if is_cli:
         config.agents["general"].tools.append(ToolConfigEntry(name="shell"))
         config.administrators = ["@user:localhost"]
-    config.defaults.learning = False
     config.memory.backend = "none"
     config.models["default"].provider = "synthetic"
     config.models["default"].id = "synthetic"

@@ -1847,7 +1847,6 @@ class TestUserIdPassthrough:
                 self.name = "GeneralAgent"
                 self.add_history_to_context = False
                 self.db = None
-                self.learning = None
 
             async def arun(self, prompt: str | list[Message], **_kwargs: object) -> AsyncIterator[object]:
                 prompt_messages = prompt if isinstance(prompt, list) else [Message(role="user", content=prompt)]

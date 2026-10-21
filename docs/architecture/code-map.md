@@ -244,7 +244,7 @@ Matrix sync callback
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Agent session and learning SQLite storage helpers |
+| `session_storage/agent_storage.py` | Agent session SQLite storage helpers |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
 | `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
