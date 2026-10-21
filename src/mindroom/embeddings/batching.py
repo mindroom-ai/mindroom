@@ -1,19 +1,11 @@
 """Batch the document embedding requests a semantic knowledge refresh issues.
 
-A refresh writes each file's chunks as one unit, and embedding them one
-request per chunk makes a corpus of many small files one HTTP round trip per
-file, which is the dominant cost of a large build and far slower than the rate
-at which such corpora change.
-
-``BatchPrefetchEmbedder`` wraps the configured embedder and serves
-already-embedded chunk texts from a short-lived cache. The indexer reads and
-chunks a bounded batch of files first, embeds those chunk texts in as few
-provider requests as the item and payload limits allow, and only then writes
-the files, whose chunk embeddings become cache hits.
-
-Cache misses fall through to the wrapped embedder one text at a time, so
-behavior is identical (only slower) for providers without batch requests and
-for content that changed between planning and writing.
+A refresh reads and chunks a bounded batch of files once, embeds the batch's
+distinct chunk texts in as few provider requests as the item and payload
+limits allow, and only then writes each file's rows. Embedding one request per
+chunk instead makes a corpus of many small files one HTTP round trip per file,
+which is the dominant cost of a large build and far slower than the rate at
+which such corpora change.
 """
 
 from __future__ import annotations
@@ -32,7 +24,7 @@ from mindroom.embeddings.errors import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.embeddings.base import Embedder
 
@@ -41,15 +33,15 @@ logger = get_logger(__name__)
 #: Provider request limits. Both bounds matter: item count keeps a request from
 #: exceeding per-request input limits, and payload size keeps a batch of large
 #: chunks from producing a request the provider rejects outright.
-DEFAULT_MAX_EMBEDDING_BATCH_ITEMS = 64
-DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES = 512_000
+_MAX_EMBEDDING_BATCH_ITEMS = 64
+_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES = 512_000
 
 
 def plan_embedding_batches(
     texts: Sequence[str],
     *,
-    max_items: int = DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
-    max_payload_bytes: int = DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
+    max_items: int = _MAX_EMBEDDING_BATCH_ITEMS,
+    max_payload_bytes: int = _MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
 ) -> list[list[str]]:
     """Split texts into provider requests bounded by item count and payload size.
 
@@ -76,129 +68,97 @@ def plan_embedding_batches(
 
 
 @dataclass
-class BatchPrefetchEmbedder:
-    """Document embedder for the knowledge write path that serves prefetched chunk embeddings from a bounded cache."""
+class RefreshEmbedder:
+    """The embedder one knowledge refresh writes chunks with, and what the refresh has learned about it.
 
-    inner: Embedder
-    _cache: dict[str, list[float]] = field(default_factory=dict, init=False, repr=False)
+    Every vector is checked against the width of the first vector this
+    refresh saw, not against a declared width, which real providers routinely
+    contradict, so trusting it would reject correct vectors. Consistency still
+    catches the case that matters here, a provider changing width mid-run.
+    """
+
+    embedder: Embedder
     _batching_disabled: bool = field(default=False, init=False, repr=False)
-    _observed_dimensions: int | None = field(default=None, init=False, repr=False)
+    _dimensions: int | None = field(default=None, init=False, repr=False)
 
-    def supports_batching(self) -> bool:
-        """Return whether the wrapped embedder can still embed a batch in one request."""
-        return not self._batching_disabled and self.inner.sends_batches
+    def batches(self) -> bool:
+        """Return whether one request can still carry several chunk texts."""
+        return not self._batching_disabled and self.embedder.sends_batches
 
-    def clear_cache(self) -> None:
-        """Drop prefetched vectors once their batch has been written."""
-        self._cache.clear()
-
-    def uncached(self, texts: Iterable[str]) -> list[str]:
-        """Return the distinct texts that still need embedding, in first-seen order."""
-        return list(dict.fromkeys(text for text in texts if text not in self._cache))
-
-    def _validated(self, embedding: list[float]) -> list[float]:
-        """Reject a vector that is empty or inconsistent with the ones before it.
-
-        Width is checked against the first vector this adapter actually saw,
-        not against a declared width, which real providers routinely
-        contradict, so trusting it would reject correct vectors. Consistency
-        still catches the case that matters here, a provider changing width
-        mid-run.
-        """
-        if not embedding:
-            raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
-        if self._observed_dimensions is None:
-            self._observed_dimensions = len(embedding)
-        elif len(embedding) != self._observed_dimensions:
-            detail = f"embedder returned a {len(embedding)}-dimension vector, expected {self._observed_dimensions}"
-            raise EmbedderRequestError(detail)
-        return embedding
-
-    def _embed_each_into_cache(self, pending: Sequence[str]) -> int:
-        """Embed one text per request, preserving input order.
-
-        Successes are cached as they land, so a failure part-way through never
-        costs the items already embedded.
-
-        Prefetching is an optimization, so a fault affecting one text is left
-        uncached and the file that owns it fails through the normal per-file
-        path, where it is retried and recorded as a failed file. Only a
-        credential rejection is re-raised: that is provably global, and
-        grinding one doomed request per remaining chunk would bury the cause.
-        """
-        cached = 0
-        for text in pending:
-            try:
-                self._cache[text] = self._validated(self.inner.embed([text], purpose="document")[0])
-            except Exception as exc:
-                if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
-                    raise
-                logger.debug("Leaving one chunk unembedded for the per-file path", exc_info=True)
-                continue
-            cached += 1
-        return cached
-
-    def embed_batch_into_cache(self, texts: Sequence[str]) -> int:
-        """Embed one planned batch, falling back to per-item when batching is unusable.
+    def embed_texts(self, texts: Sequence[str]) -> dict[str, list[float]]:
+        """Embed distinct chunk texts as documents, in one request when batching is usable.
 
         Batch support is a capability claim that only a real multi-input
         request can test: some OpenAI-compatible backends accept an array and
         answer with a single vector, or reject the array outright. Treating
         that as a fatal error stalls every refresh on its first batch, so a
-        non-transient batch failure retires batching for the rest of this run
-        and the same texts are embedded one at a time instead.
+        cardinality mismatch retires batching for the rest of this refresh and
+        the same texts are embedded one at a time instead.
 
-        The fallback hides nothing: authentication, authorization, invalid
-        model, and dimension failures surface again from the per-item requests
-        with their existing semantics. Transient failures are re-raised
-        untouched so the caller's retry and backoff still apply.
+        Everything else is re-raised: transient failures keep the caller's
+        retry and backoff, and credentials, permissions, a bad model, or a
+        malformed payload would fail exactly the same way one input at a time.
+
+        On the per-item path, a text whose request fails for any reason but a
+        credential rejection is left out of the result, so the file that owns
+        it embeds it again through :meth:`embed_each`, where the failure is
+        retried and recorded against that file. A rejected credential is
+        re-raised because it is provably global, and grinding one doomed
+        request per remaining chunk would bury the cause.
         """
-        pending = [text for text in dict.fromkeys(texts) if text not in self._cache]
+        pending = list(dict.fromkeys(texts))
         if not pending:
-            return 0
-        if not self.supports_batching() or len(pending) == 1:
+            return {}
+        if not self.batches() or len(pending) == 1:
             # A single-input request proves nothing about batch support, so it
             # is never allowed to retire batching.
-            return self._embed_each_into_cache(pending)
+            return self._embed_each_leaving_failures(pending)
 
         try:
-            embeddings = self.inner.embed(pending, purpose="document")
+            vectors = self.embedder.embed(pending, purpose="document")
         except Exception as exc:
             if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
-                # Transient faults keep their retry, and everything else
-                # (credentials, permissions, bad model, malformed payload)
-                # would fail exactly the same way one input at a time. Falling
-                # back would only turn one clear failure into one failed
-                # request per chunk.
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
-            return self._embed_each_into_cache(pending)
+            return self._embed_each_leaving_failures(pending)
 
-        if len(embeddings) != len(pending):
+        if len(vectors) != len(pending):
             # The partial result is discarded on purpose: with fewer vectors
             # than inputs there is no trustworthy way to tell which input each
             # one belongs to, and guessing by position would silently attach a
-            # vector to the wrong chunk. Vectors cached by earlier successful
-            # batches are untouched.
-            self._disable_batching(
-                f"multi-input request returned {len(embeddings)} vectors for {len(pending)} inputs",
-            )
-            return self._embed_each_into_cache(pending)
+            # vector to the wrong chunk.
+            self._disable_batching(f"multi-input request returned {len(vectors)} vectors for {len(pending)} inputs")
+            return self._embed_each_leaving_failures(pending)
 
-        for text, embedding in zip(pending, embeddings, strict=True):
-            self._cache[text] = self._validated(embedding)
-        return len(pending)
+        return {text: self._validated(vector) for text, vector in zip(pending, vectors, strict=True)}
+
+    def embed_each(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed each chunk text as a document in its own request, raising the first failure."""
+        return [self._validated(self.embedder.embed([text], purpose="document")[0]) for text in texts]
+
+    def _embed_each_leaving_failures(self, texts: Sequence[str]) -> dict[str, list[float]]:
+        """Embed one text per request, leaving out every text but a credential rejection fails."""
+        vectors: dict[str, list[float]] = {}
+        for text in texts:
+            try:
+                vectors[text] = self.embed_each([text])[0]
+            except Exception as exc:
+                if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
+                    raise
+                logger.debug("Leaving one chunk for its file to embed", exc_info=True)
+        return vectors
+
+    def _validated(self, vector: list[float]) -> list[float]:
+        """Reject a vector that is empty or inconsistent with the ones before it."""
+        if not vector:
+            raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
+        if self._dimensions is None:
+            self._dimensions = len(vector)
+        elif len(vector) != self._dimensions:
+            detail = f"embedder returned a {len(vector)}-dimension vector, expected {self._dimensions}"
+            raise EmbedderRequestError(detail)
+        return vector
 
     def _disable_batching(self, reason: str) -> None:
         self._batching_disabled = True
         logger.warning("Knowledge embedder does not support batching; using one request per chunk", reason=reason)
-
-    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        """Return one validated vector per chunk text, embedding each text the cache misses in its own request."""
-        vectors: list[list[float]] = []
-        for text in texts:
-            cached = self._cache.get(text)
-            if cached is None:
-                cached = self._validated(self.inner.embed([text], purpose="document")[0])
-            vectors.append(cached)
-        return vectors

@@ -105,9 +105,7 @@ def _assert_carries_base_chunking(reader: Reader) -> None:
     assert strategy.min_chunk_fill_ratio == 0.5
     assert reader.chunk is True
     assert reader.chunk_size == _CHUNK_SIZE
-    # None is how these readers spell UTF-8 (``self.encoding or "utf-8"``), which
-    # is what lets `SafeFixedSizeChunking.max_chunk_text_bytes` bound decoded
-    # text by a size on disk -- the precondition the prefetch budget rests on.
+    # None is how these readers spell UTF-8 (``self.encoding or "utf-8"``).
     assert reader.encoding is None
 
 

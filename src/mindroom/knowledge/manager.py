@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
 import tempfile
 import time
 import uuid
@@ -14,7 +13,6 @@ from contextlib import closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 
@@ -32,12 +30,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
-from mindroom.embeddings.batching import (
-    DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
-    DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
-    BatchPrefetchEmbedder,
-    plan_embedding_batches,
-)
+from mindroom.embeddings.batching import RefreshEmbedder, plan_embedding_batches
 from mindroom.embeddings.errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
@@ -158,10 +151,12 @@ class _InMemoryTextReader(TextReader):
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
 _INDEX_FILES_PER_BATCH = 64
-#: Chunk text held in memory for one prefetch pass. File count alone does not
-#: bound memory: 64 large files can materialize far more text (and far more
-#: cached vectors) than 64 small ones.
-_MAX_PREFETCH_TEXT_BYTES = 8_000_000
+#: Chunk text one batch holds between reading its files and writing them. File
+#: count alone does not bound memory: 64 large files can materialize far more
+#: text (and far more vectors) than 64 small ones. A batch closes once its text
+#: reaches this budget, so it holds at most the budget plus one file's chunks,
+#: which indexing that file has to materialize anyway.
+_MAX_BATCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
@@ -217,7 +212,7 @@ class _CandidateRun:
 
     checkpoint: CandidateCheckpoint
     collection: KnowledgeCollection
-    embedder: BatchPrefetchEmbedder
+    embedder: RefreshEmbedder
     #: Revision the candidate's file signatures describe, when known.
     baseline_revision: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
@@ -368,13 +363,6 @@ async def _shielded_write(write: Coroutine[Any, Any, _ShieldedResult]) -> _Shiel
         raise
 
 
-def _iter_file_batches(files: Sequence[Path], batch_size: int) -> Iterator[list[Path]]:
-    """Yield bounded slices so a huge corpus never becomes one huge fan-out."""
-    size = max(batch_size, 1)
-    for start in range(0, len(files), size):
-        yield list(files[start : start + size])
-
-
 def _resolve_knowledge_path(
     path: str,
     runtime_paths: RuntimePaths,
@@ -409,12 +397,14 @@ def _file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignat
 
 
 @contextmanager
-def _knowledge_source_snapshot(file_path: Path) -> Iterator[Path]:
-    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path."""
+def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSignature]]:
+    """Copy one listed file into a primary-private directory, because Agno readers reopen sources by path.
+
+    Yields the copy and the signature of the bytes copied into it.
+    """
     with tempfile.TemporaryDirectory(prefix="mindroom-knowledge-") as snapshot_dir:
         snapshot = Path(snapshot_dir) / file_path.name
-        _file_signature(file_path, snapshot)
-        yield snapshot
+        yield snapshot, _file_signature(file_path, snapshot)
 
 
 def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
@@ -425,26 +415,53 @@ def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
     ]
 
 
+class _SourceReadError(Exception):
+    """A reader's failure on a file already copied, kept apart from the errors of a file that vanished."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(f"Knowledge reader failed ({type(cause).__name__})")
+        self.cause = cause
+
+
+@dataclass(frozen=True)
+class _PreparedFile:
+    """One listed file read and chunked once, waiting for its batch's vectors."""
+
+    path: Path
+    relative_path: str
+    signature: FileSignature
+    chunks: tuple[KnowledgeChunk, ...]
+
+    def text_bytes(self) -> int:
+        """Return the UTF-8 size of the chunk text this file holds in memory."""
+        return sum(len(chunk.text.encode("utf-8")) for chunk in self.chunks)
+
+
 def _write_file_rows(
     collection: KnowledgeCollection,
-    embedder: BatchPrefetchEmbedder,
-    *,
-    snapshot: Path,
-    reader: Reader,
-    relative_path: str,
-    source_metadata: Mapping[str, object],
-) -> int:
-    """Read one file snapshot, embed its chunks as documents, and replace the file's rows; return the row count."""
-    chunks = _knowledge_chunks(reader.read(snapshot, name=snapshot.name))
-    vectors = embedder.embed_documents([chunk.text for chunk in chunks])
+    embedder: RefreshEmbedder,
+    prepared: _PreparedFile,
+    batch_vectors: Mapping[str, list[float]],
+) -> None:
+    """Embed the chunks one file's batch left unembedded, then replace the file's rows."""
+    missing = [text for text in dict.fromkeys(chunk.text for chunk in prepared.chunks) if text not in batch_vectors]
+    own_vectors = dict(zip(missing, embedder.embed_each(missing), strict=True))
+    mtime_ns, size, digest = prepared.signature
     write_source_rows(
         collection,
-        relative_path=relative_path,
-        source_metadata=source_metadata,
-        chunks=chunks,
-        vectors=vectors,
+        relative_path=prepared.relative_path,
+        source_metadata={
+            SOURCE_PATH_KEY: prepared.relative_path,
+            SOURCE_MTIME_NS_KEY: mtime_ns,
+            SOURCE_SIZE_KEY: size,
+            SOURCE_DIGEST_KEY: digest,
+        },
+        chunks=prepared.chunks,
+        vectors=[
+            batch_vectors[chunk.text] if chunk.text in batch_vectors else own_vectors[chunk.text]
+            for chunk in prepared.chunks
+        ],
     )
-    return len(chunks)
 
 
 def _knowledge_source_signature(
@@ -719,25 +736,41 @@ class KnowledgeManager:
 
         return self._configure_text_reader(deepcopy(reader))
 
-    async def _write_with_malformed_json_fallback(
-        self,
-        write: Callable[[Reader], Awaitable[int]],
-        *,
-        relative_path: str,
-        reader: Reader,
-    ) -> int:
-        """Write through the selected reader, falling back only for malformed source JSON; return the row count."""
+    def _read_file(self, file_path: Path) -> _PreparedFile | None:
+        """Read and chunk one listed file through a private snapshot; None when its reader dependency is missing.
 
-        async def _write_with_retry(selected_reader: Reader) -> int:
-            return await run_with_embedding_retry(
-                partial(write, selected_reader),
-                policy=_EMBEDDING_RETRY_POLICY,
-                sleep=_EMBEDDING_RETRY_SLEEP,
-                on_retry=self._record_embedding_retry,
-            )
-
+        A file that vanished or was swapped after listing raises
+        ``FileNotFoundError`` or ``ValueError`` from the snapshot, and a reader
+        failure raises ``_SourceReadError``, so the two never get confused.
+        """
+        relative_path = self._relative_path(file_path)
         try:
-            return await _write_with_retry(reader)
+            reader = self._build_reader(file_path)
+        except ImportError as exc:
+            logger.warning(
+                "Skipping knowledge file because its reader dependency is not installed",
+                base_id=self.base_id,
+                path=relative_path,
+                extension=file_path.suffix.lower(),
+                error=str(exc),
+            )
+            return None
+        with _knowledge_source_snapshot(file_path) as (snapshot, signature):
+            try:
+                documents = self._read_documents(reader, snapshot, relative_path)
+            except Exception as exc:
+                raise _SourceReadError(exc) from exc
+        return _PreparedFile(
+            path=file_path,
+            relative_path=relative_path,
+            signature=signature,
+            chunks=tuple(_knowledge_chunks(documents)),
+        )
+
+    def _read_documents(self, reader: Reader, snapshot: Path, relative_path: str) -> list[Document]:
+        """Read one snapshot with its reader, rereading the retained text only for malformed source JSON."""
+        try:
+            return reader.read(snapshot, name=snapshot.name)
         except _MalformedJSONSourceError as error:
             logger.warning(
                 "Malformed JSON knowledge file; indexing as text",
@@ -747,7 +780,29 @@ class KnowledgeManager:
                 column=error.column,
             )
             fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
-            return await _write_with_retry(fallback_reader)
+            return fallback_reader.read(snapshot, name=snapshot.name)
+
+    async def _prepare_file(self, file_path: Path, *, vanished_files: set[str]) -> _PreparedFile | None:
+        """Read and chunk one file on a worker thread; None when it vanished, failed to read, or lacks its reader."""
+        try:
+            return await asyncio.to_thread(self._read_file, file_path)
+        except _SourceReadError as error:
+            self._record_file_failure(file_path, error.cause)
+        except (FileNotFoundError, ValueError):
+            # Live source folders (e.g. thread exports) delete or replace files while
+            # a refresh runs; a file vanishing or turning into a link between listing
+            # and indexing is not an indexing failure. Record it so the caller can drop
+            # it from its completeness accounting: the trailing
+            # source-signature comparison then decides whether the
+            # surviving corpus is publishable or another refresh is needed.
+            relative_path = self._relative_path(file_path)
+            logger.warning(
+                "Knowledge file vanished during refresh; skipping",
+                base_id=self.base_id,
+                path=relative_path,
+            )
+            vanished_files.add(relative_path)
+        return None
 
     async def _save_candidate_publish_metadata(
         self,
@@ -801,101 +856,60 @@ class KnowledgeManager:
 
     async def _index_file_locked(
         self,
-        resolved_path: Path,
+        prepared: _PreparedFile,
         *,
+        batch_vectors: Mapping[str, list[float]],
         collection: KnowledgeCollection,
-        embedder: BatchPrefetchEmbedder,
+        embedder: RefreshEmbedder,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
-        """Index one file while the caller owns the operation lock, reading it once into a private snapshot."""
-        snapshot_dir = Path(cast("str", await asyncio.to_thread(tempfile.mkdtemp, prefix="mindroom-knowledge-")))
-        try:
-            return await self._index_snapshot_locked(
-                resolved_path,
-                snapshot_dir / resolved_path.name,
-                collection=collection,
-                embedder=embedder,
-                indexed_signatures=indexed_signatures,
-            )
-        finally:
-            await asyncio.to_thread(shutil.rmtree, snapshot_dir, ignore_errors=True)
+        """Replace one prepared file's rows while the caller owns the operation lock."""
 
-    async def _index_snapshot_locked(
-        self,
-        resolved_path: Path,
-        snapshot: Path,
-        *,
-        collection: KnowledgeCollection,
-        embedder: BatchPrefetchEmbedder,
-        indexed_signatures: dict[str, FileSignature],
-    ) -> bool:
-        relative_path = self._relative_path(resolved_path)
-        source_mtime_ns, source_size, source_digest = await asyncio.to_thread(_file_signature, resolved_path, snapshot)
-        source_metadata = {
-            SOURCE_PATH_KEY: relative_path,
-            SOURCE_MTIME_NS_KEY: source_mtime_ns,
-            SOURCE_SIZE_KEY: source_size,
-            SOURCE_DIGEST_KEY: source_digest,
-        }
-        try:
-            reader = self._build_reader(resolved_path)
-        except ImportError as exc:
-            logger.warning(
-                "Skipping knowledge file because its reader dependency is not installed",
-                base_id=self.base_id,
-                path=relative_path,
-                extension=resolved_path.suffix.lower(),
-                error=str(exc),
-            )
-            return False
-
-        async def _write_once(selected_reader: Reader) -> int:
-            # Reading, embedding, and the vector store write all run on a
-            # worker thread, so the loop stays responsive to Matrix sync, tool
-            # calls, and cache writes.
-            return await asyncio.to_thread(
-                _write_file_rows,
-                collection,
-                embedder,
-                snapshot=snapshot,
-                reader=selected_reader,
-                relative_path=relative_path,
-                source_metadata=source_metadata,
-            )
+        async def _write() -> None:
+            # Embedding the chunks the batch left out and the vector store
+            # write run on a worker thread, so the loop stays responsive to
+            # Matrix sync, tool calls, and cache writes.
+            await asyncio.to_thread(_write_file_rows, collection, embedder, prepared, batch_vectors)
 
         try:
             # A file's rows are replaced only after all of its chunks embedded,
             # so a transient embedding fault costs one retry of this file
             # instead of the whole refresh.
-            written = await self._write_with_malformed_json_fallback(
-                _write_once,
-                relative_path=relative_path,
-                reader=reader,
+            await run_with_embedding_retry(
+                _write,
+                policy=_EMBEDDING_RETRY_POLICY,
+                sleep=_EMBEDDING_RETRY_SLEEP,
+                on_retry=self._record_embedding_retry,
             )
         except Exception as exc:
-            classified = classified_embedder_error(exc)
-            error = classified or f"knowledge indexing failed ({type(exc).__name__})"
-            if self._last_file_index_error is None:
-                self._last_file_index_error = error
-            self._file_index_errors[relative_path] = error
-            self._record_embedder_rejection(classified)
-            logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
+            self._record_file_failure(prepared.path, exc)
             return False
 
-        if not written:
+        if not prepared.chunks:
             return self._handle_vectorless_file(
-                relative_path,
-                (source_mtime_ns, source_size, source_digest),
+                prepared.relative_path,
+                prepared.signature,
                 indexed_signatures=indexed_signatures,
             )
 
-        indexed_signatures[relative_path] = (source_mtime_ns, source_size, source_digest)
-        self._file_index_errors.pop(relative_path, None)
+        indexed_signatures[prepared.relative_path] = prepared.signature
+        self._file_index_errors.pop(prepared.relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
         # Operators get periodic aggregate progress instead.
-        logger.debug("Indexed knowledge file", base_id=self.base_id, path=relative_path)
+        logger.debug("Indexed knowledge file", base_id=self.base_id, path=prepared.relative_path)
         return True
+
+    def _record_file_failure(self, file_path: Path, exc: Exception) -> None:
+        """Record why one file failed to index, for its candidate entry and the refresh summary."""
+        relative_path = self._relative_path(file_path)
+        classified = classified_embedder_error(exc)
+        error = classified or f"knowledge indexing failed ({type(exc).__name__})"
+        if self._last_file_index_error is None:
+            self._last_file_index_error = error
+        self._file_index_errors[relative_path] = error
+        self._record_embedder_rejection(classified)
+        logger.error("Failed to index knowledge file", base_id=self.base_id, path=str(file_path), exc_info=exc)
 
     def _handle_vectorless_file(
         self,
@@ -921,9 +935,9 @@ class KnowledgeManager:
     def _record_embedder_rejection(self, classified: str | None) -> None:
         """Track evidence that the embedder is rejecting everything, not one file.
 
-        Providers without a batch surface, and files read by a non-text reader,
-        never reach the batch-prefetch stop, so without this the same doomed
-        request is issued once per remaining file.
+        Providers without a batch surface never reach the batch-embedding stop,
+        so without this the same doomed request is issued once per remaining
+        file.
         """
         if classified is None:
             return
@@ -937,111 +951,37 @@ class KnowledgeManager:
     def _note_embedder_success(self) -> None:
         self._embedder_failure_streak = 0
 
-    def _chunk_texts_for_prefetch(self, resolved_path: Path) -> tuple[str, ...]:
-        """Return the chunk texts Agno will embed for one file, or ``()``.
-
-        Only the text-like readers MindRoom configures chunking for are
-        pre-read: for those, reading twice is negligible next to one embedding
-        round trip per chunk. Any reader failure here is swallowed on purpose
-        because prefetching is an optimization; the real insert path below owns
-        error reporting for this file.
-        """
-        try:
-            reader = self._build_reader(resolved_path)
-        except Exception:
-            return ()
-        if not isinstance(reader, (TextReader, MarkdownReader)):
-            return ()
-        try:
-            with _knowledge_source_snapshot(resolved_path) as snapshot:
-                documents: Sequence[Document] = reader.read(snapshot, name=resolved_path.name)
-        except Exception:
-            logger.debug(
-                "Skipping embedding prefetch for knowledge file",
-                base_id=self.base_id,
-                path=str(resolved_path),
-                exc_info=True,
-            )
-            return ()
-        return tuple(document.content for document in documents if document.content)
-
-    def _chunk_texts_for_batch(self, files: Sequence[Path]) -> list[str]:
-        """Return chunk texts to prefetch, stopping at the memory budget.
-
-        The size check has to precede the read: chunking materializes a file's
-        entire content, so a budget consulted afterwards cannot stop a single
-        oversized file from blowing the bound. A file that cannot fit the
-        remaining budget is skipped rather than ending the pass, so smaller
-        files behind it still benefit.
-
-        Overlapping chunks re-emit the same characters many times over, so a
-        file's size on disk stops bounding the text its chunks occupy: 4 KB at
-        chunk_size=128/overlap=127 materializes ~484 KB. The admission test is
-        therefore the chunker's own worst-case expansion of that size, never
-        the size itself.
-
-        Skipped files are simply not prefetched; their chunks are embedded by
-        the normal per-file path, so the only cost of the bound is speed,
-        never correctness.
-        """
-        chunking_strategy = self._chunking_strategy()
-        chunk_texts: list[str] = []
-        remaining = _MAX_PREFETCH_TEXT_BYTES
-        skipped = 0
-        for resolved_path in files:
-            if remaining <= 0:
-                break
-            try:
-                with open_knowledge_file(resolved_path) as descriptor:
-                    source_size = os.fstat(descriptor).st_size
-            except (OSError, ValueError):
-                continue
-            if chunking_strategy.max_chunk_text_bytes(source_size) > remaining:
-                skipped += 1
-                continue
-            for text in self._chunk_texts_for_prefetch(resolved_path):
-                chunk_texts.append(text)
-                remaining -= len(text.encode("utf-8"))
-                if remaining <= 0:
-                    break
-        if skipped or remaining <= 0:
-            logger.debug(
-                "Bounded embedding prefetch at the memory budget",
-                base_id=self.base_id,
-                chunks=len(chunk_texts),
-                skipped_files=skipped,
-            )
-        return chunk_texts
-
-    async def _prefetch_batch_embeddings(
+    async def _embed_batch_texts(
         self,
-        embedder: BatchPrefetchEmbedder,
-        files: Sequence[Path],
-    ) -> None:
-        """Embed one batch's chunks in as few provider requests as limits allow."""
-        if not embedder.supports_batching():
-            return
-        # One thread hop for the whole batch: a hop per file would serialize
-        # reads that cost far less than the round trip scheduling them.
-        chunk_texts = await asyncio.to_thread(self._chunk_texts_for_batch, list(files))
-        if not chunk_texts:
-            return
+        embedder: RefreshEmbedder,
+        prepared: Sequence[_PreparedFile],
+    ) -> dict[str, list[float]]:
+        """Embed one batch's distinct chunk texts in as few provider requests as limits allow.
 
-        for planned_batch in plan_embedding_batches(
-            embedder.uncached(chunk_texts),
-            max_items=DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
-            max_payload_bytes=DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
-        ):
+        A text left out here is embedded by its own file's write, one request
+        per chunk, where a failure is retried and recorded against that file.
+        Empty chunks are always left to their file, so a provider that rejects
+        empty input fails that file instead of the whole batch.
+        """
+        vectors: dict[str, list[float]] = {}
+        texts = list(dict.fromkeys(chunk.text for file in prepared for chunk in file.chunks if chunk.text))
+        for planned_batch in plan_embedding_batches(texts):
+            if not embedder.batches():
+                # Without batch requests, each file embeds its own chunks,
+                # concurrently with the rest of the batch.
+                break
 
-            async def _embed(batch: list[str] = planned_batch) -> int:
-                return await asyncio.to_thread(embedder.embed_batch_into_cache, batch)
+            async def _embed(batch: list[str] = planned_batch) -> dict[str, list[float]]:
+                return await asyncio.to_thread(embedder.embed_texts, batch)
 
             try:
-                await run_with_embedding_retry(
-                    _embed,
-                    policy=_EMBEDDING_RETRY_POLICY,
-                    sleep=_EMBEDDING_RETRY_SLEEP,
-                    on_retry=self._record_embedding_retry,
+                vectors.update(
+                    await run_with_embedding_retry(
+                        _embed,
+                        policy=_EMBEDDING_RETRY_POLICY,
+                        sleep=_EMBEDDING_RETRY_SLEEP,
+                        on_retry=self._record_embedding_retry,
+                    ),
                 )
             except Exception as exc:
                 if not embedder_failure_is_transient(exc):
@@ -1055,8 +995,8 @@ class KnowledgeManager:
                         )
                     raise _PermanentEmbeddingError from exc
                 # Exhausted transient retries: stop batching for this batch and
-                # let the per-file insert path retry, so the failure is
-                # attributed to specific files and nothing already cached is
+                # let each file's write retry its own chunks, so the failure is
+                # attributed to specific files and nothing already embedded is
                 # embedded again.
                 logger.warning(
                     "Falling back to per-file embedding after batch retries were exhausted",
@@ -1065,40 +1005,75 @@ class KnowledgeManager:
                     exc_info=True,
                 )
                 break
+        return vectors
+
+    async def _prepare_batch(
+        self,
+        files: Sequence[Path],
+        start: int,
+        *,
+        vanished_files: set[str],
+        on_file_result: Callable[[Path], Awaitable[None]] | None,
+    ) -> tuple[list[_PreparedFile], int]:
+        """Read and chunk the next batch of files once; return it and where the following batch starts.
+
+        A batch ends at the file-count limit or once its chunk text reaches the
+        memory budget. Files that vanished, failed to read, or lack their reader
+        are reported right away and never join the batch.
+        """
+        prepared: list[_PreparedFile] = []
+        text_bytes = 0
+        end = start
+        while end < len(files) and end - start < _INDEX_FILES_PER_BATCH and text_bytes < _MAX_BATCH_TEXT_BYTES:
+            file_path = files[end]
+            end += 1
+            prepared_file = await self._prepare_file(file_path, vanished_files=vanished_files)
+            if prepared_file is None:
+                if on_file_result is not None:
+                    await on_file_result(file_path)
+                continue
+            prepared.append(prepared_file)
+            text_bytes += prepared_file.text_bytes()
+        return prepared, end
 
     async def _reindex_files_locked(
         self,
-        files: list[Path],
+        files: Sequence[Path],
         *,
         collection: KnowledgeCollection,
-        embedder: BatchPrefetchEmbedder,
+        embedder: RefreshEmbedder,
         indexed_signatures: dict[str, FileSignature],
         vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
-        on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
+        on_batch_complete: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         """Reindex resolved files in bounded batches while holding the operation lock.
 
         Work is pulled batch by batch rather than fanned out over the whole
         list: live asyncio tasks stay bounded by the per-file concurrency limit
-        regardless of corpus size, and each batch's chunks are embedded
-        together before the batch is written.
+        regardless of corpus size. Each batch's files are read once, their
+        distinct chunk texts are embedded together, and only then are the
+        files written.
         """
-        if not files:
-            return 0
-
         indexed_count = 0
-        for batch in _iter_file_batches(files, _INDEX_FILES_PER_BATCH):
+        start = 0
+        while start < len(files):
+            prepared, start = await self._prepare_batch(
+                files,
+                start,
+                vanished_files=vanished_files,
+                on_file_result=on_file_result,
+            )
             try:
-                await self._prefetch_batch_embeddings(embedder, batch)
+                batch_vectors = await self._embed_batch_texts(embedder, prepared)
             except _PermanentEmbeddingError:
                 return indexed_count
             indexed_count += await self._index_file_batch(
-                batch,
+                prepared,
+                batch_vectors=batch_vectors,
                 collection=collection,
                 embedder=embedder,
                 indexed_signatures=indexed_signatures,
-                vanished_files=vanished_files,
                 on_file_result=on_file_result,
             )
             if self._global_embedder_failure is not None:
@@ -1108,92 +1083,57 @@ class KnowledgeManager:
                     detail=self._global_embedder_failure,
                 )
                 return indexed_count
-            # Prefetched vectors are only useful for the batch that planned
-            # them; dropping them keeps peak memory independent of corpus size.
-            embedder.clear_cache()
             if on_batch_complete is not None:
-                await on_batch_complete(batch)
+                await on_batch_complete()
         return indexed_count
-
-    async def _index_file_or_skip_vanished(
-        self,
-        file_path: Path,
-        *,
-        collection: KnowledgeCollection,
-        embedder: BatchPrefetchEmbedder,
-        indexed_signatures: dict[str, FileSignature],
-        vanished_files: set[str],
-    ) -> bool:
-        try:
-            return await self._index_file_locked(
-                file_path,
-                collection=collection,
-                embedder=embedder,
-                indexed_signatures=indexed_signatures,
-            )
-        except (FileNotFoundError, ValueError):
-            # Live source folders (e.g. thread exports) delete or replace files while
-            # a refresh runs; a file vanishing or turning into a link between listing
-            # and indexing is not an indexing failure. Record it so the caller can drop
-            # it from its completeness accounting: the trailing
-            # source-signature comparison then decides whether the
-            # surviving corpus is publishable or another refresh is needed.
-            relative_path = self._relative_path(file_path)
-            logger.warning(
-                "Knowledge file vanished during refresh; skipping",
-                base_id=self.base_id,
-                path=relative_path,
-            )
-            vanished_files.add(relative_path)
-            return False
 
     async def _index_file_batch(
         self,
-        batch: Sequence[Path],
+        batch: Sequence[_PreparedFile],
         *,
+        batch_vectors: Mapping[str, list[float]],
         collection: KnowledgeCollection,
-        embedder: BatchPrefetchEmbedder,
+        embedder: RefreshEmbedder,
         indexed_signatures: dict[str, FileSignature],
-        vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
     ) -> int:
-        """Index one bounded batch, capping live tasks at the concurrency limit."""
+        """Write one prepared batch, capping live tasks at the concurrency limit."""
 
-        async def _index_one(file_path: Path) -> bool:
+        async def _index_one(prepared: _PreparedFile) -> bool:
             if self._global_embedder_failure is not None:
                 return False
-            indexed = await self._index_file_or_skip_vanished(
-                file_path,
+            indexed = await self._index_file_locked(
+                prepared,
+                batch_vectors=batch_vectors,
                 collection=collection,
                 embedder=embedder,
                 indexed_signatures=indexed_signatures,
-                vanished_files=vanished_files,
             )
             if on_file_result is not None:
                 # Recorded per file, not per batch: an interruption partway
                 # through a batch must still keep every file it finished.
-                await on_file_result(file_path)
+                await on_file_result(prepared.path)
             return indexed
 
         concurrency = min(self._max_concurrent_file_indexes, len(batch))
         if concurrency <= 1:
             batch_indexed = 0
-            for file_path in batch:
-                batch_indexed += int(await _index_one(file_path))
+            for prepared in batch:
+                batch_indexed += int(await _index_one(prepared))
             return batch_indexed
 
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def _index_one_bounded(file_path: Path) -> bool:
+        async def _index_one_bounded(prepared: _PreparedFile) -> bool:
             async with semaphore:
-                return await _index_one(file_path)
+                return await _index_one(prepared)
 
         # return_exceptions=True so a failing or cancelled child cannot leave its
         # siblings running: they would keep appending journal entries and mutating
         # candidate bookkeeping while the caller's `finally` compacts the
         # checkpoint, silently dropping the work those files had finished.
         results = await asyncio.gather(
-            *(_index_one_bounded(file_path) for file_path in batch),
+            *(_index_one_bounded(prepared) for prepared in batch),
             return_exceptions=True,
         )
         first_error = next((result for result in results if isinstance(result, BaseException)), None)
@@ -1570,7 +1510,7 @@ class KnowledgeManager:
         run = _CandidateRun(
             checkpoint=checkpoint,
             collection=opened.collection,
-            embedder=BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths)),
+            embedder=RefreshEmbedder(create_configured_embedder(self.config, self.runtime_paths)),
             baseline_revision=baseline_revision,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
@@ -1971,8 +1911,7 @@ class KnowledgeManager:
                     progress.retrying = self._embedding_retry_count
                     progress.maybe_log()
 
-                async def _record_batch(batch: Sequence[Path], active_run: _CandidateRun = run) -> None:
-                    _ = batch
+                async def _record_batch(active_run: _CandidateRun = run) -> None:
                     await self._compact_candidate_checkpoint(active_run)
 
                 progress.indexed_this_run += await self._reindex_files_locked(
@@ -2032,7 +1971,6 @@ class KnowledgeManager:
 
     async def _publish_candidate(self, run: _CandidateRun, source_signature: str) -> None:
         """Publish the verified candidate and retire the state it supersedes."""
-        run.embedder.clear_cache()
         publish_state = _CandidatePublishState()
         try:
             await self._publish_candidate_after_metadata_save(

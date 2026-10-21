@@ -21,6 +21,8 @@ from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
+from agno.knowledge.document.base import Document
+from agno.knowledge.reader.markdown_reader import MarkdownReader
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -32,7 +34,7 @@ import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.embeddings.batching import BatchPrefetchEmbedder, plan_embedding_batches
+from mindroom.embeddings.batching import RefreshEmbedder, plan_embedding_batches
 from mindroom.embeddings.errors import (
     EmbedderRequestError,
     embedder_failure_is_transient,
@@ -61,7 +63,7 @@ from mindroom.knowledge.collections import (
 )
 from mindroom.knowledge.index_metadata import write_json_atomic
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
-from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.manager import KnowledgeManager, _PreparedFile
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
@@ -451,7 +453,7 @@ def _use_non_batching_embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingNon
 
 
 class _NonBatchingEmbedder:
-    """Embedder without batch requests, to prove the adapter degrades safely."""
+    """Embedder without batch requests, to prove batch embedding degrades safely."""
 
     sends_batches = False
 
@@ -609,11 +611,11 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
     manager = _manager(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _stop_midway(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+    async def _stop_midway(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
         if len(indexed_before_interrupt) >= interrupt_after:
             raise asyncio.CancelledError
-        indexed_before_interrupt.append(resolved_path.name)
-        return await original_index(self, resolved_path, **kwargs)
+        indexed_before_interrupt.append(prepared.path.name)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _stop_midway  # type: ignore[method-assign]
     try:
@@ -627,7 +629,7 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
     assert len(checkpoint.completed) == interrupt_after
     interrupted_collection = checkpoint.collection
     # Only durably completed files may be skipped on resume; vectors that were
-    # merely prefetched into memory are legitimately re-embedded.
+    # merely batch-embedded in memory are legitimately re-embedded.
     completed_bodies = {f"content {names.index(name)}" for name in checkpoint.completed}
     embedded_after_interrupt = {body: embedder.embedded_count(body) for body in completed_bodies}
 
@@ -673,10 +675,10 @@ async def test_candidate_resume_never_disturbs_the_last_good_published_index(
     (docs_path / "b.md").write_text("cannot index", encoding="utf-8")
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_b(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "b.md":
+    async def _fail_b(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "b.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_b  # type: ignore[method-assign]
     try:
@@ -1022,10 +1024,10 @@ async def test_source_revision_advancement_reuses_unchanged_candidate_work(
     # Fail one file so the pass keeps its candidate instead of publishing.
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_change(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "change.md":
+    async def _fail_change(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "change.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_change  # type: ignore[method-assign]
     try:
@@ -1228,8 +1230,8 @@ async def test_repeated_interrupted_refreshes_keep_collection_count_bounded(
     config = _config(tmp_path, docs_path)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _always_fail(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        _ = (self, resolved_path, kwargs)
+    async def _always_fail(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        _ = (self, prepared, kwargs)
         return False
 
     KnowledgeManager._index_file_locked = _always_fail  # type: ignore[method-assign]
@@ -1276,7 +1278,7 @@ async def test_embedding_request_count_scales_with_batches_not_files(
 
     assert (await _manager(config).reindex_all()).indexed_count == file_count
 
-    assert embedder.single_requests == [], "every chunk was served from a batch prefetch"
+    assert embedder.single_requests == [], "every chunk was embedded in a batch request"
     assert len(embedder.batch_requests) <= 4, f"expected batched requests, got {len(embedder.batch_requests)}"
     assert sum(len(batch) for batch in embedder.batch_requests) == file_count
     assert all(len(batch) <= 64 for batch in embedder.batch_requests)
@@ -1288,7 +1290,7 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An exhausted batch retry degrades to per-file work, keeping cached vectors."""
+    """An exhausted batch retry degrades to per-file work without embedding anything twice."""
     monkeypatch.setattr(
         knowledge_manager_module,
         "_EMBEDDING_RETRY_POLICY",
@@ -1307,23 +1309,19 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
         assert embedder.embedded_count(f"content {index}") == 1
 
 
-def test_batch_prefetch_embedder_degrades_for_providers_without_batching() -> None:
-    """Providers without a batch surface keep working, one request per chunk."""
+def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
+    """Providers without a batch surface keep working, one request per distinct chunk."""
     inner = _NonBatchingEmbedder()
-    adapter = BatchPrefetchEmbedder(inner=inner)
+    embedder = RefreshEmbedder(inner)
 
-    assert adapter.supports_batching() is False
-    assert adapter.embed_batch_into_cache(["one", "two"]) == 2
+    assert embedder.batches() is False
+    assert embedder.embed_texts(["one", "two", "one"]) == {"one": [3.0, 1.0], "two": [3.0, 1.0]}
     assert inner.single_requests == ["one", "two"]
-    # Prefetched texts are served from cache; misses still reach the provider.
-    assert adapter.embed_documents(["one"]) == [[3.0, 1.0]]
-    assert inner.single_requests == ["one", "two"]
-    adapter.clear_cache()
-    assert adapter.embed_documents(["one"]) == [[3.0, 1.0]]
+    assert embedder.embed_each(["one"]) == [[3.0, 1.0]]
     assert inner.single_requests == ["one", "two", "one"]
 
 
-class _QueryPromptedEmbedder(_NonBatchingEmbedder):
+class _QueryPromptedEmbedder(_RecordingEmbedder):
     """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
 
     def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
@@ -1332,13 +1330,13 @@ class _QueryPromptedEmbedder(_NonBatchingEmbedder):
         return super().embed(texts, purpose=purpose)
 
 
-def test_batch_prefetch_embeds_chunks_as_documents() -> None:
-    """Per-chunk prefetch must use the document path, or prompted models index chunks as queries."""
-    inner = _QueryPromptedEmbedder()
-    adapter = BatchPrefetchEmbedder(inner=inner)
+def test_refresh_embedder_embeds_chunks_as_documents() -> None:
+    """Chunks must use the document path, or prompted models index them as queries."""
+    embedder = RefreshEmbedder(_QueryPromptedEmbedder())
 
-    assert adapter.embed_batch_into_cache(["chunk"]) == 1
-    assert adapter.embed_documents(["chunk"]) == [[5.0, 1.0]]
+    assert embedder.embed_texts(["chunk", "bb"]) == {"chunk": [5.0, 1.0], "bb": [2.0, 1.0]}
+    assert embedder.embed_texts(["chunk"]) == {"chunk": [5.0, 1.0]}
+    assert embedder.embed_each(["chunk"]) == [[5.0, 1.0]]
 
 
 # --------------------------------------------------------------------------
@@ -1362,10 +1360,10 @@ async def test_large_corpus_keeps_live_tasks_bounded(
     peak_tasks = 0
     original_index = KnowledgeManager._index_file_locked
 
-    async def _observe(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+    async def _observe(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
         nonlocal peak_tasks
         peak_tasks = max(peak_tasks, len(asyncio.all_tasks()))
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _observe  # type: ignore[method-assign]
     try:
@@ -1394,10 +1392,10 @@ async def test_status_reports_candidate_progress_separately_from_published_count
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "doc0003.md":
+    async def _fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "doc0003.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
     try:
@@ -1496,10 +1494,10 @@ async def test_completed_checkpoint_entry_without_vectors_is_requeued(
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_third(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "blocker.md":
+    async def _fail_third(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "blocker.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     (docs_path / "blocker.md").write_text("blocker body", encoding="utf-8")
     KnowledgeManager._index_file_locked = _fail_third  # type: ignore[method-assign]
@@ -1712,12 +1710,12 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
     indexed = 0
     original_index = KnowledgeManager._index_file_locked
 
-    async def _stop_at_ninety_percent(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+    async def _stop_at_ninety_percent(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
         nonlocal indexed
         if indexed >= stop_after:
             raise asyncio.CancelledError
         indexed += 1
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _stop_at_ninety_percent  # type: ignore[method-assign]
     try:
@@ -1788,10 +1786,10 @@ async def test_candidate_progress_reports_real_outstanding_work(
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name in {"doc0003.md", "doc0004.md"}:
+    async def _fail_two(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name in {"doc0003.md", "doc0004.md"}:
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_two  # type: ignore[method-assign]
     try:
@@ -1834,16 +1832,16 @@ async def test_batch_failure_never_leaves_stragglers_writing_after_compaction(
 
     async def _fail_fast_and_stall_others(
         self: KnowledgeManager,
-        resolved_path: Path,
+        prepared: _PreparedFile,
         **kwargs: object,
     ) -> bool:
-        if resolved_path.name == "doc0000.md":
+        if prepared.path.name == "doc0000.md":
             await slow_started.wait()
             msg = "explodes while siblings are still running"
             raise RuntimeError(msg)
         slow_started.set()
         await asyncio.sleep(0)
-        indexed = await original_index(self, resolved_path, **kwargs)
+        indexed = await original_index(self, prepared, **kwargs)
         slow_finished.set()
         return indexed
 
@@ -2043,8 +2041,8 @@ async def test_candidate_pending_count_is_visible_while_the_build_runs(
     pending_samples: list[int] = []
     original_index = KnowledgeManager._index_file_locked
 
-    async def _observe_status(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        indexed = await original_index(self, resolved_path, **kwargs)
+    async def _observe_status(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        indexed = await original_index(self, prepared, **kwargs)
         status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
         if status.candidate is not None:
             observed.append((status.candidate.total_files, status.candidate.completed_count))
@@ -2086,10 +2084,10 @@ async def test_candidate_converges_across_repeated_interruptions_and_source_chan
     original_index = KnowledgeManager._index_file_locked
     blocked = {"doc0004.md", "doc0007.md"}
 
-    async def _fail_blocked(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name in blocked:
+    async def _fail_blocked(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name in blocked:
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_blocked  # type: ignore[method-assign]
     try:
@@ -2255,38 +2253,48 @@ async def test_single_input_wrong_cardinality_still_fails_and_does_not_publish(
 
 
 def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
-    """Fallback keeps input order and refuses vectors of inconsistent width."""
+    """Fallback maps each text to its own vector and refuses vectors of inconsistent width."""
     inner = _RecordingEmbedder()
     inner.short_batch = True
-    adapter = BatchPrefetchEmbedder(inner=inner)
+    embedder = RefreshEmbedder(inner)
 
-    assert adapter.embed_batch_into_cache(["alpha", "bb", "c"]) == 3
-    assert adapter.supports_batching() is False, "a failed probe retires batching for the run"
-    # Order preserved: each text maps to its own vector, keyed by content.
-    assert adapter.embed_documents(["alpha", "bb", "c"]) == [[5.0, 1.0], [2.0, 1.0], [1.0, 1.0]]
+    assert embedder.embed_texts(["alpha", "bb", "c"]) == {"alpha": [5.0, 1.0], "bb": [2.0, 1.0], "c": [1.0, 1.0]}
+    assert embedder.batches() is False, "a failed probe retires batching for the run"
+    assert inner.single_requests == ["alpha", "bb", "c"]
 
     widening = _RecordingEmbedder()
     widening.supports_batch = False
-    adapter = BatchPrefetchEmbedder(inner=widening)
-    assert adapter.embed_batch_into_cache(["one"]) == 1
+    embedder = RefreshEmbedder(widening)
+    assert embedder.embed_each(["one"]) == [[3.0, 1.0]]
     original_single = widening.single_request
     widening.single_request = lambda text: [*original_single(text), 9.0]  # type: ignore[method-assign]
-    # Validation guards the path Agno's writer uses, so a widened vector cannot
-    # reach the collection even though prefetch treats its own faults as best effort.
+    # The width check guards the vectors a file writes, so a widened vector
+    # cannot reach the collection, and batch embedding leaves it to that file.
     with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
-        adapter.embed_documents(["two"])
+        embedder.embed_each(["two"])
+    assert embedder.embed_texts(["three"]) == {}
 
 
-def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
-    """An empty vector is never cached, whatever path produced it."""
+def test_empty_vector_is_rejected_on_every_path() -> None:
+    """An empty vector never reaches a file's rows, whatever path produced it."""
     inner = _RecordingEmbedder()
     inner.supports_batch = False
     inner.single_request = lambda _text: []  # type: ignore[method-assign]
-    adapter = BatchPrefetchEmbedder(inner=inner)
+    embedder = RefreshEmbedder(inner)
 
-    assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"
+    assert embedder.embed_texts(["anything"]) == {}, "batch embedding leaves it to the file's own write"
     with pytest.raises(EmbedderRequestError, match="empty vector"):
-        adapter.embed_documents(["anything"])
+        embedder.embed_each(["anything"])
+
+
+def test_batch_vectors_of_inconsistent_width_are_rejected() -> None:
+    """A multi-input response whose vectors change width is refused rather than written."""
+    inner = _RecordingEmbedder()
+    inner.batch_request = lambda texts: [[1.0, 1.0], [1.0, 1.0, 1.0]][: len(texts)]  # type: ignore[method-assign]
+    embedder = RefreshEmbedder(inner)
+
+    with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
+        embedder.embed_texts(["one", "two"])
 
 
 @pytest.mark.asyncio
@@ -2351,10 +2359,10 @@ async def test_restart_during_batch_fallback_resumes_the_same_candidate(
     embedder.short_batch = True
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_one(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "doc0005.md":
+    async def _fail_one(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "doc0005.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_one  # type: ignore[method-assign]
     try:
@@ -2425,10 +2433,10 @@ async def test_progress_and_resumable_state_stay_accurate_under_batch_fallback(
     embedder.short_batch = True
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name in {"doc0006.md", "doc0007.md"}:
+    async def _fail_two(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name in {"doc0006.md", "doc0007.md"}:
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_two  # type: ignore[method-assign]
     try:
@@ -2467,7 +2475,7 @@ async def test_progress_and_resumable_state_stay_accurate_under_batch_fallback(
 
 
 @pytest.mark.asyncio
-async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
+async def test_vectors_batched_before_a_later_fallback_are_still_reused(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
@@ -2493,7 +2501,7 @@ async def test_vectors_prefetched_before_a_later_fallback_are_still_reused(
 
     multi_input = [batch for batch in embedder.batch_requests if len(batch) > 1]
     assert len(multi_input) == 2, "batching stopped after the batch that proved it broken"
-    # The first batch succeeded, so its vectors are served from cache and are
+    # The first batch succeeded, so its files are written with its vectors and are
     # never requested again.
     for index in range(4):
         assert embedder.embedded_count(f"content {index}") == 1, "an earlier successful batch was redone"
@@ -2609,10 +2617,10 @@ async def test_mtime_only_change_keeps_completed_vectors(
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "doc0004.md":
+    async def _fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "doc0004.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
     try:
@@ -2651,7 +2659,7 @@ async def test_globally_failing_embedder_stops_a_non_batching_refresh(
 ) -> None:
     """A rejected credential must stop the pass even with no batch surface.
 
-    Providers without batch requests skip prefetch entirely, so the
+    Providers without batch requests skip batch embedding entirely, so the
     batch-path stop never runs and every remaining file issued the same doomed
     request.
     """
@@ -2745,10 +2753,10 @@ async def test_candidate_path_removal_is_batched(tmp_path: Path) -> None:
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "doc0039.md":
+    async def _fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "doc0039.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
     try:
@@ -2788,10 +2796,10 @@ async def test_journal_compaction_bound_survives_restart(
     storage = _storage_path(config, runtime_paths)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == "doc0007.md":
+    async def _fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == "doc0007.md":
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     KnowledgeManager._index_file_locked = _fail_last  # type: ignore[method-assign]
     try:
@@ -2808,12 +2816,16 @@ async def test_journal_compaction_bound_survives_restart(
         run = await manager._open_candidate_run()
         assert run.journal_appends == 9, "a resumed run restarted the compaction count"
         final_path = docs_path / "doc0007.md"
-        assert await original_index(
-            manager,
-            final_path,
-            collection=run.collection,
-            embedder=run.embedder,
-            indexed_signatures=run.completed,
+        KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
+        assert (
+            await manager._reindex_files_locked(
+                [final_path],
+                collection=run.collection,
+                embedder=run.embedder,
+                indexed_signatures=run.completed,
+                vanished_files=run.vanished,
+            )
+            == 1
         )
         await manager._persist_candidate_batch(run, (final_path,))
         assert run.journal_appends == 10
@@ -2955,143 +2967,147 @@ async def test_unchanged_publish_stays_ready_when_checkpoint_cleanup_fails(
     assert load_candidate_checkpoint(storage) is not None, "failed cleanup unexpectedly removed the checkpoint"
 
 
-def test_prefetch_admits_a_file_that_exactly_fills_the_remaining_budget(
+@pytest.mark.asyncio
+async def test_each_file_is_read_once_per_refresh(
     tmp_path: Path,
+    embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file whose worst case exactly equals the remaining budget still fits.
-
-    The neighbouring cases cover comfortably-inside and far-too-large, so the
-    comparison could be off by one at the boundary without any of them
-    noticing: two 2,000-byte files under a 4,000-byte budget would prefetch
-    only the first.
-    """
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    """One read of each file feeds both its batch's embedding requests and its row write."""
     docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    files = []
-    for index in range(2):
-        path = docs_path / f"exact{index}.md"
-        path.write_text("x" * 2_000, encoding="utf-8")
-        files.append(path)
-    config = _config(tmp_path, docs_path, chunk_size=100_000)
+    names = _write_corpus(docs_path, 5)
+    config = _config(tmp_path, docs_path)
+    reads: list[str | None] = []
+    original_read = MarkdownReader.read
 
-    texts = _manager(config)._chunk_texts_for_batch(files)
+    def _record_read(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
+        reads.append(name)
+        return original_read(self, file, name=name)
 
-    assert len(texts) == 2, "a file that exactly fills the remaining budget was skipped"
+    monkeypatch.setattr(MarkdownReader, "read", _record_read)
 
+    assert (await _manager(config).reindex_all()).indexed_count == len(names)
 
-def test_prefetch_reads_text_sources_and_skips_parsed_ones(tmp_path: Path) -> None:
-    """The prefetch gate has to be exercised in both directions, not just the open one.
-
-    Every other prefetch case here writes markdown, so nothing observes a
-    refusal. Skipping matters for two reasons: re-reading a parsed format costs
-    a second parse rather than a decode, and the budget below is derived from
-    ``stat().st_size``, which bounds decoded text only for a text decode -- an
-    archive's extracted content can dwarf the file it came out of.
-    """
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    rows = docs_path / "rows.csv"
-    rows.write_text("header,value\nalpha,1\nbeta,2\n", encoding="utf-8")
-    notes = docs_path / "notes.md"
-    notes.write_text("prose that is worth prefetching", encoding="utf-8")
-    manager = _manager(_config(tmp_path, docs_path))
-
-    assert manager._chunk_texts_for_prefetch(rows) == ()
-    assert manager._chunk_texts_for_prefetch(notes) != ()
-
-
-def test_prefetch_text_is_bounded_by_bytes_not_only_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Peak prefetch memory must not scale with how large the batch's files are."""
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    files = []
-    for index in range(20):
-        path = docs_path / f"big{index}.md"
-        path.write_text("x" * 2_000, encoding="utf-8")
-        files.append(path)
-    config = _config(tmp_path, docs_path, chunk_size=100_000)
-
-    texts = _manager(config)._chunk_texts_for_batch(files)
-
-    total_bytes = sum(len(text.encode("utf-8")) for text in texts)
-    assert texts, "prefetch produced nothing at all"
-    assert total_bytes <= 4_000 + 2_000, f"prefetch held {total_bytes} bytes past its budget"
-    assert len(texts) < len(files), "every file was read despite the byte budget"
-
-
-def test_single_oversized_file_is_never_read_into_the_prefetch_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One huge file must not blow the prefetch bound on its own.
-
-    Chunking materializes a file's whole content, so checking the budget after
-    reading cannot bound anything: a single oversized document exceeds it by
-    however large it happens to be.
-    """
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    huge = docs_path / "huge.md"
-    huge.write_text("y" * 200_000, encoding="utf-8")
-    small = [docs_path / f"small{index}.md" for index in range(3)]
-    for path in small:
-        path.write_text("z" * 500, encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=100_000)
-    read_files: list[str] = []
-    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
-
-    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
-        read_files.append(resolved_path.name)
-        return original_chunk(self, resolved_path)
-
-    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
-
-    texts = _manager(config)._chunk_texts_for_batch([huge, *small])
-
-    assert "huge.md" not in read_files, "the oversized file was read despite exceeding the budget"
-    total_bytes = sum(len(text.encode("utf-8")) for text in texts)
-    assert total_bytes <= 4_000, f"prefetch held {total_bytes} bytes past its budget"
-    assert texts, "smaller files behind the oversized one were skipped too"
-
-
-def test_prefetch_skips_overlap_that_can_expand_past_the_byte_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Near-total overlap must not amplify one small source into unbounded text."""
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    source = docs_path / "overlap.md"
-    source.write_text("x" * 4_000, encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=128, chunk_overlap=127)
-    manager = _manager(config)
-    read_files: list[str] = []
-    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
-
-    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
-        read_files.append(resolved_path.name)
-        return original_chunk(self, resolved_path)
-
-    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
-
-    texts = manager._chunk_texts_for_batch([source])
-
-    assert texts == []
-    assert read_files == [], "overlapping source was materialized before prefetch declined it"
+    assert sorted(name or "" for name in reads) == names
+    assert embedder.batch_requests == [tuple(f"content {index}" for index in range(len(names)))]
+    assert embedder.single_requests == []
 
 
 @pytest.mark.asyncio
-async def test_oversized_file_still_indexes_and_publishes(
+async def test_reader_failure_fails_its_file_instead_of_passing_as_vanished(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Skipping a file for prefetch must never skip indexing it."""
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 1_000)
+    """A reader raising ``ValueError`` fails its file; only the snapshot's errors mean a file vanished."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    original_read = MarkdownReader.read
+
+    def _fail_one(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
+        if name == "doc0001.md":
+            message = "unparseable source"
+            raise ValueError(message)
+        return original_read(self, file, name=name)
+
+    monkeypatch.setattr(MarkdownReader, "read", _fail_one)
+
+    outcome = await _manager(config).reindex_all()
+
+    assert not outcome.published
+    assert outcome.error is not None
+    assert "Indexed 2 of 3" in outcome.error
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert set(checkpoint.failed) == {"doc0001.md"}
+    assert checkpoint.failed["doc0001.md"].last_error == "knowledge indexing failed (ValueError)"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_chunk_fails_only_its_own_file(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider rejecting empty input fails the file that produced it, not the batch it shares."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.failures[""] = [EmbedderRequestError("embedder request failed (HTTP 400)") for _ in range(10)]
+    original_read = MarkdownReader.read
+
+    def _add_empty_chunk(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
+        documents = original_read(self, file, name=name)
+        if name == "doc0001.md":
+            documents.append(Document(name=name, content=""))
+        return documents
+
+    monkeypatch.setattr(MarkdownReader, "read", _add_empty_chunk)
+
+    outcome = await _manager(config).reindex_all()
+
+    assert outcome.error is not None
+    assert "Indexed 2 of 3" in outcome.error
+    assert embedder.batch_requests == [("content 0", "content 1", "content 2")]
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert set(checkpoint.failed) == {"doc0001.md"}
+
+
+@pytest.mark.asyncio
+async def test_parsed_sources_share_batch_requests_with_text_sources(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Chunks from parsed formats are batched like text chunks instead of costing a request each."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "notes.md").write_text("prose worth batching", encoding="utf-8")
+    (docs_path / "rows.csv").write_text("header,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+    config = _config(tmp_path, docs_path)
+
+    assert (await _manager(config).reindex_all()).indexed_count == 2
+
+    assert embedder.single_requests == []
+    [request] = embedder.batch_requests
+    assert "prose worth batching" in request
+    assert any("alpha" in text for text in request)
+
+
+@pytest.mark.asyncio
+async def test_batch_text_is_bounded_by_bytes_not_only_file_count(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch closes once its chunk text reaches the budget, so peak memory does not scale with file size.
+
+    Two 2,000-byte files exactly fill a 4,000-byte budget, so a comparison off
+    by one at the boundary would put one or three files in a batch instead.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_BATCH_TEXT_BYTES", 4_000)
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    for index in range(20):
+        (docs_path / f"big{index:02d}.md").write_text(f"{index:02d}" + "x" * 1_998, encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=100_000)
+
+    assert (await _manager(config).reindex_all()).indexed_count == 20
+
+    assert [len(request) for request in embedder.batch_requests] == [2] * 10
+    assert embedder.single_requests == []
+
+
+@pytest.mark.asyncio
+async def test_oversized_file_closes_its_batch_and_still_indexes(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file larger than the whole budget is still indexed, without dragging later files into its batch."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_BATCH_TEXT_BYTES", 1_000)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "huge.md").write_text("y" * 50_000, encoding="utf-8")
@@ -3102,6 +3118,9 @@ async def test_oversized_file_still_indexes_and_publishes(
 
     assert (await _manager(config).reindex_all()).indexed_count == 4
 
+    # Files are indexed in path order, so the huge file fills the first batch alone.
+    assert embedder.single_requests == ["y" * 50_000]
+    assert embedder.batch_requests == [("small body 0", "small body 1", "small body 2")]
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.status == "complete"
@@ -3110,55 +3129,36 @@ async def test_oversized_file_still_indexes_and_publishes(
     assert "huge.md" in stored
 
 
-def test_moderate_overlap_is_still_batch_prefetched(tmp_path: Path) -> None:
-    """Ordinary overlap expands predictably, so it must not disable prefetch."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    source = docs_path / "overlapped.md"
-    source.write_text(_overlapping_body(500), encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
-
-    texts = _manager(config)._chunk_texts_for_batch([source])
-
-    assert len(texts) > 1, "overlapping chunks were not prefetched at all"
-
-
-def test_prefetch_skips_overlap_expansion_that_outgrows_the_budget(
+@pytest.mark.asyncio
+async def test_batch_budget_counts_overlap_expansion_not_size_on_disk(
     tmp_path: Path,
+    embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Admission is decided by worst-case expansion, not by the size on disk.
-
-    The oversized file here is smaller than the whole budget; only its overlap
-    expansion is not, so a check against the raw file size would read it.
-    """
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
+    """Overlapping chunks repeat text, so the budget counts the chunk text a file produced, not its size."""
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_BATCH_TEXT_BYTES", 2_600)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
-    expanding = docs_path / "expanding.md"
-    expanding.write_text("x" * 2_500, encoding="utf-8")
-    small = docs_path / "small.md"
-    small.write_text(_overlapping_body(50), encoding="utf-8")
+    (docs_path / "expanding.md").write_text(_overlapping_body(250), encoding="utf-8")
+    for index in range(3):
+        (docs_path / f"small{index}.md").write_text(f"small body {index}", encoding="utf-8")
     config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
-    read_files: list[str] = []
-    original_chunk = KnowledgeManager._chunk_texts_for_prefetch
+    runtime_paths = runtime_paths_for(config)
 
-    def _record_read(self: KnowledgeManager, resolved_path: Path) -> tuple[str, ...]:
-        read_files.append(resolved_path.name)
-        return original_chunk(self, resolved_path)
+    assert (await _manager(config).reindex_all()).indexed_count == 4
 
-    monkeypatch.setattr(KnowledgeManager, "_chunk_texts_for_prefetch", _record_read)
-
-    texts = _manager(config)._chunk_texts_for_batch([expanding, small])
-
-    assert expanding.stat().st_size < 4_000, "the oversized file no longer fits the budget by raw size"
-    assert read_files == ["small.md"], "the expanding file was materialized before prefetch declined it"
-    assert texts, "the smaller file behind the skipped one was never prefetched"
-    assert sum(len(text.encode("utf-8")) for text in texts) <= 4_000
+    expanding_chunks, small_bodies = embedder.batch_requests
+    assert (docs_path / "expanding.md").stat().st_size < 2_600
+    assert sum(len(text.encode("utf-8")) for text in expanding_chunks) >= 2_600
+    assert small_bodies == ("small body 0", "small body 1", "small body 2")
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.status == "complete"
+    assert state.indexed_count == 4
 
 
 @pytest.mark.asyncio
-async def test_overlapping_chunks_are_batch_prefetched_and_published(
+async def test_overlapping_chunks_are_batch_embedded_and_published(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
 ) -> None:
@@ -3172,7 +3172,7 @@ async def test_overlapping_chunks_are_batch_prefetched_and_published(
     assert (await _manager(config).reindex_all()).indexed_count == 1
 
     assert [batch for batch in embedder.batch_requests if len(batch) > 1], "no multi-input request was issued"
-    assert embedder.single_requests == [], "every overlapping chunk was served from the batch prefetch"
+    assert embedder.single_requests == [], "an overlapping chunk cost a request of its own"
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.status == "complete"
@@ -3182,31 +3182,6 @@ async def test_overlapping_chunks_are_batch_prefetched_and_published(
     hits = lookup.index.reader.search("token0000", limit=5)
     assert hits, "the published overlapping index returned nothing"
     assert all("token" in document.content for document in hits)
-
-
-@pytest.mark.asyncio
-async def test_file_skipped_by_overlap_expansion_still_indexes_and_publishes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A file prefetch declines must still be indexed by the per-file path."""
-    monkeypatch.setattr(knowledge_manager_module, "_MAX_PREFETCH_TEXT_BYTES", 4_000)
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "expanding.md").write_text("x" * 2_500, encoding="utf-8")
-    for index in range(3):
-        (docs_path / f"small{index}.md").write_text(f"small body {index}", encoding="utf-8")
-    config = _config(tmp_path, docs_path, chunk_size=1_000, chunk_overlap=100)
-    runtime_paths = runtime_paths_for(config)
-
-    assert (await _manager(config).reindex_all()).indexed_count == 4
-
-    state = _published_state(config, runtime_paths)
-    assert state is not None
-    assert state.status == "complete"
-    assert state.indexed_count == 4
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
-    assert "expanding.md" in stored
 
 
 # --------------------------------------------------------------------------
@@ -3703,10 +3678,10 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
     runtime_paths = runtime_paths_for(config)
     original_index = KnowledgeManager._index_file_locked
 
-    async def _fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if resolved_path.name == names[-1]:
+    async def _fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if prepared.path.name == names[-1]:
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_last)
     await _manager(config).reindex_all()
@@ -3927,11 +3902,11 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
     indexed: list[str] = []
     original_index = KnowledgeManager._index_file_locked
 
-    async def _stop_after_two(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
+    async def _stop_after_two(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
         if len(indexed) >= 2:
             raise asyncio.CancelledError
-        indexed.append(resolved_path.name)
-        return await original_index(self, resolved_path, **kwargs)
+        indexed.append(prepared.path.name)
+        return await original_index(self, prepared, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _stop_after_two)
     with pytest.raises(asyncio.CancelledError):
@@ -3966,8 +3941,8 @@ async def test_a_candidate_with_no_vectors_and_no_claims_is_still_resumed(
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
 
-    async def _fail_everything(_self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        _ = (resolved_path, kwargs)
+    async def _fail_everything(_self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        _ = (prepared, kwargs)
         return False
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_everything)
@@ -4140,10 +4115,10 @@ async def test_forced_reindex_discards_a_candidate_that_survived_a_failed_refres
     fail_last = True
     original_index = KnowledgeManager._index_file_locked
 
-    async def _maybe_fail_last(self: KnowledgeManager, resolved_path: Path, **kwargs: object) -> bool:
-        if fail_last and resolved_path.name == names[-1]:
+    async def _maybe_fail_last(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+        if fail_last and prepared.path.name == names[-1]:
             return False
-        return await original_index(self, resolved_path, **kwargs)
+        return await original_index(self, prepared, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _maybe_fail_last)
     failed = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)

@@ -54,7 +54,7 @@ from mindroom.constants import (
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.embeddings import embedder_health
-from mindroom.embeddings.batching import BatchPrefetchEmbedder
+from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
@@ -69,7 +69,7 @@ from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowled
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
-from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature
+from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature, _PreparedFile
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
     credential_free_url_identity,
@@ -1989,7 +1989,7 @@ async def test_reindex_files_locked_records_files_vanishing_during_refresh(tmp_p
     indexed = await manager._reindex_files_locked(
         [vanished],
         collection=collection,
-        embedder=BatchPrefetchEmbedder(inner=_FakeEmbedder()),
+        embedder=RefreshEmbedder(_FakeEmbedder()),
         indexed_signatures=indexed_signatures,
         vanished_files=vanished_files,
     )
@@ -3569,22 +3569,15 @@ async def test_existing_published_index_is_used_while_refresh_runs(
 
     async def _block_candidate(
         self: KnowledgeManager,
-        resolved_path: Path,
+        prepared: _PreparedFile,
         *,
         collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        **kwargs: object,
     ) -> bool:
         if collection is not self._published_collection and not started.is_set():
             started.set()
             await release.wait()
-        return await original_index_file_locked(
-            self,
-            resolved_path,
-            collection=collection,
-            embedder=embedder,
-            indexed_signatures=indexed_signatures,
-        )
+        return await original_index_file_locked(self, prepared, collection=collection, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _block_candidate)
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
@@ -3621,22 +3614,15 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
 
     async def _block_candidate(
         self: KnowledgeManager,
-        resolved_path: Path,
+        prepared: _PreparedFile,
         *,
         collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        **kwargs: object,
     ) -> bool:
         if collection is not self._published_collection:
             candidate_started.set()
             await asyncio.Event().wait()
-        return await original_index_file_locked(
-            self,
-            resolved_path,
-            collection=collection,
-            embedder=embedder,
-            indexed_signatures=indexed_signatures,
-        )
+        return await original_index_file_locked(self, prepared, collection=collection, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _block_candidate)
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
@@ -4365,22 +4351,15 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
 
     async def _fail_candidate(
         self: KnowledgeManager,
-        resolved_path: Path,
+        prepared: _PreparedFile,
         *,
         collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        **kwargs: object,
     ) -> bool:
         if collection is not self._published_collection:
             msg = "candidate failed"
             raise RuntimeError(msg)
-        return await original_index_file_locked(
-            self,
-            resolved_path,
-            collection=collection,
-            embedder=embedder,
-            indexed_signatures=indexed_signatures,
-        )
+        return await original_index_file_locked(self, prepared, collection=collection, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_candidate)
     with pytest.raises(RuntimeError, match="candidate failed"):
@@ -4459,21 +4438,12 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
 
     async def _skip_bad_file(
         self: KnowledgeManager,
-        resolved_path: Path,
-        *,
-        collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        prepared: _PreparedFile,
+        **kwargs: object,
     ) -> bool:
-        if resolved_path.name == "bad.md":
+        if prepared.path.name == "bad.md":
             return False
-        return await original_index_file_locked(
-            self,
-            resolved_path,
-            collection=collection,
-            embedder=embedder,
-            indexed_signatures=indexed_signatures,
-        )
+        return await original_index_file_locked(self, prepared, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _skip_bad_file)
 
@@ -4886,13 +4856,10 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
 
     async def _fail_candidate(
         self: KnowledgeManager,
-        resolved_path: Path,
-        *,
-        collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        prepared: _PreparedFile,
+        **kwargs: object,
     ) -> bool:
-        _ = (self, resolved_path, collection, embedder, indexed_signatures)
+        _ = (self, prepared, kwargs)
         msg = "candidate failed"
         raise RuntimeError(msg)
 
@@ -5063,21 +5030,12 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
 
     async def _skip_bad_file(
         self: KnowledgeManager,
-        resolved_path: Path,
-        *,
-        collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        prepared: _PreparedFile,
+        **kwargs: object,
     ) -> bool:
-        if resolved_path.name == "bad.md":
+        if prepared.path.name == "bad.md":
             return False
-        return await original_index_file_locked(
-            self,
-            resolved_path,
-            collection=collection,
-            embedder=embedder,
-            indexed_signatures=indexed_signatures,
-        )
+        return await original_index_file_locked(self, prepared, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _skip_bad_file)
 
@@ -5352,13 +5310,10 @@ async def test_embedder_changing_partial_refresh_does_not_publish_old_index_unde
 
     async def _partial_candidate(
         self: KnowledgeManager,
-        resolved_path: Path,
-        *,
-        collection: object,
-        embedder: object,
-        indexed_signatures: dict[str, tuple[int, int, str]],
+        prepared: _PreparedFile,
+        **kwargs: object,
     ) -> bool:
-        _ = (self, resolved_path, collection, embedder, indexed_signatures)
+        _ = (self, prepared, kwargs)
         return False
 
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _partial_candidate)
