@@ -68,6 +68,7 @@ const json = (value: unknown, status = 200) =>
 
 const identity = {
   matrix_user_id: "@bob:example.org",
+  display_name: "Bob Builder",
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
@@ -1779,7 +1780,7 @@ describe("the page's header and intro", () => {
   it("says who is signed in and links Agents and Agent Keys", async () => {
     render(<EgressCredentials />);
     expect(
-      await screen.findByText("Signed in as @bob:example.org"),
+      await screen.findByText("Signed in as Bob Builder"),
     ).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
     expect(within(nav).getByRole("link", { name: "Agents" })).toHaveAttribute(

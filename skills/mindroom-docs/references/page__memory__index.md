@@ -9,9 +9,9 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
-  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
+  <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f1d8e8ce-8160-46bf-811d-2a3e71cde673" type="video/mp4">
 </video>
 
 ## Choosing a Backend
@@ -201,6 +201,7 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
 `memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
 Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.

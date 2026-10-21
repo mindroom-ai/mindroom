@@ -59,7 +59,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
-from mindroom.history.replay import apply_replay_plan
+from mindroom.history.replay import apply_replay_plan, compaction_marker
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -83,7 +83,13 @@ from mindroom.llm_request_logging import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
-from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
+from mindroom.memory import (
+    ConversationRef,
+    MemoryPromptParts,
+    build_memory_prompt_parts,
+    conversation_entrypoint_preamble,
+    strip_user_turn_time_prefix,
+)
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
@@ -1021,6 +1027,19 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _install_system_context(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    base_context: str | None,
+    session_preamble: str,
+) -> None:
+    """Set the agent's system context to its base context, the memory preamble, and the turn's system enrichment."""
+    agent.additional_context = base_context
+    _append_additional_context(agent, session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+
+
 def _standard_turn_enrichment(
     agent: Agent,
     ctx: ResponseTurnContext,
@@ -1030,9 +1049,7 @@ def _standard_turn_enrichment(
     """Put enrichment in the prompt and bind the turn for an agent whose shell can call its other tools."""
     if isinstance(agent, CliShellAgent):
         agent.response_context = ctx
-    _append_additional_context(agent, session_preamble)
-    if ctx.system_enrichment_items:
-        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+    _install_system_context(agent, ctx, agent.additional_context, session_preamble)
     return render_transient_context(
         (transient_memory, render_enrichment_block(list(ctx.transient_enrichment_items))),
     )
@@ -1059,12 +1076,52 @@ def _minimal_turn_enrichment(
     )
 
 
+def _memory_conversation(
+    ctx: ResponseTurnContext,
+    config: Config,
+    scope_context: ScopeSessionContext | None,
+) -> ConversationRef | None:
+    """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
+
+    Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
+    demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
+    system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
+    Without automatic compaction, fitting a long conversation into the context window is such a limit.
+    """
+    if (
+        ctx.persona is not None
+        or ctx.agent_mode == "minimal"
+        or ctx.scheduled_history_budget is not None
+        or scope_context is None
+        or scope_context.session_id is None
+    ):
+        return None
+    entity = config.resolve_entity(ctx.entity_label)
+    if (
+        entity.memory_backend != "file"
+        or not entity.history_settings.replays_whole_history
+        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+    ):
+        return None
+    session = scope_context.session
+    compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)
+    return ConversationRef(scope_context.session_id, compaction)
+
+
+def _turn_enrichment(agent: Agent, ctx: ResponseTurnContext, prompt_parts: MemoryPromptParts) -> str:
+    """Install the turn's memory and enrichment on the agent, and return its transient turn context."""
+    if isinstance(agent, MinimalAgent):
+        return _minimal_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
+    return _standard_turn_enrichment(agent, ctx, prompt_parts.session_preamble, prompt_parts.transient_turn_context)
+
+
 async def _prepare_turn_memory(
     ctx: ResponseTurnContext,
     prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn; an authored persona recalls none."""
     if ctx.persona is not None:
@@ -1076,7 +1133,37 @@ async def _prepare_turn_memory(
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        conversation=conversation,
     )
+
+
+async def _reload_memory_with_compaction(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    scope_context: ScopeSessionContext | None,
+    conversation: ConversationRef | None,
+    base_context: str | None,
+) -> None:
+    """Rebuild the agent's system context with the current MEMORY.md when this turn's history preparation compacted.
+
+    That compaction already changes the request after the system prompt, so reloading here costs nothing, while
+    waiting for the next turn would make it miss the cache on the whole compacted history.
+    """
+    compacted = _memory_conversation(ctx, config, scope_context)
+    if compacted is None or compacted == conversation:
+        return
+    fresh = await conversation_entrypoint_preamble(
+        ctx.entity_label,
+        runtime_paths.storage_root,
+        config,
+        runtime_paths,
+        execution_identity,
+        conversation=compacted,
+    )
+    _install_system_context(agent, ctx, base_context, fresh)
 
 
 @timed("system_prompt_assembly")
@@ -1154,6 +1241,7 @@ async def _prepare_agent_and_prompt(
         return runtime_model, agent
 
     memory_backend = config.resolve_entity(agent_name).memory_backend
+    memory_conversation = _memory_conversation(ctx, config, scope_context)
     parallel_branches = memory_backend == "mem0"
     serial_reason: str | None = None
     if memory_backend == "file":
@@ -1187,6 +1275,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         execution_identity,
+                        memory_conversation,
                     ),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
@@ -1202,7 +1291,14 @@ async def _prepare_agent_and_prompt(
         )
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(ctx, prompt, config, runtime_paths, execution_identity)
+        prompt_parts = await _prepare_turn_memory(
+            ctx,
+            prompt,
+            config,
+            runtime_paths,
+            execution_identity,
+            memory_conversation,
+        )
         current_turn_prompt = _compose_current_turn_prompt(
             raw_prompt=prompt,
             model_prompt=model_prompt,
@@ -1222,20 +1318,8 @@ async def _prepare_agent_and_prompt(
         shared_scope_storage=scope_context.storage if scope_context is not None else None,
         caller_owned_agent=reusable_agent,
     ):
-        if isinstance(agent, MinimalAgent):
-            transient_turn_context = _minimal_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
-        else:
-            transient_turn_context = _standard_turn_enrichment(
-                agent,
-                ctx,
-                prompt_parts.session_preamble,
-                prompt_parts.transient_turn_context,
-            )
+        base_context = agent.additional_context
+        transient_turn_context = _turn_enrichment(agent, ctx, prompt_parts)
 
         prepared_execution = await prepare_agent_execution_context(
             ctx,
@@ -1265,28 +1349,36 @@ async def _prepare_agent_and_prompt(
             include_openai_compat_guidance=include_openai_compat_guidance,
             pipeline_timing=pipeline_timing,
         )
+        await _reload_memory_with_compaction(
+            agent,
+            ctx,
+            config,
+            runtime_paths,
+            execution_identity,
+            scope_context,
+            memory_conversation,
+            base_context,
+        )
         prepared_history = prepared_execution.prepared_history
         if prepared_execution.replay_plan is not None:
             apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
-        unseen_event_ids = prepared_execution.unseen_event_ids
-        run_messages = prepared_execution.messages
 
         # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
         logger.info(
             "Preparing agent and prompt",
             agent=agent_name,
-            message_count=len(run_messages),
-            unseen_event_count=len(unseen_event_ids),
+            message_count=len(prepared_execution.messages),
+            unseen_event_count=len(prepared_execution.unseen_event_ids),
         )
         logger.debug(
             "Prepared agent full prompt",
             agent=agent_name,
-            full_prompt=render_prepared_messages_text(run_messages),
+            full_prompt=render_prepared_messages_text(prepared_execution.messages),
         )
         return _PreparedAgentRun(
             agent=agent,
-            messages=run_messages,
-            unseen_event_ids=unseen_event_ids,
+            messages=prepared_execution.messages,
+            unseen_event_ids=prepared_execution.unseen_event_ids,
             prepared_history=prepared_history,
             runtime_model_name=runtime_model.model_name,
         )

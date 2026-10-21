@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ import jwt
 import nio
 import pytest
 import yaml
+from aiohttp import ClientConnectionError
 from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -325,11 +327,62 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
     assert response.status_code == 200, response.text
     assert response.json() == {
         "matrix_user_id": f"@{user}:example.org",
+        "display_name": user,
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
     }
     assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "expected"),
+    [(200, {"displayname": "Bob Builder"}, "Bob Builder"), (200, {}, "bob"), (404, {"errcode": "M_NOT_FOUND"}, "bob")],
+)
+def test_me_names_the_user_by_matrix_display_name(
+    portal: dict[str, Any],
+    status: int,
+    payload: dict[str, str],
+    expected: str,
+) -> None:
+    """The header greets the user by their Matrix display name, and by their localpart when the profile has none."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
+            status=status,
+            payload=payload,
+        )
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        assert len(matrix.requests) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"exception": ClientConnectionError("refused")},
+        {"status": 429, "payload": {"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 5000}},
+    ],
+    ids=["unreachable", "rate-limited"],
+)
+def test_me_falls_back_at_once_when_the_homeserver_fails(portal: dict[str, Any], failure: dict[str, Any]) -> None:
+    """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
+        started = time.monotonic()
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        elapsed = time.monotonic() - started
+        assert sum(len(calls) for calls in matrix.requests.values()) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "bob"
+    assert elapsed < 1.5
 
 
 @pytest.mark.parametrize("broker_on", [False, True])

@@ -375,6 +375,53 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_teams",
+      "category": "communication",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow sending channel messages, channel replies, and chat messages.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Read and send Teams channel and chat messages as the connected user",
+      "display_name": "Microsoft Teams",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_teams_list_teams",
+        "microsoft_teams_list_channels",
+        "microsoft_teams_list_channel_messages",
+        "microsoft_teams_list_channel_message_replies",
+        "microsoft_teams_list_chats",
+        "microsoft_teams_list_chat_messages",
+        "microsoft_teams_send_channel_message",
+        "microsoft_teams_reply_to_channel_message",
+        "microsoft_teams_send_chat_message"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "TbBrandTeams",
+      "icon_color": "text-indigo-600",
+      "name": "microsoft_teams",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
       "config_fields": [
@@ -7100,6 +7147,53 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "outlook_mail",
+      "category": "email",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating and sending drafts, sending and replying, marking read, and moving messages.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Search, read, draft, send, and organize Outlook mail as the connected user",
+      "display_name": "Outlook Mail",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "agent",
+      "function_names": [
+        "outlook_mail_search",
+        "outlook_mail_get_message",
+        "outlook_mail_download_attachment",
+        "outlook_mail_create_draft",
+        "outlook_mail_send_draft",
+        "outlook_mail_send",
+        "outlook_mail_reply",
+        "outlook_mail_mark_read",
+        "outlook_mail_move"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "Mail",
+      "icon_color": "text-sky-600",
+      "name": "outlook_mail",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "email",
       "config_fields": [
@@ -9087,6 +9181,96 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_files",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow replacing and uploading files and writing Excel ranges.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Search, read, and save OneDrive and SharePoint files and Excel ranges as the connected user",
+      "display_name": "Microsoft OneDrive and SharePoint",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "agent",
+      "function_names": [
+        "microsoft_files_search",
+        "microsoft_files_list_folder",
+        "microsoft_files_get_file",
+        "microsoft_files_download_file",
+        "microsoft_files_replace_file",
+        "microsoft_files_upload_file",
+        "microsoft_files_excel_list_worksheets",
+        "microsoft_files_excel_read_range",
+        "microsoft_files_excel_update_range"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "TbBrandOnedrive",
+      "icon_color": "text-sky-600",
+      "name": "microsoft_files",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "microsoft_todo",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, updating, completing, and deleting tasks.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "List, create, update, complete, and delete tasks in the connected user's Microsoft To Do",
+      "display_name": "Microsoft To Do",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_todo_list_lists",
+        "microsoft_todo_list_tasks",
+        "microsoft_todo_create_task",
+        "microsoft_todo_update_task",
+        "microsoft_todo_delete_task"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "ListTodo",
+      "icon_color": "text-blue-600",
+      "name": "microsoft_todo",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [
@@ -9326,6 +9510,51 @@
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": "outlook_calendar",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating, changing, deleting, and answering events.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "View Outlook calendars and create, change, and answer events as the connected user",
+      "display_name": "Outlook Calendar",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "outlook_calendar_list_calendars",
+        "outlook_calendar_list_events",
+        "outlook_calendar_get_event",
+        "outlook_calendar_create_event",
+        "outlook_calendar_update_event",
+        "outlook_calendar_delete_event",
+        "outlook_calendar_respond_to_event"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "CalendarDays",
+      "icon_color": "text-blue-600",
+      "name": "outlook_calendar",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
     },
     {
       "agent_override_fields": null,

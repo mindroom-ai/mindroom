@@ -2405,7 +2405,7 @@ async def test_mention_in_an_agents_finished_reply_wakes_the_mentioned_agent_onc
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("status", [constants.STREAM_STATUS_CANCELLED, constants.STREAM_STATUS_ERROR])
 async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions(tmp_path: Path, status: str) -> None:
-    """Only a completed reply hands off; a stopped or failed one stays an ordinary edit."""
+    """Only a completed reply hands off; a stopped or failed one stays an agent's edit, which changes nothing."""
     config = _owner_only_general_config(tmp_path)
     # The edit path checks the editing agent's own account, so general admits research here.
     with_responder_access(config, "general", users=[_OWNER, _entity_user_id(config, "research")])
@@ -2424,7 +2424,7 @@ async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions
     await harness.deliver(room, edit)
 
     assert harness.runner.requests == []
-    assert regenerator.edit_event_ids == [edit.event_id]
+    assert regenerator.edit_event_ids == []
 
 
 @pytest.mark.asyncio
@@ -4758,10 +4758,10 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
+        question_text="Which role should I use?",
+        selection_key="🧭",
+        selected_label="Department head",
+        selected_value="department_head",
         thread_id="$thread-root:localhost",
     )
 
@@ -4775,7 +4775,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert len(harness.gateway.sent) == 1
     ack_request = harness.gateway.sent[0]
-    assert ack_request.response_text.startswith("You selected: 1 Option 1")
+    assert ack_request.response_text.startswith("You selected: 🧭 Department head\n")
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id == selection.question_event_id
     assert ack_request.reply_write is not None
@@ -5682,17 +5682,32 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
 
 
 @pytest.mark.asyncio
-async def test_an_edit_before_the_turn_starts_changes_what_it_answers(config: Config, tmp_path: Path) -> None:
-    """A message edited while it still waits to be answered is answered as edited, without a regeneration."""
+@pytest.mark.parametrize("by_agent", [False, True], ids=["person", "agent"])
+async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_agent_made_it(
+    config: Config,
+    tmp_path: Path,
+    by_agent: bool,
+) -> None:
+    """A person's message edited while it still waits is answered as edited, and an agent's as it was queued.
+
+    Neither edit regenerates anything.
+    """
     harness = _build_harness(config, tmp_path)
     regenerator = _NoEditRegeneration()
     harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
-    room = _room_with_members(config, "general")
-    original = _text_event("what is 2+2?", thread_id=_THREAD_ROOT)
-    edit = _text_event("* what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_001)
-    edit.source["content"]["m.new_content"] = {"body": "what is 3+3?", "msgtype": "m.text"}
+    room = _room_with_members(config, "general", "research")
+    sender = _entity_user_id(config, "research") if by_agent else _SENDER
+    mentions = {"user_ids": [_entity_user_id(config, "general")]}
+    original = _text_event("@general what is 2+2?", thread_id=_THREAD_ROOT, sender=sender)
+    original.source["content"]["m.mentions"] = mentions
+    edit = _text_event("* @general what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_001, sender=sender)
+    edit.source["content"]["m.new_content"] = {
+        "body": "@general what is 3+3?",
+        "msgtype": "m.text",
+        "m.mentions": mentions,
+    }
     edit.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": original.event_id}
-    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(_SENDER))
+    key = CoalescingKey(_ROOM_ID, _THREAD_ROOT, RequesterCoalescingOwner(sender))
 
     # The message waits out a debounce in its queue, as an agent's participation delay holds it.
     with patch.object(harness.controller, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)):
@@ -5710,5 +5725,6 @@ async def test_an_edit_before_the_turn_starts_changes_what_it_answers(config: Co
     assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert regenerator.edit_event_ids == []
     (request,) = harness.runner.requests
-    assert "what is 3+3?" in request.prompt
-    assert "2+2" not in request.prompt
+    answered, replaced = ("2+2", "3+3") if by_agent else ("3+3", "2+2")
+    assert f"what is {answered}?" in request.prompt
+    assert replaced not in request.prompt

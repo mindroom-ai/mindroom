@@ -127,6 +127,7 @@ _RANDOM_RUN_PATTERN = re.compile(r"[A-Za-z0-9]{12,}")
 _ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
+_GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
 _PLACEHOLDER_OPEN = "\u27e6"
 _PLACEHOLDER_CLOSE = "\u27e7"
 # Matrix canonical JSON, required for unencrypted room events, rejects floats and integers outside this range.
@@ -163,6 +164,7 @@ _URL_QUERY_SECRET_KEYS: frozenset[str] = frozenset(
         "googleaccessid",
         "sig",
         "signature",
+        "tempauth",
         "x_amz_credential",
         "x_amz_security_token",
         "x_amz_signature",
@@ -470,6 +472,19 @@ def _redact_secret_assignments(value: str) -> str:
     return _replace_spans_with_redaction(value, spans)
 
 
+def _redacted_capability_path(host: str, path: str) -> str | None:
+    """Return the path of a capability URL with its credential removed, or None for any other URL.
+
+    A personal OneDrive download carries its credential in the path, and a Microsoft Graph share ID is the
+    base64 of a sharing link; both grant access on their own.
+    """
+    if host.endswith(".1drv.com") and path not in {"", "/"}:
+        return f"/{REDACTED}"
+    if host == "graph.microsoft.com" and "/shares/" in path:
+        return _GRAPH_SHARE_ID_PATTERN.sub(f"/shares/{REDACTED}", path)
+    return None
+
+
 def _redact_url(value: str) -> str:
     try:
         parsed = urlparse(value)
@@ -479,8 +494,13 @@ def _redact_url(value: str) -> str:
         return value
 
     netloc = parsed.netloc
+    path = parsed.path
     query = parsed.query
     changed = False
+    capability_path = _redacted_capability_path((parsed.hostname or "").lower(), path)
+    if capability_path is not None:
+        path = capability_path
+        changed = True
     if "@" in netloc:
         userinfo, host = netloc.rsplit("@", 1)
         netloc = f"{userinfo.split(':', 1)[0]}:***@{host}" if ":" in userinfo else f"***@{host}"
@@ -501,7 +521,7 @@ def _redact_url(value: str) -> str:
 
     if not changed:
         return value
-    return urlunparse(parsed._replace(netloc=netloc, query=query))
+    return urlunparse(parsed._replace(netloc=netloc, path=path, query=query))
 
 
 def _redact_query_fragment(value: str, *, max_length: int | None) -> str:

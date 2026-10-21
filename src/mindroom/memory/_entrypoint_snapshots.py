@@ -1,0 +1,79 @@
+"""Keep a conversation's inlined MEMORY.md unchanged while entries are added and its prompt cache can be reused.
+
+The preamble is part of the system prompt, so a changed preamble makes the provider re-read the whole
+conversation after it. A conversation therefore keeps the preamble it last sent while the file only gains lines,
+until it idles past the cache lifetime, its history is compacted, or the process restarts; the conversation
+already shows the agent its own memory writes as tool calls.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ConversationRef:
+    """The conversation a turn continues, and what its history was last compacted into when the turn started.
+
+    ``compaction`` holds the conversation's text summary and newest native checkpoint; a change means a compaction
+    rewrote the replayed history.
+    """
+
+    session_id: str
+    compaction: tuple[str | None, str | None]
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    preamble: str
+    body: str
+    compaction: tuple[str | None, str | None]
+    used_at: float
+
+
+# Best effort: a restart starts every conversation from the file again.
+_snapshots: dict[tuple[str, str, Path], _Snapshot] = {}
+
+
+def _only_added_lines(snapshot: str, fresh: str) -> bool:
+    return fresh == snapshot or fresh.startswith(f"{snapshot}\n")
+
+
+def stable_entrypoint_preamble(
+    agent_name: str,
+    conversation: ConversationRef,
+    source_path: Path,
+    fresh_body: str,
+    fresh_preamble: str,
+    *,
+    now: float,
+) -> str:
+    """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
+
+    ``fresh_body`` is this turn's preamble without the truncation marker, whose counts change as lines are added
+    past a cap; its header is compared too, so an edited prompt override loads again.
+    A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
+    anyway, and the turn after one costs only its compacted history.
+    An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
+    Keying by the file keeps one requester's private memory out of another requester's turns.
+    """
+    for key in [key for key, snapshot in _snapshots.items() if now - snapshot.used_at >= PROMPT_CACHE_IDLE_SECONDS]:
+        del _snapshots[key]
+    key = (agent_name, conversation.session_id, source_path)
+    snapshot = _snapshots.get(key)
+    if (
+        snapshot is not None
+        and snapshot.compaction == conversation.compaction
+        and _only_added_lines(snapshot.body, fresh_body)
+    ):
+        preamble, body = snapshot.preamble, snapshot.body
+    else:
+        preamble, body = fresh_preamble, fresh_body
+    _snapshots[key] = _Snapshot(preamble, body, conversation.compaction, now)
+    return preamble

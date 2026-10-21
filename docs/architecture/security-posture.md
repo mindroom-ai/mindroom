@@ -98,7 +98,7 @@ It writes an approved proposal into `memory/` from bytes worker code staged, whi
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
@@ -122,6 +122,8 @@ Reads of worker-controlled files are capped per surface.
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
+| `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
+| `outlook_mail` attachments | 3 MB per file, Microsoft Graph's inline attachment limit | Refused with a tool error before any request |
 | Files a `file` content search reads | 500 KiB each, Agno's search limit | Skipped |
 | `browser` upload snapshots, kept in the browser's temp directory until their tab closes | 256 MiB in total per browser | Refused with a tool error |
 | Media files a background job's result reads by path | 48 MiB in total per result, within its 64 MiB encoded limit | The job fails with a size-limit error |
@@ -154,7 +156,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 
 | Tool class | Tools | Behavior |
 |---|---|---|
-| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
+| Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
 | Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
@@ -210,10 +212,10 @@ Do not report or "fix" these; they are deliberate.
 - An operator who runs MindRoom without workers, for example inside a dedicated LXC container or VM, has chosen full trust; `file_access: unrestricted` matches that choice.
 - `file_access: unrestricted`, or unconfined tools in the primary process, are allowed together with worker routing; they log a warning instead of failing.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
-- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, and Google Drive may still use every file in the agent workspace.
+- With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, and Outlook mail may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](../canvases.md#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail and Google Drive take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `mindroom_output_path`, attachment saves, Google Drive downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, and Outlook mail take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](../skills.md#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
@@ -225,6 +227,7 @@ Do not report or "fix" these; they are deliberate.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](../tools/matrix-and-attachments.md#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
 - The `job` function never asks for approval, even under `tool_approval.default: require_approval`, because it only reads and cancels the caller's own jobs, each of which passed its own approval.
+- `config_manager`'s `manage_config(operation="inspect")` and `manage_agent(operation="validate")` calls never ask for approval, even under a matching rule or `tool_approval.default: require_approval`, because they only read configuration.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.

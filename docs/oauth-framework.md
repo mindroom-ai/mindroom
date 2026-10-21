@@ -70,9 +70,9 @@ MindRoom runs the whole OAuth flow for OAuth-backed tools and MCP servers: conne
 Each connection is stored for one credential scope, so the right person's account is used for each agent.
 Providers, built in or from plugins, supply only provider-specific details such as endpoints, scopes, and client configuration.
 
-<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-light="https://github.com/user-attachments/assets/03c90592-472a-42ea-8e57-d802e9129b6f" data-poster-dark="https://github.com/user-attachments/assets/9849b052-508e-409a-867c-cf155a640d31">
-  <source src="https://github.com/user-attachments/assets/c3a4166f-79a4-4ccb-a176-3a7c9922b828" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/62767b38-9729-4277-b615-e2b7b6863234" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user connects an account from the conversation, then the agent answers from it" style="width: 100%" poster="https://github.com/user-attachments/assets/474025d7-38f7-4695-a838-d75c8404efe0" data-poster-light="https://github.com/user-attachments/assets/474025d7-38f7-4695-a838-d75c8404efe0" data-poster-dark="https://github.com/user-attachments/assets/b54e0d21-18fb-4c85-ad0a-4b8052f7b379">
+  <source src="https://github.com/user-attachments/assets/3d033cc5-268c-4467-a69e-3badddc337a6" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/9ccc5590-0d48-4ddd-8272-28d7d485c21f" type="video/mp4">
 </video>
 
 ### Connect An Account
@@ -120,7 +120,7 @@ See [Authorization](authorization.md#platform-and-credential-authority) for admi
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub and Atlassian, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -131,7 +131,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub and Google OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -140,6 +140,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | GitHub (GitHub App user tokens) | [GitHub OAuth Setup](tools/project-management.md#oauth-setup) |
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](tools/atlassian.md) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](deployment/google-services-oauth.md) |
+| Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, and Teams) | [Microsoft 365](tools/microsoft-365.md) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](mcp.md#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom, and the authorization server confirmed that callback when registering.

@@ -497,12 +497,10 @@ def _reported_history_tokens(
     The replay budgets are what the window leaves after the static estimate, so taking off that estimate's system
     prompt and tools share, ``non_prompt_tokens``, converts the count to their units.
     """
-    history_settings = resolved_inputs.history_settings
     if (
         model is None
         # Replay limits drop the oldest content as runs accrue, so that request held more than will replay.
-        or history_settings.policy.mode != "all"
-        or history_settings.max_tool_calls_from_history is not None
+        or not resolved_inputs.history_settings.replays_whole_history
         # Another model counts with another tokenizer.
         or (latest_run.model, latest_run.model_provider) != (model.id, model.provider)
     ):

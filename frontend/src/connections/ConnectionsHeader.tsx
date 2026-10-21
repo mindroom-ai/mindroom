@@ -154,8 +154,11 @@ export function ConnectionsHeader({
           )}
         </nav>
         {identity && (
-          <span className="break-all text-muted-foreground">
-            {`Signed in as ${identity.matrix_user_id}`}
+          <span
+            className="break-all text-muted-foreground"
+            title={identity.matrix_user_id}
+          >
+            {`Signed in as ${identity.display_name}`}
           </span>
         )}
       </div>

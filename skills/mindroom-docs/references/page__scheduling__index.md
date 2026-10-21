@@ -3,9 +3,9 @@
 Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
 Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
-<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
-  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-light="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-dark="https://github.com/user-attachments/assets/01a8d67f-f1ed-4c6a-b2df-a1681149722e">
+  <source src="https://github.com/user-attachments/assets/99f7e664-131d-4831-9c7e-64a2d95b2b6b" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/67fd537c-d810-4a3c-b5a5-d8e307708d56" type="video/mp4">
 </video>
 
 ## Commands
@@ -97,9 +97,9 @@ Use `!list_schedules` to find task IDs.
 
 ## [`scheduler`]
 
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
-  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-light="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-dark="https://github.com/user-attachments/assets/70ad19a8-6728-4344-9e6d-0258c43b5173">
+  <source src="https://github.com/user-attachments/assets/3377307e-268f-4ae0-a0e6-061dd16c1627" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/4423fd02-b6c9-4cf5-bf10-ae50149ebd2e" type="video/mp4">
 </video>
 
 The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.

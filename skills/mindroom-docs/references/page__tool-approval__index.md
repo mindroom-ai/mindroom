@@ -1,8 +1,8 @@
 # Tool Approval
 
-<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-light="https://github.com/user-attachments/assets/444fee69-b77f-4c48-b7d1-b92043159bb3" data-poster-dark="https://github.com/user-attachments/assets/94181525-4b2b-43b4-b366-d85aa18f59b8">
-  <source src="https://github.com/user-attachments/assets/f3792ec9-ea73-4169-97ee-d09146cd65cc" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/cf813bb1-5f9d-43b2-a197-b4749696a86e" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="An agent pauses for approval before it books a meeting" style="width: 100%" poster="https://github.com/user-attachments/assets/72632152-a056-40de-961e-2435119812d6" data-poster-light="https://github.com/user-attachments/assets/72632152-a056-40de-961e-2435119812d6" data-poster-dark="https://github.com/user-attachments/assets/44197f0e-da33-4076-b859-ac4e2ca39513">
+  <source src="https://github.com/user-attachments/assets/502962b4-4dc6-4819-ae5a-eef572a41422" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/cd2e754b-dbb7-4af7-a050-c29514ab712e" type="video/mp4">
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
@@ -32,6 +32,8 @@ tool_approval:
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
+
+[`config_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 
 ## Approving and Denying
 

@@ -2,9 +2,9 @@
 
 A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
-<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-light="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-dark="https://github.com/user-attachments/assets/41849fb8-3dd1-4b9c-8eff-33bb10803f48">
-  <source src="https://github.com/user-attachments/assets/cb657cd9-3114-442f-a4fa-d8e6a96b6425" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/9ee83e64-1425-4165-b1f5-5d4aa978b46e" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-light="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-dark="https://github.com/user-attachments/assets/613f4f1e-cae4-4e82-a082-282fbbf2d73b">
+  <source src="https://github.com/user-attachments/assets/fc66ec35-de5f-4a4e-9494-5bb1f361973a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/0fc87c04-06ed-4508-bc4f-f461720218dc" type="video/mp4">
 </video>
 
 ## Team Modes

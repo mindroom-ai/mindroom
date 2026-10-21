@@ -508,6 +508,7 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
     if (path === "/api/connections/me")
       return json({
         matrix_user_id: "@bob:example.org",
+        display_name: "Bob Builder",
         email: null,
         is_administrator: false,
         egress_enabled: true,
@@ -2111,7 +2112,7 @@ describe("connections header", () => {
   it("shows who is signed in and links the other page", async () => {
     render(<Connections />);
     expect(
-      await screen.findByText("Signed in as @bob:example.org"),
+      await screen.findByText("Signed in as Bob Builder"),
     ).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
     expect(within(nav).getByRole("link", { name: "Agents" })).toHaveAttribute(
@@ -2129,6 +2130,7 @@ describe("connections header", () => {
       "/api/connections/me": async () =>
         json({
           matrix_user_id: "@bob:example.org",
+          display_name: "Bob Builder",
           email: null,
           is_administrator: false,
           egress_enabled: false,
@@ -2136,7 +2138,7 @@ describe("connections header", () => {
     });
     render(<Connections />);
     expect(
-      await screen.findByText("Signed in as @bob:example.org"),
+      await screen.findByText("Signed in as Bob Builder"),
     ).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Connections pages" });
     expect(within(nav).getByRole("link", { name: "Agents" })).toBeVisible();

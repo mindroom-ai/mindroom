@@ -30,6 +30,9 @@ DEFAULT_MATRIX_HOMESERVER = "https://mindroom.chat"
 # timeline and forces a limited-sync gap backfill.
 CLASSIC_SYNC_TIMELINE_LIMIT = 5000
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
+# Idle time after which a thread's provider prompt cache counts as cold; most provider prompt caches expire
+# within an hour idle.
+PROMPT_CACHE_IDLE_SECONDS = 3600
 DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES = 50 * 1024
 DEFAULT_TOOL_OUTPUT_MAX_BYTES = 64 * 1024 * 1024
 # Largest attachment MindRoom retains, received from Matrix or registered by a tool;

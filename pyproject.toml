@@ -310,6 +310,9 @@ mem0 = [
   "mem0ai>=0.1.115",
 ]
 memory = []
+microsoft_files = []
+microsoft_teams = []
+microsoft_todo = []
 modelslabs = [
   "requests",
 ]
@@ -337,6 +340,8 @@ openclaw_compat = []
 openweather = [
   "requests",
 ]
+outlook_calendar = []
+outlook_mail = []
 oxylabs = [
   "oxylabs",
 ]

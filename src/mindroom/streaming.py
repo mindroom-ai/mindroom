@@ -451,6 +451,10 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
     )
     display_text = response.formatted_text
     if in_progress:
+        # A cut-off mention can be another valid user ID (@grace:matrix of @grace:matrix.localhost), so it waits.
+        last_word = display_text.rsplit(maxsplit=1)[-1] if display_text[-1:].strip() else ""
+        if "@" in last_word:
+            display_text = display_text.removesuffix(last_word).rstrip()
         # An interactive block still arriving is raw JSON; its question renders once the block closes.
         display_text = interactive.hide_unfinished_interactive(display_text) or _PROGRESS_PLACEHOLDER
 

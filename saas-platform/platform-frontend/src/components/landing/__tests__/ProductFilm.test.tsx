@@ -14,8 +14,8 @@ describe('ProductFilm', () => {
     render(<ProductFilm />)
 
     expect(film().tagName).toBe('VIDEO')
-    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564')
-    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751')
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/fcc38c9c-61ba-4db4-b026-4f947c931381')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/1e6ecd17-024a-497d-8c12-041dbeaf5438')
     expect(film()).not.toHaveAttribute('controls')
     expect(film()).toHaveAttribute('preload', 'none')
     expect(screen.getByRole('button', { name: 'Play the MindRoom film' })).toBeInTheDocument()
@@ -83,8 +83,8 @@ describe('ProductFilm', () => {
     ;(useDarkMode as jest.Mock).mockReturnValue({ isDarkMode: true })
     rerender(<ProductFilm />)
 
-    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f99556da-f289-49fe-a365-7c2a8bb93c77')
-    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/7c8011bd-22b7-4795-8d4d-ab2864c7b118')
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/67ca35c1-e66c-40c7-8295-740d57ceec92')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/320881ba-a36d-4c00-949d-f4f56dc3d15c')
   })
 
   it('keeps the film the reader started when the page turns dark', () => {
@@ -97,7 +97,7 @@ describe('ProductFilm', () => {
     rerender(<ProductFilm />)
 
     expect(film()).toBe(started)
-    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/f35866c4-c226-408a-9f1f-b7588f76c564')
-    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/88accc8b-6666-494b-a415-6f7effaaf751')
+    expect(film()).toHaveAttribute('src', 'https://github.com/user-attachments/assets/fcc38c9c-61ba-4db4-b026-4f947c931381')
+    expect(film()).toHaveAttribute('poster', 'https://github.com/user-attachments/assets/1e6ecd17-024a-497d-8c12-041dbeaf5438')
   })
 })

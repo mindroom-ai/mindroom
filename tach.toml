@@ -1428,6 +1428,7 @@ visibility = [
     "mindroom.custom_tools.config_manager",
     "mindroom.custom_tools.google_drive",
     "mindroom.custom_tools.github",
+    "mindroom.custom_tools.microsoft_graph",
     "mindroom.egress_broker",
     "mindroom.mcp.manager",
     "mindroom.oauth.client",
@@ -2488,7 +2489,6 @@ path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing.gate",
     "mindroom.conversation_resolver",
-    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
@@ -3293,6 +3293,7 @@ depends_on = [
     "mindroom.constants", "mindroom.tool_system.worker_routing",
     "mindroom.memory.auto_flush",
     "mindroom.memory.functions",
+    "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
@@ -3387,10 +3388,16 @@ depends_on = []
 visibility = ["mindroom.memory.auto_flush"]
 
 [[modules]]
+path = "mindroom.memory._entrypoint_snapshots"
+depends_on = ["mindroom.constants"]
+visibility = ["mindroom.memory", "mindroom.memory.functions"]
+
+[[modules]]
 path = "mindroom.memory.functions"
 depends_on = [
     "mindroom.logging_config",
     "mindroom.memory._backend",
+    "mindroom.memory._entrypoint_snapshots",
     "mindroom.memory._file_backend",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
@@ -6195,12 +6202,14 @@ from = ["mindroom.config.memory"]
 # ARCH-B memory enforcement slice: expose the supported memory facade, not helper modules.
 [[interfaces]]
 expose = [
+    "ConversationRef",
     "MemoryAutoFlushWorker",
     "MemoryPromptParts",
     "add_agent_memory",
     "append_agent_daily_memory",
     "auto_flush_enabled",
     "build_memory_prompt_parts",
+    "conversation_entrypoint_preamble",
     "delete_agent_memory",
     "get_agent_memory",
     "list_all_agent_memories",
@@ -7626,7 +7635,7 @@ visibility = ["mindroom.providers.model_loading"]
 
 [[modules]]
 path = "mindroom.config.cold_cache"
-depends_on = ["mindroom.config.judgment"]
+depends_on = ["mindroom.config.judgment", "mindroom.constants"]
 visibility = ["mindroom.config.agent"]
 
 [[modules]]

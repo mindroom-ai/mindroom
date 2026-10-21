@@ -15,7 +15,7 @@ Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
 
-1. The portal shows nothing until sign-in succeeds, then shows `Signed in as <Matrix ID>`.
+1. The portal shows nothing until sign-in succeeds, then shows `Signed in as <display name>`, with the Matrix ID on hover.
    It ignores any session the browser still holds, so the account signed in to Chat replaces another account's session in the same browser.
 2. MindRoom accepts only users of its configured homeserver, and only from the Chat origins it allows (see `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` below).
 

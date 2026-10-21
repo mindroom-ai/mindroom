@@ -100,6 +100,9 @@ from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
+from mindroom.tools.microsoft_files import microsoft_files_tools
+from mindroom.tools.microsoft_teams import microsoft_teams_tools
+from mindroom.tools.microsoft_todo import microsoft_todo_tools
 from mindroom.tools.modelslabs import modelslabs_tools
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 from mindroom.tools.neo4j import neo4j_tools
@@ -109,6 +112,8 @@ from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
 from mindroom.tools.openweather import openweather_tools
+from mindroom.tools.outlook_calendar import outlook_calendar_tools
+from mindroom.tools.outlook_mail import outlook_mail_tools
 from mindroom.tools.oxylabs import oxylabs_tools
 from mindroom.tools.pandas import pandas_tools
 from mindroom.tools.postgres import postgres_tools
@@ -239,6 +244,9 @@ __all__ = [
     "matrix_room_tools",
     "matrix_voice_message_tools",
     "mem0_tools",
+    "microsoft_files_tools",
+    "microsoft_teams_tools",
+    "microsoft_todo_tools",
     "modelslabs_tools",
     "moviepy_video_tools",
     "neo4j_tools",
@@ -248,6 +256,8 @@ __all__ = [
     "openai_tools",
     "openbb_tools",
     "openweather_tools",
+    "outlook_calendar_tools",
+    "outlook_mail_tools",
     "oxylabs_tools",
     "pandas_tools",
     "postgres_tools",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
@@ -39,3 +40,8 @@ def config_manager_tools() -> type[ConfigManagerTools]:
     from mindroom.custom_tools.config_manager import ConfigManagerTools
 
     return ConfigManagerTools
+
+
+# Inspection and validation only read configuration, so no tool_approval rule or default pauses them.
+register_tool_approval_exemption("manage_config", lambda arguments: arguments.get("operation") == "inspect")
+register_tool_approval_exemption("manage_agent", lambda arguments: arguments.get("operation") == "validate")
