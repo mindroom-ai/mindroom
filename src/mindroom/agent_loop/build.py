@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.agent_modes import AgentMode
     from mindroom.history.types import ResolvedHistorySettings
+    from mindroom.knowledge.search import KnowledgeSourceDescription
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.session_storage.store import ConversationStore
@@ -27,7 +28,8 @@ class AgentSurface:
     Standard mode offers the spec's tools; ``cli_shell`` says the agent's shell commands can call its other tools
     through ``mindroom-agent``. Minimal mode offers one Bash function through which the agent reaches the spec's
     tools and the toolkits in ``deferred`` once it materializes them, and reads ``context_documents``, the complete
-    preload files before the prompt cap, listed as ``context_files`` relative to its workspace.
+    preload files before the prompt cap, listed as ``context_files`` relative to its workspace, and
+    ``knowledge_sources``, the knowledge bases its search reaches after the persona and approval gating.
     """
 
     mode: AgentMode
@@ -35,6 +37,7 @@ class AgentSurface:
     deferred: tuple[DeferredAgentToolkit, ...] = ()
     context_documents: tuple[str, ...] = ()
     context_files: tuple[str, ...] = ()
+    knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

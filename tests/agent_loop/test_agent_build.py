@@ -137,6 +137,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
         cli_shell=False,
         context_documents=("You are calm and precise.",),
         context_files=("SOUL.md",),
+        knowledge_sources=tuple(source.description for source in knowledge.sources),
     )
 
 
@@ -156,7 +157,7 @@ def test_a_build_without_runtime_state_has_no_store_tools_or_context(tmp_path: P
     assert build.spec.toolkits == ()
     assert (build.prompt.skills_block, build.prompt.knowledge_block, build.prompt.model_note) == (None, None, None)
     assert "SOUL.md" not in build.prompt.role
-    assert build.surface.context_documents == ()
+    assert (build.surface.context_documents, build.surface.knowledge_sources) == ((), ())
 
 
 def test_approval_rules_gate_configured_functions_and_hide_generated_ones(tmp_path: Path) -> None:
@@ -175,6 +176,7 @@ def test_approval_rules_gate_configured_functions_and_hide_generated_ones(tmp_pa
     assert set(offered) == _CALCULATOR_FUNCTIONS
     assert all(function.requires_confirmation is True for function in offered.values())
     assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)
+    assert build.surface.knowledge_sources == ()
     assert config.get_prompt("SKILLS_TOOL_USAGE_PROMPT") not in build.prompt.instructions
 
 

@@ -2098,6 +2098,9 @@ def create_agent(
             deferred=tool_assembly.cli_deferred,
             context_documents=tuple(document.body for document in role_context.context_documents),
             context_files=tuple(role_context.workspace_context_files(agent_runtime.tool_base_dir)),
+            knowledge_sources=()
+            if enabled_knowledge is None
+            else tuple(source.description for source in enabled_knowledge.sources),
         ),
     )
 
