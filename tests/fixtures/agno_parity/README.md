@@ -62,6 +62,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `plain_turn` | System prompt and one user message, text reply. |
 | `system_history` | `plain_turn` replayed as history, then a new prompt. |
 | `tool_definitions` | Two tool schemas, one tool-call reply. |
+| `complex_tool_definitions` | A toolkit function whose typed signature yields nested objects, an array of objects, nullable and defaulted parameters, an enum, and a dict, plus a raw MCP input schema with `$defs`/`$ref`, nullable `anyOf` and type lists, formats, bounds, and defaults; the reply calls the MCP tool with nested arguments. |
 | `tool_results_history` | `tool_definitions` replayed with its tool result. |
 | `parallel_tool_calls`, `parallel_tool_results` | Two calls in one reply, then both results replayed. |
 | `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
@@ -74,9 +75,10 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `responses_explicit_replay` | On Responses routes, `reasoning_tool_call` runs under portable replay and this golden replays its items and result explicitly. |
 | `responses_store_false_turn`, `responses_store_false` | The same reasoning tool turn and explicit replay with `store: false`. |
 | `structured_output` | `mindroom.routing._RoutingSuggestion` as native schema, JSON schema, or JSON mode, per route. |
+| `structured_output_nested` | `mindroom.scheduling.tasks.ScheduledWorkflow`, whose schema has `$defs`/`$ref`, nullable `anyOf`, defaults, a format, and a bound, the same way. |
 | `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
 | `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
-| `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind portable `tool_search`/`call_tool`, then a deferred call replayed. |
+| `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
 
 Skipped where the route has nothing to pin:
 

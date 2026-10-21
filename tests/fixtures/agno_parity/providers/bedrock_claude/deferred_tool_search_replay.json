@@ -119,32 +119,37 @@
         "requires_confirmation": false
       },
       {
-        "description": "Search the deferred tools by keyword.",
+        "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
         "external_execution": false,
         "name": "tool_search",
         "parameters": {
           "properties": {
+            "max_results": {
+              "description": "Maximum number of function definitions to return, at most 20.",
+              "type": "integer"
+            },
             "query": {
+              "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
               "type": "string"
             }
           },
-          "required": [
-            "query"
-          ],
+          "required": [],
           "type": "object"
         },
         "requires_confirmation": false
       },
       {
-        "description": "Call a deferred tool returned by tool_search.",
+        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
         "external_execution": false,
         "name": "call_tool",
         "parameters": {
           "properties": {
             "arguments": {
+              "description": "The function's arguments as a JSON object.",
               "type": "object"
             },
             "name": {
+              "description": "Exact function name from tool_search.",
               "type": "string"
             }
           },
@@ -293,16 +298,16 @@
       ],
       "tools": [
         {
-          "description": "Call a deferred tool returned by tool_search.",
+          "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
               "arguments": {
-                "description": "",
+                "description": "The function's arguments as a JSON object.",
                 "type": "object"
               },
               "name": {
-                "description": "",
+                "description": "Exact function name from tool_search.",
                 "type": "string"
               }
             },
@@ -343,18 +348,20 @@
             "ttl": "1h",
             "type": "ephemeral"
           },
-          "description": "Search the deferred tools by keyword.",
+          "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
           "input_schema": {
             "additionalProperties": false,
             "properties": {
+              "max_results": {
+                "description": "Maximum number of function definitions to return, at most 20.",
+                "type": "integer"
+              },
               "query": {
-                "description": "",
+                "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
                 "type": "string"
               }
             },
-            "required": [
-              "query"
-            ],
+            "required": [],
             "type": "object"
           },
           "name": "tool_search"

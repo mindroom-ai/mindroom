@@ -34,19 +34,23 @@ from agno.agent._response import get_response_format
 from agno.models.message import Message
 from agno.models.response import ModelResponse, ModelResponseEvent
 from agno.run.base import RunContext
+from agno.tools import Toolkit
 from agno.tools.function import Function
 from google.genai import _api_client as genai_api_client
 from google.oauth2.credentials import Credentials
+from pydantic import BaseModel, Field
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.providers.claude_prompt_cache import aclose_anthropic_async_client, install_claude_deferred_tool_search
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.providers.portable_tool_search import install_portable_deferred_tool_search, resolve_call_tool_calls
 from mindroom.routing import _RoutingSuggestion
+from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_storage import agno_compat_run_messages
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
@@ -54,7 +58,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from agno.models.base import Model
-    from pydantic import BaseModel
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 
@@ -1088,21 +1091,139 @@ INVOICE_TOOL = _toolkit_function(
     description="Email the invoice for one order.",
     parameters={"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
 )
-TOOL_SEARCH_TOOL = _toolkit_function(
-    name="tool_search",
-    description="Search the deferred tools by keyword.",
-    parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-)
-CALL_TOOL_TOOL = _toolkit_function(
-    name="call_tool",
-    description="Call a deferred tool returned by tool_search.",
-    parameters={
-        "type": "object",
-        "properties": {"arguments": {"type": "object"}, "name": {"type": "string"}},
-        "required": ["name"],
-    },
-)
 DEFERRED_TOOL_NAMES = ("lookup_order", "send_invoice")
+
+
+def _offered_functions(toolkit: Toolkit) -> dict[str, dict[str, Any]]:
+    """Return a toolkit's functions as an agent turn offers them to the model.
+
+    The agent processes each function's entrypoint into its schema, strict only for native
+    structured output, which no tool-calling golden uses.
+    """
+    offered = {}
+    for name, function in toolkit.get_async_functions().items():
+        function.process_entrypoint(strict=False)
+        offered[name] = function.to_dict()
+    return offered
+
+
+# The portable tool-search functions the production dynamic_tools toolkit offers; their schemas ignore the deferred set.
+_DYNAMIC_TOOLS = _offered_functions(DynamicToolsToolkit(deferred_toolkits=()))
+TOOL_SEARCH_TOOL = _DYNAMIC_TOOLS["tool_search"]
+CALL_TOOL_TOOL = _DYNAMIC_TOOLS["call_tool"]
+
+
+class TripStop(BaseModel):
+    """One stop on the trip."""
+
+    city: str = Field(description="City name.")
+    nights: int = Field(default=1, ge=1, description="Nights to stay.")
+
+
+class TripBudget(BaseModel):
+    """Total budget for the trip."""
+
+    amount: float
+    currency: Literal["EUR", "USD"] = "EUR"
+
+
+class _TripToolkit(Toolkit):
+    """A toolkit whose typed signature Agno turns into nested, optional, enum, and dict schemas."""
+
+    def __init__(self) -> None:
+        super().__init__(name="trip_planner", tools=[self.plan_trip])
+
+    def plan_trip(
+        self,
+        destination: str,
+        stops: list[TripStop],
+        budget: TripBudget | None = None,
+        pace: Literal["relaxed", "packed"] = "relaxed",
+        travelers: list[dict[str, str]] | None = None,
+        days: int = 3,
+    ) -> str:
+        """Plan a multi-stop trip.
+
+        Args:
+            destination: Country or region to visit.
+            stops: Ordered stops with nights per stop.
+            budget: Optional total budget.
+            pace: How full each day should be.
+            travelers: Traveler names and roles.
+            days: Total trip length in days.
+
+        """
+        del destination, stops, budget, pace, travelers, days
+        return ""
+
+
+PLAN_TRIP_TOOL = _offered_functions(_TripToolkit())["plan_trip"]
+# A raw MCP input schema as MindRoom's MCP toolkit offers it: no approval flags, shared types under $defs.
+CALENDAR_EVENT_TOOL = Function(
+    name="calendar_create_event",
+    description="Create a calendar event and invite attendees.",
+    parameters={
+        "$defs": {
+            "Attendee": {
+                "properties": {
+                    "contact": {"$ref": "#/$defs/Contact"},
+                    "optional": {"default": False, "title": "Optional", "type": "boolean"},
+                    "role": {"default": "guest", "enum": ["guest", "organizer"], "title": "Role", "type": "string"},
+                },
+                "required": ["contact"],
+                "title": "Attendee",
+                "type": "object",
+            },
+            "Contact": {
+                "properties": {
+                    "email": {"format": "email", "title": "Email", "type": "string"},
+                    "name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Name"},
+                },
+                "required": ["email"],
+                "title": "Contact",
+                "type": "object",
+            },
+            "Location": {
+                "properties": {
+                    "address": {"title": "Address", "type": "string"},
+                    "room": {"type": ["string", "null"], "description": "Room inside the venue."},
+                },
+                "required": ["address"],
+                "title": "Location",
+                "type": "object",
+            },
+        },
+        "properties": {
+            "attendees": {
+                "description": "People to invite.",
+                "items": {"$ref": "#/$defs/Attendee"},
+                "maxItems": 50,
+                "title": "Attendees",
+                "type": "array",
+            },
+            "labels": {
+                "additionalProperties": {"type": "string"},
+                "description": "Free-form labels.",
+                "title": "Labels",
+                "type": "object",
+            },
+            "location": {"anyOf": [{"$ref": "#/$defs/Location"}, {"type": "null"}], "default": None},
+            "reminder_minutes": {
+                "default": 10,
+                "maximum": 1440,
+                "minimum": 0,
+                "title": "Reminder Minutes",
+                "type": "integer",
+            },
+            "starts_at": {"format": "date-time", "title": "Starts At", "type": "string"},
+            "title": {"description": "Event title.", "title": "Title", "type": "string"},
+        },
+        "required": ["title", "starts_at", "attendees"],
+        "title": "create_eventArguments",
+        "type": "object",
+    },
+    skip_entrypoint_processing=True,
+).to_dict()
 
 
 @dataclass(frozen=True)
@@ -1179,6 +1300,44 @@ _WEATHER = Call("weather", "get_weather", {"city": "Paris", "unit": "celsius"})
 _NOTES = Call("notes", "search_notes", {"query": "Paris packing list"})
 _ORDER = Call("order", "lookup_order", {"order_id": "A-1001"})
 _CALL_ORDER = Call("order", "call_tool", {"name": "lookup_order", "arguments": {"order_id": "A-1001"}})
+_CALENDAR_EVENT = Call(
+    "event",
+    "calendar_create_event",
+    {
+        "attendees": [
+            {"contact": {"email": "ana@example.com", "name": "Ana"}, "role": "organizer"},
+            {"contact": {"email": "ben@example.com"}, "optional": True},
+        ],
+        "labels": {"trip": "paris"},
+        "location": {"address": "Gare du Nord, Paris", "room": None},
+        "starts_at": "2026-10-21T08:30:00+02:00",
+        "title": "Paris train",
+    },
+)
+# Output schema, system prompt, user prompt, and the reply's JSON for each structured-output golden.
+_STRUCTURED_OUTPUTS: dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]] = {
+    "structured_output": (
+        _RoutingSuggestion,
+        "Route the message to the best agent.",
+        _PROMPT,
+        {"entity_name": "travel_agent", "reasoning": "The message asks about packing for a trip."},
+    ),
+    "structured_output_nested": (
+        ScheduledWorkflow,
+        "Parse the scheduling request into a workflow.",
+        "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
+        {
+            "cron_schedule": {"day": "*", "hour": "5", "minute": "30", "month": "*", "weekday": "1-5"},
+            "description": "Weekday Paris packing check",
+            "execute_at": None,
+            "history_limit": 0,
+            "is_conditional": False,
+            "message": "@travel_agent Check the Paris forecast and say what to pack.",
+            "new_thread": True,
+            "schedule_type": "cron",
+        },
+    ),
+}
 _ORDER_RESULT = '{"order_id": "A-1001", "status": "shipped"}'
 _WEATHER_RESULT = '{"city": "Paris", "forecast": "light rain", "high_c": 14}'
 _NOTES_RESULT = '[{"title": "Paris 2025", "text": "Bring the blue scarf."}]'
@@ -1309,7 +1468,7 @@ def _responses_replay_case(name: str, family: Family, messages: list[dict[str, A
     )
 
 
-def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Case:  # noqa: C901, PLR0911, PLR0912
+def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Case:  # noqa: C901, PLR0911, PLR0912, PLR0915
     weather_tools = (WEATHER_TOOL, NOTES_TOOL)
     if name == "plain_turn":
         return Case([_system(), _user(_PROMPT)], Reply(text=_ANSWER))
@@ -1318,6 +1477,10 @@ def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Cas
     if name == "tool_definitions":
         reply = Reply(calls=(_call(family, _WEATHER, omit_gemini_id=True),))
         return Case([_system(), _user(_PROMPT)], reply, tools=weather_tools)
+    if name == "complex_tool_definitions":
+        prompt = "Book the Paris train for 08:30 tomorrow with Ana organizing and Ben optional."
+        reply = Reply(calls=(_call(family, _CALENDAR_EVENT),))
+        return Case([_system(), _user(prompt)], reply, tools=(PLAN_TRIP_TOOL, CALENDAR_EVENT_TOOL))
     if name == "foreign_tool_history":
         messages = [_system(), *_foreign_tool_turn(family), _user("And for the evening?")]
         return Case(messages, Reply(text="Add a warm layer."), tools=weather_tools)
@@ -1396,13 +1559,9 @@ def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Cas
     if name in _RESPONSES_REPLAY_SEEDS:
         messages = _followup(done, _RESPONSES_REPLAY_SEEDS[name], _WEATHER_RESULT)
         return _responses_replay_case(name, family, messages, Reply(text=_ANSWER))
-    if name == "structured_output":
-        suggestion = {"entity_name": "travel_agent", "reasoning": "The message asks about packing for a trip."}
-        return Case(
-            [_system("Route the message to the best agent."), _user(_PROMPT)],
-            Reply(text=json.dumps(suggestion)),
-            output_schema=_RoutingSuggestion,
-        )
+    if name in _STRUCTURED_OUTPUTS:
+        schema, system, prompt, output = _STRUCTURED_OUTPUTS[name]
+        return Case([_system(system), _user(prompt)], Reply(text=json.dumps(output)), output_schema=schema)
     if name == "prompt_cache":
         reply = Reply(text=_ANSWER, cached_tokens=30, cache_write_tokens=8)
         return Case(
@@ -1449,6 +1608,7 @@ _BASE_SCENARIOS = (
     "plain_turn",
     "system_history",
     "tool_definitions",
+    "complex_tool_definitions",
     "tool_results_history",
     "parallel_tool_calls",
     "parallel_tool_results",
@@ -1468,7 +1628,7 @@ def family_scenarios(family: Family) -> list[str]:
             # Responses routes replay a reasoning tool turn in responses_explicit_replay.
             names += ["reasoning_tool_call", "reasoning_tool_results"]
     names += family.extra_scenarios
-    names.append("structured_output")
+    names += ["structured_output", "structured_output_nested"]
     if family.prompt_cache_config is not None:
         names.append("prompt_cache")
     names.append("deferred_tool_search")
