@@ -87,8 +87,9 @@ BOB = replace(ALICE, requester_id="@bob:example.test")
 
 
 _Call = tuple[str, dict[str, object]]
-# The review's replayed model, which the review builds when it cannot fork the response's request.
+# Where a review that cannot fork the response's request builds its model.
 _REVIEW_MODEL = "mindroom.skill_learning.reviewer.build_model_provider"
+_SCRIPTED = ModelIdentity(id="scripted", provider="test", provider_name="test")
 
 
 @dataclass
@@ -96,7 +97,7 @@ class _ScriptedModel:
     """Provider double that plays a fixed tool-call script, then answers, recording what each request sent."""
 
     script: list[_Call | list[_Call]] = field(default_factory=list)
-    identity: ModelIdentity = field(default=ModelIdentity(id="scripted", provider="test", provider_name="test"))
+    identity: ModelIdentity = _SCRIPTED
     capabilities: Capabilities = field(default_factory=Capabilities)
     received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
