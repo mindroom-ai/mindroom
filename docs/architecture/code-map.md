@@ -229,6 +229,11 @@ Matrix sync callback
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, and `build_provider` |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search, media fallback, stream retry with the idle limit, and request logging |
+| `providers/gemini/` | Owned stream-only Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, and stream parsing (not wired yet) |
+| `providers/ollama_adapter.py` | Owned stream-only Ollama adapter over the native chat API (not wired yet) |
+| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls (not wired yet) |
+| `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
+| `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |

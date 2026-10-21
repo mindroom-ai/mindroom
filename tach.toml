@@ -7801,7 +7801,32 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agn
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models", "mindroom.providers.google_gemini", "mindroom.providers.groq_model", "mindroom.providers.cerebras_model", "mindroom.providers.ollama_model", "mindroom.providers.openai"]
+visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models", "mindroom.providers.google_gemini", "mindroom.providers.groq_model", "mindroom.providers.cerebras_model", "mindroom.providers.ollama_model", "mindroom.providers.gemini", "mindroom.providers.ollama_adapter", "mindroom.providers.openai"]
+
+# Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
+[[modules]]
+path = "mindroom.providers.extra_kwargs"
+depends_on = []
+
+[[modules]]
+path = "mindroom.providers.status_errors"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.providers.remote_media"
+depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
+
+[[modules]]
+path = "mindroom.providers.gemini"
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+
+[[modules]]
+path = "mindroom.providers.ollama_adapter"
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+
+[[modules]]
+path = "mindroom.providers.synthetic_adapter"
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.groq_model"

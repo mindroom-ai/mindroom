@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+# The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
+# Gemini's MALFORMED_FUNCTION_CALL; the loop answers it with one guidance retry, and the media fallback
+# never strips media for it.
+MALFORMED_TOOL_CALL = "malformed_tool_call"
+
 
 class ProviderError(Exception):
     """A model provider rejected or failed a request.
@@ -65,6 +70,7 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
 
 
 __all__ = [
+    "MALFORMED_TOOL_CALL",
     "ContextWindowExceeded",
     "InvalidRequest",
     "ProviderError",

@@ -1,0 +1,958 @@
+"""Behavior of the owned Gemini, Ollama, and synthetic adapters that the C1 goldens do not exercise."""
+
+from __future__ import annotations
+
+import base64
+import copy
+import hashlib
+import json
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import httpx
+import pytest
+
+from mindroom.config.models import ModelConfig
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted
+from mindroom.providers import remote_media, synthetic_adapter
+from mindroom.providers.gemini import adapter as gemini_adapter
+from mindroom.providers.gemini import files as gemini_files
+from mindroom.providers.gemini import wire as gemini_wire
+from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
+from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
+from mindroom.providers.tool_policy import without_provider_tools
+from tests.providers.gemini_ollama_support import (
+    build_adapter,
+    gemini_sse,
+    hide_provider_environment,
+    normalized_request,
+    ollama_ndjson,
+    run_adapter,
+    runtime_paths_for,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.llm.provider import StreamEvent
+
+GEMINI = {"provider": "google", "id": "gemini-3.1-pro-preview", "api_key": "test-key"}
+GEMINI_VERTEX = {
+    "provider": "gemini",
+    "id": "gemini-3.1-pro-preview",
+    "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
+}
+OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
+WEATHER = ToolSpec(
+    name="get_weather",
+    description="Return the forecast.",
+    parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+)
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c636001000000050001a5f645400000000049454e44ae426082",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_provider_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    hide_provider_environment(monkeypatch)
+
+
+def _config(base: dict[str, Any], **extra_kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {**base, "extra_kwargs": {**base.get("extra_kwargs", {}), **extra_kwargs}}
+
+
+def _request(*messages: Message, **changes: Any) -> ModelRequest:  # noqa: ANN401
+    default_messages = (Message(role="system", content="Be brief."), Message(role="user", content="Hi"))
+    return ModelRequest(messages=messages or default_messages, **changes)
+
+
+def _gemini_chunk(*parts: dict[str, Any], finish: str | None = "STOP", usage: bool = True) -> dict[str, Any]:
+    candidate: dict[str, Any] = {"content": {"role": "model", "parts": list(parts)}, "index": 0}
+    if finish is not None:
+        candidate["finishReason"] = finish
+    chunk: dict[str, Any] = {"candidates": [candidate]}
+    if usage:
+        chunk["usageMetadata"] = {"promptTokenCount": 10, "candidatesTokenCount": 3, "thoughtsTokenCount": 2}
+    return chunk
+
+
+def _ollama_done(reason: str = "stop", **message: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {
+        "model": "qwen3.8:27b",
+        "created_at": "2026-10-20T00:00:00Z",
+        "done": True,
+        "done_reason": reason,
+        "message": {"role": "assistant", "content": "", **message},
+        "prompt_eval_count": 7,
+        "eval_count": 5,
+    }
+
+
+def _completed(events: list[StreamEvent]) -> TurnCompleted:
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    return completed
+
+
+# ---------------------------------------------------------------------------
+# Gemini
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_rejects_unknown_and_dropped_extra_kwargs(tmp_path: Path) -> None:
+    """Agno-only Gemini features fail at build time with the accepted keys listed."""
+    config = ModelConfig(**_config(GEMINI, search=True))
+
+    with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'google': search\. Accepted keys: "):
+        gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+
+def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without its own key a Gemini model takes the shared Google key; Vertex AI never does."""
+    requested: list[str] = []
+
+    def shared_key(provider: str, *, runtime_paths: object) -> str:
+        del runtime_paths
+        requested.append(provider)
+        return "shared-key"
+
+    monkeypatch.setattr(gemini_adapter, "get_api_key_for_provider", shared_key)
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-3.1-pro-preview"), runtime_paths)
+    vertex = gemini_adapter.build_provider(ModelConfig(**GEMINI_VERTEX), runtime_paths)
+    own = gemini_adapter.build_provider(ModelConfig(**GEMINI), runtime_paths)
+
+    assert api.settings.api_key == "shared-key"
+    assert vertex.settings.api_key is None
+    assert vertex.vertexai
+    assert own.settings.api_key == "test-key"
+    assert requested == ["google"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_path: Path) -> None:
+    """Authored settings reach the request; overrides replace them, and disabling thinking keeps the authored config.
+
+    Gemini thinks by default, so dropping a ``thinking_budget: 0`` would turn thinking on.
+    """
+    config = _config(
+        GEMINI,
+        generation_config={"candidate_count": 1},
+        temperature=0.2,
+        max_output_tokens=100,
+        thinking_budget=0,
+        include_thoughts=False,
+    )
+    response = gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    authored, _ = await run_adapter(config, _request(), tmp_path, response)
+    overridden, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.7, max_output_tokens=50, disable_thinking=True)),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert authored["body"]["generationConfig"] == {
+        "candidateCount": 1,
+        "temperature": 0.2,
+        "maxOutputTokens": 100,
+        "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
+    }
+    assert overridden["body"]["generationConfig"] == {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "maxOutputTokens": 50,
+        "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: Path) -> None:
+    """Models that require their provider's sampling defaults never receive temperature, top_p, or top_k."""
+    config = _config({**GEMINI, "id": "gemini-3.8-flash"}, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+
+    request, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.5)),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert request["body"]["generationConfig"] == {"seed": 7}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("config", "json_output"), [(GEMINI, True), (GEMINI_VERTEX, False)])
+async def test_gemini_decision_requests_keep_schemas_but_disable_function_calling(
+    config: dict[str, Any],
+    json_output: bool,
+    tmp_path: Path,
+) -> None:
+    """A participation decision keeps declarations, sets mode NONE, and asks for JSON where Gemini accepts it."""
+    with without_provider_tools():
+        request, _ = await run_adapter(
+            config,
+            _request(tools=[WEATHER], tool_choice="none"),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "{}"})),
+        )
+
+    body = request["body"]
+    assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
+    assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
+    assert ("responseMimeType" in body["generationConfig"]) is json_output
+
+
+@pytest.mark.parametrize(("tool_choice", "mode"), [("auto", "AUTO"), ("none", "NONE"), ("required", "ANY")])
+def test_gemini_tool_choice_modes(tool_choice: str, mode: str) -> None:
+    """The protocol's tool choices map to Gemini function-calling modes."""
+    assert gemini_wire.tool_config(tool_choice) == {"function_calling_config": {"mode": mode}}
+
+
+def test_gemini_rejects_a_named_tool_choice() -> None:
+    """Gemini has no single-function choice in this adapter, so a mapping fails loudly."""
+    with pytest.raises(ValueError, match="Gemini supports tool_choice"):
+        gemini_wire.tool_config({"type": "function", "function": {"name": "get_weather"}})
+
+
+@pytest.mark.asyncio
+async def test_gemini_parses_reasoning_tool_calls_and_usage(tmp_path: Path) -> None:
+    """Thoughts become reasoning, a call without an id gets one, and thinking counts as output."""
+    response = gemini_sse(
+        _gemini_chunk({"text": "Think.", "thought": True}, finish=None, usage=False),
+        _gemini_chunk(
+            {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}, "thoughtSignature": "c2ln"},
+        ),
+    )
+
+    _, events = await run_adapter(GEMINI, _request(tools=[WEATHER]), tmp_path, response)
+
+    completed = _completed(events)
+    message = completed.message
+    assert message.reasoning_content == "Think."
+    assert message.content is None
+    [call] = message.tool_calls or []
+    assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Paris"}'}
+    assert call["thought_signature"] == "c2ln"
+    assert call["id"]
+    metrics = message.metrics
+    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens, metrics.reasoning_tokens) == (
+        10,
+        5,
+        15,
+        2,
+    )
+    assert completed.stop_reason == "tool_use"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish", "stop"),
+    [("MAX_TOKENS", "output_limit"), ("SAFETY", "content_filter"), ("OTHER", "incomplete"), (None, None)],
+)
+async def test_gemini_stop_reasons(finish: str | None, stop: str | None, tmp_path: Path) -> None:
+    """Gemini finish reasons map to the normalized stop reasons."""
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "x"}, finish=finish)))
+
+    assert _completed(events).stop_reason == stop
+
+
+@pytest.mark.asyncio
+async def test_gemini_malformed_function_call_fails_with_its_code(tmp_path: Path) -> None:
+    """A malformed function call ends the stream with an error the loop can answer with guidance."""
+    response = gemini_sse(_gemini_chunk(finish="MALFORMED_FUNCTION_CALL"))
+
+    with pytest.raises(ProviderError) as raised:
+        await run_adapter(GEMINI, _request(), tmp_path, response)
+
+    assert raised.value.code == MALFORMED_TOOL_CALL
+    assert not raised.value.retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message", "error_type"),
+    [
+        (429, "Resource has been exhausted", RateLimited),
+        (503, "The model is overloaded", ProviderUnavailable),
+        (
+            400,
+            "The input token count (2000000) exceeds the maximum number of tokens allowed (1048576).",
+            ContextWindowExceeded,
+        ),
+        (400, "Invalid JSON payload received.", InvalidRequest),
+        (403, "Permission denied", ProviderError),
+    ],
+)
+async def test_gemini_http_errors_are_normalized(
+    status: int,
+    message: str,
+    error_type: type[ProviderError],
+    tmp_path: Path,
+) -> None:
+    """SDK API errors become the normalized error for their status and wording."""
+    response = httpx.Response(status, json={"error": {"code": status, "message": message, "status": "FAILED"}})
+
+    with pytest.raises(ProviderError) as raised:
+        await run_adapter(GEMINI, _request(), tmp_path, response)
+
+    assert type(raised.value) is error_type
+    assert raised.value.status_code == status
+    assert raised.value.provider == "Google"
+
+
+@pytest.mark.asyncio
+async def test_gemini_transport_failure_is_retryable(tmp_path: Path) -> None:
+    """A connection failure before any reply is a retryable provider error."""
+    with pytest.raises(ProviderUnavailable) as raised:
+        await run_adapter(GEMINI, _request(), tmp_path, httpx.ConnectError("connection refused"))
+
+    assert raised.value.retryable
+
+
+_GEMINI_API = "https://generativelanguage.googleapis.com/"
+_UPLOAD_SESSION = "https://upload.test/session"
+_STREAM_SUFFIX = ":streamGenerateContent?alt=sse"
+
+
+@dataclass
+class _MediaServer:
+    """Answers model requests, the Gemini Files API, and remote media URLs, recording every request."""
+
+    remote: dict[str, httpx.Response] = field(default_factory=dict)
+    # How many Files API checks still report PROCESSING after an upload, and the state that follows.
+    processing_checks: int = 1
+    processed_state: str = "ACTIVE"
+    # Another request uploads the same content between this request's check and its upload.
+    uploaded_concurrently: bool = False
+    files: dict[str, dict[str, Any]] = field(default_factory=dict)
+    uploads: list[str] = field(default_factory=list)
+    requests: list[httpx.Request] = field(default_factory=list)
+    _pending: dict[str, Any] = field(default_factory=dict)
+    _checks_left: dict[str, int] = field(default_factory=dict)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        url = str(request.url)
+        if url in self.remote:
+            return self.remote[url]
+        if url.endswith(_STREAM_SUFFIX):
+            return gemini_sse(_gemini_chunk({"text": "ok"}))
+        if url.endswith("/api/chat"):
+            return ollama_ndjson(_ollama_done())
+        if url == f"{_GEMINI_API}upload/v1beta/files":
+            return self._start_upload(json.loads(request.content)["file"])
+        if url == _UPLOAD_SESSION:
+            return self._finish_upload()
+        if request.method == "GET" and url.startswith(f"{_GEMINI_API}v1beta/files/"):
+            return self._file(f"files/{url.rsplit('/', 1)[1]}")
+        msg = f"unexpected request {request.method} {url}"
+        raise AssertionError(msg)
+
+    def _start_upload(self, file: dict[str, Any]) -> httpx.Response:
+        self._pending = file
+        if self.uploaded_concurrently:
+            name = file["name"]
+            self.files[name] = {"name": name, "uri": f"{_GEMINI_API}v1beta/{name}", "state": "ACTIVE"}
+            error = {"code": 409, "message": "File already exists", "status": "ALREADY_EXISTS"}
+            return httpx.Response(409, json={"error": error})
+        return httpx.Response(200, headers={"x-goog-upload-url": _UPLOAD_SESSION}, json={})
+
+    def _finish_upload(self) -> httpx.Response:
+        name = self._pending["name"]
+        self.uploads.append(name)
+        self.files[name] = {
+            "name": name,
+            "mimeType": self._pending["mime_type"],
+            "uri": f"{_GEMINI_API}v1beta/{name}",
+            "state": "PROCESSING",
+        }
+        self._checks_left[name] = self.processing_checks
+        return httpx.Response(200, headers={"x-goog-upload-status": "final"}, json={"file": self.files[name]})
+
+    def _file(self, name: str) -> httpx.Response:
+        file = self.files.get(name)
+        if file is None:
+            # The Gemini API answers 403 for a file name it does not know.
+            error = {"code": 403, "message": "You do not have permission to access the File", "status": "DENIED"}
+            return httpx.Response(403, json={"error": error})
+        if file["state"] == "PROCESSING":
+            if self._checks_left[name]:
+                self._checks_left[name] -= 1
+            else:
+                file["state"] = self.processed_state
+        return httpx.Response(200, json=file)
+
+    def model_requests(self) -> list[httpx.Request]:
+        return [request for request in self.requests if str(request.url).endswith((_STREAM_SUFFIX, "/api/chat"))]
+
+
+def _upload_name(mime_type: str, data: bytes) -> str:
+    return f"files/{hashlib.sha256(f'{mime_type}\0'.encode() + data).hexdigest()[:40]}"
+
+
+def _uploaded(name: str, mime_type: str) -> dict[str, Any]:
+    return {"fileData": {"fileUri": f"{_GEMINI_API}v1beta/{name}", "mimeType": mime_type}}
+
+
+async def _stream_media(
+    model_config: dict[str, Any],
+    request: ModelRequest,
+    tmp_path: Path,
+    server: _MediaServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[StreamEvent]:
+    """Stream ``request`` with model, Files API, and remote media traffic answered by ``server``."""
+    adapter = build_adapter(model_config, tmp_path, server)
+    transport = httpx.MockTransport(server)
+    monkeypatch.setattr(remote_media, "_http_client", lambda: httpx.AsyncClient(transport=transport))
+    monkeypatch.setattr(gemini_files, "_PROCESSING_POLL_SECONDS", 0)
+    return [event async for event in adapter.stream(request)]
+
+
+def _user_parts(server: _MediaServer) -> list[dict[str, Any]]:
+    return normalized_request(server.model_requests()[-1])["body"]["contents"][0]["parts"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_inlines_local_media_and_uploads_what_is_too_large(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local media up to the inline limit is inlined; a larger file goes through the Files API."""
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(PNG)
+    large = b"%PDF" + b"0" * 256
+    large_path = tmp_path / "large.pdf"
+    large_path.write_bytes(large)
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 128)
+    message = Message(
+        role="user",
+        content="Look",
+        images=[Image(filepath=str(image_path))],
+        files=[File(filepath=str(large_path)), File(url="gs://bucket/notes.pdf")],
+    )
+    server = _MediaServer()
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    name = _upload_name("application/pdf", large)
+    assert server.uploads == [name]
+    assert _user_parts(server) == [
+        {"text": "Look"},
+        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
+        _uploaded(name, "application/pdf"),
+        {"fileData": {"fileUri": "gs://bucket/notes.pdf", "mimeType": "application/pdf"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_uploads_local_audio_and_video_once_and_reuses_the_active_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local audio and video go through the Files API whatever their size, and the same content is uploaded once."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4-clip")
+    message = Message(
+        role="user",
+        content="Summarize",
+        audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")],
+        videos=[Video(filepath=str(video_path))],
+    )
+    server = _MediaServer(processing_checks=2)
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+    first_parts = _user_parts(server)
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    video_name = _upload_name("video/mp4", b"mp4-clip")
+    audio_name = _upload_name("audio/ogg", b"OggS-voice")
+    assert server.uploads == [video_name, audio_name]
+    assert first_parts == [
+        _uploaded(video_name, "video/mp4"),
+        {"text": "Summarize"},
+        _uploaded(audio_name, "audio/ogg"),
+    ]
+    assert _user_parts(server) == first_parts
+
+
+@pytest.mark.asyncio
+async def test_gemini_uses_the_upload_a_concurrent_request_made_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Team members sending the same attachment at once share one upload instead of failing on the name clash."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    server = _MediaServer(uploaded_concurrently=True)
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert server.uploads == []
+    assert _user_parts(server)[1] == _uploaded(_upload_name("audio/ogg", b"OggS-voice"), "audio/ogg")
+
+
+@pytest.mark.asyncio
+async def test_gemini_upload_the_files_api_cannot_process_is_an_invalid_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed upload raises before the model request, so the media fallback can note the missing media."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    server = _MediaServer(processed_state="FAILED")
+
+    with pytest.raises(InvalidRequest) as raised:
+        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert not raised.value.retryable
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_on_vertex_inlines_local_media_and_rejects_what_is_too_large(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI has no Files API: local audio is inlined, and media above the inline limit cannot be sent."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"mp4" + b"0" * 256)
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 128)
+    audio = Audio(filepath=str(audio_path), mime_type="audio/ogg")
+    server = _MediaServer()
+
+    await _stream_media(
+        GEMINI_VERTEX,
+        _request(Message(role="user", content="Hi", audio=[audio])),
+        tmp_path,
+        server,
+        monkeypatch,
+    )
+    with pytest.raises(InvalidRequest):
+        await _stream_media(
+            GEMINI_VERTEX,
+            _request(Message(role="user", content="Hi", videos=[Video(filepath=str(video_path))])),
+            tmp_path,
+            server,
+            monkeypatch,
+        )
+
+    assert [str(request.url).endswith(_STREAM_SUFFIX) for request in server.requests] == [True]
+    assert _user_parts(server) == [
+        {"text": "Hi"},
+        # The Vertex AI body names the MIME type in snake case, as the goldens record.
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mime_type": "audio/ogg"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_downloads_remote_images_audio_and_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remote images, audio, and files Gemini cannot fetch are downloaded and inlined; remote video is referenced."""
+    server = _MediaServer(
+        remote={
+            "https://media.test/generated": httpx.Response(200, content=PNG),
+            "https://media.test/speech": httpx.Response(200, content=b"RIFF-speech"),
+            "http://media.test/notes": httpx.Response(200, headers={"content-type": "text/plain"}, content=b"notes"),
+        },
+    )
+    message = Message(
+        role="user",
+        content="Use these",
+        images=[Image(url="https://media.test/generated")],
+        audio=[Audio(url="https://media.test/speech", format="wav")],
+        files=[File(url="http://media.test/notes")],
+        videos=[Video(url="https://media.test/clip.mp4")],
+    )
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert _user_parts(server) == [
+        {"fileData": {"fileUri": "https://media.test/clip.mp4", "mimeType": "video/mp4"}},
+        {"text": "Use these"},
+        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"RIFF-speech").decode(), "mimeType": "audio/wav"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"notes").decode(), "mimeType": "text/plain"}},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["missing_file", "unreachable_url", "oversized_url"])
+async def test_gemini_media_it_cannot_send_is_an_invalid_request(
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Media that cannot be read or downloaded raises before the model request instead of being dropped silently."""
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 128)
+    images = {
+        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
+        "unreachable_url": Image(url="https://media.test/gone"),
+        "oversized_url": Image(url="https://media.test/huge"),
+    }
+    server = _MediaServer(
+        remote={
+            "https://media.test/gone": httpx.Response(404),
+            "https://media.test/huge": httpx.Response(200, content=b"0" * 256),
+        },
+    )
+    message = Message(role="user", content="Look", images=[images[source]])
+
+    with pytest.raises(InvalidRequest) as raised:
+        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    # The media fallback strips media and retries only for a non-retryable error with no exempt code.
+    assert not raised.value.retryable
+    assert raised.value.code is None
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_path: Path) -> None:
+    """Videos lead the user turn, last one first; images, audio, and files follow the text in that order."""
+    message = Message(
+        role="user",
+        content="Compare",
+        files=[File(content=b"%PDF", filename="a.pdf")],
+        audio=[Audio(content=b"RIFF", mime_type="audio/wav")],
+        images=[Image(content=PNG)],
+        videos=[Video(url="gs://bucket/first.mp4"), Video(content=b"mp4", format="webm")],
+    )
+
+    request, _ = await run_adapter(GEMINI, _request(message), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    parts = request["body"]["contents"][0]["parts"]
+    assert [next(iter(part)) for part in parts] == [
+        "inlineData",
+        "fileData",
+        "text",
+        "inlineData",
+        "inlineData",
+        "inlineData",
+    ]
+    assert [part["inlineData"]["mimeType"] for part in parts if "inlineData" in part] == [
+        "video/webm",
+        "image/png",
+        "audio/wav",
+        "application/pdf",
+    ]
+
+
+def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> None:
+    """Self references end in a placeholder object, and nullable type lists do not rewrite the caller's schema."""
+    schema = {
+        "type": "object",
+        "properties": {"child": {"$ref": "#/$defs/Node"}, "note": {"type": ["string", "null"]}},
+        "$defs": {"Node": {"type": "object", "properties": {"child": {"$ref": "#/$defs/Node"}}}},
+    }
+    original = copy.deepcopy(schema)
+
+    converted = gemini_wire.convert_schema(schema)
+
+    assert converted == {
+        "type": "OBJECT",
+        "required": [],
+        "properties": {
+            "child": {
+                "type": "OBJECT",
+                "required": [],
+                "properties": {"child": {"type": "OBJECT", "description": "Circular reference to #/$defs/Node"}},
+            },
+            "note": {"type": "STRING", "nullable": True},
+        },
+    }
+    assert schema == original
+
+
+# ---------------------------------------------------------------------------
+# Ollama
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_rejects_unknown_extra_kwargs(tmp_path: Path) -> None:
+    """Keys the Ollama adapter does not take fail at build time."""
+    config = ModelConfig(**_config(OLLAMA, temperature=0.3))
+
+    with pytest.raises(ValueError, match="Unsupported extra_kwargs for provider 'ollama': temperature"):
+        build_ollama_provider(config, runtime_paths_for(tmp_path))
+
+
+def test_ollama_host_and_key_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host falls back to the local default, and OLLAMA_API_KEY supplies a missing key."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "env-key")
+    provider = build_ollama_provider(ModelConfig(provider="ollama", id="qwen3.8:27b"), runtime_paths_for(tmp_path))
+
+    assert provider.host == "http://localhost:11434"
+    assert provider.settings.api_key == "env-key"
+
+
+@pytest.mark.asyncio
+async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> None:
+    """Options, keep_alive, format, and request_params pass through; overrides land in options."""
+    config = _config(
+        OLLAMA,
+        options={"num_ctx": 8192},
+        keep_alive="5m",
+        format="json",
+        request_params={"think": False},
+    )
+
+    request, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.1, max_output_tokens=64)),
+        tmp_path,
+        ollama_ndjson(_ollama_done()),
+    )
+
+    body = request["body"]
+    assert body["options"] == {"num_ctx": 8192, "temperature": 0.1, "num_predict": 64}
+    assert body["keep_alive"] == "5m"
+    assert body["format"] == "json"
+    assert body["think"] is False
+    assert request["url"] == "http://ollama.test:11434/api/chat"
+
+
+@pytest.mark.asyncio
+async def test_ollama_sends_the_api_key_as_a_bearer_token(tmp_path: Path) -> None:
+    """An API key authenticates against Ollama's hosted endpoint."""
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return ollama_ndjson(_ollama_done())
+
+    config = ModelConfig(
+        **_config(OLLAMA, api_key="ollama-key", client_params={"transport": httpx.MockTransport(respond)}),
+    )
+    provider = build_ollama_provider(config, runtime_paths_for(tmp_path))
+
+    _completed([event async for event in provider.stream(_request())])
+
+    assert seen[0].headers["authorization"] == "Bearer ollama-key"
+
+
+@pytest.mark.asyncio
+async def test_ollama_tools_are_sorted_and_leave_out_empty_descriptions(tmp_path: Path) -> None:
+    """Tools go out sorted by name, and a tool without a description sends none, as Agno's did."""
+    quiet = ToolSpec(name="a_tool", description="", parameters={"type": "object", "properties": {}})
+
+    request, _ = await run_adapter(OLLAMA, _request(tools=[WEATHER, quiet]), tmp_path, ollama_ndjson(_ollama_done()))
+
+    assert [tool["function"] for tool in request["body"]["tools"]] == [
+        {"name": "a_tool", "parameters": {"type": "object", "properties": {}}},
+        {"name": "get_weather", "description": "Return the forecast.", "parameters": dict(WEATHER.parameters)},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ollama_decision_requests_send_no_tools(tmp_path: Path) -> None:
+    """Ollama has no tool_choice, so a participation decision leaves the tools out."""
+    with without_provider_tools():
+        request, _ = await run_adapter(
+            OLLAMA,
+            _request(tools=[WEATHER], tool_choice="none"),
+            tmp_path,
+            ollama_ndjson(_ollama_done()),
+        )
+
+    assert request["body"]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_ollama_reads_local_images(tmp_path: Path) -> None:
+    """Local image attachments are read off the event loop and sent as base64."""
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(PNG)
+
+    request, _ = await run_adapter(
+        OLLAMA,
+        _request(Message(role="user", content="Look", images=[Image(filepath=str(image_path))])),
+        tmp_path,
+        ollama_ndjson(_ollama_done()),
+    )
+
+    assert request["body"]["messages"][0]["images"] == [base64.b64encode(PNG).decode()]
+
+
+@pytest.mark.asyncio
+async def test_ollama_downloads_remote_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Images a tool returned as URLs are downloaded and sent as base64."""
+    server = _MediaServer(remote={"https://media.test/generated": httpx.Response(200, content=PNG)})
+    message = Message(role="user", content="Look", images=[Image(url="https://media.test/generated")])
+
+    await _stream_media(OLLAMA, _request(message), tmp_path, server, monkeypatch)
+
+    body = normalized_request(server.model_requests()[-1])["body"]
+    assert body["messages"][-1]["images"] == [base64.b64encode(PNG).decode()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["missing_file", "unreachable_url"])
+async def test_ollama_images_it_cannot_read_are_an_invalid_request(
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image that cannot be read or downloaded raises before the chat request instead of being dropped."""
+    images = {
+        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
+        "unreachable_url": Image(url="https://media.test/gone"),
+    }
+    server = _MediaServer(remote={"https://media.test/gone": httpx.Response(404)})
+
+    with pytest.raises(InvalidRequest) as raised:
+        await _stream_media(
+            OLLAMA,
+            _request(Message(role="user", content="Look", images=[images[source]])),
+            tmp_path,
+            server,
+            monkeypatch,
+        )
+
+    assert not raised.value.retryable
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Path) -> None:
+    """Text deltas stream, id-less calls get ids, usage comes from the final chunk, and length stops are limits."""
+    response = ollama_ndjson(
+        {
+            "model": "m",
+            "created_at": "2026-10-20T00:00:00Z",
+            "done": False,
+            "message": {"role": "assistant", "content": "Hi"},
+        },
+        _ollama_done("length", tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]),
+    )
+
+    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, response)
+
+    completed = _completed(events)
+    assert [event.text for event in events if isinstance(event, TextDelta)] == ["Hi"]
+    [call] = completed.message.tool_calls or []
+    assert call["function"] == {"name": "get_weather", "arguments": '{"city": "Paris"}'}
+    assert call["id"]
+    assert completed.message.metrics.input_tokens == 7
+    assert completed.message.metrics.output_tokens == 5
+    assert completed.stop_reason == "output_limit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "error_type"),
+    [
+        (httpx.Response(404, json={"error": "model 'qwen' not found"}), InvalidRequest),
+        (httpx.Response(500, json={"error": "llama runner process has terminated"}), ProviderUnavailable),
+        (httpx.ConnectError("connection refused"), ProviderUnavailable),
+        (ollama_ndjson({"error": "model runner has unexpectedly stopped"}), ProviderError),
+    ],
+)
+async def test_ollama_errors_are_normalized(
+    response: httpx.Response | Exception,
+    error_type: type[ProviderError],
+    tmp_path: Path,
+) -> None:
+    """Ollama response errors and connection failures become normalized provider errors."""
+    with pytest.raises(ProviderError) as raised:
+        await run_adapter(OLLAMA, _request(), tmp_path, response)
+
+    assert type(raised.value) is error_type
+    assert raised.value.provider == "Ollama"
+
+
+@pytest.mark.asyncio
+async def test_ollama_replays_undecodable_tool_arguments_as_empty(tmp_path: Path) -> None:
+    """Stored calls with broken or missing arguments replay as calls without arguments instead of failing."""
+    message = Message(
+        role="assistant",
+        tool_calls=[
+            {"id": "a", "type": "function", "function": {"name": "get_weather", "arguments": "{not json"}},
+            {"id": "b", "type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+
+    request, _ = await run_adapter(OLLAMA, _request(message), tmp_path, ollama_ndjson(_ollama_done()))
+
+    assert request["body"]["messages"][0]["tool_calls"] == [
+        {"function": {"name": "get_weather", "arguments": {}}},
+        {"function": {"name": "get_weather", "arguments": {}}},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Synthetic
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_config(**extra_kwargs: object) -> ModelConfig:
+    return ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs=extra_kwargs)
+
+
+@pytest.mark.asyncio
+async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each chunk waits for its character count at the configured fixed rate."""
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(synthetic_adapter.asyncio, "sleep", record_sleep)
+    config = _synthetic_config(min_response_chars=10, max_response_chars=10, chunk_chars=4, chars_per_second=2)
+    provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
+
+    _completed([event async for event in provider.stream(_request())])
+
+    assert sleeps == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "message"),
+    [
+        ({"min_response_chars": 1}, "at least 2"),
+        ({"min_response_chars": 10, "max_response_chars": 9}, "greater than or equal"),
+        ({"chunk_chars": 0}, "chunk_chars must be positive"),
+        ({"chars_per_second": -1}, "chars_per_second must be non-negative"),
+        ({"tool_call_probability": 1.1}, "between 0 and 1"),
+        ({"temperature": 0.5}, "Unsupported extra_kwargs for provider 'synthetic': temperature"),
+    ],
+)
+def test_synthetic_rejects_invalid_settings_at_build(
+    extra_kwargs: dict[str, object],
+    message: str,
+    tmp_path: Path,
+) -> None:
+    """Invalid or unknown generation settings fail before serving any request."""
+    with pytest.raises(ValueError, match=message):
+        build_synthetic_provider(_synthetic_config(**extra_kwargs), runtime_paths_for(tmp_path))
+
+
+def test_synthetic_ignores_an_api_key(tmp_path: Path) -> None:
+    """A key the shared credential flow adds to every model does not break the synthetic model."""
+    provider = build_synthetic_provider(_synthetic_config(api_key="unused", seed=4), runtime_paths_for(tmp_path))
+
+    assert provider.settings.seed == 4
+    assert (provider.identity.provider, provider.identity.provider_name) == ("Synthetic", "Synthetic")
