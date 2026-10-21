@@ -419,17 +419,18 @@ def test_session_creation_never_takes_the_audience_from_the_host_header(gateway:
     assert peer.userinfo_audiences == ["https://mindroom.example.org"]
 
 
-@pytest.mark.parametrize("public_url", [None, "mindroom.example.org"])
-def test_session_creation_sends_no_audience_without_a_usable_public_url(
+@pytest.mark.parametrize(("public_url", "audience"), [(None, "http://localhost:8765"), ("mindroom.example.org", None)])
+def test_session_creation_audience_without_a_usable_public_url(
     gateway: Gateway,
     public_url: str | None,
+    audience: str | None,
 ) -> None:
-    """Without a usable MINDROOM_PUBLIC_URL no audience is sent, and a homeserver that binds no tokens still verifies."""
+    """Unset, the audience is the local default; unusable, none is sent; a homeserver that binds no tokens verifies both."""
     client, peer, app = gateway
     if public_url is not None:
         _set_public_url(app, public_url)
     assert create(client).status_code == 200
-    assert peer.userinfo_audiences == [None]
+    assert peer.userinfo_audiences == [audience]
 
 
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:

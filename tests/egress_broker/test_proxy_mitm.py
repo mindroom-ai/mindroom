@@ -731,7 +731,7 @@ async def test_oauth_refresh_outage_gets_retryable_503(
 
 # The end of a personal scope's refusal where the personal page, the only place that sets its keys, is not served.
 _PAGE_NOT_SERVED = (
-    "on the Connections page, which this deployment does not serve. "
+    "on the Connections page, which nobody can sign in to here. "
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _WITHOUT_PAGE = ScopeInfo(shared=False, managers=(), personal_page=False)

@@ -82,7 +82,6 @@ def _enabled(paths: RuntimePaths) -> bool:
         paths.env_flag("MINDROOM_MCP_GATEWAY_ENABLED", default=False)
         and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED", default=False)
         and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", default=False)
-        and bool((paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip())
     )
 
 
@@ -99,7 +98,7 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
         try:
             origins.append(parse_browser_origin(value))
         except ValueError:
-            msg = "MCP browser origins must be explicit HTTPS or loopback HTTP origins"
+            msg = "MCP browser origins must be explicit HTTPS origins, or HTTP origins on local addresses"
             raise ValueError(msg) from None
     return tuple(dict.fromkeys(origins))
 

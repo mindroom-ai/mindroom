@@ -367,8 +367,9 @@ function ServiceSection({
           </>
         ) : (
           <>
-            Agent Keys page, which needs trusted upstream auth and is not served
-            here. Give such agents a shared worker scope to set their keys here.
+            Agent Keys page, which nobody can sign in to while sign-in from
+            MindRoom Chat is off and trusted upstream JWT auth is not set. Give
+            such agents a shared worker scope to set their keys here.
           </>
         )}
       </p>
