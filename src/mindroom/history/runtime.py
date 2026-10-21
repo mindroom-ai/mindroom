@@ -88,6 +88,8 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity
     from mindroom.llm.usage import MessageMetrics
     from mindroom.native_compaction import NativeCompactionModel
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.timing import DispatchPipelineTiming
 
 
@@ -959,18 +961,18 @@ def resolve_agent_preparation_inputs(
 
 def _prepare_scope_state_for_run(
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    session: ConversationSession,
     scope: HistoryScope,
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
     if consume_pending_force_compaction_scope(session, scope):
         state = set_force_compaction_state(session, scope, state, force=True)
-        storage.upsert_session(session)
+        storage.save_session_fields(session, "metadata", "session_state")
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
         state = set_force_compaction_state(session, scope, state, force=False)
-        storage.upsert_session(session)
+        storage.save_session_fields(session, "metadata")
         description = describe_compaction_unavailability(execution_plan)
         logger.warning(
             "Forced compaction skipped because text compaction is unavailable",

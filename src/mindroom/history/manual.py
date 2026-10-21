@@ -85,7 +85,7 @@ def request_compaction_before_next_reply(
         assert session is not None
         current_state = read_scope_state(session, scope_context.scope)
         set_force_compaction_state(session, scope_context.scope, current_state, force=True)
-        scope_context.storage.upsert_session(session)
+        scope_context.storage.save_session_fields(session, "metadata")
 
         next_session_state = session_state
         if record_pending_scope_in_session_state:
