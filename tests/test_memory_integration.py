@@ -79,8 +79,9 @@ class TestMemoryIntegration:
         tmp_path: Path,
         config: Config,
     ) -> None:
-        """Test that AI response uses memory enhancement."""
+        """Test that AI response uses memory enhancement and names the turn's conversation for file memory."""
         mock_build = mock_memory_functions
+        config.memory.backend = "file"
         runtime_paths = self._runtime_paths(tmp_path)
         persist_entity_accounts(config, runtime_paths)
 
@@ -147,7 +148,7 @@ class TestMemoryIntegration:
                 config=config,
             )
 
-            # Verify memory enhancement remains agent-scoped
+            # Verify memory enhancement remains agent-scoped; mem0 inlines no MEMORY.md to keep.
             mock_build.assert_called_once_with(
                 "Hello",
                 "general",
@@ -155,7 +156,7 @@ class TestMemoryIntegration:
                 config,
                 runtime_paths,
                 execution_identity=None,
-                conversation=ConversationRef("test_session", (None, None)),
+                conversation=None,
             )
 
             # Note: Memory storage now happens at the bot level, not in ai_response
@@ -226,7 +227,7 @@ class TestMemoryIntegration:
 
 @pytest.mark.parametrize("history_limit", [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}])
 def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(history_limit: dict[str, int]) -> None:
-    """A persona recalls no memory, a minimal agent reads it on demand, and a replay limit shifts the history."""
+    """Only file memory inlines MEMORY.md; a persona recalls none, a minimal agent reads it on demand, and a replay limit shifts the history."""
     session = AgentSession(session_id="thread", summary=SessionSummary(summary=" Earlier work. "))
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
@@ -235,13 +236,20 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         session_id="thread",
     )
     ctx = make_turn_context("general", session_id="thread")
-    config = TestMemoryIntegration._config()
+    mem0 = TestMemoryIntegration._config()
+    config = Config(
+        agents={"general": AgentConfig(display_name="General")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+        memory={"backend": "file"},
+    )
     limited = Config(
         agents={"general": AgentConfig(display_name="General", **history_limit)},
         models={"default": ModelConfig(provider="openai", id="test-model")},
+        memory={"backend": "file"},
     )
 
     assert _memory_conversation(ctx, config, scope_context) == ConversationRef("thread", ("Earlier work.", None))
+    assert _memory_conversation(ctx, mem0, scope_context) is None
     assert _memory_conversation(replace(ctx, agent_mode="minimal"), config, scope_context) is None
     assert _memory_conversation(ctx, limited, scope_context) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))

@@ -1083,9 +1083,9 @@ def _memory_conversation(
 ) -> ConversationRef | None:
     """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
 
-    An authored persona recalls no memory, a minimal agent reads its memory on demand rather than in its system
-    prompt, and a replay limit, configured or scheduled, moves the history after the system prompt every turn and can
-    drop the agent's own memory writes, so none of them has a cache to keep.
+    Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
+    demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
+    system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
     """
     if (
         ctx.persona is not None
@@ -1095,8 +1095,8 @@ def _memory_conversation(
         or scope_context.session_id is None
     ):
         return None
-    history_settings = config.resolve_entity(ctx.entity_label).history_settings
-    if history_settings.policy.mode != "all" or history_settings.max_tool_calls_from_history is not None:
+    entity = config.resolve_entity(ctx.entity_label)
+    if entity.memory_backend != "file" or not entity.history_settings.replays_whole_history:
         return None
     session = scope_context.session
     compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)

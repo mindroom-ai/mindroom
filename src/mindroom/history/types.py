@@ -96,6 +96,11 @@ class ResolvedHistorySettings:
     max_tool_calls_from_history: int | None
     system_message_role: str = "system"
 
+    @property
+    def replays_whole_history(self) -> bool:
+        """Return whether no authored run, message, or tool-call limit drops older history from replay."""
+        return self.policy.mode == "all" and self.max_tool_calls_from_history is None
+
 
 @dataclass(frozen=True)
 class HistoryScopeState:
