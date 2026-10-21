@@ -284,7 +284,7 @@ class SessionMetrics:
     additional_metrics: dict[str, Any] | None = None
 
     def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None = None) -> None:
-        """Add one run's usage, minus ``replacing``, what an earlier save of the same run already added.
+        """Add one run's usage, first taking back ``replacing``, what an earlier save of the same run added.
 
         Without ``replacing`` this is Agno's ``SessionMetrics.accumulate_from_run``.
         """

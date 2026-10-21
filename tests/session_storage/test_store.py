@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.types import SessionKind
 
 _NAMES = TableNames("code_sessions")
 
@@ -38,10 +39,10 @@ def store(tmp_path: Path) -> ConversationStore:
     return _store(tmp_path)
 
 
-def _session(session_id: str = "s1", *, kind: str = "agent", owner: str = "code") -> ConversationSession:
+def _session(session_id: str = "s1", *, kind: SessionKind = "agent", owner: str = "code") -> ConversationSession:
     return ConversationSession(
         session_id=session_id,
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
         owner_id=owner,
         user_id="@alice:example.test",
         created_at=1_700_000_000,
@@ -110,17 +111,32 @@ def _execute(store: ConversationStore, sql: str, *parameters: object) -> None:
 
 
 def _run_rows(store: ConversationStore) -> list[tuple[str, int]]:
-    return _query(store, "SELECT run_id, run_index FROM code_sessions_runs ORDER BY run_index")  # type: ignore[return-value]
+    return [
+        (run_id, run_index)
+        for run_id, run_index in _query(store, "SELECT run_id, run_index FROM code_sessions_runs ORDER BY run_index")
+    ]
 
 
-def _stored(store: ConversationStore, run_id: str) -> tuple[int, str, dict[str, Any]] | None:
-    rows = _query(store, "SELECT run_index, status, run_data FROM code_sessions_runs WHERE run_id = ?", run_id)
-    return None if not rows else (rows[0][0], rows[0][1], json.loads(rows[0][2]))
+def _stored(store: ConversationStore, run_id: str) -> tuple[int, str, dict[str, Any]]:
+    [(run_index, status, run_data)] = _query(
+        store,
+        "SELECT run_index, status, run_data FROM code_sessions_runs WHERE run_id = ?",
+        run_id,
+    )
+    return run_index, status, json.loads(run_data)
 
 
-def _usage_row(store: ConversationStore, run_id: str) -> dict[str, Any] | None:
-    rows = _query(store, "SELECT usage_data FROM code_sessions_usage WHERE run_id = ?", run_id)
-    return None if not rows else json.loads(rows[0][0])
+def _has_row(store: ConversationStore, run_id: str) -> bool:
+    return bool(_query(store, "SELECT 1 FROM code_sessions_runs WHERE run_id = ?", run_id))
+
+
+def _usage_row(store: ConversationStore, run_id: str) -> dict[str, Any]:
+    [(usage_data,)] = _query(store, "SELECT usage_data FROM code_sessions_usage WHERE run_id = ?", run_id)
+    return json.loads(usage_data)
+
+
+def _has_usage(store: ConversationStore, run_id: str) -> bool:
+    return bool(_query(store, "SELECT 1 FROM code_sessions_usage WHERE run_id = ?", run_id))
 
 
 def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, Any]:
@@ -149,13 +165,13 @@ def _remove(store: ConversationStore, run_id: str) -> None:
     _execute(store, "INSERT INTO code_sessions_removed_runs (run_id, session_id) VALUES (?, 's1')", run_id)
 
 
-def _loaded(store: ConversationStore, kind: str = "agent") -> ConversationSession:
-    session = store.load_session("s1", kind)  # type: ignore[arg-type]
+def _loaded(store: ConversationStore, kind: SessionKind = "agent") -> ConversationSession:
+    session = store.load_session("s1", kind)
     assert session is not None
     return session
 
 
-def _loaded_ids(store: ConversationStore, kind: str = "agent") -> list[str]:
+def _loaded_ids(store: ConversationStore, kind: SessionKind = "agent") -> list[str]:
     return [run.run_id for run in _loaded(store, kind).runs]
 
 
@@ -235,7 +251,7 @@ def test_new_runs_sort_after_every_summary_row(store: ConversationStore) -> None
 
     _seed(store, [_run("r3")])
 
-    assert _stored(store, "r3")[0] == 3  # type: ignore[index]
+    assert _stored(store, "r3")[0] == 3
     assert _loaded_ids(store) == ["r3"]
 
 
@@ -252,7 +268,7 @@ def test_a_non_visible_run_saved_visible_moves_to_the_end(store: ConversationSto
     _seed(store, [_run("r0", content="approved")])
 
     session = _loaded(store)
-    assert _stored(store, "r0")[0] == 4  # type: ignore[index]
+    assert _stored(store, "r0")[0] == 4
     assert [run.run_id for run in session.runs] == ["r0"]
     assert session.summary is not None
     assert session.summary.text == "summary"
@@ -273,8 +289,8 @@ def test_a_save_keeping_visibility_never_moves_a_run(store: ConversationStore) -
 
     _seed(store, [_run("r1", content="linked"), _run("r0", RunStatus.paused, content="still waiting")])
 
-    assert _stored(store, "r0")[0] == 0  # type: ignore[index]
-    assert _stored(store, "r1")[0] == 1  # type: ignore[index]
+    assert _stored(store, "r0")[0] == 0
+    assert _stored(store, "r1")[0] == 1
 
 
 def test_a_folded_run_is_frozen(store: ConversationStore) -> None:
@@ -293,7 +309,7 @@ def test_a_folded_run_is_frozen(store: ConversationStore) -> None:
     assert _stored(store, "r1") == before
     assert _usage_row(store, "r1") == usage_before
     assert _totals(store) == totals_before
-    assert _stored(store, "p0")[2]["content"] == "still waiting"  # type: ignore[index]
+    assert _stored(store, "p0")[2]["content"] == "still waiting"
     assert _loaded_ids(store) == ["p0"]
 
 
@@ -309,8 +325,8 @@ def test_a_member_of_a_folded_team_run_is_frozen(store: ConversationStore) -> No
     ]
 
     assert outcomes == ["frozen", "frozen"]
-    assert _stored(store, "m0")[2]["content"] == "original"  # type: ignore[index]
-    assert _stored(store, "m-new") is None
+    assert _stored(store, "m0")[2]["content"] == "original"
+    assert not _has_row(store, "m-new")
 
 
 def test_a_removed_run_is_never_written_again_but_its_usage_counts(store: ConversationStore) -> None:
@@ -325,9 +341,9 @@ def test_a_removed_run_is_never_written_again_but_its_usage_counts(store: Conver
 
     assert outcomes == ["removed", "removed"]
     assert _loaded_ids(store) == ["r0"]
-    assert _stored(store, "gone") is None
-    assert _stored(store, "gone-member") is None
-    assert _usage_row(store, "gone")["metrics"]["input_tokens"] == 5  # type: ignore[index]
+    assert not _has_row(store, "gone")
+    assert not _has_row(store, "gone-member")
+    assert _usage_row(store, "gone")["metrics"]["input_tokens"] == 5
     assert _totals(store)["input_tokens"] == 15
 
 
@@ -344,9 +360,9 @@ def test_save_runs_swaps_in_only_the_runs_it_wrote(store: ConversationStore) -> 
     store.save_runs(session, [stale, written, removed, _run("r3", content="new")])
 
     assert [(run.run_id, run.content) for run in session.runs] == [("r1", "r1"), ("r3", "new")]
-    assert _stored(store, "r0")[2].get("content") is None  # type: ignore[index]
-    assert _stored(store, "r3")[0] == 2  # type: ignore[index]
-    assert _usage_row(store, "r3") is None
+    assert _stored(store, "r0")[2].get("content") is None
+    assert _stored(store, "r3")[0] == 2
+    assert not _has_usage(store, "r3")
 
 
 def test_save_runs_refuses_a_run_object_loaded_from_the_session(store: ConversationStore) -> None:
@@ -357,7 +373,7 @@ def test_save_runs_refuses_a_run_object_loaded_from_the_session(store: Conversat
 
     with pytest.raises(ValueError, match="edit a copy"):
         store.save_runs(session, [session.runs[0]])
-    assert _stored(store, "r1")[2].get("content") is None  # type: ignore[index]
+    assert _stored(store, "r1")[2].get("content") is None
 
 
 def test_a_failed_rewrite_writes_nothing_and_leaves_the_session_as_loaded(
@@ -382,7 +398,7 @@ def test_a_failed_rewrite_writes_nothing_and_leaves_the_session_as_loaded(
         store.save_runs(session, [_run("r1", content="new"), _run("r2", content="new")])
 
     assert session.runs == loaded
-    assert _stored(store, "r1")[2].get("content") is None  # type: ignore[index]
+    assert _stored(store, "r1")[2].get("content") is None
 
 
 def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> None:
@@ -396,7 +412,7 @@ def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> N
     with pytest.raises(sqlite3.IntegrityError, match="usage refused"):
         store.save_run(_session(), _run("r1"), record_usage=True)
 
-    assert _stored(store, "r1") is None
+    assert not _has_row(store, "r1")
 
 
 def test_deleting_a_team_run_takes_its_member_rows_along(store: ConversationStore) -> None:
@@ -417,7 +433,7 @@ def test_deleting_a_team_run_takes_its_member_rows_along(store: ConversationStor
 
     assert store.delete_run_subtrees(["team1"], session_id="s1") == {"team1", "m1", "m1-child"}
     assert _loaded_ids(store, "team") == ["team2"]
-    assert _stored(store, "elsewhere") is not None
+    assert _has_row(store, "elsewhere")
     assert store.delete_run_subtrees(["team2", ""]) == {"team2"}
     assert _loaded(store, "team").runs == []
 
@@ -440,8 +456,8 @@ def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_o
 
     _seed(store, [_run("m0", parent="t0", agent_id="helper", content="after"), _team_run("t0")], team)
 
-    assert _stored(store, "m0")[2]["content"] == "after"  # type: ignore[index]
-    assert _stored(store, "t0")[0] == 3  # type: ignore[index]
+    assert _stored(store, "m0")[2]["content"] == "after"
+    assert _stored(store, "t0")[0] == 3
     assert _loaded_ids(store, "team") == ["m0", "t0"]
 
 
@@ -513,9 +529,11 @@ def test_load_takes_the_summary_from_the_owner_scopes_latest_row(store: Conversa
     _seed(store, [_run("r0"), _run("r1")])
     _summary_after(store, "r0", summary="first")
     _summary_after(store, "r0", "agent:other", summary="another scope")
-    assert _loaded(store).summary.text == "first"  # type: ignore[union-attr]
+    first = _loaded(store).summary
+    assert first is not None
+    assert first.text == "first"
 
-    _summary_after(store, "r1", summary=None)  # type: ignore[arg-type]
+    _summary_after(store, "r1", summary=None)
 
     session = _loaded(store)
     assert session.summary is None
@@ -715,7 +733,7 @@ def test_unreadable_session_columns_load_as_empty(store: ConversationStore) -> N
 
     _seed(store, [_run("r1", metrics=_usage(3))])
     assert _query(store, "SELECT session_data FROM code_sessions") == [("not json",)]
-    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3  # type: ignore[index]
+    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
 
 
 # --- usage ------------------------------------------------------------------------------------------------------
@@ -737,7 +755,7 @@ def test_a_run_saved_again_counts_once_in_the_session_totals(store: Conversation
         ("code-model", 25),
         ("other-model", 100),
     ]
-    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 25  # type: ignore[index]
+    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 25
 
 
 def test_team_member_runs_count_in_their_team_sessions_totals(store: ConversationStore) -> None:
@@ -754,7 +772,7 @@ def test_team_member_runs_count_in_their_team_sessions_totals(store: Conversatio
 
     totals = _totals(store)
     assert totals["input_tokens"] == 37
-    assert _usage_row(store, "m1")["parent_run_id"] == "t1"  # type: ignore[index]
+    assert _usage_row(store, "m1")["parent_run_id"] == "t1"
 
 
 def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:

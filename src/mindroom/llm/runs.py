@@ -181,6 +181,14 @@ class RunRequirement:
         an unreadable ``created_at`` becomes now, and a decision recorded only on the requirement reaches
         its tool execution, which is what a resume runs from.
         """
+        # LEGACY_COMPAT: Run requirements stored without a tool execution or with an unreadable timestamp.
+        # Legacy format: ``requirements`` entries lacking ``tool_execution``, or whose ``created_at`` is not
+        # ISO 8601, which Agno's reader accepted as legacy data.
+        # Last legacy release: unversioned external input; no MindRoom release is known to write them, and
+        # agno 3.0.9 always wrote both.
+        # Handling: the entry reads with an ``unknown`` placeholder tool execution and the current time, as
+        # Agno's reader did, so one such entry never fails the load of its session.
+        # Coverage: tests/llm/test_codecs.py::test_run_requirement_reads_rows_agno_read_leniently
         tool_data = data.get("tool_execution")
         requirement = cls(
             ToolExecution.from_dict(tool_data)

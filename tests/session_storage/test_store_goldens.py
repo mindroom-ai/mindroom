@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.codec import run_from_row
 from mindroom.session_storage.store import open_conversation_store
 from mindroom.session_storage.types import ConversationSession
@@ -265,3 +266,50 @@ def test_a_resumed_team_run_keeps_its_empty_member_and_requirement_lists(tmp_pat
         row for row in stored_rows(conversation.path, store.names.runs, session_id) if row["run_id"] == "team-approved"
     ]
     assert (row["run_data"]["member_responses"], row["run_data"]["requirements"]) == ([], [])
+
+
+def _layout(db_file: Path, tables: tuple[str, ...]) -> dict[str, Any]:
+    with sqlite3.connect(db_file) as connection:
+        return {
+            table: (
+                connection.execute(f'PRAGMA table_info("{table}")').fetchall(),
+                connection.execute(f'PRAGMA foreign_key_list("{table}")').fetchall(),
+                sorted(
+                    (name, [column for _, _, column in connection.execute(f'PRAGMA index_info("{name}")')])
+                    for _, name, *_ in connection.execute(f'PRAGMA index_list("{table}")')
+                ),
+            )
+            for table in tables
+        }
+
+
+def _schema_objects(db_file: Path) -> list[tuple[str, str]]:
+    with sqlite3.connect(db_file) as connection:
+        return connection.execute("SELECT type, name FROM sqlite_master ORDER BY type, name").fetchall()
+
+
+def test_new_databases_get_the_layout_agno_created(tmp_path: Path) -> None:
+    """A database the owned store creates has Agno 3's tables and indexes, and writing to Agno's adds none."""
+    [store] = [store for store in golden_stores() if store.label == "agent_code"]
+    golden = store.restore(tmp_path / "golden")
+    objects = _schema_objects(golden)
+    session = ConversationSession(session_id="s1", kind="agent", owner_id="code")
+    tables = (
+        store.names.sessions,
+        store.names.runs,
+        store.names.summaries,
+        store.names.removed_runs,
+        store.names.usage,
+    )
+
+    for db_file in (tmp_path / "fresh.db", golden):
+        open_conversation_store(db_file, store.names).save_run(
+            session,
+            RunRecord(run_id="r1", agent_id="code"),
+            record_usage=True,
+        )
+
+    assert _layout(tmp_path / "fresh.db", tables) == _layout(golden, tables)
+    assert _schema_objects(golden) == objects
+    # Agno's own bookkeeping table is the one object the owned store does not create.
+    assert _schema_objects(tmp_path / "fresh.db") == [item for item in objects if "agno_schema_versions" not in item[1]]

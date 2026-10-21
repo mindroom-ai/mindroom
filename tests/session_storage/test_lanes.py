@@ -62,12 +62,14 @@ async def test_operations_on_one_database_run_one_at_a_time_off_the_event_loop(t
 @pytest.mark.asyncio
 async def test_databases_do_not_wait_for_each_other(tmp_path: Path) -> None:
     """Each database has its own lane, so a slow operation on one never holds up another."""
-    other_ran = threading.Event()
+    started, other_ran = threading.Event(), threading.Event()
 
     def wait_for_other(_conversation: ConversationStore) -> bool:
+        started.set()
         return other_ran.wait(5)
 
     waiting = asyncio.create_task(run_session_storage_operation(lambda: _store(tmp_path, "code"), wait_for_other))
+    assert await asyncio.to_thread(started.wait, 5)
     await run_session_storage_operation(lambda: _store(tmp_path, "helper"), lambda _conversation: other_ran.set())
 
     assert await waiting is True

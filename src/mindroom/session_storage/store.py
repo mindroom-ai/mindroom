@@ -1,8 +1,8 @@
 """The conversation store: one SQLite database of sessions, their run log, summary rows, and usage ledger.
 
-Every operation runs in one transaction on its own short-lived connection, in SQLite's default rollback
-journal. A write takes the write lock before it reads anything its rules depend on, and a load reads the
-session row, its runs, and its summary from one snapshot.
+Every operation runs in one transaction on its own short-lived connection and leaves the journal mode alone, so
+databases keep SQLite's default rollback journal. A write takes the write lock before it reads anything its rules
+depend on, and a load reads the session row, its runs, and its summary from one snapshot.
 """
 
 from __future__ import annotations
@@ -308,7 +308,7 @@ class ConversationStore:
         if run.status != RunStatus.paused and self.prompt_roles:
             # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
             data["messages"] = [message for message in data["messages"] if message["role"] not in self.prompt_roles]
-        stored = _write_run_row(connection, self.names, data, run_type=run_type(run), session_id=session_id)
+        stored = _write_run_row(connection, self.names, data, row_type=run_type(run), session_id=session_id)
         outcome: SaveOutcome = stored if isinstance(stored, str) else "written"
         if not record_usage or outcome == "frozen":
             return outcome
@@ -361,7 +361,7 @@ def _write_run_row(
     names: TableNames,
     data: dict[str, Any],
     *,
-    run_type: str,
+    row_type: str,
     session_id: str,
 ) -> tuple[int, int] | SaveOutcome:
     """Upsert one run row under the conversation log's rules; return its timestamps, or why no row was written."""
@@ -391,7 +391,7 @@ def _write_run_row(
         (
             run_id,
             session_id,
-            run_type,
+            row_type,
             data.get("agent_id"),
             data.get("team_id"),
             data.get("user_id"),

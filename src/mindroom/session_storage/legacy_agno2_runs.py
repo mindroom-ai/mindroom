@@ -58,7 +58,7 @@ def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
 
 def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) -> None:
     """Turn the runs Agno 2 blobs hold into run rows, in the caller's write transaction."""
-    sessions = quote_identifier(names.sessions)
+    sessions, runs = quote_identifier(names.sessions), quote_identifier(names.runs)
     blobs = connection.execute(f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL").fetchall()  # noqa: S608
     for session_id, blob in blobs:
         stored = _ordered_run_ids(connection, names, session_id)
@@ -69,7 +69,6 @@ def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) ->
                 _insert_run_entry(connection, names, entry, session_id=session_id)
         # Agno's merge read blob entries first, table copies substituted, then table-only rows.
         order = [*legacy, *(run_id for run_id in stored if run_id not in legacy)]
-        runs = quote_identifier(names.runs)
         connection.executemany(
             f"UPDATE {runs} SET run_index = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
             [(run_index, session_id, run_id) for run_index, run_id in enumerate(order)],

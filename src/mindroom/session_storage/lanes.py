@@ -1,7 +1,7 @@
 """One FIFO lane per conversation database for storage operations started from async code.
 
 An operation opens its store and runs off the event loop; operations on one database run one at a time, in the
-order they reach its lane, so writers in one process never contend for the database's write lock.
+order they reach its lane, so they never wait on each other for the database's write lock.
 """
 
 from __future__ import annotations
