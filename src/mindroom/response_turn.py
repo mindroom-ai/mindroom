@@ -93,6 +93,7 @@ __all__ = [
     "apply_local_approval_decisions",
     "build_matrix_run_metadata",
     "local_approval_requirements",
+    "pause_without_approval_error",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
@@ -439,6 +440,23 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
                 tool_trace=tuple(deepcopy(tool_trace)),
             ),
         )
+
+
+def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> RuntimeError:
+    """Return the error for a pause with no approval to ask for and no delegation to drive.
+
+    Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
+    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
+    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it, and a blocking
+    reply also raises it through the runner.
+    """
+    pending = [
+        requirement.tool_execution.tool_name
+        for requirement in record.requirements or ()
+        if not requirement.is_resolved()
+    ]
+    msg = f"{entity_label} run {record.run_id!r} paused on {pending} without an approval to ask for"
+    return RuntimeError(msg)
 
 
 def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:

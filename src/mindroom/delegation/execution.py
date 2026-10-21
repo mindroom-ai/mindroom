@@ -147,12 +147,15 @@ class _DelegationTarget:
     model: str | None = None
 
 
+# The delegate tools run outside the loop: the driver runs the child and continues the parent with its result.
+DELEGATION_TOOL_NAMES = frozenset({"run_subagent", "continue_subagent"})
+
+
 def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
     return [
         requirement
         for requirement in response.requirements or ()
-        if requirement.needs_external_execution
-        and requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent"}
+        if requirement.needs_external_execution and requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES
     ]
 
 

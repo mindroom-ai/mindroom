@@ -12,7 +12,7 @@ import asyncio
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom import ai_runtime
@@ -25,11 +25,13 @@ from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import team_background_jobs
+from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.approval.resume import ResumeDecisions, approval_decisions
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
-from mindroom.delegation.execution import has_delegation_state
+from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -40,6 +42,7 @@ from mindroom.execution_preparation import (
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook, without_fold_records
 from mindroom.history.native import restore_native_history
+from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_request, build_resume_request, scope_history_messages
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
@@ -51,7 +54,7 @@ from mindroom.history.storage import new_scope_session, update_scope_seen_event_
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
-from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.events import ContentDelta, RunEvent, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
@@ -80,6 +83,7 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
@@ -126,13 +130,14 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.run import ApprovedCall, Persist
+    from mindroom.approval.resume import ResumeEvents
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.request_messages import TurnMessages
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, ScopeSummary
+    from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import AnyRunRecord, RunRecord, RunRequirement, ToolExecution
@@ -578,6 +583,11 @@ def _leader_hooks(
     )
 
 
+def _team_history_settings(config: Config, team_name: str | None) -> ResolvedHistorySettings:
+    """Return the history settings of the configured team, or the defaults for an ad hoc one."""
+    return config.resolve_entity(team_name if team_name in config.teams else None).history_settings
+
+
 def _toolkit_owners(members: ResolvedExactTeamMembers) -> dict[tuple[str, str], str | None]:
     """Return the authored toolkit of each member function, keyed as approvals look them up."""
     return {(build.spec.id, name): toolkit for build in members.builds for name, toolkit in build.tool_owners.items()}
@@ -625,21 +635,6 @@ def _register_team_notice_storage(
         session_kind="team",
         entity_name=entity_name,
     )
-
-
-def _unresumable_pause(record: TeamRunRecord) -> RuntimeError:
-    """Return the error for a team pause only the delegation driver can resume: an externally executed call waits.
-
-    Resuming a team paused on a member's delegation is the delegation driver's job; until it runs on this path, the
-    pause fails the reply loudly instead of being recorded as an ordinary stop over the stored ``PAUSED`` row.
-    """
-    pending = [
-        requirement.tool_execution.tool_name
-        for requirement in record.requirements or ()
-        if not requirement.is_resolved()
-    ]
-    msg = f"team run {record.run_id!r} paused on {pending}; resuming an externally executed call is not wired for teams"
-    return RuntimeError(msg)
 
 
 def _team_tool_executions(record: TeamRunRecord, members: Sequence[RunRecord]) -> list[ToolExecution]:
@@ -706,7 +701,11 @@ class _TeamAttempt:
             self.terminal.record = event.record
             return False
         if isinstance(event, MemberRunEnded):
-            self.member_records.append(event.record)
+            # A member resumed within this attempt ends twice; its later record replaces the paused one.
+            self.member_records = [
+                *(record for record in self.member_records if record.run_id != event.record.run_id),
+                event.record,
+            ]
             return False
         if isinstance(event, MemberEvent):
             inner = event.event
@@ -962,6 +961,12 @@ class _TeamTurn:
             run_input=run_input,
             metadata=prepared.run_metadata,
         )
+        request_template = ModelRequest(
+            messages=(),
+            stream=stream,
+            native_compaction=native.native_compaction if native is not None else None,
+            portable_replay=native.portable_replay if native is not None else False,
+        )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
                 self.pipeline_timing.mark_model_request()
@@ -977,19 +982,35 @@ class _TeamTurn:
                 ),
                 hooks=hooks,
                 persist=_persist_into(attempt.terminal, storage),
-                request_template=ModelRequest(
-                    messages=(),
-                    stream=stream,
-                    native_compaction=native.native_compaction if native is not None else None,
-                    portable_replay=native.portable_replay if native is not None else False,
-                ),
+                request_template=request_template,
             )
-        events = ai_runtime.stream_attempt_with_model(
+        events = _under_team_scope(events, storage.scope if storage is not None else None)
+        if storage is not None:
+            events = _drive_team_delegations(
+                events,
+                _TeamResume(
+                    spec=built.spec,
+                    storage=storage,
+                    terminal=attempt.terminal,
+                    hooks=hooks,
+                    request_template=request_template,
+                    settings=_team_history_settings(config, self.configured_team_name),
+                    plan=prepared.prepared_history.replay_plan,
+                    user_id=self.user_id,
+                    toolkit_owners=_toolkit_owners(members),
+                ),
+                owners={},
+                team_name=self.entity_name,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=self.execution_identity,
+                refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
+            )
+        return attempt, ai_runtime.stream_attempt_with_model(
             self.attempt_model_runtime,
             stream_with_llm_request_log_context(events, request_context=request_context),
             active_model_name=prepared.runtime_model_name,
         )
-        return attempt, _under_team_scope(events, storage.scope if storage is not None else None)
 
     async def run_blocking_attempt(
         self,
@@ -1096,7 +1117,7 @@ class _TeamTurn:
             toolkit_owners=_toolkit_owners(attempt.members),
         )
         if paused is None:
-            raise _unresumable_pause(record)
+            raise pause_without_approval_error(record, entity_label="team")
         return replace(
             _continued_team_pause(attempt.presentation, paused),
             runtime_model_name=attempt.runtime_model_name,
@@ -1569,34 +1590,44 @@ def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunR
 
 
 @dataclass(frozen=True)
-class _ResumeDecisions:
-    """The approval's decisions routed to the calls the paused team waits for."""
+class _RoutedDecisions:
+    """The resume's decisions routed to the calls the paused team waits for, by ``TeamCallKey``."""
 
     approved: dict[TeamCallKey, ApprovedCall]
     denied: dict[TeamCallKey, str | None]
+    external_results: dict[TeamCallKey, str]
 
 
 def _route_decisions(
     persisted: TeamRunRecord,
-    calls: Sequence[ApprovalCall],
+    decisions: ResumeDecisions,
     *,
-    decisions: Mapping[str, bool],
-    denial_reasons: Mapping[str, str | None],
     toolkit_owners: Mapping[tuple[str, str], str | None],
-) -> _ResumeDecisions:
-    """Route each saved approval call to the waiting member or leader call it names, checking its toolkit owner.
+) -> _RoutedDecisions:
+    """Route each decision to the waiting member or leader call it names, checking an approved call's toolkit owner.
 
-    A member's call is matched by the member the approval was shown for; an approved call must still come from the
-    toolkit the approval recorded, so a removed or replaced tool cannot run under an old approval.
+    An approved call is matched by the member the approval was shown for, and must still come from the toolkit the
+    approval recorded, so a removed or replaced tool cannot run under an old approval. A denial or a delegation's
+    result names its call by id alone; a call id two members share is refused rather than guessed at.
     """
     waiting: dict[str | None, list[RunRequirement]] = {}
     for requirement in persisted.requirements or ():
-        if requirement.needs_confirmation:
+        if not requirement.is_resolved():
             waiting.setdefault(requirement.tool_execution.tool_call_id, []).append(requirement)
+
+    def key_of(call_id: str) -> TeamCallKey:
+        candidates = waiting.get(call_id, [])
+        if not candidates:
+            msg = "Saved approval calls no longer match the pending requirements; retry the request"
+            raise RuntimeError(msg)
+        if len(candidates) > 1:
+            msg = f"Call {call_id!r} is pending for more than one member of the team; retry the request"
+            raise RuntimeError(msg)
+        return (candidates[0].member_agent_id, call_id)
+
     approved: dict[TeamCallKey, ApprovedCall] = {}
-    denied: dict[TeamCallKey, str | None] = {}
-    for call in calls:
-        candidates = waiting.get(call.tool_call_id, [])
+    for call in decisions.approved:
+        candidates = [r for r in waiting.get(call.tool_call_id, []) if r.needs_confirmation]
         requirement = next((r for r in candidates if r.member_agent_id == call.invoking_agent), None) or next(
             (r for r in candidates if r.member_agent_id is None),
             None,
@@ -1604,44 +1635,201 @@ def _route_decisions(
         if requirement is None or requirement.tool_execution.tool_name != call.tool_name:
             msg = "Saved approval calls no longer match the pending requirements; retry the request"
             raise RuntimeError(msg)
-        key: TeamCallKey = (requirement.member_agent_id, call.tool_call_id)
-        if not decisions.get(call.tool_call_id):
-            denied[key] = denial_reasons.get(call.tool_call_id)
-            continue
         if call.toolkit_name is None or toolkit_owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
             msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
             raise RuntimeError(msg)
-        approved[key] = call
-    return _ResumeDecisions(approved=approved, denied=denied)
+        approved[(requirement.member_agent_id, call.tool_call_id)] = call
+    return _RoutedDecisions(
+        approved=approved,
+        denied={key_of(call_id): note for call_id, note in decisions.denied.items()},
+        external_results={key_of(call_id): result for call_id, result in decisions.external_results.items()},
+    )
 
 
 def _resume_request(
-    scope: ScopeSessionContext,
+    storage: _TeamStorage,
     persisted: TeamRunRecord,
     *,
-    config: Config,
-    team_name: str,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
 ) -> list[Message]:
-    """Return the leader's resume request: its stored system message, the scope summary and history, then the rest."""
-    session = scope.session
-    settings = config.resolve_entity(team_name if team_name in config.teams else None).history_settings
-    history = (
-        scope_history_messages(
-            session.runs,
-            scope=scope.scope,
-            num_history_runs=settings.policy.num_history_runs,
-            num_history_messages=settings.policy.num_history_messages,
-            max_tool_calls_from_history=settings.max_tool_calls_from_history,
-            system_message_role=settings.system_message_role,
+    """Return the leader's resume request: its stored system message, the summary and history ``plan`` replays, then the rest."""
+    session = storage.session
+    if plan is None or not plan.add_history_to_context:
+        return build_resume_request(paused=persisted.messages, summary=None, history=[])
+    history = scope_history_messages(
+        session.runs,
+        scope=storage.scope,
+        num_history_runs=plan.num_history_runs,
+        num_history_messages=plan.num_history_messages,
+        max_tool_calls_from_history=settings.max_tool_calls_from_history,
+        system_message_role=settings.system_message_role,
+    )
+    return build_resume_request(paused=persisted.messages, summary=session.summary, history=history)
+
+
+@dataclass(frozen=True)
+class _TeamResume:
+    """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
+
+    ``plan`` selects the stored history the leader's resume request replays: the turn's own plan within a turn, the
+    configured policy for a saved approval.
+    """
+
+    spec: TeamSpec
+    storage: _TeamStorage
+    terminal: _TerminalTeamRecord
+    hooks: LoopHooks
+    request_template: ModelRequest
+    settings: ResolvedHistorySettings
+    plan: ResolvedReplayPlan | None
+    user_id: str | None
+    toolkit_owners: Mapping[tuple[str, str], str | None]
+
+    def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
+        """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
+
+        Routing and the loop's own coverage check run here, before the stream starts, so a resume that no longer fits
+        is refused before anything runs.
+        """
+        routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
+        session = self.storage.session
+        events = continue_team(
+            self.spec,
+            paused,
+            _resume_request(self.storage, paused, settings=self.settings, plan=self.plan),
+            approved=routed.approved,
+            denied=routed.denied,
+            external_results=routed.external_results,
+            ctx=RunContext(
+                run_id=paused.run_id,
+                session_id=session.session_id,
+                user_id=self.user_id,
+                metadata=deepcopy(paused.metadata),
+                session_state=session.session_state,
+            ),
+            hooks=self.hooks,
+            persist=_persist_into(self.terminal, self.storage),
+            request_template=self.request_template,
         )
-        if session is not None
-        else []
+        return _under_team_scope(events, self.storage.scope)
+
+    async def __call__(
+        self,
+        paused: TeamRunRecord,
+        decisions: ResumeDecisions,
+        on_event: ResumeEvents | None,
+    ) -> TeamRunRecord:
+        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record."""
+        record: TeamRunRecord | None = None
+        events = self.events(paused, decisions)
+        async with closing_async_stream(events):
+            async for event in events:
+                if isinstance(event, RunFinished):
+                    assert isinstance(event.record, TeamRunRecord)
+                    record = event.record
+                elif on_event is not None:
+                    # The driver forwards a parent's events without reading them, so member events ride along.
+                    on_event(cast("RunEvent", event))
+        if record is None:
+            msg = f"team run {paused.run_id!r} ended its resume without its terminal record"
+            raise RuntimeError(msg)
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class _MemberCall:
+    """The member whose run issued one delegation call, for the driver's events about that call."""
+
+    member_id: str
+    member_name: str
+    run_id: str
+
+
+def _delegation_owners(record: TeamRunRecord) -> dict[str, _MemberCall]:
+    """Return, by call id, the member whose paused run waits on each delegation call of a stored team pause."""
+    return {
+        requirement.tool_execution.tool_call_id: _MemberCall(
+            requirement.member_agent_id,
+            requirement.member_agent_name or requirement.member_agent_id,
+            requirement.member_run_id,
+        )
+        for requirement in record.requirements or ()
+        if requirement.needs_external_execution
+        and requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES
+        and requirement.tool_execution.tool_call_id is not None
+        and requirement.member_agent_id is not None
+        and requirement.member_run_id is not None
+    }
+
+
+async def _tag_member_delegation_events(
+    events: AsyncIterator[TeamRunEvent],
+    owners: dict[str, _MemberCall],
+) -> AsyncIterator[TeamRunEvent]:
+    """Route the driver's events about a member's delegation call into that member's slot.
+
+    The driver reports the delegation call it runs as the parent's own ``ToolStarted`` and ``ToolCompleted``. In a
+    team the call belongs to the member whose run paused on it, which announced the call first; ``owners`` seeds
+    the calls a stored pause already holds.
+    """
+    async with closing_async_stream(events):
+        async for event in events:
+            if isinstance(event, MemberEvent) and isinstance(event.event, ToolStarted):
+                tool = event.event.tool
+                if tool.tool_call_id is not None and tool.tool_name in DELEGATION_TOOL_NAMES:
+                    owners[tool.tool_call_id] = _MemberCall(event.member_id, event.member_name, event.run_id)
+                yield event
+            elif (
+                isinstance(event, ToolStarted | ToolCompleted)
+                and (owner := owners.get(event.tool.tool_call_id or "")) is not None
+            ):
+                yield MemberEvent(owner.member_id, owner.member_name, owner.run_id, event)
+            else:
+                yield event
+
+
+def _drive_team_delegations(
+    events: AsyncIterator[TeamRunEvent],
+    resume: _TeamResume,
+    *,
+    owners: dict[str, _MemberCall],
+    team_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool] | None = None,
+    denial_reasons: dict[str, str | None] | None = None,
+    approval_calls: Sequence[ApprovalCall] = (),
+) -> AsyncIterator[TeamRunEvent]:
+    """Pass the run's events through; when it ends paused on a member's delegation, run the children and continue it.
+
+    The driver sees the team run as a parent and ``resume`` continues it with the children's results. Member ids
+    are their config names on the owned loop, which the driver needs as the callers of the members' delegations.
+    """
+    driven = drive_delegation_stream(
+        cast("AsyncIterator[RunEvent]", events),
+        store=resume.storage.store,
+        session=resume.storage.session,
+        continue_parent=resume,
+        agent_name=team_name,
+        run_child=run_delegated_child_response,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+        approval_calls=approval_calls,
+        member_config_names={member.spec.id: member.spec.id for member in resume.spec.members},
     )
-    return build_resume_request(
-        paused=persisted.messages,
-        summary=session.summary if session is not None else None,
-        history=history,
-    )
+    return _tag_member_delegation_events(cast("AsyncIterator[TeamRunEvent]", driven), owners)
+
+
+async def _finished(record: TeamRunRecord) -> AsyncIterator[TeamRunEvent]:
+    """Yield a stored run as the end of a stream, for the driver to continue."""
+    yield RunFinished(record)
 
 
 @owned_tool_execution(
@@ -1690,8 +1878,7 @@ async def continue_paused_team_run(
                 raise RuntimeError(msg)
             set_consumption_storage(scope.storage_factory)
             persisted = _stored_paused_team_run(scope, run_id)
-            if has_delegation_state(persisted):
-                raise _unresumable_pause(persisted)
+            delegated = has_delegation_state(persisted)
             approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
             async with asyncio.TaskGroup() as recovery:
                 required_tool_tasks = {
@@ -1729,13 +1916,6 @@ async def continue_paused_team_run(
                 configured_team_name=configured_team_name,
             )
             toolkit_owners = _toolkit_owners(members)
-            routed = _route_decisions(
-                persisted,
-                approval_calls,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-                toolkit_owners=toolkit_owners,
-            )
             native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
             presentation = TeamStreamPresentation.restore(
                 config_names=member_names,
@@ -1759,19 +1939,11 @@ async def continue_paused_team_run(
                 prepared_history=None,
                 canonical_per_member=dict.fromkeys(presentation.member_ids, ""),
             )
-            events = continue_team(
-                built.spec,
-                persisted,
-                _resume_request(scope, persisted, config=config, team_name=configured_team_name),
-                approved=routed.approved,
-                denied=routed.denied,
-                ctx=RunContext(
-                    run_id=run_id,
-                    session_id=session_id,
-                    user_id=user_id,
-                    metadata=deepcopy(persisted.metadata),
-                    session_state=session.session_state,
-                ),
+            settings = _team_history_settings(config, configured_team_name)
+            resume = _TeamResume(
+                spec=built.spec,
+                storage=storage,
+                terminal=attempt.terminal,
                 hooks=_leader_hooks(
                     config=config,
                     runtime_paths=runtime_paths,
@@ -1787,18 +1959,38 @@ async def continue_paused_team_run(
                     turn_recorder=None,
                     leader_middleware=built.leader_middleware,
                 ),
-                persist=_persist_into(attempt.terminal, storage),
                 request_template=ModelRequest(
                     messages=(),
                     native_compaction=native.native_compaction if native is not None else None,
                     portable_replay=native.portable_replay if native is not None else False,
                 ),
+                settings=settings,
+                plan=configured_replay_plan(history_settings=settings, estimated_tokens=0),
+                user_id=user_id,
+                toolkit_owners=toolkit_owners,
+            )
+            # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
+            # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
+            # on a member's delegation.
+            events = _drive_team_delegations(
+                _finished(persisted)
+                if delegated
+                else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
+                resume,
+                owners=_delegation_owners(persisted),
+                team_name=configured_team_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                refresh_scheduler=refresh_scheduler,
+                decisions=decisions if delegated else None,
+                denial_reasons=denial_reasons if delegated else None,
+                approval_calls=approval_calls if delegated else (),
             )
             with helper_usage_context(scope):
                 await _publish_team_presentation(progress, presentation)
-                scoped_events = _under_team_scope(events, scope.scope)
-                async with closing_async_stream(scoped_events):
-                    async for event in scoped_events:
+                async with closing_async_stream(events):
+                    async for event in events:
                         if attempt.apply(event):
                             await _publish_team_presentation(progress, presentation)
             continued = attempt.terminal.record

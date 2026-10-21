@@ -23,11 +23,15 @@ from mindroom import agents, response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.delegation.lifecycle import child_execution_identity
+from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import read_scope_seen_event_ids
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
@@ -35,6 +39,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
 from mindroom.teams.spec import TeamMode
@@ -48,7 +53,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.usage.storage import quote_identifier
-from tests.access_schema_support import with_current_room_member_access
+from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.ai_user_id_helpers import _team_orchestrator
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
@@ -64,6 +69,7 @@ from tests.conftest import (
     patch_response_runner_module,
     test_runtime_paths,
 )
+from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
@@ -73,7 +79,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -180,17 +185,20 @@ def _team(
     leader: Sequence[Sequence[ScriptStep]],
     writer: Sequence[Sequence[ScriptStep]] = (),
     checker: Sequence[Sequence[ScriptStep]] = (),
+    helper: Sequence[Sequence[ScriptStep]] | None = None,
     mode: str = "coordinate",
     approval_rules: Sequence[ApprovalRuleConfig] = (),
 ) -> _Team:
-    """Build the ``squad`` team of a writer and a checker whose models are scripted providers."""
-    from mindroom.history.turn_recorder import TurnRecorder  # noqa: PLC0415 - a value here, a type above
+    """Build the ``squad`` team of a writer and a checker whose models are scripted providers.
 
+    ``helper`` scripts the ``helper`` agent, outside the team, that the writer may then delegate to.
+    """
     authored = {
         "defaults": {"tools": []},
         "agents": {
             "writer": {"display_name": "Writer", "role": "Writes.", "model": "writer-model", "tools": [PROBE_TOOL]},
             "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": [PROBE_TOOL]},
+            "helper": {"display_name": "Helper", "role": "Helps.", "model": "helper-model", "tools": [PROBE_TOOL]},
         },
         "teams": {
             "squad": {"display_name": "Squad", "role": "Answers.", "agents": ["writer", "checker"], "mode": mode},
@@ -198,19 +206,23 @@ def _team(
         "memory": {"backend": "none"},
         "models": {
             name: {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}}
-            for name in ("default", "writer-model", "checker-model")
+            for name in ("default", "writer-model", "checker-model", "helper-model")
         },
         "timezone": "UTC",
     }
+    if helper is not None:
+        authored["agents"]["writer"]["delegate_to"] = ["helper"]
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     with_current_room_member_access(config)
+    with_responder_access(config, "helper", users=[REQUESTER_ID])
     if approval_rules:
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     models = {
         "default": ScriptedModel([list(turn) for turn in leader]),
         "writer-model": ScriptedModel([list(turn) for turn in writer]),
         "checker-model": ScriptedModel([list(turn) for turn in checker]),
+        "helper-model": ScriptedModel([list(turn) for turn in helper or ()]),
     }
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
     monkeypatch.setattr(envelope, "build_model_provider", lambda _config, _paths, name, **_kwargs: models[name])
@@ -241,7 +253,7 @@ def _team(
         execution_identity=identity,
     )
     orchestrator = _team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("writer", "checker")}
+    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("writer", "checker", "helper")}
     return _Team(
         config,
         runtime_paths,
@@ -648,6 +660,33 @@ async def test_a_denied_member_call_never_runs_and_the_member_answers_the_denial
 
 
 @pytest.mark.asyncio
+async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_approved_tool_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A leader request that fails after the approved call ran reaches the caller; the rows record the outcome."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+
+    async def lose_the_provider() -> None:
+        msg = "provider connection lost"
+        raise ProviderError(msg, provider="Synthetic")
+
+    team.models["default"] = ScriptedModel([[Await(lose_the_provider)]])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    with pytest.raises(ProviderError, match="provider connection lost"):
+        await _resume(team, raised.paused, approved=True, calls_=(_approval("call-touch", "dangerous"),))
+
+    assert probe.calls == ["dangerous"]
+    record, [member] = _stored_runs(team)
+    assert (record.status, member.status) == (RunStatus.error, RunStatus.completed)
+    assert "provider connection lost" in str(record.content)
+    assert member.tools is not None
+    assert (member.tools[0].confirmed, member.tools[0].result) == (True, "touched dangerous")
+
+
+@pytest.mark.asyncio
 async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_longer_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -670,6 +709,103 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     assert (team.leader.requests, team.checker.requests) == ([], [])
     record, _ = _stored_runs(team)
     assert record.status is RunStatus.paused
+
+
+def _delegate_to_helper(task: str) -> list[ScriptStep]:
+    return calls(tool_call("run_subagent", "call-sub", agent_name="helper", task=task), metrics=usage(10, 1))
+
+
+def _delegation_state(team: _Team) -> tuple[TeamRunRecord, RunRecord, DelegationState]:
+    record, [member] = _stored_runs(team)
+    return record, member, DelegationState.from_metadata(record.metadata)
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_the_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A member's ``run_subagent`` pauses the team run; the driver runs the child, then the member and the leader continue."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: the helper found it.")],
+        helper=[calls(tool_call("touch", "call-helper", label="dug"), metrics=usage(5, 1)), answer("Helper found it.")],
+    )
+
+    chunks = await _stream(team)
+
+    assert probe.calls == ["dug"]
+    assert chunks[-1].content == (
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: the helper found it.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
+    )
+    # The driver's events about the member's call land in the member's slot, once.
+    assert [(entry.tool_name, entry.scope_key) for entry in chunks[-1].tool_trace or []] == [
+        ("run_subagent", "agent:writer"),
+        ("delegate_task_to_member", "team"),
+    ]
+    assert team.recorder.outcome == "completed"
+    record, member, state = _delegation_state(team)
+    assert (record.status, record.content) == (RunStatus.completed, "Consensus.")
+    assert (member.agent_id, member.status) == ("writer", RunStatus.completed)
+    assert member.tools is not None
+    assert member.tools[0].tool_name == "run_subagent"
+    assert "Helper found it." in str(member.tools[0].result)
+    [child] = state.children
+    assert (child.caller_agent_name, child.child_agent_name, child.status) == ("writer", "helper", "completed")
+    helper_store = create_session_storage("helper", team.config, team.runtime_paths, child_execution_identity(child))
+    helper_run = helper_store.get_run(child.run_id)
+    assert helper_run is not None
+    assert (helper_run.status, helper_run.content) == (RunStatus.completed, "Helper found it.")
+    # The writer read the helper's result where its call paused; the leader read the writer's answer.
+    assert "Helper found it." in str(team.writer.requests[-1].messages[-1].content)
+    assert team.leader.requests[-1].messages[-1].content == (
+        "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegation_driver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The approval a member's child needs is asked through the team's pause; approving it resumes child, member, and leader."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await _stream(team, show_tool_calls=False)
+
+    paused = raised.value.paused
+    assert probe.calls == []
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.paused, RunStatus.paused)
+    [child] = state.children
+    assert (child.caller_agent_name, child.child_agent_name, child.status) == ("writer", "helper", "paused")
+    assert state.pending_child_id == child.delegation_id
+    [tool] = paused.tools
+    assert (tool.tool_name, tool.tool_call_id) == ("touch", f"{child.delegation_id}:call-helper")
+    assert paused.toolkit_owners == {("helper", "touch"): PROBE_TOOL}
+    assert team.recorder.outcome == "suspended"
+
+    result = await _resume(team, paused, approved=True, calls_=_saved_approval_calls(state))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert probe.calls == ["deep"]
+    assert result.response_text == f"{HEADER}**Writer**: Writer: dug.\n\n\n**Team Consensus**:\n\nConsensus."
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
+    assert [child.status for child in state.children] == ["completed"]
+    assert "Dug deep." in str(team.writer.requests[-1].messages[-1].content)
 
 
 @pytest.mark.asyncio

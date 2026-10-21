@@ -78,6 +78,7 @@ from mindroom.response_turn import (
     TurnPartialSnapshot,
     TurnSinks,
     build_matrix_run_metadata,
+    pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     skip_unapproved_attempt,
@@ -1297,23 +1298,6 @@ def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str],
     return {(agent_name, name): toolkit for name, toolkit in build.tool_owners.items()}
 
 
-def _unresumable_pause(record: AnyRunRecord) -> RuntimeError:
-    """Return the error for a pause with no approval to ask for and no delegation to drive.
-
-    Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
-    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
-    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it, and a blocking
-    reply also raises it through the runner.
-    """
-    pending = [
-        requirement.tool_execution.tool_name
-        for requirement in record.requirements or ()
-        if not requirement.is_resolved()
-    ]
-    msg = f"agent run {record.run_id!r} paused on {pending} without an approval to ask for"
-    return RuntimeError(msg)
-
-
 async def run_delegated_child_response(
     child: DelegationChild,
     *,
@@ -1692,7 +1676,7 @@ async def ai_response(  # noqa: C901
                 toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
             )
             if paused_attempt is None:
-                raise _unresumable_pause(record)
+                raise pause_without_approval_error(record, entity_label="agent")
             return replace(
                 _attach_blocking_pause_presentation(
                     paused_attempt,
@@ -2164,7 +2148,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
             )
             if paused_attempt is None:
-                raise _unresumable_pause(record)
+                raise pause_without_approval_error(record, entity_label="agent")
             for tool_event in _materialize_paused_agent_tool_events(
                 state,
                 paused_attempt.tools,
