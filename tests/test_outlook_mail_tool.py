@@ -117,6 +117,7 @@ class _Graph:
         routes = {
             "/v1.0/me/messages": listing,
             "/v1.0/me/mailFolders/inbox/messages": listing,
+            "/v1.0/me/mailFolders('inbox')/messages": listing,
             MESSAGE_PATH: httpx.Response(200, json=_selected(self.message, request)),
             f"{MESSAGE_PATH}/attachments": httpx.Response(
                 200,
@@ -254,7 +255,7 @@ def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkey
     ]
 
 
-@pytest.mark.parametrize("mailbox_path", ["/me", "/me/mailFolders/inbox"])
+@pytest.mark.parametrize("mailbox_path", ["/me", "/me/mailFolders/inbox", "/me/mailFolders('inbox')"])
 def test_search_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mailbox_path: str) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
     page_token = f"{mailbox_path}/messages?$top=25&$skiptoken=page2"
