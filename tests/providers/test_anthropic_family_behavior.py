@@ -298,7 +298,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     """A safeguard refusal is a completed turn the loop recognizes by its stop reason, not an adapter error."""
     wire = _Wire(_json_reply([], stop_reason="refusal"))
     provider = _provider("anthropic", tmp_path, wire)
-    completed = await _turn(provider, ModelRequest(messages=_user(), response_format={"type": "json_object"}))
+    completed = await _turn(provider, ModelRequest(messages=_user(), stream=False))
     assert completed.stop_reason == "refusal"
     assert completed.message.content is None
     assert completed.message.metrics.input_tokens == 40
@@ -438,11 +438,14 @@ class _Answer(BaseModel):
 
 @pytest.mark.asyncio
 async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_outputs_beta(tmp_path: Path) -> None:
-    """Strict tools and a pydantic response format use the beta endpoint with its header, without streaming."""
+    """Strict tools and a pydantic response format use the beta endpoint with its header."""
     wire = _Wire(_json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = _provider("anthropic", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
-    completed = await _turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer))
+    completed = await _turn(
+        provider,
+        ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False),
+    )
     request = wire.requests[0]
     assert str(request.url) == "https://api.anthropic.com/v1/messages?beta=true"
     assert request.headers["anthropic-beta"] == "structured-outputs-2025-11-13"
@@ -462,13 +465,111 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
     wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
     provider = _provider("vertexai_claude", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
-    await _turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer))
+    await _turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False))
     request = wire.requests[0]
     assert request.url.path.endswith(":rawPredict")
     assert "anthropic-beta" not in request.headers
     body = wire.body()
     assert "strict" not in body["tools"][0]
     assert "output_config" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "strict_sent", "url_suffix", "beta_header"),
+    [
+        ("anthropic", True, "/v1/messages?beta=true", "structured-outputs-2025-11-13"),
+        ("vertexai_claude", False, ":streamRawPredict", None),
+        ("bedrock_claude", True, "/v1/messages?beta=true", None),
+    ],
+)
+async def test_tool_definitions_carry_only_the_fields_agno_sent(
+    tmp_path: Path,
+    route: str,
+    strict_sent: bool,
+    url_suffix: str,
+    beta_header: str | None,
+) -> None:
+    """An unset description goes out empty, ``strict`` only when True on a route that takes it, approval flags never.
+
+    The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
+    through the beta endpoint without one.
+    """
+    wire = _Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = _provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}}
+    tools = [
+        ToolSpec(name="unset", description=None, parameters=schema, strict=None),
+        ToolSpec(
+            name="gated",
+            description="Gated.",
+            parameters=schema,
+            strict=True,
+            requires_confirmation=True,
+            external_execution=True,
+            approval_type="mindroom_policy",
+        ),
+        ToolSpec(
+            name="plain",
+            description="Plain.",
+            parameters=schema,
+            strict=False,
+            requires_confirmation=False,
+            external_execution=False,
+        ),
+    ]
+    await _turn(provider, ModelRequest(messages=_user(), tools=tools))
+    input_schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string", "description": ""}},
+        "required": [],
+        "additionalProperties": False,
+    }
+    assert wire.body()["tools"] == [
+        {"name": "gated", "description": "Gated.", "input_schema": input_schema}
+        | ({"strict": True} if strict_sent else {}),
+        {"name": "plain", "description": "Plain.", "input_schema": input_schema},
+        {"name": "unset", "description": "", "input_schema": input_schema},
+    ]
+    request = wire.requests[0]
+    assert str(request.url).endswith(url_suffix)
+    assert request.headers.get("anthropic-beta") == beta_header
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_choice", "expected"),
+    [
+        ("none", {"type": "none"}),
+        ("auto", {"type": "auto"}),
+        ("required", {"type": "any"}),
+        ({"type": "tool", "name": "get_weather"}, {"type": "tool", "name": "get_weather"}),
+        (None, {"type": "any"}),
+    ],
+)
+async def test_request_tool_choice_replaces_an_authored_one(
+    tmp_path: Path,
+    tool_choice: str | dict[str, str] | None,
+    expected: dict[str, str],
+) -> None:
+    """A request's choice wins over ``request_params``, including the ``extra_body`` copy the SDK merges last."""
+    wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    authored = {"request_params": {"tool_choice": {"type": "auto"}, "extra_body": {"tool_choice": {"type": "any"}}}}
+    provider = _provider("anthropic", tmp_path, wire, extra_kwargs=authored)
+    tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
+    await _turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice, stream=False))
+    assert wire.body()["tool_choice"] == expected
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_is_left_out_of_a_request_without_tools(tmp_path: Path) -> None:
+    """The API rejects a tool choice without tools, so a decision request that offers none sends no choice."""
+    wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    await _turn(
+        _provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=_user(), tool_choice="none", stream=False),
+    )
+    assert "tool_choice" not in wire.body()
 
 
 @pytest.mark.asyncio
@@ -510,7 +611,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         provider,
         ModelRequest(
             messages=_user("Long history."),
-            response_format={"type": "json_object"},
+            stream=False,
             native_compaction=replay,
         ),
     )

@@ -191,11 +191,18 @@ def _without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]
 
 
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
-    """Apply the request's tool choice when the request offers tools; the API rejects a choice without them."""
+    """Apply the request's tool choice when the request offers tools; the API rejects a choice without them.
+
+    The SDK merges ``extra_body`` over the named fields, so an authored ``extra_body.tool_choice`` is replaced too.
+    """
     if tool_choice is None or not body.get("tools"):
         return body
     choice = _TOOL_CHOICES[tool_choice] if isinstance(tool_choice, str) else dict(tool_choice)
-    return {**body, "tool_choice": choice}
+    prepared = {**body, "tool_choice": choice}
+    extra_body = body.get("extra_body")
+    if isinstance(extra_body, dict) and "tool_choice" in extra_body:
+        prepared["extra_body"] = {**extra_body, "tool_choice": choice}
+    return prepared
 
 
 def prepare_request_body(

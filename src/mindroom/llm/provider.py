@@ -99,6 +99,8 @@ class NativeCompactionReplay:
 class ModelRequest:
     """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts.
 
+    ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
+    arrive through ``stream()``, after the response completes.
     ``deferred_tool_names`` are the tools a route with native tool search sends as deferred definitions, and
     ``native_compaction`` is the provider-managed compaction route this request replays, when any.
     """
@@ -109,6 +111,7 @@ class ModelRequest:
     response_format: type[BaseModel] | Mapping[str, Any] | None = None
     native_tools: Sequence[Mapping[str, Any]] = ()
     overrides: RequestOverrides = RequestOverrides()
+    stream: bool = True
     deferred_tool_names: frozenset[str] = frozenset()
     native_compaction: NativeCompactionReplay | None = None
 

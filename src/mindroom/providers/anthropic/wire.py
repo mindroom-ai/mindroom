@@ -523,7 +523,11 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
 
 
 def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
-    """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable."""
+    """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
+
+    A tool without a description gets an empty one, ``strict`` is sent only when it is True and the route accepts
+    it, and the approval flags never reach the wire.
+    """
     formatted: list[dict[str, Any]] = []
     for tool in sorted(tools, key=lambda item: item.name):
         parameters = dict(tool.parameters)
@@ -544,7 +548,11 @@ def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> l
         for key in ("$defs", "definitions"):
             if key in parameters:
                 input_schema[key] = parameters[key]
-        definition: dict[str, Any] = {"name": tool.name, "description": tool.description, "input_schema": input_schema}
+        definition: dict[str, Any] = {
+            "name": tool.name,
+            "description": tool.description or "",
+            "input_schema": input_schema,
+        }
         if tool.strict and strict_allowed:
             definition["strict"] = True
         formatted.append(definition)
