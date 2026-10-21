@@ -331,8 +331,8 @@ def _agno_file(file: File) -> agno_media.File:
     )
 
 
-def _identity(media_id: str | None) -> dict[str, str]:
-    # Agno assigns ids while validating, so this is only for media built around validation; the owned default stands.
+def _media_id(media_id: str | None) -> dict[str, str]:
+    # Agno assigns an id while validating; media built around validation has none, and the owned default stands.
     return {"id": media_id} if media_id is not None else {}
 
 
@@ -342,7 +342,7 @@ def _filepath(filepath: object) -> str | None:
 
 def _owned_image(image: agno_media.Image) -> Image:
     return Image(
-        **_identity(image.id),
+        **_media_id(image.id),
         url=image.url,
         filepath=_filepath(image.filepath),
         content=image.content,
@@ -358,7 +358,7 @@ def _owned_image(image: agno_media.Image) -> Image:
 
 def _owned_audio(audio: agno_media.Audio) -> Audio:
     return Audio(
-        **_identity(audio.id),
+        **_media_id(audio.id),
         url=audio.url,
         filepath=_filepath(audio.filepath),
         content=audio.content,
@@ -375,7 +375,7 @@ def _owned_audio(audio: agno_media.Audio) -> Audio:
 
 def _owned_video(video: agno_media.Video) -> Video:
     return Video(
-        **_identity(video.id),
+        **_media_id(video.id),
         url=video.url,
         filepath=_filepath(video.filepath),
         content=video.content,
@@ -395,7 +395,7 @@ def _owned_video(video: agno_media.Video) -> Video:
 def _owned_file(file: agno_media.File) -> File:
     content = file.content if isinstance(file.content, bytes | str) else None
     return File(
-        **_identity(file.id),
+        **_media_id(file.id),
         url=file.url,
         filepath=_filepath(file.filepath),
         content=content,
