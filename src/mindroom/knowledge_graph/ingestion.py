@@ -37,14 +37,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_runs import RedactedEventIds
     from mindroom.knowledge_graph.names import EntityNames
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphStore
+    from mindroom.llm.runs import RunRecord
 
 logger = get_logger(__name__)
 
@@ -93,7 +92,7 @@ class _GraphState(TypedDict):
 class _DueSession:
     session_id: str
     updated_at: int
-    runs: list[RunOutput]
+    runs: list[RunRecord]
 
 
 def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
@@ -119,9 +118,9 @@ def _new_session_state() -> _SessionState:
     }
 
 
-def _start_after_backfill_window(entry: _SessionState, runs: list[RunOutput], *, cutoff: float) -> None:
+def _start_after_backfill_window(entry: _SessionState, runs: list[RunRecord], *, cutoff: float) -> None:
     """Mark the runs before the backfill window as done, so a long conversation adds only its recent turns."""
-    older = [run for run in runs if (run.created_at or 0) < cutoff]
+    older = [run for run in runs if run.created_at < cutoff]
     if older:
         done = [*run_key(older[-1]), RUN_DONE]
         entry["markers"] = {kind: list(done) for kind in _EPISODE_KINDS}

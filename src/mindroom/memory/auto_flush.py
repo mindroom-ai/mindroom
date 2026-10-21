@@ -44,12 +44,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.llm.runs import RunRecord
     from mindroom.memory._shared import MemoryResult
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -97,7 +96,7 @@ class _FlushState(TypedDict):
 class _DueConversation:
     session_id: str
     updated_at: int
-    runs: list[RunOutput]
+    runs: list[RunRecord]
 
 
 def auto_flush_enabled(config: Config) -> bool:
@@ -133,16 +132,16 @@ def _new_conversation() -> _ConversationState:
     return {"updated_at": 0, "marker": [], "failures": 0, "failing_since": 0, "retry_at": 0, "recheck_at": 0}
 
 
-def _start(entry: _ConversationState, runs: list[RunOutput], started_at: int) -> tuple[int, str] | None:
+def _start(entry: _ConversationState, runs: list[RunRecord], started_at: int) -> tuple[int, str] | None:
     """Return the run key the conversation's unflushed turns follow, or None when all of them are unflushed."""
     if entry["marker"]:
         return (int(entry["marker"][0]), str(entry["marker"][1]))
     # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
-    older = [run for run in runs if (run.created_at or 0) < started_at]
+    older = [run for run in runs if run.created_at < started_at]
     return run_key(older[-1]) if older else None
 
 
-def _run_lines(run: RunOutput) -> list[str]:
+def _run_lines(run: RunRecord) -> list[str]:
     """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
     lines: list[str] = []
     for said in utterances(run):
@@ -171,13 +170,13 @@ def _newest_lines(lines: list[str], *, max_messages: int, max_chars: int) -> lis
     return selected
 
 
-def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple[list[RunOutput], list[str]]:
+def _next_batch(runs: list[RunRecord], settings: MemoryAutoFlushConfig) -> tuple[list[RunRecord], list[str]]:
     """Return the oldest turns whose lines fit one extraction, and those lines; a turn too long alone keeps its newest."""
     limits = {
         "max_messages": settings.extractor.max_messages_per_flush,
         "max_chars": settings.extractor.max_chars_per_flush,
     }
-    batch: list[RunOutput] = []
+    batch: list[RunRecord] = []
     lines: list[str] = []
     for run in runs:
         candidate = [*lines, *_run_lines(run)]
@@ -189,11 +188,11 @@ def _next_batch(runs: list[RunOutput], settings: MemoryAutoFlushConfig) -> tuple
     return batch, _newest_lines(lines, **limits)
 
 
-def _flush_tag(session_id: str, run: RunOutput) -> str:
+def _flush_tag(session_id: str, run: RunRecord) -> str:
     return f"{_TAG_PREFIX}{session_id}:{run.run_id}]"
 
 
-def _already_flushed(runs: list[RunOutput], session_id: str, memories: list[MemoryResult]) -> int:
+def _already_flushed(runs: list[RunRecord], session_id: str, memories: list[MemoryResult]) -> int:
     """Return how many of the runs a note written before its progress was saved already covers."""
     tags = {
         text.partition("]")[0] + "]"
@@ -226,7 +225,7 @@ def _record_unreadable(
 
 def _record_progress(
     entry: _ConversationState,
-    pending: list[RunOutput],
+    pending: list[RunRecord],
     covered: int,
     updated_at: int,
     blocked_until: float | None,
@@ -488,7 +487,7 @@ class MemoryAutoFlushWorker:
         start = _start(entry, runs, state["agents"][scope.agent_name])
         pending = [run for run in runs if start is None or run_key(run) > start]
         skipped = 0
-        batch: list[RunOutput] = []
+        batch: list[RunRecord] = []
         try:
             if pending:
                 memories = await list_all_agent_memories(
@@ -532,7 +531,7 @@ class MemoryAutoFlushWorker:
         config: Config,
         scope: _FlushScope,
         session_id: str,
-        last_run: RunOutput,
+        last_run: RunRecord,
         lines: list[str],
         memories: list[MemoryResult],
     ) -> None:

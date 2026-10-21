@@ -7,9 +7,6 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Literal
 
 import pytest
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
@@ -23,6 +20,8 @@ from mindroom.knowledge_graph.episodes import (
     render_episodes,
 )
 from mindroom.knowledge_graph.names import entity_names
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
 
 if TYPE_CHECKING:
@@ -48,14 +47,14 @@ def _run(
     answer: str = "Atlas ships Friday.",
     tools: list[ToolExecution] | None = None,
     hook_source: str | None = None,
-) -> RunOutput:
+) -> RunRecord:
     metadata: dict[str, object] = {"room_id": ROOM, "thread_id": THREAD, "requester_id": "@alice:example.test"}
     if hook_source is not None:
         metadata[HOOK_SOURCE_RUN_METADATA_KEY] = hook_source
     user_text = (
         prompt if prompt is not None else render_msg_tag(sender="@alice:example.test", body="When does Atlas ship?")
     )
-    return RunOutput(
+    return RunRecord(
         run_id=run_id,
         session_id=f"{ROOM}:{THREAD}",
         agent_id="mind",
@@ -67,7 +66,7 @@ def _run(
 
 
 def _episodes(
-    runs: list[RunOutput],
+    runs: list[RunRecord],
     thread_kind: _ThreadKind,
     settings: KnowledgeGraphIngestConfig = SETTINGS,
 ) -> list[RenderedEpisode]:
@@ -80,7 +79,7 @@ def _episodes(
 
 
 def _render(
-    runs: list[RunOutput],
+    runs: list[RunRecord],
     episode_kind: EpisodeKind,
     settings: KnowledgeGraphIngestConfig = SETTINGS,
     thread_kind: _ThreadKind = "conversation",
