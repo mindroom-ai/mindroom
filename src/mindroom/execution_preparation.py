@@ -823,8 +823,7 @@ async def _finalize_prepared_history(
     static_prompt_tokens: int,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
-    # Planning may disable native replay on a caller-owned reusable model.
-    # Drain the worker before cancellation releases that caller's ownership.
+    # Planning reads the caller's live session in a worker; drain it before cancellation lets the caller change it.
     return await run_coroutine_until_complete(
         asyncio.to_thread(
             finalize_history_preparation,
