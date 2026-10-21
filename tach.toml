@@ -824,6 +824,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.runtime",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -5027,6 +5028,7 @@ visibility = [
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -5396,6 +5398,7 @@ visibility = [
     "mindroom.history.message_content",
     "mindroom.providers.media_fallback",
     "mindroom.worker_computer.mcp_provider",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -5754,6 +5757,19 @@ depends_on = [
 [[modules]]
 path = "mindroom.llm"
 depends_on = []
+
+[[modules]]
+path = "mindroom.providers.pipeline"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.llm_request_logging",
+    "mindroom.logging_config",
+    "mindroom.media_delivery",
+    "mindroom.model_usage",
+    "mindroom.redaction",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.usage.storage",
+]
 
 [[modules]]
 path = "mindroom.knowledge"
@@ -8773,7 +8789,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = []
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.session_storage.legacy_session_storage", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.session_storage.legacy_session_storage", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
