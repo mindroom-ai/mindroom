@@ -28,7 +28,6 @@ import nio
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
 from agno.models.response import ModelResponse
-from agno.session.agent import AgentSession
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
@@ -61,6 +60,7 @@ from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.scheduling.tasks import ScheduledWorkflow, _parse_workflow_schedule
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
@@ -815,10 +815,7 @@ async def _knowledge_graph(config: Config, runtime_paths: RuntimePaths) -> None:
 async def _memory_flush(config: Config, runtime_paths: RuntimePaths) -> None:
     # Auto-flush extracts from a conversation the agent already stored.
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=None)
-    try:
-        storage.upsert_session(AgentSession(session_id=_SESSION_ID, agent_id="assistant"))
-    finally:
-        storage.close()
+    storage.ensure_session_row(ConversationSession(session_id=_SESSION_ID, kind="agent", owner_id="assistant"))
     summary = await _extract_memory_summary(
         config=config,
         runtime_paths=runtime_paths,
