@@ -502,21 +502,17 @@ def test_sends_post_escaped_text_with_line_breaks(
     path: str,
 ) -> None:
     text = "Ship it <b>today</b> & tell <at>everyone</at>\r\nThen rest"
-    tools, graph = _tools(tmp_path, monkeypatch, _answer(_message(content=text), status=201))
+    stored = "Ship it &lt;b&gt;today&lt;/b&gt; &amp; tell &lt;at&gt;everyone&lt;/at&gt;<br>Then rest"
+    tools, graph = _tools(tmp_path, monkeypatch, _answer(_message(content=stored, content_type="html"), status=201))
 
     result = _payload(getattr(tools, function)(*args, text))
 
     [request] = graph.requests
     assert (request.method, _raw_path(request)) == ("POST", path)
-    assert json.loads(request.content) == {
-        "body": {
-            "contentType": "html",
-            "content": "Ship it &lt;b&gt;today&lt;/b&gt; &amp; tell &lt;at&gt;everyone&lt;/at&gt;<br>Then rest",
-        },
-    }
+    assert json.loads(request.content) == {"body": {"contentType": "html", "content": stored}}
     assert result["status"] == "ok"
     assert result["message"]["id"] == MESSAGE
-    assert result["message"]["body"] == text
+    assert result["message"]["body"] == "Ship it <b>today</b> & tell <at>everyone</at>\nThen rest"
 
 
 _ID_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, str], str]]] = [
