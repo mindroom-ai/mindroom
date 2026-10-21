@@ -15,7 +15,10 @@ Regenerate with `.venv/bin/python -m tests.agno_parity.capture_providers [family
 - The model is built by `get_model_instance` from `input.model_config`, so every hook production installs is active: request logging, the Claude prompt-cache ladder and history repairs, stream retry, and media fallback.
 - The run-message patches that storage installs (`session_storage/agno_compat_run_messages.py`) are active, which is why every reply carries `provider_data.mindroom_model`.
 - `input.deferred_tool_search` installs the native or portable deferred tool search exactly as `agents.py` does, and `input.portable_replay` calls `configure_portable_replay` as history replay planning does.
-- Streamed goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes; structured-output goldens call `aresponse`, the non-streaming path `Agent(output_schema=...)` takes.
+- `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.
+- `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
+- `input.provider_tools_disabled` sends the request inside `without_provider_tools()`, as participation decisions and judgments do.
+- Streamed goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes; goldens with `input.stream: false` call `aresponse`, the non-streaming path of structured output, compaction summaries, and decision requests.
 - Every SDK request is answered at the httpx transport layer with `response_raw`, so the SDK clients production builds (MindRoom's pooled client, Agno's shared client, SDK-built clients) are unchanged.
 - Each golden must produce exactly one provider request.
 
@@ -27,11 +30,14 @@ Regenerate with `.venv/bin/python -m tests.agno_parity.capture_providers [family
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
 | `input.messages` | Stored-message dicts in `Message.to_dict()` shape, oldest first; earlier turns carry `from_history: true` as replayed history does. |
 | `input.tools` | `Function.to_dict()` dicts, which Agno's `_format_tools` turns into request tools. |
-| `input.tool_choice` | Always `null`. |
+| `input.tool_choice` | `null`, `"none"`, or a forced call in the shape the route's Agno adapter forwards: `{"type": "function", "function": {"name": ...}}` on Chat routes, `{"type": "function", "name": ...}` on Responses routes, and `"any"` on Gemini. |
 | `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
 | `input.stream` | `true` for `aresponse_stream`, `false` for `aresponse`. |
+| `input.provider_tools_disabled` | Present only as `true`, for a request sent inside `without_provider_tools()`. |
+| `input.tool_jobs` | Present only as `{"managed": [...]}`, the functions a turn that can start tool jobs offers as managed calls. |
+| `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
 | `request` | `method`, `url`, the stable `headers`, and the JSON `body` of the SDK request. |
 | `response_raw` | `status`, `headers`, and one of `sse` (events as `{"event"?, "data"}`, where `data` is a JSON object or the literal `[DONE]`), `ndjson` (one object per line), or `json` (the body). |
 | `parsed.message` | The assistant message's `Message.to_dict()` once the request completes, before the run loop resolves or runs its tool calls, plus `citations`, which `to_dict()` omits. |
@@ -80,6 +86,13 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
 | `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
 | `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
+| `output_limit_stop` | A reply the output limit cut off mid-sentence, sent without streaming as a compaction summary is: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
+| `output_limit_stop_tool_call` | A streamed reply the output limit cut off inside a tool call's arguments JSON. |
+| `approval_gated_tools` | A function the approval policy gates (`requires_confirmation`, `approval_type` `mindroom_policy`) and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the reply calls the gated one. |
+| `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
+| `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
+| `tool_choice_forced` | A call of `get_weather` forced through `tool_choice`. |
+| `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined, sent without streaming. |
 
 Skipped where the route has nothing to pin:
 
@@ -88,6 +101,11 @@ Skipped where the route has nothing to pin:
 - Claude-only scenarios run on `anthropic`, `vertexai_claude`, and `bedrock_claude`; the server tool-search blocks only on the first two, since Bedrock uses portable tool search.
 - `deferred_tool_search_replay`: `anthropic` and `vertexai_claude`, covered by `claude_server_tool_blocks_replay`.
 - Responses scenarios run on `openai_responses`; Codex always uses `store: false`, so it has `responses_explicit_replay` and no continuation or `store: false` variant.
+- `output_limit_stop`: `codex`, whose streamed Responses reply raises `IncompleteResponsesStreamError` at `response.incomplete`, so there is no parsed reply.
+- `output_limit_stop_tool_call`: Gemini and Ollama, which send each call whole, and the Responses routes, whose cut-off calls the harness does not reproduce.
+- `approval_gated_tools`: Claude routes, Gemini, Ollama, and Cerebras, whose request tool definitions omit Agno's approval flags (see their `tool_definitions` goldens).
+- `tool_choice_forced`: Claude routes, Ollama, and Cerebras, whose Agno adapters drop a caller's `tool_choice`.
+- `native_compaction`, `native_compaction_replay`: run only on `anthropic`, `vertexai_claude`, `openai_responses`, and `codex`, the routes with native compaction.
 
 ## Prompt goldens (`prompts/`)
 
@@ -113,6 +131,7 @@ Normalization:
 
 - The capture's temporary root becomes `<TMP>`, which appears in preloaded context-file headings.
 - Today's date in the date context, such as `Monday, October 19, 2026`, becomes `<DATE>`; the timezone is pinned to `UTC`, and message timestamps and the schedule parser's current time are fixed inputs.
+- A delegation's tool result names its record by a random 32-digit hex id under the day the delegation started; the ids become `<ID-1>`, `<ID-2>`, and so on in first-appearance order, and the day becomes `<DATE>`.
 - Requests are grouped by the model instance that received them, in the order MindRoom built those models, and each model's requests stay in call order.
   A team builds its members before its leader, so member requests come first; members run concurrently, so their relative call order is not part of the contract.
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
@@ -135,6 +154,7 @@ The file maps each built-in tool registration name to `{"instructions", "add_ins
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
 Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, `stop_after_tool_call`, and `show_result` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors.
 The provider payload `Function.to_dict()` is the same entry, in the same key order, without `stop_after_tool_call`, `show_result`, and null values.
+Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
 
 Each tool is built by `build_agent_toolkit` with its default configuration, for one agent of a config shaped like `mindroom config init` output.
 File memory gives that agent a workspace, so output-file wrapping adds `mindroom_output_path`, and the agent delegates and uses the knowledge graph, so the `delegate` and `knowledge_graph` tools exist.
@@ -180,7 +200,7 @@ Decoding errors embed the message of Python's `ast.literal_eval`, and probes tha
 ## Storage, history, and event goldens (`storage/`, `runs/`, `history/`, `events/`)
 
 `tests/agno_parity/capture_storage.py` writes `storage/`, `runs/`, `history/`, and `events/`.
-Every scenario runs MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage and compaction functions.
+Every scenario runs MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider is replaced, by the synthetic provider answering from a script.
 Regenerate with `.venv/bin/python -m tests.agno_parity.capture_storage`, which re-runs itself with `PYTHONHASHSEED=0`; never edit these files by hand.
 `tests/agno_parity/test_storage_goldens_current.py` proves the current code reproduces every file.
@@ -215,14 +235,22 @@ Every run with a provider request also has its usage row in `<table>_usage`.
   The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `tool_call_metrics` (`ToolCallMetrics`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), `model_metrics` (`ModelMetrics`), and `session_metrics` (`SessionMetrics`).
 - `history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
-- `events/ai_run.json`: the `run_metadata_collector` content, the `io.mindroom.ai_run` Matrix metadata, of every run that produced one; stopped and paused turns produce none, and a resumed run's entry is the metadata its resume produced.
+- `events/ai_run.json`: the `run_metadata_collector` content, the `io.mindroom.ai_run` Matrix metadata, of every run that produced one; a turn stopped by cancelling its task and a turn paused for approval produce none, and a resumed run's entry is the metadata its resume produced.
 - `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
+- `events/ai_run_cancelled.json`: the same content for a streamed and a blocking turn of `code` that Agno's run cancellation (`acancel_run`, which Stop also requests) ended after a completed tool call, in the sessions `$agno-cancelled` and `$agno-cancelled-blocking`.
+  These turns run after the stores are dumped, so no store golden holds their rows.
+  No golden holds a paused payload: MindRoom publishes one only for a pause it cannot turn into an approval, and every pause a MindRoom tool causes becomes an approval.
+- `storage/<store>__before_<run id>.sql`: the sessions one approval resume reads, dumped just before it ran: the paused run's session and, for a delegation, its child's session in the child's store, with only those sessions' rows in every table keyed by session.
+  Restore one like its store; the store golden holds the same sessions after the resume, so the two form a paused and resumed pair.
+- `storage/response_linkage.json`: `agent_code:run-media` and `team_squad:team-completed` re-saved with `matrix_response_event_id` through `ConversationStateWriter.apersist_response_event_id_in_session_run`, as MindRoom does after delivering a reply, with each runs-table row before and after and its `run_data` decoded.
+  The re-save runs after the stores are dumped, so the store goldens keep the rows as the turns saved them.
+- `history/scoped_selections.json`: for every `<store>:<session>`, `get_messages` with the scope filter history replay passes (`agent_id` in agent stores, `team_id` in team stores), its run and message limits, and the prompt roles it skips, plus one selection by another scope of the same kind, which owns no run in the store.
 
 Agno's own readers are not lossless.
 Re-serializing a stored run adds `"events": []` to it and to every member response, drops an empty `tools` list, and drops `Audio.format`, so a row written back after Agno read it carries those changes.
 The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run MindRoom edits and saves with `save_runs`.
 The current-behavior test pins exactly these differences.
-The capture runs no post-response effects, so no row carries the `matrix_response_event_id` linkage MindRoom adds with `save_runs` after delivering a reply.
+The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds with `save_runs` after delivering a reply; `storage/response_linkage.json` pins that re-save.
 
 The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because MindRoom's interrupted-turn text falls back to replayed history when the failed request produced no assistant message; the golden keeps that current behavior.
 
@@ -231,7 +259,7 @@ The `run-error` record holds the previous turn's answer followed by `(turn faile
 - The wall clock is frozen, and every turn starts at the next minute after 2027-01-15T08:00:00Z, so Unix timestamps run `1800000060`, `1800000120`, and so on.
 - `time.time`, `datetime.now` in every `agno` and `mindroom` module, Agno's message, run, and tool timestamps, summary rows, requirement `created_at`, and the system prompt's date follow that clock, and local time is UTC.
 - Agno's timers report every timed span as 0.5 seconds and every `time_to_first_token` as 0.25 seconds, since parallel tool calls run concurrently and would otherwise time in whatever order they ran.
-- Random ids become sequential ones in first-appearance order across the dumps and then the events: UUIDs become `00000000-0000-4000-8000-<n>`, 32-digit hex ids such as delegation, child run, correlation, and viewed-image ids become `<n>` padded to 32 hex digits, and completion ids become `chatcmpl-<n>` padded to 12 hex digits.
+- Random ids become sequential ones in first-appearance order across the dumps, the events, and then the pre-resume dumps, the linkage rows, and the cancelled-turn events: UUIDs become `00000000-0000-4000-8000-<n>`, 32-digit hex ids such as delegation, child run, correlation, and viewed-image ids become `<n>` padded to 32 hex digits, and completion ids become `chatcmpl-<n>` padded to 12 hex digits.
 - The capture's temporary directory becomes `/mindroom-capture`.
 - Dumps sort their `CREATE INDEX` statements, because Agno creates indexes in a different order on every run, and strip the trailing spaces SQLAlchemy leaves in table definitions.
 - The capture runs with `PYTHONHASHSEED=0`, because Agno's `Model.to_dict` orders `agent_data.model` and `team_data.model` by iterating a set.
