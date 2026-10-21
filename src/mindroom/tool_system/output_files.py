@@ -10,19 +10,25 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
 
-from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
+from mindroom.tool_system.agno_toolkits import (
+    AdaptedToolkit,
+    Function,
+    Toolkit,
+    ToolResult,
+    adapt_function,
+    adapt_toolkit,
+)
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
@@ -30,9 +36,8 @@ if sys.version_info >= (3, 14):
     from annotationlib import Format, type_repr
 
 if TYPE_CHECKING:
-    from agno.tools import Toolkit
-
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -248,19 +253,23 @@ def _has_output_path_argument(function: Function) -> bool:
     return isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
 
 
+def _with_optional_output_path(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property."""
+    finished = dict(parameters or _DEFAULT_PARAMETERS)
+    properties = dict(finished.get("properties") or {})
+    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
+    finished["type"] = finished.get("type") or "object"
+    finished["properties"] = properties
+    required = finished.get("required")
+    finished["required"] = (
+        [name for name in required if name != OUTPUT_PATH_ARGUMENT] if isinstance(required, list) else []
+    )
+    return finished
+
+
 def ensure_output_path_schema_optional(function: Function) -> None:
     """Keep MindRoom's reserved output-path argument optional in one tool schema."""
-    parameters = dict(function.parameters or _DEFAULT_PARAMETERS)
-    properties = dict(parameters.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
-    parameters["type"] = parameters.get("type") or "object"
-    parameters["properties"] = properties
-    required = parameters.get("required")
-    if isinstance(required, list):
-        parameters["required"] = [name for name in required if name != OUTPUT_PATH_ARGUMENT]
-    else:
-        parameters["required"] = []
-    function.parameters = parameters
+    function.parameters = _with_optional_output_path(function.parameters)
 
 
 def _normalize_output_path_argument(raw_path: object) -> object | None:
@@ -274,11 +283,6 @@ def _normalize_output_path_argument(raw_path: object) -> object | None:
 def normalize_output_path_argument(raw_path: object) -> object | None:
     """Return the canonical runtime value for the reserved output-path argument."""
     return _normalize_output_path_argument(raw_path)
-
-
-def uses_output_file_schema(function: Function) -> bool:
-    """Whether this Function uses our known output-path schema processor."""
-    return uses_schema_postprocessor(function, ensure_output_path_schema_optional)
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -731,8 +735,9 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
-    install_schema_postprocessor(function, ensure_output_path_schema_optional)
     if uses_custom_parameters:
+        # Agno keeps an authored schema as it is, so the argument joins it here; a derived one gets it from the
+        # wrapper's signature.
         ensure_output_path_schema_optional(function)
     return function
 
@@ -752,3 +757,30 @@ def wrap_toolkit_for_output_files(
         seen_functions.add(id(function))
         wrap_function_for_output_files(function, policy)
     return toolkit
+
+
+def adapt_tool_function(function: Function) -> ToolFunction:
+    """Adapt one Agno function, completing the output-path argument of a function this module wrapped.
+
+    Agno derives a wrapped function's schema from the wrapper's signature, which declares the argument without the
+    default the model is shown; the adapter processes each function once, so the schema is finished here, once.
+    """
+    return _finished(function, adapt_function(function))
+
+
+def adapt_tool_functions(toolkit: Toolkit) -> AdaptedToolkit:
+    """Adapt every function of ``toolkit`` as ``adapt_toolkit`` does, completing each wrapped output-path argument."""
+    adapted = adapt_toolkit(toolkit)
+    sources = toolkit.get_async_functions().values()
+    return replace(
+        adapted,
+        functions=tuple(
+            _finished(source, function) for source, function in zip(sources, adapted.functions, strict=True)
+        ),
+    )
+
+
+def _finished(source: Function, adapted: ToolFunction) -> ToolFunction:
+    if not getattr(source.entrypoint, _WRAPPED_ATTR, False):
+        return adapted
+    return replace(adapted, parameters=_with_optional_output_path(adapted.parameters))

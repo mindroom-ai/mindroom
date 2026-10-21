@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
-from mindroom.tool_system.tool_schema_cache import processed_function_definition
+from mindroom.tool_system.tool_access import function_definition
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -173,7 +173,7 @@ def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, A
 def _function_definitions(deferred: DeferredToolkit) -> list[dict[str, Any]]:
     # Async runs execute the async implementation when a toolkit registers both, so describe that one.
     functions = deferred.toolkit.get_async_functions()
-    return [processed_function_definition(functions[name]) for name in dict.fromkeys(deferred.wire_function_names)]
+    return [function_definition(functions[name]) for name in dict.fromkeys(deferred.wire_function_names)]
 
 
 def _search_score(

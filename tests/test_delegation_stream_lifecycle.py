@@ -12,7 +12,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools
@@ -22,6 +21,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -221,7 +221,7 @@ async def test_continuation_closes_before_run_owner_exits(
     paths = _runtime_paths(tmp_path)
     identity = _identity()
     toolkit = DelegateTools("leader", [], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",

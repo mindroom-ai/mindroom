@@ -118,15 +118,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.tool_system.tool_schema_cache"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
-visibility = [
-    "mindroom.history.prompt_tokens",
-    "mindroom.tool_system.plugins",
-    "mindroom.tool_system.tool_access",
-]
-
-[[modules]]
 path = "mindroom.dynamic_workflows"
 depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
 
@@ -2615,7 +2606,7 @@ depends_on = [
     "mindroom.providers.portable_tool_search",
     "mindroom.timing",
     "mindroom.token_budget",
-    "mindroom.tool_system.tool_schema_cache",
+    "mindroom.tool_system.tool_access",
 ]
 
 [[modules]]
@@ -5220,7 +5211,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.tool_access"
 depends_on = [
-    "mindroom.tool_system.tool_schema_cache",
+    "mindroom.tool_system.output_files",
 ]
 
 [[interfaces]]
@@ -5229,6 +5220,7 @@ expose = [
     "ToolDescriptor",
     "ToolKey",
     "UnknownToolError",
+    "function_definition",
     "function_schema",
     "search_tool_metadata",
     "validate_tool_arguments",
@@ -5280,11 +5272,11 @@ path = "mindroom.tool_system.output_files"
 depends_on = [
     "mindroom.path_confinement",
     "mindroom.atomic_file",
-    "mindroom.tool_system.agno_compat_function_schema",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.tool_system.declarations",
     "mindroom.workspaces",
+    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
@@ -5538,7 +5530,6 @@ depends_on = [
     "mindroom.automations.registry",
     "mindroom.constants",
     "mindroom.hooks",
-    "mindroom.tool_system.tool_schema_cache",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.skills",
@@ -8371,16 +8362,6 @@ visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynami
 [[interfaces]]
 from = ["mindroom.tool_call_budget"]
 expose = ["install_model_call_cap"]
-
-
-[[modules]]
-path = "mindroom.tool_system.agno_compat_function_schema"
-depends_on = []
-visibility = ["mindroom.tool_system.output_files"]
-
-[[interfaces]]
-from = ["mindroom.tool_system.agno_compat_function_schema"]
-expose = ["install_schema_postprocessor", "uses_schema_postprocessor"]
 
 
 [[modules]]

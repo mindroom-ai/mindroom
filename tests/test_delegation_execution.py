@@ -21,7 +21,7 @@ from agno.team import Team
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.agents import apply_tool_approval_capability
+from mindroom.agents import _hide_unresumable_approval_functions
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.execution import _collect_agent_continuation
 from mindroom.approval.response import require_ordered_pause_presentation
@@ -60,6 +60,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
 )
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -618,10 +619,9 @@ def test_native_delegate_uses_external_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    apply_tool_approval_capability(
+    with_agno_approval_flags(
         toolkit,
         Config(),
-        supports_native_tool_approval=True,
         registered_tool_name="delegate",
     )
     assert toolkit.async_functions["run_subagent"].external_execution is True
@@ -634,12 +634,7 @@ def test_detached_delegate_retains_inline_execution() -> None:
         return f"{agent_name}: {task}"
 
     toolkit = Toolkit(name="delegate", tools=[run_subagent])
-    apply_tool_approval_capability(
-        toolkit,
-        Config(),
-        supports_native_tool_approval=False,
-        registered_tool_name="delegate",
-    )
+    assert _hide_unresumable_approval_functions(toolkit, Config(), registered_tool_name="delegate") is toolkit
     assert not toolkit.async_functions["run_subagent"].external_execution
 
 
@@ -670,7 +665,7 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path) -> None
         "parent",
     )
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",
@@ -750,7 +745,7 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
         "parent",
     )
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",
@@ -837,7 +832,7 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
         "parent",
     )
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     upsert_run = storage.upsert_run
 

@@ -1,4 +1,7 @@
-"""The Agno toolkit adapter reproduces every field the C3 tool goldens recorded, for every registered tool."""
+"""The Agno toolkit adapter reproduces every field the C3 tool goldens recorded, for every registered tool.
+
+Registered tools are adapted as agents adapt them, completing the output-path argument after the adapter.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
+from mindroom.tool_system.output_files import adapt_tool_functions
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -84,7 +88,7 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
         if (missing := support.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")
         toolkit = support.build_toolkit(tool_name, config, runtime_paths)
-        adapted = adapt_toolkit(toolkit)
+        adapted = adapt_tool_functions(toolkit)
     assert adapted.name == toolkit.name
     assert_same_json(adapted_entry(adapted), expected_entry(SCHEMAS[tool_name]))
     # The adapter carries only toolkit instructions, so no registered function may set instructions of its own.
@@ -104,7 +108,7 @@ def test_adapted_all_enabled_tool_matches_golden(
             pytest.skip(f"{tool_name} needs {missing}")
         assert support.all_enabled_overrides(tool_name) == golden["overrides"]
         toolkit = support.build_toolkit(tool_name, config, runtime_paths, golden["overrides"])
-        adapted = adapt_toolkit(toolkit)
+        adapted = adapt_tool_functions(toolkit)
     assert_same_json(adapted_entry(adapted), expected_entry(golden))
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
 

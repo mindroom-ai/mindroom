@@ -9,12 +9,12 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
+from mindroom.tool_system.output_files import adapt_tool_function
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from agno.tools.function import Function
+    from mindroom.tool_system.agno_toolkits import Function
 
 
 class _InvalidToolArgumentsError(ValueError):
@@ -47,16 +47,21 @@ class ToolDescriptor:
 
 
 def function_schema(function: Function) -> dict[str, Any]:
-    """Return a processed input schema without mutating the live function."""
-    if function.skip_entrypoint_processing or function.entrypoint is None:
+    """Return the input schema the model is shown for one Agno function, without mutating the live function.
+
+    A function without an entrypoint has nothing to derive a schema from, so its declared one is returned.
+    """
+    if function.entrypoint is None:
         return function.parameters
-    strict = function.strict is True
-    snapshot = cached_processed_schema(function, strict=strict)
-    if snapshot is not None:
-        return snapshot.parameters
-    prepared = function.model_copy(deep=True)
-    prepared.process_entrypoint(strict=strict)
-    return prepared.parameters
+    return dict(adapt_tool_function(function).parameters)
+
+
+def function_definition(function: Function) -> dict[str, object]:
+    """Return the name, description, and input schema the model is shown for one Agno function."""
+    if function.entrypoint is None:
+        return {"name": function.name, "description": function.description or "", "parameters": function.parameters}
+    adapted = adapt_tool_function(function)
+    return {"name": adapted.name, "description": adapted.description or "", "parameters": dict(adapted.parameters)}
 
 
 def _no_remote_schema(uri: str) -> Never:

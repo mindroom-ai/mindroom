@@ -72,7 +72,7 @@ from mindroom.tool_system.metadata import (
     resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, adapt_tool_function
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     WorkerRuntimeContext,
@@ -870,8 +870,7 @@ def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.Mon
         tool_output_workspace_root=tmp_path,
         worker_target=None,
     )
-    function = tool.functions["add"].model_copy(deep=True)
-    function.process_entrypoint()
+    function = adapt_tool_function(tool.functions["add"])
 
     output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
     assert output_schema["description"].startswith("Optional")

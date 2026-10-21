@@ -4758,9 +4758,7 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
     finally:
         await manager.shutdown()
 
-    function_names = [
-        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
-    ]
+    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
     assert "shared_connection_status" not in function_names
     assert "shared_list_tools" not in function_names
     assert "shared_call_tool" not in function_names
@@ -5183,13 +5181,12 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
     finally:
         await manager.shutdown()
 
-    mcp_toolkit = next(tool for tool in agent.tools if tool.name == "mcp_demo")
-    function_names = [
-        function_name for tool in agent.tools for function_name in (*tool.get_functions(), *tool.get_async_functions())
-    ]
+    mcp_toolkit = next(toolkit for toolkit in agent.spec.toolkits if toolkit.name == "mcp_demo")
+    mcp_functions = {function.name for function in mcp_toolkit.functions}
+    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
     assert function_names.count("run_shell_command") == 1
-    assert "run_shell_command" not in mcp_toolkit.get_async_functions()
-    assert "run_call_tool" in mcp_toolkit.get_async_functions()
+    assert "run_shell_command" not in mcp_functions
+    assert "run_call_tool" in mcp_functions
 
 
 @pytest.mark.asyncio
@@ -5243,7 +5240,7 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
             execution_identity=None,
             include_interactive_questions=False,
         )
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
     assert "dynamic_tools" not in tool_names
 
@@ -5306,7 +5303,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
     finally:
         await manager.shutdown()
 
-    assert not any(tool.name == "mcp_demo" for tool in agent.tools)
+    assert not any(toolkit.name == "mcp_demo" for toolkit in agent.spec.toolkits)
 
 
 @pytest.mark.asyncio

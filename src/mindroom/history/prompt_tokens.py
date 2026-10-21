@@ -36,11 +36,7 @@ from mindroom.providers.openai_tool_search import model_deferred_tool_names
 from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
-from mindroom.tool_system.tool_schema_cache import (
-    default_function_parameters,
-    live_function_definition,
-    processed_function_definition,
-)
+from mindroom.tool_system.tool_access import function_definition
 
 if TYPE_CHECKING:
     from agno.agent import Agent
@@ -50,6 +46,19 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
 
 type _ToolDefinition = dict[str, object]
+
+
+def _default_function_parameters() -> dict[str, object]:
+    return {"type": "object", "properties": {}, "required": []}
+
+
+def _live_function_definition(function: Function) -> _ToolDefinition:
+    """Return one definition from a Function's current schema fields, for tools Agno already prepared."""
+    return {
+        "name": function.name,
+        "description": function.description or "",
+        "parameters": deepcopy(function.parameters) if function.parameters else _default_function_parameters(),
+    }
 
 
 @dataclass(frozen=True)
@@ -227,7 +236,7 @@ def _team_prompt_tool_surface(team: Team) -> _PromptToolSurface:
         payloads_by_name: dict[str, _ToolDefinition] = {}
         for tool in prepared.tools:
             if isinstance(tool, Function):
-                payload = live_function_definition(tool)
+                payload = _live_function_definition(tool)
             elif _is_tool_definition_dict(tool):
                 payload = _dict_tool_payload(tool)
             else:
@@ -283,14 +292,14 @@ def _prompt_tool_surface_for_tools(tools: object) -> _PromptToolSurface:
 
 def _prompt_payload_candidates(tool: object) -> list[tuple[Function | None, _ToolDefinition]]:
     if isinstance(tool, Function):
-        return [(tool, processed_function_definition(tool))]
+        return [(tool, function_definition(tool))]
     if isinstance(tool, Toolkit):
-        return [(function, processed_function_definition(function)) for function in _toolkit_functions(tool).values()]
+        return [(function, function_definition(function)) for function in _toolkit_functions(tool).values()]
     if _is_tool_definition_dict(tool):
         return [(None, _dict_tool_payload(tool))]
     if callable(tool):
         function = Function.from_callable(tool)
-        return [(function, live_function_definition(function))]
+        return [(function, _live_function_definition(function))]
     return []
 
 
@@ -318,7 +327,7 @@ def _dict_tool_payload(tool: _ToolDefinition) -> _ToolDefinition:
     return {
         "name": str(tool["name"]),
         "description": str(tool.get("description", "")),
-        "parameters": deepcopy(parameters) if isinstance(parameters, dict) else default_function_parameters(),
+        "parameters": deepcopy(parameters) if isinstance(parameters, dict) else _default_function_parameters(),
     }
 
 
