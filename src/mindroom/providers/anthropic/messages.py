@@ -510,18 +510,21 @@ class ClaudeProvider:
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:
-    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed."""
+    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed.
+
+    The SDK builds a delta or block of a type it does not know as the first model of its union, keeping the
+    unknown ``type``, so the type decides.
+    """
     if isinstance(event, (RawContentBlockDeltaEvent, BetaRawContentBlockDeltaEvent)):
         delta = event.delta
-        if isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
+        if delta.type == "text_delta" and isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
             return TextDelta(delta.text)
-        if isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
+        if delta.type == "thinking_delta" and isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
             return ReasoningDelta(delta.thinking)
-    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)) and isinstance(
-        event.content_block,
-        (ToolUseBlock, BetaToolUseBlock),
-    ):
-        return ToolCallReady(tool_call_from_block(event.content_block))
+    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)):
+        block = event.content_block
+        if block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
+            return ToolCallReady(tool_call_from_block(block))
     return None
 
 

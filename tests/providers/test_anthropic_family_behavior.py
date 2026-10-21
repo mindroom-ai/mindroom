@@ -132,8 +132,9 @@ def _sse_reply(
                 {"type": "input_json_delta", "partial_json": block.pop("partial_json", json.dumps(block["input"]))},
             ]
         else:
+            # Other blocks arrive whole, unless the block names deltas of its own.
+            deltas = block.pop("deltas", [])
             start = block
-            deltas = []
         events.append({"type": "content_block_start", "index": index, "content_block": start})
         events.extend({"type": "content_block_delta", "index": index, "delta": delta} for delta in deltas)
         events.append({"type": "content_block_stop", "index": index})
@@ -291,6 +292,32 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
         {"id": "toolu_1", "type": "function", "function": {"name": "save_file", "arguments": '{"name": "notes.md"}'}},
     ]
     assert (completed.message.provider_data or {})["stop_reason"] == "max_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: Path, stream: bool) -> None:
+    """A newer block type, which the SDK builds as a text block with its own ``type``, is kept, not read as text."""
+    unknown = {"type": "future_block", "payload": "p"}
+    text = {"type": "text", "text": "Hi."}
+    if stream:
+        reply = _sse_reply([{**unknown, "deltas": [{"type": "future_delta", "payload": "q"}]}, dict(text)])
+    else:
+        reply = _json_reply([unknown, text])
+    events = await _events(
+        _provider("anthropic", tmp_path, _Wire(reply)),
+        ModelRequest(messages=_user(), stream=stream),
+    )
+    outputs = [event for event in events if isinstance(event, (TextDelta, ReasoningDelta, ToolCallReady))]
+    assert outputs == ([TextDelta("Hi.")] if stream else [])
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert completed.message.content == "Hi."
+    provider_data = completed.message.provider_data or {}
+    assert provider_data["content_blocks"] == [unknown, text]
+    assert [(block["type"], block["payload"]) for block in provider_data["server_tool_blocks"]] == [
+        ("future_block", "p"),
+    ]
 
 
 @pytest.mark.asyncio

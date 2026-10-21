@@ -613,7 +613,7 @@ def assistant_message_from_response(
     """Build the assistant message of one finished response.
 
     ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
-    ``server_tool_blocks`` (every block that is not text, thinking, or a tool use), the thinking ``signature``,
+    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
     the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool
     use becomes a tool call, including the calls of a response the output limit cut off.
     """
@@ -624,14 +624,18 @@ def assistant_message_from_response(
     server_tool_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
     for block in response.content:
-        if isinstance(block, (TextBlock, BetaTextBlock)):
+        # The SDK builds a block of a type it does not know as a text block that keeps its own ``type``.
+        if block.type == "text" and isinstance(block, (TextBlock, BetaTextBlock)):
             texts.append(block.text)
-        elif isinstance(block, (ThinkingBlock, BetaThinkingBlock)):
+        elif block.type == "thinking" and isinstance(block, (ThinkingBlock, BetaThinkingBlock)):
             thinking.append(block.thinking)
             signature = block.signature
-        elif isinstance(block, (RedactedThinkingBlock, BetaRedactedThinkingBlock)):
+        elif block.type == "redacted_thinking" and isinstance(
+            block,
+            (RedactedThinkingBlock, BetaRedactedThinkingBlock),
+        ):
             redacted = block.data
-        elif isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
+        elif block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
             tool_calls.append(tool_call_from_block(block))
         else:
             server_tool_blocks.append(block.model_dump())
