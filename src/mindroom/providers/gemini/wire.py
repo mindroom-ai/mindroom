@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -41,7 +41,6 @@ Guidelines:
 - Use the function name exactly as defined (no namespace prefixes like 'default_api.')
 - Ensure all required parameters are provided with correct types
 """
-MALFORMED_FUNCTION_CALL_CODE = "malformed_function_call"
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media is left out instead of inlined.
@@ -495,7 +494,7 @@ def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: 
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value
     if finish_reason == "MALFORMED_FUNCTION_CALL":
         msg = f"Generation ended with finish reason: {finish_reason}"
-        raise ProviderError(msg, provider=provider, code=MALFORMED_FUNCTION_CALL_CODE)
+        raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
     parts = candidate.content.parts if candidate.content is not None else None
     events = [event for part in parts or () for event in _read_part(reply, part)]
     if finish_reason is not None:
@@ -564,7 +563,6 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 
 
 __all__ = [
-    "MALFORMED_FUNCTION_CALL_CODE",
     "MALFORMED_FUNCTION_CALL_GUIDANCE",
     "GeminiReply",
     "convert_schema",

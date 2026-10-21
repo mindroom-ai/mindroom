@@ -10,14 +10,20 @@ import httpx
 import pytest
 
 from mindroom.config.models import ModelConfig
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted
 from mindroom.providers import synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_CODE
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from mindroom.providers.tool_policy import without_provider_tools
@@ -259,7 +265,7 @@ async def test_gemini_malformed_function_call_fails_with_its_code(tmp_path: Path
     with pytest.raises(ProviderError) as raised:
         await run_adapter(GEMINI, _request(), tmp_path, response)
 
-    assert raised.value.code == MALFORMED_FUNCTION_CALL_CODE
+    assert raised.value.code == MALFORMED_TOOL_CALL
     assert not raised.value.retryable
 
 
