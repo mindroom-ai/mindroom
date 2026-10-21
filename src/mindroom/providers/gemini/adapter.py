@@ -187,10 +187,10 @@ class GeminiProvider:
             )
             if value is not None
         }
+        # ``overrides.disable_thinking`` leaves the authored thinking config alone: Gemini 2.5 and 3 think by
+        # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
         if thinking:
             config["thinking_config"] = thinking
-        if overrides.disable_thinking:
-            config.pop("thinking_config", None)
         declarations = function_declarations(request.tools)
         tools = [*([declarations] if declarations is not None else []), *request.native_tools]
         if tools:

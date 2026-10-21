@@ -138,14 +138,17 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
 
 @pytest.mark.asyncio
 async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_path: Path) -> None:
-    """Authored settings reach the request; per-request overrides replace them and can drop thinking."""
+    """Authored settings reach the request; overrides replace them, and disabling thinking keeps the authored config.
+
+    Gemini thinks by default, so dropping a ``thinking_budget: 0`` would turn thinking on.
+    """
     config = _config(
         GEMINI,
         generation_config={"candidate_count": 1},
         temperature=0.2,
         max_output_tokens=100,
-        thinking_budget=512,
-        include_thoughts=True,
+        thinking_budget=0,
+        include_thoughts=False,
     )
     response = gemini_sse(_gemini_chunk({"text": "ok"}))
 
@@ -161,9 +164,14 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
         "candidateCount": 1,
         "temperature": 0.2,
         "maxOutputTokens": 100,
-        "thinkingConfig": {"thinking_budget": 512, "include_thoughts": True},
+        "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
     }
-    assert overridden["body"]["generationConfig"] == {"candidateCount": 1, "temperature": 0.7, "maxOutputTokens": 50}
+    assert overridden["body"]["generationConfig"] == {
+        "candidateCount": 1,
+        "temperature": 0.7,
+        "maxOutputTokens": 50,
+        "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
+    }
 
 
 @pytest.mark.asyncio
