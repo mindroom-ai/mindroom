@@ -9,11 +9,11 @@ application default credentials from the process environment.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -24,8 +24,10 @@ from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, TurnCo
 from mindroom.llm.usage import MessageMetrics
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
     GeminiReply,
+    MediaRoute,
     format_contents,
     function_declarations,
     read_chunk,
@@ -98,15 +100,18 @@ class GeminiProvider:
         return list(results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one streamed ``generateContent`` request and yield its events."""
-        contents, system_instruction = await asyncio.to_thread(format_contents, request.messages)
-        config = self._request_config(request, system_instruction)
+        """Send one streamed ``generateContent`` request and yield its events.
+
+        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
+        """
         from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
 
         reply = GeminiReply()
-        started = time.perf_counter()
         first_text_at: float | None = None
         try:
+            contents, system_instruction = await format_contents(request.messages, self._media_route())
+            config = self._request_config(request, system_instruction)
+            started = time.perf_counter()
             chunks = await self._sdk_client().aio.models.generate_content_stream(
                 model=self.identity.id,
                 # The request dicts use google-genai's field names; the SDK validates them into its types.
@@ -218,6 +223,12 @@ class GeminiProvider:
             msg = "Participation decisions cannot safely apply Gemini body overrides"
             raise ValueError(msg)
         return _without_tool_selection(config, vertexai=self.vertexai) if config else config
+
+    def _media_route(self) -> MediaRoute:
+        provider = self.identity.provider_name
+        if self.vertexai:
+            return MediaRoute(provider=provider)
+        return MediaRoute(provider=provider, upload=partial(uploaded_file_uri, self._sdk_client(), provider=provider))
 
     def _sdk_client(self) -> Client:
         if self._client is None:

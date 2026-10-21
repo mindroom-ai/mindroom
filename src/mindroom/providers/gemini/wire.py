@@ -7,23 +7,27 @@ The SDK validates them into its own types and serializes the same JSON body Agno
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import mimetypes
+import os
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
+from mindroom.providers.remote_media import download_media
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from google.genai.types import GenerateContentResponse, GenerateContentResponseUsageMetadata, Part
 
@@ -43,8 +47,10 @@ Guidelines:
 """
 
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
-# Gemini rejects requests above 20 MB, so larger local media is left out instead of inlined.
+# Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
+# The leading bytes that identify an image format.
+_HEADER_BYTES = 12
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -88,10 +94,26 @@ def _without_none(**values: Any) -> dict[str, Any]:  # noqa: ANN401
 # ---------------------------------------------------------------------------
 
 
-def format_contents(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], str | list[Any] | None]:
+@dataclass(frozen=True, slots=True)
+class MediaRoute:
+    """Where one request's media can go.
+
+    ``upload(path, mime_type)`` sends a local file through the Files API and returns its URI; it is None on
+    Vertex AI, which has no Files API. ``provider`` names the adapter in the errors for media that cannot be sent.
+    """
+
+    provider: str
+    upload: Callable[[Path, str], Awaitable[str]] | None = None
+
+
+async def format_contents(
+    messages: Sequence[Message],
+    route: MediaRoute,
+) -> tuple[list[dict[str, Any]], str | list[Any] | None]:
     """Return the request contents and the system instruction for ``messages``.
 
-    Reads local media files, so callers run it off the event loop.
+    Local media is read off the event loop and remote media downloaded; media that cannot be sent raises
+    ``InvalidRequest``, so the media fallback replaces it with its note instead of the model never seeing it.
     """
     contents: list[dict[str, Any]] = []
     system_instruction: str | list[Any] | None = None
@@ -101,6 +123,8 @@ def format_contents(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], 
             continue
         role = _ROLE_MAP.get(message.role, message.role)
         parts = _message_parts(message, role)
+        if role == "user" and message.tool_calls is None and not _is_tool_result(message):
+            parts = await _with_media(message, parts, route)
         if parts:
             contents.append({"role": role, "parts": parts})
     # Gemini rejects consecutive contents with the same role.
@@ -113,25 +137,30 @@ def format_contents(messages: Sequence[Message]) -> tuple[list[dict[str, Any]], 
     return merged, system_instruction
 
 
+def _is_tool_result(message: Message) -> bool:
+    return message.role == "tool" and message.tool_call_id is not None and message.tool_name is not None
+
+
 def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
+    """Return the text, function call, and function response parts of one message."""
     content = message.content
-    is_tool_result = message.role == "tool" and message.tool_call_id is not None and message.tool_name is not None
     if role == "model" and message.tool_calls:
         parts = [] if content is None else [_text_part(str(content), message.provider_data)]
         parts.extend(_function_call_part(call) for call in message.tool_calls)
         return parts
-    if is_tool_result:
+    if _is_tool_result(message):
         function_response: dict[str, Any] = {"name": message.tool_name, "response": {"result": content}}
         if call_id := _provider_id(message.tool_call_id):
             function_response["id"] = call_id
         return [{"function_response": function_response}]
-    parts = [_text_part(content, message.provider_data)] if isinstance(content, str) else []
-    if role != "user" or message.tool_calls is not None:
-        return parts
-    images = [part for image in message.images or () if (part := _image_part(image)) is not None]
-    videos = [part for video in message.videos or () if (part := _video_part(video)) is not None]
-    audio = [part for clip in message.audio or () if (part := _audio_part(clip)) is not None]
-    files = [part for file in message.files or () if (part := _file_part(file)) is not None]
+    return [_text_part(content, message.provider_data)] if isinstance(content, str) else []
+
+
+async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:
+    images = [part for image in message.images or () if (part := await _image_part(image, route)) is not None]
+    videos = [part for video in message.videos or () if (part := await _video_part(video, route)) is not None]
+    audio = [part for clip in message.audio or () if (part := await _audio_part(clip, route)) is not None]
+    files = [part for file in message.files or () if (part := await _file_part(file, route)) is not None]
     # Google recommends videos before the prompt; each video is placed first, so the last one leads.
     return [*reversed(videos), *parts, *images, *audio, *files]
 
@@ -168,20 +197,48 @@ def _file_uri(uri: str, mime_type: str) -> dict[str, Any]:
     return {"file_data": {"file_uri": uri, "mime_type": mime_type}}
 
 
-def _read_local_media(path: str, kind: str) -> bytes | None:
+def _read_local_media(path: Path, kind: str, provider: str, inline_limit: int) -> tuple[int, bytes]:
+    """Return the size of a local media file and its bytes: all of them up to ``inline_limit``, else its header."""
+    try:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            return size, stream.read() if size <= inline_limit else stream.read(_HEADER_BYTES)
+    except OSError as error:
+        logger.warning("gemini_media_file_unreadable", kind=kind, path=str(path), error=str(error))
+        msg = f"The {kind} attachment could not be read"
+        raise InvalidRequest(msg, provider=provider) from error
+
+
+async def _local_part(
+    path: str,
+    kind: str,
+    route: MediaRoute,
+    mime_type: Callable[[bytes], str],
+    *,
+    always_upload: bool = False,
+) -> dict[str, Any] | None:
+    """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
+
+    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
+    """
     file_path = Path(path)
-    if not file_path.is_file():
-        logger.warning("gemini_media_file_missing", kind=kind, path=path)
+    inline_limit = 0 if always_upload and route.upload is not None else _INLINE_MEDIA_LIMIT_BYTES
+    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, inline_limit)
+    if not size:
         return None
-    if file_path.stat().st_size > _INLINE_MEDIA_LIMIT_BYTES:
-        logger.warning("gemini_media_file_too_large", kind=kind, path=path, limit_bytes=_INLINE_MEDIA_LIMIT_BYTES)
-        return None
-    return file_path.read_bytes() or None
+    if size <= inline_limit:
+        return _inline(data, mime_type(data))
+    if route.upload is None:
+        msg = f"The {kind} attachment is too large to send inline to Vertex AI"
+        raise InvalidRequest(msg, provider=route.provider)
+    file_mime_type = mime_type(data)
+    return _file_uri(await route.upload(file_path, file_mime_type), file_mime_type)
 
 
-def _skip_url_media(kind: str, url: str) -> None:
-    # MindRoom hands models local or inline media; remote media is not downloaded on the request path.
-    logger.warning("gemini_url_media_not_downloaded", kind=kind, url=url)
+async def _downloaded(url: str, kind: str, route: MediaRoute) -> tuple[bytes, str | None]:
+    return await download_media(url, kind=kind, limit_bytes=_INLINE_MEDIA_LIMIT_BYTES, provider=route.provider)
 
 
 def _media_mime_type(media: Audio | Video, default: str) -> str:
@@ -199,7 +256,7 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
 
 def _image_format(data: bytes) -> str | None:  # noqa: PLR0911 - one return per magic-byte signature
     """Return the image format from the magic bytes in the file header."""
-    if len(data) < 12:
+    if len(data) < _HEADER_BYTES:
         return None
     if data[0:8] == b"\x89PNG\r\n\x1a\n":
         return "png"
@@ -226,52 +283,56 @@ def _image_mime_type(image: Image, data: bytes) -> str:
     return "image/jpeg"
 
 
-def _image_part(image: Image) -> dict[str, Any] | None:
+async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
     if image.url is not None:
-        _skip_url_media("image", image.url)
-        return None
-    data = _read_local_media(image.filepath, "image") if image.filepath is not None else image.content
-    return _inline(data, _image_mime_type(image, data)) if data else None
+        data, _ = await _downloaded(image.url, "image", route)
+        return _inline(data, _image_mime_type(image, data))
+    if image.filepath is not None:
+        return await _local_part(image.filepath, "image", route, partial(_image_mime_type, image))
+    return _inline(image.content, _image_mime_type(image, image.content)) if image.content else None
 
 
-def _audio_part(audio: Audio) -> dict[str, Any] | None:
+async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
+    mime_type = _media_mime_type(audio, "audio/mp3")
     if audio.url is not None:
-        _skip_url_media("audio", audio.url)
-        return None
-    data = _read_local_media(audio.filepath, "audio") if audio.filepath is not None else audio.content
-    return _inline(data, _media_mime_type(audio, "audio/mp3")) if data else None
+        data, _ = await _downloaded(audio.url, "audio", route)
+        return _inline(data, mime_type)
+    if audio.filepath is not None:
+        # Local audio goes through the Files API where there is one, as Agno sent it.
+        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type, always_upload=True)
+    return _inline(audio.content, mime_type) if audio.content else None
 
 
-def _video_part(video: Video) -> dict[str, Any] | None:
+async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     mime_type = _media_mime_type(video, "video/mp4")
     if video.url is not None:
         return _file_uri(video.url, mime_type)
-    data = _read_local_media(video.filepath, "video") if video.filepath is not None else video.content
-    return _inline(data, mime_type) if data else None
+    if video.filepath is not None:
+        # Local video goes through the Files API where there is one, as Agno sent it.
+        return await _local_part(video.filepath, "video", route, lambda _: mime_type, always_upload=True)
+    return _inline(video.content, mime_type) if video.content else None
 
 
-def _file_part(file: File) -> dict[str, Any] | None:
+async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
         return _inline(data, file.mime_type or mimetypes.guess_type(file.filename or "")[0] or "application/pdf")
     if file.url is not None:
-        return _remote_file_part(file.url, file.mime_type)
+        return await _remote_file_part(file, file.url, route)
     if file.filepath is None:
         return None
-    data = _read_local_media(file.filepath, "file")
-    if data is None:
-        return None
-    return _inline(data, file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf")
+    mime_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    return await _local_part(file.filepath, "file", route, lambda _: mime_type)
 
 
-def _remote_file_part(url: str, mime_type: str | None) -> dict[str, Any] | None:
-    """Reference a Cloud Storage file, or an HTTPS file of known type, which Gemini fetches itself."""
+async def _remote_file_part(file: File, url: str, route: MediaRoute) -> dict[str, Any]:
+    """Reference a Cloud Storage file, or an HTTPS file of known type, which Gemini fetches itself; download others."""
     if url.startswith("gs://"):
-        return _file_uri(url, mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
-    if url.startswith("https://") and mime_type:
-        return _file_uri(url, mime_type)
-    _skip_url_media("file", url)
-    return None
+        return _file_uri(url, file.mime_type or mimetypes.guess_type(url)[0] or "application/pdf")
+    if url.startswith("https://") and file.mime_type:
+        return _file_uri(url, file.mime_type)
+    data, declared = await _downloaded(url, "file", route)
+    return _inline(data, file.mime_type or declared or mimetypes.guess_type(url)[0] or "application/pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +626,7 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 __all__ = [
     "MALFORMED_FUNCTION_CALL_GUIDANCE",
     "GeminiReply",
+    "MediaRoute",
     "convert_schema",
     "format_contents",
     "function_declarations",

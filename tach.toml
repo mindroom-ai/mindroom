@@ -7633,12 +7633,16 @@ path = "mindroom.providers.status_errors"
 depends_on = ["mindroom.llm"]
 
 [[modules]]
+path = "mindroom.providers.remote_media"
+depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
+
+[[modules]]
 path = "mindroom.providers.gemini"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
 
 [[modules]]
 path = "mindroom.providers.ollama_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"

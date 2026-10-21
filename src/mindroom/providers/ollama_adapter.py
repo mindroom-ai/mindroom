@@ -21,12 +21,14 @@ import httpx
 from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
+from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.remote_media import download_media
 from mindroom.providers.status_errors import provider_error_for_status, provider_unavailable
 from mindroom.providers.tool_policy import provider_tools_disabled
 
@@ -43,6 +45,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PROVIDER = "Ollama"
+# Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
+_IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -84,7 +88,7 @@ class OllamaProvider:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""
-        messages = await asyncio.to_thread(_format_messages, request.messages)
+        messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         chat_kwargs = self._chat_kwargs(request)
         from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
 
@@ -189,12 +193,11 @@ def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     ]
 
 
-def _format_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
-    """Return the chat messages for ``messages``; reads local images, so callers run it off the event loop."""
-    return [_format_message(message) for message in messages]
+async def _format_message(message: Message, provider: str) -> dict[str, Any]:
+    """Return one chat message; images are read off the event loop or downloaded.
 
-
-def _format_message(message: Message) -> dict[str, Any]:
+    An image that cannot be read raises ``InvalidRequest``, so the media fallback replaces it with its note.
+    """
     formatted: dict[str, Any] = {"role": message.role, "content": message.content}
     if message.role == "assistant" and message.tool_calls is not None:
         tool_calls = [
@@ -212,7 +215,7 @@ def _format_message(message: Message) -> dict[str, Any]:
         if tool_calls:
             formatted["tool_calls"] = tool_calls
     if message.role == "user":
-        images = [data for image in message.images or () if (data := _image_bytes(image))]
+        images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
         if images:
             formatted["images"] = images
         if unsupported := [
@@ -234,18 +237,24 @@ def _call_arguments(arguments: object) -> object:
         return {}
 
 
-def _image_bytes(image: Image) -> bytes | None:
+async def _image_bytes(image: Image, provider: str) -> bytes | None:
     if image.url is not None:
-        # MindRoom hands models local or inline media; remote media is not downloaded on the request path.
-        logger.warning("ollama_url_media_not_downloaded", url=image.url)
-        return None
+        data, _ = await download_media(image.url, kind="image", limit_bytes=_IMAGE_LIMIT_BYTES, provider=provider)
+        return data
     if image.filepath is None:
         return image.content
-    path = Path(image.filepath)
-    if not path.is_file():
-        logger.warning("ollama_media_file_missing", path=image.filepath)
-        return None
-    return path.read_bytes()
+    return await asyncio.to_thread(_read_image, Path(image.filepath), provider)
+
+
+def _read_image(path: Path, provider: str) -> bytes:
+    try:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        return path.read_bytes()
+    except OSError as error:
+        logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
+        msg = "The image attachment could not be read"
+        raise InvalidRequest(msg, provider=provider) from error
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
