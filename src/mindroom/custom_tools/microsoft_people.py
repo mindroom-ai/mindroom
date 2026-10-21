@@ -77,15 +77,9 @@ def _user_path(person: object) -> str:
 
 
 def _user_id_by_mail(session: GraphSession, address: str) -> str | None:
-    """Return the id of the one user with this email address, which need not be their sign-in name.
-
-    None when no single user has it or the lookup itself fails, so the caller reports its own not_found.
-    """
+    """Return the id of the one user with this email address, which need not be their sign-in name."""
     literal = address.replace("'", "''")
-    try:
-        payload = session.json("GET", "/users", params={"$filter": f"mail eq '{literal}'", "$select": "id"})
-    except MicrosoftGraphError:
-        return None
+    payload = session.json("GET", "/users", params={"$filter": f"mail eq '{literal}'", "$select": "id"})
     ids = [entry.get("id") for entry in payload.get("value") or [] if isinstance(entry, dict)]
     return ids[0] if len(ids) == 1 and isinstance(ids[0], str) else None
 

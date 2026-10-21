@@ -363,7 +363,7 @@ def test_get_profile_reports_no_manager_for_me(tmp_path: Path, monkeypatch: pyte
     assert (result["status"], result["person"], result["manager"]) == ("ok", _person(), None)
 
 
-def test_get_profile_keeps_the_original_not_found_when_the_email_lookup_fails(
+def test_get_profile_reports_a_throttled_email_lookup_as_throttled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -373,14 +373,18 @@ def test_get_profile_keeps_the_original_not_found_when_the_email_lookup_fails(
         _routes(
             {
                 "/v1.0/users/dana@example.com": _not_found(),
-                "/v1.0/users": httpx.Response(400, json={"error": {"code": "Request_UnsupportedQuery"}}),
+                "/v1.0/users": httpx.Response(
+                    429,
+                    headers={"Retry-After": "7"},
+                    json={"error": {"code": "TooManyRequests"}},
+                ),
             },
         ),
     )
 
     result = _payload(tools.microsoft_people_get_profile("dana@example.com"))
 
-    assert (result["code"], result["graph_code"]) == ("not_found", "Request_ResourceNotFound")
+    assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)
     assert len(graph.requests) == 2
 
 
