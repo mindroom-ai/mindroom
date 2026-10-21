@@ -83,9 +83,8 @@ from tests.knowledge_test_support import chroma_get_result, metadata_matches, va
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-    from agno.knowledge.embedder.base import Embedder
-
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
 
 

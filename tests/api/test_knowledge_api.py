@@ -310,22 +310,13 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=4)
-    seen_embedders: list[str] = []
 
-    class _BrokenVectorDb:
-        def __init__(self, *, embedder: object, **_kwargs: object) -> None:
-            seen_embedders.append(type(embedder).__name__)
-
-        def exists(self) -> bool:
-            msg = "corrupt collection"
-            raise RuntimeError(msg)
-
-    # One tripwire per module that can construct a collection handle. The
-    # manager builds none: it narrows types against ChromaDb but delegates
-    # construction to mindroom.knowledge.collections.
+    # Every knowledge collection handle opens its Chroma client through this one function.
     with (
-        patch("mindroom.knowledge.collections.ChromaDb", _BrokenVectorDb),
-        patch("mindroom.knowledge.chroma_client.ChromaDb", _BrokenVectorDb),
+        patch(
+            "mindroom.knowledge.chroma_client._persistent_client",
+            side_effect=AssertionError("collection should not open"),
+        ),
         patch(
             "mindroom.knowledge.manager.create_configured_embedder",
             side_effect=AssertionError("embedder should not load"),
@@ -340,7 +331,6 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     assert response.status_code == 200
     assert response.json()["indexed_count"] == 4
     assert "manager_available" not in response.json()
-    assert seen_embedders == []
 
 
 def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
