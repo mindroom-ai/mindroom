@@ -32,6 +32,7 @@ const status = {
   can_connect: true,
   reset_required: false,
   account_label: null,
+  service_account: false,
 };
 const json = (value: unknown, code = 200) =>
   new Response(JSON.stringify(value), { status: code });
@@ -927,7 +928,7 @@ describe("connections", () => {
     expect(screen.queryByText(/<html>/)).not.toBeInTheDocument();
   });
 
-  it("keeps an unavailable provider disabled", async () => {
+  it("keeps an unavailable provider disabled and says why", async () => {
     installApi({
       "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, can_connect: false }),
@@ -937,7 +938,24 @@ describe("connections", () => {
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeDisabled();
-    expect(screen.getByText(/not ready to connect/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This service needs its OAuth client saved in the MindRoom dashboard before it can connect.",
+      ),
+    ).toBeInTheDocument();
+    cleanup();
+
+    installApi({
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, can_connect: false, service_account: true }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByText(
+        "This service uses a shared service account, so there is no account to connect here.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("closes an in-flight popup when the portal unmounts", async () => {

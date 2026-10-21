@@ -298,7 +298,9 @@ export function ConnectionServiceRows({
                       !status.can_connect &&
                       !status.reset_required && (
                         <p className="w-full text-sm text-muted-foreground">
-                          This service is not ready to connect yet.
+                          {status.service_account
+                            ? "This service uses a shared service account, so there is no account to connect here."
+                            : "This service needs its OAuth client saved in the MindRoom dashboard before it can connect."}
                         </p>
                       )}
                   </div>

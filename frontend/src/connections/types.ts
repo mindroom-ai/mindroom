@@ -61,6 +61,8 @@ export interface ConnectionStatus {
   can_connect: boolean;
   reset_required: boolean;
   account_label: string | null;
+  /** A shared service account serves this provider, so no personal account can be connected. */
+  service_account: boolean;
 }
 
 /** The account a service can use instead of an API key. */

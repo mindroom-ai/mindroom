@@ -612,6 +612,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         "can_connect": False,
         "reset_required": False,
         "account_label": None,
+        "service_account": True,
     }
     assert (
         portal["client"]
@@ -734,6 +735,7 @@ def test_agent_user_sees_shared_connection_without_management(shared_portal: dic
     assert status.json()["connected"] is True
     assert status.json()["account_label"] == "alice@example.com"
     assert status.json()["can_connect"] is False
+    assert status.json()["service_account"] is False
     for action in ("connect", "disconnect"):
         assert client.post(f"{base}/{action}", headers=headers["bob"], json={}).status_code == 403
         assert (
