@@ -21,7 +21,7 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.legacy_session_storage import decode_persisted_session_json
+from mindroom.session_storage.legacy_agno2_runs import decode_session_json
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
@@ -637,7 +637,7 @@ def _read_runs(
 def _decode_session_usage(
     raw_value: object,
 ) -> tuple[Mapping[str, _MetricValue], tuple[UsageModelMetrics, ...] | None]:
-    decoded = decode_persisted_session_json(raw_value)
+    decoded = decode_session_json(raw_value)
     if decoded is None:
         return MappingProxyType({}), ()
     if not isinstance(decoded, dict):

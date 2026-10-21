@@ -32,12 +32,8 @@ from agno.utils.log import log_warning
 
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay
-from mindroom.history.replay import (
-    compaction_summary_message,
-    current_summary_text,
-    is_scope_summary,
-    summary_follows,
-)
+from mindroom.history.replay import compaction_summary_message, current_summary_text
+from mindroom.history.summary_message import is_scope_summary, summary_follows
 
 if TYPE_CHECKING:
     from agno.agent import Agent

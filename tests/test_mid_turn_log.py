@@ -25,8 +25,6 @@ from mindroom.history.replay import (
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
-    is_scope_summary,
-    mark_summary_follows,
 )
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -36,6 +34,7 @@ from mindroom.history.storage import (
     read_scope_seen_event_ids,
     remove_runs_answering,
 )
+from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment_tool_call_ids
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.native_compaction import NativeCompactionModel, record_native_checkpoint

@@ -25,8 +25,8 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.personas import PersonaError, caller_toolkit_names, inline_persona
 from mindroom.delegation.state import SubagentPersona
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import open_resolved_scope_session_context
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryScope
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage

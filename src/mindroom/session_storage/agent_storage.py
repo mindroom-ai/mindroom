@@ -34,6 +34,7 @@ from mindroom.session_storage import (
 )
 from mindroom.session_storage.legacy_session_storage import drop_run_tool_schemas
 from mindroom.session_storage.preflight import session_storage_preflight
+from mindroom.session_storage.schema import TableNames
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.storage import project_usage, usage_table_sql, usage_upsert_sql
 
@@ -230,9 +231,11 @@ def _create_sqlite_state_storage(
     with preflight:
         db_dir = state_root / subdir
         db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = db_dir / f"{storage_name}.db"
         if subdir == "sessions":
-            migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
-        db_file = str(db_dir / f"{storage_name}.db")
+            migrate_usage_database(db_path, session_table)
+            migrate_to_summary_rows(db_path, TableNames(session_table))
+        db_file = str(db_path)
         # Both: the engine is what the database is reached through, and the path
         # is what it reports itself as. Handing over an engine alone leaves
         # ``db_file`` empty on a store that is very much file-backed.
@@ -242,8 +245,6 @@ def _create_sqlite_state_storage(
             db_file=db_file,
             db_engine=create_state_engine(db_file),
         )
-        if subdir == "sessions":
-            migrate_to_summary_rows(database)
         agno_compat_session_persistence._register_sync_session_storage(
             database,
             db_file=db_file,

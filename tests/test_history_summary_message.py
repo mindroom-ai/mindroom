@@ -27,9 +27,9 @@ from mindroom.history.replay import (
     compaction_summary_message,
     estimate_prompt_visible_history_tokens,
     estimate_request_messages_tokens,
-    is_compaction_summary,
     plan_replay_that_fits,
 )
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,

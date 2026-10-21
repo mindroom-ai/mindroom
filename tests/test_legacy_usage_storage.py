@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -73,6 +74,25 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
     assert "created_at" not in rows[None]
     assert "user_id" not in rows[None]
     assert "private history" not in json.dumps(rows)
+
+
+def test_migration_reads_the_agno_runs_table_beside_agno_sessions(tmp_path: Path) -> None:
+    """Agno names the runs table beside ``agno_sessions`` ``agno_runs``, so an entity named agno keeps its run usage."""
+    path = tmp_path / "agno.db"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE agno_sessions (session_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO agno_sessions VALUES ('session-1')")
+        connection.execute("CREATE TABLE agno_runs (session_id TEXT, run_id TEXT, run_data TEXT, created_at INTEGER)")
+        connection.execute(
+            "INSERT INTO agno_runs VALUES (?, ?, ?, ?)",
+            ("session-1", "run", json.dumps({"metrics": {"total_tokens": 7}}), 1),
+        )
+
+    legacy_usage_storage.migrate_usage_database(path, "agno_sessions")
+
+    with closing(sqlite3.connect(path)) as connection:
+        rows = connection.execute("SELECT run_id, usage_data FROM agno_sessions_usage").fetchall()
+    assert [(run_id, json.loads(data)["metrics"]["total_tokens"]) for run_id, data in rows] == [("run", 7)]
 
 
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

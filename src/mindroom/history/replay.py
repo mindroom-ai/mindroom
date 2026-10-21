@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from agno.models.message import Message
 from agno.utils.message import filter_tool_calls
@@ -18,6 +18,7 @@ from mindroom.history.message_content import (
     render_message_content,
 )
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
+from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
@@ -33,7 +34,6 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from agno.team import Team
 
-    from mindroom.llm.messages import Message as OwnedMessage
     from mindroom.native_compaction import NativeCompactionModel
 
 
@@ -160,76 +160,9 @@ def _without_image_transport(message: Message, *, strip_content_blocks: bool) ->
     return message.model_copy(update=updates) if updates else message
 
 
-_COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
-_SCOPE_SUMMARY = "scope"
-_RUN_LOCAL_SUMMARY = "run"
-
-
-class _CompactionSummaryFields(TypedDict):
-    """The fields of the user message one compaction summary renders as."""
-
-    role: str
-    content: str
-    provider_data: dict[str, Any]
-    from_history: bool
-
-
-def compaction_summary_fields(summary: str, *, run_local: bool) -> _CompactionSummaryFields:
-    """Return the fields of the user message that replaces the history one compaction summary covers.
-
-    The scope's summary is rebuilt from its latest summary row for every request, so it is history; a run-local summary is
-    stored with its run. The marker keeps that kind when Agno later replays the run and marks its messages history.
-    """
-    return {
-        "role": "user",
-        "content": (
-            "The earlier part of this conversation was compacted into this summary:\n\n"
-            f"<compacted_history>\n{summary}\n</compacted_history>\n\n"
-            "The conversation continues after this summary. If it records progress on the current request, "
-            "continue that work from its next steps instead of starting over."
-        ),
-        "provider_data": {_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
-        "from_history": not run_local,
-    }
-
-
 def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
     """Render one compaction summary as the user message that replaces the history it covers."""
     return Message(**compaction_summary_fields(summary, run_local=run_local))
-
-
-def compaction_summary_text(message: Message) -> str:
-    """Return the summary a rendered compaction summary message carries."""
-    content = str(message.content)
-    start = content.index("<compacted_history>\n") + len("<compacted_history>\n")
-    return content[start : content.rindex("\n</compacted_history>")]
-
-
-def is_compaction_summary(message: Message) -> bool:
-    """Return whether one message is a rendered compaction summary."""
-    return _summary_kind(message) in {_SCOPE_SUMMARY, _RUN_LOCAL_SUMMARY}
-
-
-def is_scope_summary(message: Message | OwnedMessage) -> bool:
-    """Return whether one message is the scope's summary, as opposed to one run's own."""
-    return _summary_kind(message) == _SCOPE_SUMMARY
-
-
-_SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
-
-
-def mark_summary_follows(prompt: Message) -> None:
-    """Record that the scope's summary replays right after this prompt, where a mid-turn compaction placed it."""
-    prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
-
-
-def summary_follows(message: Message | OwnedMessage) -> bool:
-    """Return whether the scope's summary replays right after this message."""
-    return isinstance(message.provider_data, dict) and message.provider_data.get(_SUMMARY_FOLLOWS_KEY) is True
-
-
-def _summary_kind(message: Message | OwnedMessage) -> object:
-    return message.provider_data.get(_COMPACTION_SUMMARY_MARKER) if isinstance(message.provider_data, dict) else None
 
 
 def _summary_tokens(session: AgentSession | TeamSession) -> int:

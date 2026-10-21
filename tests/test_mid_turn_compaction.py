@@ -39,18 +39,14 @@ from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner
 from mindroom.history import agno_compat_message_builder, compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, install_mid_turn_compaction
-from mindroom.history.replay import (
-    compaction_summary_message,
-    estimate_request_messages_tokens,
-    is_compaction_summary,
-    is_scope_summary,
-)
+from mindroom.history.replay import compaction_summary_message, estimate_request_messages_tokens
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import (
     new_scope_session,
     read_scope_state,
     set_force_compaction_state,
 )
+from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (

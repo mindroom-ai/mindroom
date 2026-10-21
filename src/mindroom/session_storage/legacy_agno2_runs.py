@@ -1,4 +1,4 @@
-"""Session data Agno 2 stored: run history in a JSON blob on the session row, and JSON columns encoded twice."""
+"""Run data older Agno releases stored: Agno 2 run blobs, JSON columns encoded twice, and rows without a position."""
 
 from __future__ import annotations
 
@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote each column's JSON once.
 # Handling: Readers decode a column once and again when the first decode yields a string; owned writers
 # encode once, so a column the owned store rewrites is single-encoded from then on.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_store_opens and
-# tests/session_storage/test_store.py::test_double_encoded_session_columns_load_and_are_rewritten_once.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_store_opens,
+# tests/session_storage/test_store.py::test_double_encoded_session_columns_load_and_are_rewritten_once,
+# tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata, and
+# tests/test_usage_stats.py::test_daily_models_read_real_agno_2_history.
 def decode_session_json(raw_value: object) -> object:
     """Strictly decode a single- or double-encoded JSON column value."""
     if raw_value is None:
@@ -36,11 +38,15 @@ def decode_session_json(raw_value: object) -> object:
 # Legacy format: Agno 2 sessions stored run history in a single- or double-encoded JSON `runs` blob on the session
 # row, which Agno 3 merged into every read ahead of the run rows; the column exists only on files Agno 2 created.
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote first-class run rows.
-# Handling: When a store opens a database whose sessions table still has the column and that has no summary-row
-# table yet, every blob entry with a string run id that has no row yet becomes a run row, the session's rows are
-# renumbered in the order Agno's merge read them, and the blob is cleared, all in one write transaction, so no read
-# has to merge a blob. Entries without a string run id are dropped, as no read could address them.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py.
+# Handling: When the summary-row migration or a store opens a database whose sessions table still has the column and
+# that has no summary-row table yet, every blob entry with a string run id that has no row yet becomes a run row, the
+# session's rows are renumbered in the order Agno's merge read them, and the blob is cleared, all in one write
+# transaction, so no read has to merge a blob. Entries without a string run id are dropped, as no read could address
+# them.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py,
+# tests/test_agent_storage_runs.py::test_agno_2_blob_runs_become_rows_once,
+# tests/test_agent_storage_runs.py::test_blob_runs_keep_the_order_agno_read_them_in, and
+# tests/test_agent_storage_runs.py::test_blob_entries_without_a_string_run_id_are_dropped.
 def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
     """Return whether the database may still hold Agno 2 run blobs, from its schema alone."""
     tables = {
@@ -58,25 +64,40 @@ def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
 
 def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) -> None:
     """Turn the runs Agno 2 blobs hold into run rows, in the caller's write transaction."""
-    sessions, runs = quote_identifier(names.sessions), quote_identifier(names.runs)
+    sessions = quote_identifier(names.sessions)
     blobs = connection.execute(f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL").fetchall()  # noqa: S608
     for session_id, blob in blobs:
-        stored = _ordered_run_ids(connection, names, session_id)
+        stored = ordered_run_ids(connection, names, session_id)
         legacy = _legacy_entries(blob)
         stored_ids = set(stored)
         for run_id, entry in legacy.items():
             if run_id not in stored_ids:
-                _insert_run_entry(connection, names, entry, session_id=session_id)
+                insert_run_entry(connection, names, entry, session_id=session_id)
         # Agno's merge read blob entries first, table copies substituted, then table-only rows.
-        order = [*legacy, *(run_id for run_id in stored if run_id not in legacy)]
-        connection.executemany(
-            f"UPDATE {runs} SET run_index = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
-            [(run_index, session_id, run_id) for run_index, run_id in enumerate(order)],
-        )
+        renumber_runs(connection, names, session_id, [*legacy, *(run_id for run_id in stored if run_id not in legacy)])
         connection.execute(f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?", (session_id,))  # noqa: S608
 
 
-def _ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[str]:
+# LEGACY_COMPAT: Run rows without a position.
+# Legacy format: Run rows whose ``run_index`` is ``NULL``, which Agno 3 writers before its ``upsert_run`` index backfill
+# stored when a run arrived without one; Agno reads them first in a session.
+# Last legacy release: unversioned external input; no MindRoom release is known to write them, and the current
+# insertion rules give every new row an index.
+# Handling: The open-time summary-row migration renumbers each session holding such a row in the order a read returned
+# its rows, so every run has a place in the conversation log before any response loads it.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_rows_without_an_index_are_numbered_in_read_order,
+# tests/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index, and
+# tests/test_archive_migration.py::test_rows_without_an_index_keep_their_place.
+def number_unindexed_runs(connection: sqlite3.Connection, names: TableNames) -> None:
+    """Give every session that holds a row without an index consecutive indexes in its read order."""
+    unindexed = connection.execute(
+        f"SELECT DISTINCT session_id FROM {quote_identifier(names.runs)} WHERE run_index IS NULL",  # noqa: S608
+    ).fetchall()
+    for (session_id,) in unindexed:
+        renumber_runs(connection, names, session_id, ordered_run_ids(connection, names, session_id))
+
+
+def ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[str]:
     """Return one session's run rows in the order Agno read them, rows without an index first."""
     return [
         run_id
@@ -88,14 +109,25 @@ def _ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_
     ]
 
 
-def _insert_run_entry(
+def renumber_runs(connection: sqlite3.Connection, names: TableNames, session_id: str, run_ids: list[str]) -> None:
+    """Give one session's run rows consecutive indexes in the order of ``run_ids``."""
+    connection.executemany(
+        f"UPDATE {quote_identifier(names.runs)} SET run_index = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
+        [(run_index, session_id, run_id) for run_index, run_id in enumerate(run_ids)],
+    )
+
+
+def insert_run_entry(
     connection: sqlite3.Connection,
     names: TableNames,
     entry: dict[str, Any],
     *,
     session_id: str,
 ) -> None:
-    """Write one blob entry as a run row without an index, with the columns Agno 3 derived from a run dict."""
+    """Write one serialized run as a run row without an index, with the columns Agno 3 derived from a run dict.
+
+    A row that already has the run's id is kept.
+    """
     if entry.get("agent_id") or entry.get("agent_name"):
         run_type = "agent"
     elif entry.get("team_id") or entry.get("team_name"):
@@ -144,5 +176,9 @@ def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
 __all__ = [
     "decode_session_json",
     "has_blob_runs",
+    "insert_run_entry",
     "move_blob_runs_to_rows",
+    "number_unindexed_runs",
+    "ordered_run_ids",
+    "renumber_runs",
 ]

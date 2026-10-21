@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
