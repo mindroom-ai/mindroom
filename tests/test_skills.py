@@ -704,29 +704,28 @@ def test_workspace_skill_references_are_read_without_following_links(tmp_path: P
     assert "error" in _get_skill_reference(skills, "docs", "planted.md")
 
 
-def test_workspace_skills_reload_after_dir_created_late(tmp_path: Path) -> None:
-    """Reload should discover workspace skills created after agent startup."""
+def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path: Path) -> None:
+    """Agents load their skills when they are built, so a workspace skill created later loads on the next build."""
     storage = tmp_path / "storage"
     config = _base_config(["later"])
-    skills = build_agent_skills(
-        "code",
-        config,
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "empty"],
-        env_vars={},
-        credential_keys=set(),
-    )
 
-    assert skills is not None
-    assert _skill_names(skills) == []
+    def build() -> Skills | None:
+        return build_agent_skills(
+            "code",
+            config,
+            _runtime_paths(storage),
+            skill_roots=[tmp_path / "empty"],
+            env_vars={},
+            credential_keys=set(),
+        )
+
+    assert _skill_names(build()) == []
 
     workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
     workspace_skills.mkdir(parents=True)
     _write_skill(workspace_skills, "later", "Later workspace skill")
 
-    skills.reload()
-
-    assert _skill_names(skills) == ["later"]
+    assert _skill_names(build()) == ["later"]
 
 
 def test_workspace_skills_do_not_override_explicit_roots(tmp_path: Path) -> None:

@@ -283,7 +283,7 @@ legacy_private_dynamic_workflow_report  # unused function (src/mindroom/api/dyna
 public_report  # unused function (src/mindroom/api/report_publishing.py)
 public_report_index  # unused function (src/mindroom/api/report_publishing.py)
 public_report_asset  # unused function (src/mindroom/api/report_publishing.py)
-_._load_skills  # unused method (src/mindroom/tool_system/skills.py)
+_.get_system_prompt_snippet  # Skills method Agno's Agent calls for the skills prompt (src/mindroom/tool_system/skills.py)
 set_credentials  # unused function (src/mindroom/api/credentials.py)
 _.validate_root_space_alias_does_not_collide_with_managed_rooms  # unused method (src/mindroom/config/main.py)
 _.send_message  # unused method (src/mindroom/hooks/context.py)

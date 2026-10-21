@@ -1,4 +1,4 @@
-"""Skill integration built on Agno skills with OpenClaw-compatible metadata."""
+"""OpenClaw-compatible skills: loading from skill roots and agent workspaces, and the toolkit that offers them."""
 
 from __future__ import annotations
 
@@ -9,17 +9,19 @@ import platform
 import re
 import shutil
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import json5
-from agno.skills import LocalSkills, Skills
-from agno.skills.errors import SkillValidationError
-from agno.skills.loaders import SkillLoader
-from agno.skills.skill import Skill
+from agno.exceptions import PathSecurityError
+from agno.skills import Skills
+from agno.skills.skill import Skill as AgnoSkill
+from agno.tools import Toolkit
+from agno.tools.function import Function
+from agno.utils.path_safety import safe_join_relative_path
 
 from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
@@ -34,15 +36,13 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.tools.function import Function
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
-# The functions Agno generates for an agent's skills; none has an owning toolkit.
+# The functions of an agent's skills toolkit; none has an owning toolkit.
 # All three only read a skill; Dynamic Workflow participants get get_skill_script only through an operator rule.
 SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
 SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
@@ -56,19 +56,46 @@ MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 # Worker code can plant any number of entries, so a workspace skill listing examines only this many.
 _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
+_GET_SKILL_INSTRUCTIONS_DESCRIPTION = (
+    "Load the full instructions for a skill. Use this when you need to follow a skill's guidance."
+)
+_GET_SKILL_REFERENCE_DESCRIPTION = (
+    "Load a reference document from a skill's references. Use this to access detailed documentation."
+)
 _GET_SKILL_SCRIPT_DESCRIPTION = (
     "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
 )
-# Agno's skills prompt lines that describe get_skill_script as running scripts, and what MindRoom offers instead.
-_SCRIPT_PROMPT_LINES = (
-    (
-        "`get_skill_script(skill_name, script_path, execute=False)` - Read or run scripts",
-        "`get_skill_script(skill_name, script_path)` - Read scripts",
-    ),
-    (
-        "Use `get_skill_script` to read or execute scripts from a skill",
-        "Use `get_skill_script` to read scripts from a skill; it never runs them",
-    ),
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# Agno's skills prompt, with get_skill_script offered only for reading.
+_PROMPT_HEADER = (
+    "<skills_system>",
+    "",
+    "## What are Skills?",
+    "Skills are packages of domain expertise that extend your capabilities. Each skill contains:",
+    "- **Instructions**: Detailed guidance on when and how to apply the skill",
+    "- **Scripts**: Executable code templates you can use or adapt",
+    "- **References**: Supporting documentation (guides, cheatsheets, examples)",
+    "",
+    "## IMPORTANT: How to Use Skills",
+    "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
+    "Instead, you MUST use the provided skill access tools:",
+    "",
+    "1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill",
+    "2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation",
+    "3. `get_skill_script(skill_name, script_path)` - Read scripts",
+    "",
+    "## Progressive Discovery Workflow",
+    "1. **Browse**: Review the skill summaries below to understand what's available",
+    "2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
+    "3. **Reference**: Use `get_skill_reference` to access specific documentation as needed",
+    "4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them",
+    "",
+    "**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when "
+    "`<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.",
+    "",
+    "This approach ensures you only load detailed instructions when actually needed.",
+    "",
+    "## Available Skills",
 )
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
@@ -86,9 +113,25 @@ _BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[2] / "skills"
 _BUNDLED_SKILLS_PACKAGE_DIR = _THIS_DIR.parent / "_bundled_skills"
 
 
+@dataclass(frozen=True, slots=True)
+class Skill:
+    """One skill: its ``SKILL.md`` instructions and the script and reference file names beside it.
+
+    ``metadata`` is the frontmatter ``metadata`` as a mapping once loading has validated the skill.
+    """
+
+    name: str
+    description: str
+    instructions: str
+    source_path: Path
+    scripts: tuple[str, ...] = ()
+    references: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] | None = None
+
+
 @dataclass
-class _MindroomSkillsLoader(SkillLoader):
-    """Load skills via Agno with OpenClaw compatibility filtering."""
+class _SkillsLoader:
+    """Load the eligible skills of the configured roots, in allowlist order when an allowlist is set."""
 
     roots: Sequence[Path]
     config: Config
@@ -144,7 +187,7 @@ class RefusedWorkspaceSkill:
 
 
 @dataclass(kw_only=True)
-class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
+class _WorkspaceSkillsLoader(_SkillsLoader):
     """Load one workspace's ``skills`` directory through no-follow descriptors."""
 
     workspace_root: Path
@@ -156,144 +199,163 @@ class _WorkspaceSkillsLoader(_MindroomSkillsLoader):
         return _load_workspace_skills(self.workspace_root, self.refused)
 
 
-class _MindroomSkills(Skills):
-    """MindRoom-specific Skills wrapper for workspace skill access policy."""
+class SkillsToolkit(Toolkit):
+    """One agent's skills: three functions that only read them, and the skills section of the system prompt.
+
+    Workspace skills, which worker code can write, are read through no-follow descriptors, and loading one records
+    its use for the skill learner's inactivity clock; configured skills are read by path and record nothing.
+    """
 
     def __init__(
         self,
+        skills: Mapping[str, Skill],
         *,
-        loaders: list[SkillLoader],
+        workspace_roots: Mapping[str, Path],
         output_file_policy: ToolOutputFilePolicy | None = None,
-        only: Collection[str] | None = None,
     ) -> None:
-        self._workspace_roots_by_skill: dict[str, Path] = {}
+        super().__init__(name="skills")
+        self._skills = dict(skills)
+        # The workspace root of each skill that came from an agent workspace.
+        self._workspace_roots = dict(workspace_roots)
         self._output_file_policy = output_file_policy
-        self._only = None if only is None else frozenset(only)
-        super().__init__(loaders=loaders)
+        for function in self._new_functions():
+            self.functions[function.name] = function
 
-    # AGNO_COMPAT: Skills runs a skill script in the process that holds the Skills object.
-    # Reason: Agno 3.0.9 Skills._get_skill_script with execute=True runs a script as a subprocess of the primary
-    #   process, outside the worker, hooks, and approval rules of the agent's shell, and its tool description,
-    #   parameter docs, and skills prompt offer that; MindRoom's get_skill_script, below, takes no execute
-    #   argument and only reads scripts, and its description and the skills prompt say so.
-    # Upstream issue: Tracking gap; no issue for offering read-only skill scripts has been identified.
-    # Upstream PR: None identified.
-    # Remove when: Skills lets an application leave script execution out of its tool and prompt.
-    # Coverage: tests/test_skills.py::test_skill_scripts_are_read_and_never_run;
-    #   tests/test_skills.py::test_the_skills_prompt_describes_get_skill_script_as_read_only.
-    def get_system_prompt_snippet(self) -> str:
-        """Return Agno's skills prompt, describing get_skill_script as the read-only function MindRoom offers."""
-        snippet = super().get_system_prompt_snippet()
-        for agno_line, line in _SCRIPT_PROMPT_LINES:
-            snippet = snippet.replace(agno_line, line)
-        return snippet
-
-    def get_tools(self) -> list[Function]:
-        """Return skill access tools with MindRoom's reserved output-path argument."""
-        tools = super().get_tools()
-        for tool in tools:
-            if tool.name == "get_skill_script":
-                tool.description = _GET_SKILL_SCRIPT_DESCRIPTION
+    def _new_functions(self) -> list[Function]:
+        functions = [
+            Function(
+                name="get_skill_instructions",
+                description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION,
+                entrypoint=self.get_skill_instructions,
+            ),
+            Function(
+                name="get_skill_reference",
+                description=_GET_SKILL_REFERENCE_DESCRIPTION,
+                entrypoint=self.get_skill_reference,
+            ),
+            Function(
+                name="get_skill_script",
+                description=_GET_SKILL_SCRIPT_DESCRIPTION,
+                entrypoint=self.get_skill_script,
+            ),
+        ]
         if self._output_file_policy is None:
-            return tools
-        return [wrap_function_for_output_files(tool, self._output_file_policy) for tool in tools]
+            return functions
+        return [wrap_function_for_output_files(function, self._output_file_policy) for function in functions]
 
-    def _load_skills(self) -> None:
-        """Load skills, keeping only the names in ``only`` when set, and track which came from workspace loaders."""
-        self._workspace_roots_by_skill.clear()
-        for loader in self.loaders:
-            try:
-                skills = loader.load()
-                workspace_root = loader.workspace_root if isinstance(loader, _WorkspaceSkillsLoader) else None
-                for skill in skills:
-                    if self._only is not None and skill.name not in self._only:
-                        continue
-                    if skill.name in self._skills:
-                        logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
-                    self._skills[skill.name] = skill
-                    if workspace_root is not None:
-                        self._workspace_roots_by_skill[skill.name] = workspace_root
-                    else:
-                        self._workspace_roots_by_skill.pop(skill.name, None)
-            except SkillValidationError:
-                raise
-            except Exception as exc:
-                logger.warning("Error loading skills", loader=repr(loader), error=str(exc))
+    @property
+    def skills(self) -> tuple[Skill, ...]:
+        """The loaded skills, in the order the prompt lists them."""
+        return tuple(self._skills.values())
 
-        logger.debug("Loaded skills", count=len(self._skills))
+    def get_skill(self, name: str) -> Skill | None:
+        """Return the loaded skill named ``name``."""
+        return self._skills.get(name)
 
-    # AGNO_COMPAT: Skills offers no hook for when an agent loads a skill.
-    # Reason: Agno 3.0.9 Skills.get_tools binds the private _get_skill_instructions directly, so counting workspace
-    #   skill loads for the skill learner's inactivity clock requires overriding it.
-    # Upstream issue: Tracking gap; no issue for a skill-load callback has been identified.
-    # Upstream PR: None identified.
-    # Remove when: Skills calls a hook when a skill's instructions or files are loaded.
-    # Coverage: tests/test_skills.py::test_workspace_skill_loads_record_usage_but_configured_skills_do_not.
-    def _get_skill_instructions(self, skill_name: str) -> str:
-        self._record_use(skill_name)
-        return super()._get_skill_instructions(skill_name)
+    def prompt_block(self) -> str:
+        """Return the skills section of the system prompt, or ``""`` when no skill loaded."""
+        if not self._skills:
+            return ""
+        lines = list(_PROMPT_HEADER)
+        for skill in self._skills.values():
+            lines.append("<skill>")
+            lines.append(f"  <name>{skill.name}</name>")
+            lines.append(f"  <description>{skill.description}</description>")
+            lines.append(
+                f"  <scripts>{', '.join(skill.scripts)}</scripts>" if skill.scripts else "  <scripts>none</scripts>",
+            )
+            if skill.references:
+                lines.append(f"  <references>{', '.join(skill.references)}</references>")
+            lines.append("</skill>")
+        lines.extend(("", "</skills_system>"))
+        return "\n".join(lines)
 
-    def _record_use(self, skill_name: str) -> None:
-        """Record one agent load of a workspace skill directory; configured skills are not recorded.
+    def get_skill_instructions(self, skill_name: str) -> str:
+        """Load the full instructions for a skill.
 
-        Usage records live beside skill directories, so a workspace whose ``skills/`` is itself one skill keeps none.
-        Agno calls the skill tools on the event loop, so there the usage write runs in a thread.
+        Args:
+            skill_name: The name of the skill to get instructions for.
+
+        Returns:
+            A JSON string with the skill's instructions and metadata.
+
         """
-        workspace_root = self._workspace_roots_by_skill.get(skill_name)
-        skill = self.get_skill(skill_name)
-        if (
-            workspace_root is None
-            or skill is None
-            or Path(skill.source_path).parent != workspace_root / _WORKSPACE_SKILLS_DIRNAME
-        ):
-            return
-        record = partial(record_skill_use, Path(skill.source_path))
+        self._record_use(skill_name)
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return self._not_found(skill_name)
+        return json.dumps(
+            {
+                "skill_name": skill.name,
+                "description": skill.description,
+                "instructions": skill.instructions,
+                "available_scripts": skill.scripts,
+                "available_references": skill.references,
+            },
+        )
+
+    def get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
+        """Load a reference document from a skill.
+
+        Args:
+            skill_name: The name of the skill.
+            reference_path: The filename of the reference document.
+
+        Returns:
+            A JSON string with the reference content.
+
+        """
+        return self._read_skill_file(skill_name, _REFERENCES, reference_path)
+
+    def get_skill_script(self, skill_name: str, script_path: str | None = None) -> str:
+        """Read a script from a skill without running it.
+
+        Args:
+            skill_name: The name of the skill.
+            script_path: The filename of the script.
+
+        Returns:
+            A JSON string with the script content.
+
+        """
+        return self._read_skill_file(skill_name, _SCRIPTS, script_path)
+
+    def _not_found(self, skill_name: str) -> str:
+        return json.dumps({"error": f"Skill '{skill_name}' not found", "available_skills": ", ".join(self._skills)})
+
+    def _read_skill_file(self, skill_name: str, kind: _SkillFileKind, filename: str | None) -> str:
+        """Read one listed reference or script of a skill as the JSON a skill function returns."""
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return self._not_found(skill_name)
+        listed = kind.listed(skill)
+        if not filename or filename not in listed:
+            return json.dumps(_unlisted_file_error(skill_name, kind, filename, listed))
+        workspace_root = self._workspace_roots.get(skill_name)
+        if workspace_root is not None:
+            content = self._read_workspace_skill_file(workspace_root, skill, kind.dirname, filename)
+            return json.dumps({"skill_name": skill_name, kind.path_key: filename, **content})
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            record()
-            return
-        create_background_task(asyncio.to_thread(record), name="record_skill_use")
-
-    # AGNO_COMPAT: Skills reads skill references and scripts by path, following links.
-    # Reason: Agno 3.0.9 Skills._get_skill_reference and _get_skill_script open files below a
-    #   skill's source_path by path, so a workspace skill file swapped for a link or FIFO would
-    #   be followed or block; workspace skills are read through no-follow descriptors instead.
-    # Upstream issue: Tracking gap; no issue for descriptor-safe skill file reads has been identified.
-    # Upstream PR: None identified.
-    # Remove when: Agno lets a loader supply skill file contents or refuses links and non-regular files.
-    # Coverage: tests/test_skills.py::test_workspace_skill_references_are_read_without_following_links.
-    def _get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
-        content = self._read_workspace_skill_file(skill_name, "references", reference_path)
-        if content is None:
-            return super()._get_skill_reference(skill_name, reference_path)
-        return json.dumps({"skill_name": skill_name, "reference_path": reference_path, **content})
-
-    # Read-only on purpose; see the AGNO_COMPAT note on get_system_prompt_snippet.
-    def _get_skill_script(  # ty: ignore[invalid-method-override]  # MindRoom offers no execute, args, or timeout
-        self,
-        skill_name: str,
-        script_path: str | None = None,
-    ) -> str:
-        content = self._read_workspace_skill_file(skill_name, "scripts", script_path)
-        if content is not None:
-            return json.dumps({"skill_name": skill_name, "script_path": script_path, **content})
-        return super()._get_skill_script(skill_name=skill_name, script_path=script_path)
+            path = safe_join_relative_path(skill.source_path / kind.dirname, filename)
+        except PathSecurityError:
+            return json.dumps({"error": f"Invalid {kind.noun} path: '{filename}'", "skill_name": skill_name})
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            return json.dumps(
+                {"error": f"Error reading {kind.noun} file: {exc}", "skill_name": skill_name, kind.path_key: filename},
+            )
+        return json.dumps({"skill_name": skill_name, kind.path_key: filename, "content": content})
 
     def _read_workspace_skill_file(
         self,
-        skill_name: str,
+        workspace_root: Path,
+        skill: Skill,
         kind: str,
-        filename: str | None,
-    ) -> dict[str, str] | None:
-        """Read one listed workspace skill file, or return ``None`` for names Agno validates itself."""
-        workspace_root = self._workspace_roots_by_skill.get(skill_name)
-        skill = self.get_skill(skill_name)
-        if workspace_root is None or skill is None or not filename:
-            return None
-        if filename not in (skill.references if kind == "references" else skill.scripts):
-            return None
-        relative_path = Path(skill.source_path).relative_to(workspace_root) / kind / filename
+        filename: str,
+    ) -> dict[str, str]:
+        """Read one listed workspace skill file below its pinned directory, never following links."""
+        relative_path = skill.source_path.relative_to(workspace_root) / kind / filename
         try:
             payload = read_regular_file_within_root(
                 workspace_root,
@@ -304,11 +366,115 @@ class _MindroomSkills(Skills):
         except (OSError, ValueError) as exc:
             logger.warning("Refused a workspace skill file", path=str(workspace_root / relative_path), error=str(exc))
             return {"error": f"Error reading workspace skill file {filename}: {type(exc).__name__}"}
-        self._record_use(skill_name)
+        self._record_use(skill.name)
         return {"content": content}
 
+    def _record_use(self, skill_name: str) -> None:
+        """Record one agent load of a workspace skill directory; configured skills are not recorded.
 
-def build_agent_skills(
+        Usage records live beside skill directories, so a workspace whose ``skills/`` is itself one skill keeps none.
+        Skill functions can run on the event loop, so there the usage write runs in a thread.
+        """
+        workspace_root = self._workspace_roots.get(skill_name)
+        skill = self._skills.get(skill_name)
+        if (
+            workspace_root is None
+            or skill is None
+            or skill.source_path.parent != workspace_root / _WORKSPACE_SKILLS_DIRNAME
+        ):
+            return
+        record = partial(record_skill_use, skill.source_path)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            record()
+            return
+        create_background_task(asyncio.to_thread(record), name="record_skill_use")
+
+
+@dataclass(frozen=True, slots=True)
+class _SkillFileKind:
+    """One kind of file a skill lists, with the error texts and keys Agno's skill functions used."""
+
+    dirname: str
+    noun: str
+    path_key: str
+    listing_key: str
+
+    def listed(self, skill: Skill) -> tuple[str, ...]:
+        """Return the file names ``skill`` lists of this kind."""
+        return skill.references if self.dirname == "references" else skill.scripts
+
+
+_REFERENCES = _SkillFileKind("references", "reference", "reference_path", "available_references")
+_SCRIPTS = _SkillFileKind("scripts", "script", "script_path", "available_scripts")
+
+
+def _unlisted_file_error(
+    skill_name: str,
+    kind: _SkillFileKind,
+    filename: str | None,
+    listed: tuple[str, ...],
+) -> dict[str, object]:
+    """Return the error a skill function answers when ``filename`` is missing or not a listed file of the skill."""
+    if not filename:
+        return {
+            "error": f"A {kind.path_key} is required to read a {kind.noun} from skill '{skill_name}'",
+            "skill_name": skill_name,
+            kind.listing_key: listed,
+        }
+    return {
+        "error": f"{kind.noun.capitalize()} '{filename}' not found in skill '{skill_name}'",
+        kind.listing_key: listed,
+    }
+
+
+class _AgnoSkills(Skills):
+    """The Agno ``Skills`` object agents built on Agno take, offering one owned ``SkillsToolkit``.
+
+    Like Agno's own, it builds fresh skill functions on every ``get_tools`` call, because Agno's callers prepare and
+    mutate the functions they receive.
+    """
+
+    def __init__(self, toolkit: SkillsToolkit) -> None:
+        self.toolkit = toolkit
+        super().__init__(loaders=[])
+
+    def get_skill(self, name: str) -> AgnoSkill | None:
+        """Return the loaded skill named ``name``."""
+        skill = self.toolkit.get_skill(name)
+        return None if skill is None else _agno_skill(skill)
+
+    def get_all_skills(self) -> list[AgnoSkill]:
+        """Return every loaded skill."""
+        return [_agno_skill(skill) for skill in self.toolkit.skills]
+
+    def get_skill_names(self) -> list[str]:
+        """Return the loaded skill names."""
+        return [skill.name for skill in self.toolkit.skills]
+
+    def get_system_prompt_snippet(self) -> str:
+        """Return the skills section of the system prompt."""
+        return self.toolkit.prompt_block()
+
+    def get_tools(self) -> list[Function]:
+        """Return fresh skill functions."""
+        return self.toolkit._new_functions()
+
+
+def _agno_skill(skill: Skill) -> AgnoSkill:
+    return AgnoSkill(
+        name=skill.name,
+        description=skill.description,
+        instructions=skill.instructions,
+        source_path=str(skill.source_path),
+        scripts=list(skill.scripts),
+        references=list(skill.references),
+        metadata=None if skill.metadata is None else dict(skill.metadata),
+    )
+
+
+def build_skills_toolkit(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -320,9 +486,10 @@ def build_agent_skills(
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
     refused: list[RefusedWorkspaceSkill] | None = None,
-) -> Skills | None:
-    """Build an Agno Skills object for a specific agent, narrowed to the skill names in ``only`` when set.
+) -> SkillsToolkit | None:
+    """Build one agent's skills toolkit, narrowed to the skill names in ``only`` when set.
 
+    Workspace skills win over the default roots on a name conflict; explicit ``skill_roots`` win over the workspace.
     ``refused`` collects the workspace skills that did not load, also when no skill loads.
     """
     if only is not None and not only:
@@ -334,7 +501,7 @@ def build_agent_skills(
 
     configured_loader = None
     if agent_config.skills:
-        configured_loader = _MindroomSkillsLoader(
+        configured_loader = _SkillsLoader(
             roots=_resolve_configured_skill_roots(skill_roots),
             config=config,
             runtime_paths=runtime_paths,
@@ -356,19 +523,76 @@ def build_agent_skills(
         ),
     )
 
-    loaders: list[SkillLoader]
+    loaders: list[_SkillsLoader]
     if skill_roots is None:
         loaders = [loader for loader in (configured_loader, workspace_loader) if loader is not None]
     else:
         loaders = [loader for loader in (workspace_loader, configured_loader) if loader is not None]
 
-    skills = _MindroomSkills(loaders=loaders, output_file_policy=output_file_policy, only=only)
+    skills, workspace_roots = _load_skills(loaders, None if only is None else frozenset(only))
     if refused is not None:
         refused.extend(workspace_loader.refused)
     # A narrowed set with no surviving skill offers nothing, even beside configured skills.
-    if skills.get_skill_names() or (agent_config.skills and only is None):
-        return skills
-    return None
+    if not skills and not (agent_config.skills and only is None):
+        return None
+    return SkillsToolkit(skills, workspace_roots=workspace_roots, output_file_policy=output_file_policy)
+
+
+def _load_skills(
+    loaders: Sequence[_SkillsLoader],
+    only: frozenset[str] | None,
+) -> tuple[dict[str, Skill], dict[str, Path]]:
+    """Load every loader's skills in order, a later loader winning a name, and track which came from a workspace."""
+    skills: dict[str, Skill] = {}
+    workspace_roots: dict[str, Path] = {}
+    for loader in loaders:
+        try:
+            loaded = loader.load()
+        except Exception as exc:
+            logger.warning("Error loading skills", loader=type(loader).__name__, error=str(exc))
+            continue
+        workspace_root = loader.workspace_root if isinstance(loader, _WorkspaceSkillsLoader) else None
+        for skill in loaded:
+            if only is not None and skill.name not in only:
+                continue
+            if skill.name in skills:
+                logger.warning("Duplicate skill name; overwriting with newer version", skill=skill.name)
+            skills[skill.name] = skill
+            if workspace_root is not None:
+                workspace_roots[skill.name] = workspace_root
+            else:
+                workspace_roots.pop(skill.name, None)
+    logger.debug("Loaded skills", count=len(skills))
+    return skills, workspace_roots
+
+
+def build_agent_skills(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    skill_roots: Sequence[Path] | None = None,
+    workspace_root: Path | None = None,
+    env_vars: Mapping[str, str] | None = None,
+    credential_keys: set[str] | None = None,
+    output_file_policy: ToolOutputFilePolicy | None = None,
+    only: Collection[str] | None = None,
+    refused: list[RefusedWorkspaceSkill] | None = None,
+) -> Skills | None:
+    """Return ``build_skills_toolkit``'s toolkit as the Agno ``Skills`` object agents built on Agno take."""
+    toolkit = build_skills_toolkit(
+        agent_name,
+        config,
+        runtime_paths,
+        skill_roots=skill_roots,
+        workspace_root=workspace_root,
+        env_vars=env_vars,
+        credential_keys=credential_keys,
+        output_file_policy=output_file_policy,
+        only=only,
+        refused=refused,
+    )
+    return None if toolkit is None else _AgnoSkills(toolkit)
 
 
 @dataclass(frozen=True)
@@ -663,11 +887,8 @@ def _load_root_skills(root: Path) -> list[Skill]:
     if cached and cached[0] == snapshot:
         return cached[1]
 
-    # Agno's validator rejects skills MindRoom supports, such as OpenClaw's JSON5 `metadata`
-    # string and a SKILL.md without frontmatter, and one invalid skill would fail the whole root.
-    loader = LocalSkills(str(resolved_root), validate=False)
     try:
-        skills = loader.load()
+        skills = _read_skill_root(resolved_root)
     except Exception as exc:
         logger.warning("Failed to load skills", path=str(resolved_root), error=str(exc))
         if cached:
@@ -676,6 +897,70 @@ def _load_root_skills(root: Path) -> list[Skill]:
 
     _SKILL_CACHE[resolved_root] = (snapshot, skills)
     return skills
+
+
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# Operator skill roots load as Agno's LocalSkills(validate=False) loaded them, so their skills keep loading the same.
+def _read_skill_root(root: Path) -> list[Skill]:
+    """Read one skill folder, or every skill folder directly below ``root``, in directory order."""
+    if (root / SKILL_FILENAME).exists():
+        skill = _read_skill_folder(root)
+        return [] if skill is None else [skill]
+    skills: list[Skill] = []
+    for item in root.iterdir():
+        if item.is_dir() and not item.name.startswith(".") and (item / SKILL_FILENAME).exists():
+            skill = _read_skill_folder(item)
+            if skill is not None:
+                skills.append(skill)
+    return skills
+
+
+def _read_skill_folder(folder: Path) -> Skill | None:
+    """Read one operator skill folder; its frontmatter is validated when an agent loads the skill."""
+    try:
+        frontmatter, instructions = _parse_operator_skill_markdown(
+            (folder / SKILL_FILENAME).read_text(encoding="utf-8"),
+        )
+        return Skill(
+            name=frontmatter.get("name", folder.name),
+            description=frontmatter.get("description", ""),
+            instructions=instructions,
+            source_path=folder,
+            scripts=_listed_file_names(folder / "scripts"),
+            references=_listed_file_names(folder / "references"),
+            metadata=frontmatter.get("metadata"),
+        )
+    except Exception as exc:
+        logger.warning("Error loading skill", path=str(folder), error=str(exc))
+        return None
+
+
+def _parse_operator_skill_markdown(content: str) -> tuple[Any, str]:
+    """Split an operator ``SKILL.md``; frontmatter that is not valid YAML is read as ``key: value`` lines."""
+    match = _match_skill_frontmatter(content)
+    if match is None:
+        return {}, content
+    try:
+        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+    except Exception as exc:
+        logger.warning("Error parsing skill frontmatter as YAML", error=str(exc))
+        frontmatter = _simple_frontmatter(match.group(1))
+    return frontmatter, match.group(2).strip()
+
+
+def _simple_frontmatter(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in text.strip().split("\n"):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+
+def _listed_file_names(directory: Path) -> tuple[str, ...]:
+    if not directory.exists() or not directory.is_dir():
+        return ()
+    return tuple(sorted(item.name for item in directory.iterdir() if item.is_file() and not item.name.startswith(".")))
 
 
 @dataclass(frozen=True)
@@ -753,13 +1038,10 @@ def _load_workspace_skill(skill_fd: int, source_path: Path, content: str) -> Ski
         name=name,
         description=description,
         instructions=instructions,
-        source_path=str(source_path),
-        scripts=workspace_skill_file_names(skill_fd, "scripts"),
-        references=workspace_skill_file_names(skill_fd, "references"),
+        source_path=source_path,
+        scripts=tuple(workspace_skill_file_names(skill_fd, "scripts")),
+        references=tuple(workspace_skill_file_names(skill_fd, "references")),
         metadata=frontmatter.get("metadata"),
-        license=frontmatter.get("license"),
-        compatibility=frontmatter.get("compatibility"),
-        allowed_tools=frontmatter.get("allowed-tools"),
     )
 
 
@@ -843,14 +1125,11 @@ def _normalize_skill(skill: Skill) -> Skill | None:
     )
     if normalized is None:
         return None
-
-    skill.name, skill.description = normalized
-
-    metadata = parse_skill_metadata(skill.metadata, path=skill.source_path)
+    metadata = parse_skill_metadata(skill.metadata, path=str(skill.source_path))
     if metadata is None:
         return None
-    skill.metadata = metadata
-    return skill
+    name, description = normalized
+    return replace(skill, name=name, description=description, metadata=metadata)
 
 
 def parse_skill_metadata(raw: object, *, path: str) -> dict[str, Any] | None:
