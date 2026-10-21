@@ -112,6 +112,15 @@ def test_builtin_oauth_registry_includes_microsoft_teams() -> None:
     assert providers["microsoft_teams"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
+def test_builtin_oauth_registry_includes_microsoft_sharepoint() -> None:
+    """Microsoft SharePoint shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_sharepoint"].credential_service == "microsoft_sharepoint_oauth"
+    assert providers["microsoft_sharepoint"].tool_config_service == "microsoft_sharepoint"
+    assert providers["microsoft_sharepoint"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
 def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
     """Dashboard-editable provider settings cannot use the reserved OAuth token suffix."""
     with pytest.raises(ValueError, match=r"tool_config_service.*must not end with '_oauth'"):
