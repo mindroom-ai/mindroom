@@ -336,6 +336,7 @@ def test_agent_selection_diagnostics(
 
 
 def _native_dispatch_builder(
+    monkeypatch: pytest.MonkeyPatch,
     phase: str,
     async_body: bool,
     paused: threading.Event,
@@ -343,11 +344,32 @@ def _native_dispatch_builder(
     events: list[str],
     agent: str = "personal",
 ) -> Callable[..., Toolkit]:
+    """Return a toolkit builder that pauses a gateway call in ``phase``: its build, its connect, or its tool hook."""
+
     def pause(at: str) -> None:
         if phase != at:
             return
         paused.set()
         assert release.wait(10), "Dispatch was never released"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def pause_in_hook(ctx: ToolBeforeCallContext) -> None:
+        assert ctx.tool_name in {"account", "async_account"}
+        await asyncio.to_thread(pause, "hook")
+
+    monkeypatch.setattr(
+        gateway_tools,
+        "load_plugins",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                name="pause",
+                entry_config=PluginEntryConfig(path="pause.py"),
+                plugin_order=0,
+                discovered_hooks=(pause_in_hook,),
+                discovered_automations=(),
+            ),
+        ],
+    )
 
     def account() -> str:
         identity = get_tool_execution_identity()
@@ -398,29 +420,8 @@ def test_native_dispatch_rejects_changed_publication(
     release = threading.Event()
     events: list[str] = []
 
-    build = _native_dispatch_builder(phase, async_body, paused, release, events)
+    build = _native_dispatch_builder(monkeypatch, phase, async_body, paused, release, events)
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def pause_in_hook(ctx: ToolBeforeCallContext) -> None:
-        assert ctx.tool_name in {"account", "async_account"}
-        if phase == "hook":
-            paused.set()
-            assert await asyncio.to_thread(release.wait, 10), "Dispatch was never released"
-
-    monkeypatch.setattr(
-        gateway_tools,
-        "load_plugins",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                name="pause",
-                entry_config=PluginEntryConfig(path="pause.py"),
-                plugin_order=0,
-                discovered_hooks=(pause_in_hook,),
-                discovered_automations=(),
-            ),
-        ],
-    )
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
             gateway_client.post,
