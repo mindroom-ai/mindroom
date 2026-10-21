@@ -101,8 +101,9 @@ class BatchPrefetchEmbedder:
 
         Width is checked against the first vector this adapter actually saw,
         not against a declared width, which real providers routinely
-        contradict, so trusting it would reject correct vectors. Consistency still catches the
-        case that matters here, a provider changing width mid-run.
+        contradict, so trusting it would reject correct vectors. Consistency
+        still catches the case that matters here, a provider changing width
+        mid-run.
         """
         if not embedding:
             raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)

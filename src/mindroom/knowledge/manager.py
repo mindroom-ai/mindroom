@@ -1424,10 +1424,10 @@ class KnowledgeManager:
 
         Two orderings are load-bearing. The checkpoint names the collection
         before the collection is created, because a crash must never strand a
-        collection nothing references. And the copy's claims are recorded in one write after the
-        last row lands, never per page, because a file's chunks can span pages
-        and a claim covering only some of them would publish a silently
-        truncated file.
+        collection nothing references. And the copy's claims are recorded in
+        one write after the last row lands, never per page, because a file's
+        chunks can span pages and a claim covering only some of them would
+        publish a silently truncated file.
 
         An interrupted published copy can leave rows the checkpoint does not
         account for. That copy-specific state is recoverable rather than

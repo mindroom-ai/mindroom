@@ -163,9 +163,9 @@ def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> No
         write_source_rows(
             collection,
             relative_path="notes.md",
-            source_metadata=_SOURCE,
-            chunks=_chunks("stale"),
-            vectors=[[1.0, 0.0]],
+            source_metadata={**_SOURCE, "source_mtime_ns": 0, "source_digest": "old"},
+            chunks=_chunks("stale", "stale", "stale"),
+            vectors=[[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
         )
         write_source_rows(
             collection,

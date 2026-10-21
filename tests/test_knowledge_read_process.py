@@ -183,6 +183,21 @@ async def test_search_returns_the_fields_the_search_tool_shows(published_index: 
     assert documents[1].meta_data == {"team": "b", "distances": 2.0, "similarity_score": 2.0}
 
 
+def test_search_returns_one_hit_per_named_chunk(tmp_path: Path) -> None:
+    """A chunk stored twice under one name is one hit, as knowledge search has always reported it."""
+    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
+        client.create_collection("published").add(
+            ids=["first", "copy", "other"],
+            embeddings=[[1.0, 0.0], [1.0, 0.0], [0.9, 0.1]],
+            documents=["same text", "same text", "same text"],
+            metadatas=[{"name": "a.md"}, {"name": "a.md"}, {"name": "b.md"}],
+        )
+
+    hits = ChromaReadProxy("published", str(tmp_path), _Embedder()).search("alpha", limit=3)
+
+    assert [(hit.name, hit.content) for hit in hits] == [("a.md", "same text"), ("b.md", "same text")]
+
+
 @pytest.mark.asyncio
 async def test_merged_search_covers_more_sources_than_reader_slots(published_index: Path) -> None:
     """One query must search every assigned base despite the native child limit."""
