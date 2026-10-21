@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.tools import PreparedTools
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
@@ -70,7 +70,7 @@ class ApprovedCall(Protocol):
         ...
 
 
-async def run_agent(
+def run_agent(
     spec: AgentSpec,
     run_input: Sequence[Message],
     *,
@@ -81,9 +81,10 @@ async def run_agent(
 ) -> AsyncIterator[RunEvent]:
     """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
 
-    Yields the loop's events and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED`` record, after
-    ``persist`` stored it. Cancellation stores a ``CANCELLED`` record and re-raises; any other exception stores an
-    ``ERROR`` record whose content is the exception's text when the model had said nothing, then re-raises.
+    The returned stream yields the loop's events and finally ``RunFinished`` with the ``COMPLETED`` or ``PAUSED``
+    record, after ``persist`` stored it. Cancellation stores a ``CANCELLED`` record and re-raises; closing the stream
+    before it finished stores one before ``aclose`` returns; any other exception stores an ``ERROR`` record whose
+    content is the exception's text when the model had said nothing, then re-raises.
     """
     identity = spec.model.identity
     record = RunRecord(
@@ -98,7 +99,7 @@ async def run_agent(
         agent_name=spec.name,
     )
     messages = [*([] if spec.system_message is None else [spec.system_message]), *run_input]
-    async for event in _drive(
+    return _drive(
         spec,
         record,
         messages,
@@ -107,11 +108,10 @@ async def run_agent(
         hooks=hooks,
         persist=persist,
         template=request_template,
-    ):
-        yield event
+    )
 
 
-async def resume_agent(
+def resume_agent(
     spec: AgentSpec,
     paused: RunRecord,
     messages: list[Message],
@@ -128,18 +128,19 @@ async def resume_agent(
 
     ``messages`` is the resume request the history subsystem built from ``paused``. Every call the record waits for
     must be covered once: a confirmation by one approved call whose name and argument digest match or by a denial,
-    an external execution by its result; anything else raises ``ValueError`` before any call runs, and ``paused``
-    is left unchanged. Approved calls run from their stored arguments and announce themselves as tool events;
-    denied calls answer with their note (``REJECTED_TEXT`` without one); external results answer as they are.
+    an external execution by its result; anything else raises ``ValueError`` here, before any call runs, and
+    ``paused`` is left unchanged. Approved calls run from their stored arguments and announce themselves as tool
+    events; denied calls answer with their note (``REJECTED_TEXT`` without one); external results answer as they
+    are. The returned stream ends as ``run_agent``'s does.
     """
     record = _resumed_record(paused)
-    _decide(record, approved=approved, denied=denied, external_results=external_results)
+    decided = _decide(record, approved=approved, denied=denied, external_results=external_results)
     prepared = prepare_run_tools(spec)
     for call in approved:
         if call.tool_name not in prepared.functions:
             msg = f"Approved tool {call.tool_name!r} is no longer offered to agent {spec.id!r}"
             raise ValueError(msg)
-    async for event in _drive(
+    return _drive(
         spec,
         record,
         messages,
@@ -148,22 +149,25 @@ async def resume_agent(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        entry=partial(_resume_entry, spec, record, messages, prepared, ctx, hooks),
-    ):
-        yield event
+        entry=partial(_resume_entry, spec, messages, prepared, ctx, hooks, decided),
+    )
 
 
 async def _resume_entry(
     spec: AgentSpec,
-    record: RunRecord,
     messages: list[Message],
     prepared: PreparedTools,
     ctx: RunContext,
     hooks: LoopHooks,
+    decided: Sequence[RunRequirement],
 ) -> AsyncIterator[RunEvent]:
-    """Answer every decided requirement in order, append the answers, and run the resume-entry hooks."""
+    """Answer the requirements this resume decided, in order, append the answers, and run the resume-entry hooks.
+
+    A run that paused more than once also carries the requirements earlier resumes answered; those keep their
+    answers and never run again.
+    """
     results: list[Message] = []
-    for requirement in record.requirements or ():
+    for requirement in decided:
         execution = requirement.tool_execution
         if requirement.confirmation is True:
             assert execution.tool_name is not None
@@ -171,10 +175,9 @@ async def _resume_entry(
                 yield event
         elif requirement.confirmation is False:
             execution.tool_call_error = True
-            results.append(_rejection_message(execution))
-        if requirement.confirmation is not None:
             execution.requires_confirmation = False
-        if requirement.external_execution_result is not None and execution.external_execution_required:
+            results.append(_rejection_message(execution))
+        if requirement.external_execution_result is not None:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
     await append_tool_results(spec.model, messages, results, ())
@@ -249,8 +252,11 @@ def _decide(
     approved: Sequence[ApprovedCall],
     denied: Mapping[str, str | None],
     external_results: Mapping[str, str],
-) -> None:
-    """Apply the decisions to the record's requirements, refusing anything but exact coverage of its paused calls."""
+) -> list[RunRequirement]:
+    """Apply the decisions to the calls the record waits for and return their requirements, in record order.
+
+    Anything but exact coverage of the waiting calls is refused before any decision is recorded.
+    """
     requirements = {
         requirement.tool_execution.tool_call_id: requirement
         for requirement in record.requirements or ()
@@ -282,6 +288,8 @@ def _decide(
         requirements[call_id].reject(note or REJECTED_TEXT)
     for call_id, result in external_results.items():
         requirements[call_id].set_external_execution_result(result)
+    waited_for = confirmations | externals
+    return [requirement for call_id, requirement in requirements.items() if call_id in waited_for]
 
 
 async def _drive(
@@ -326,7 +334,9 @@ async def _drive(
             record.content = paused_content(record.tools or ())
         if persist is not None:
             await persist(record)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, GeneratorExit):
+        # GeneratorExit is the consumer closing the run while it handles an event, where a stop lands when a reply
+        # is being sent; the usage the loop settled must reach the stored run before the caller writes its own record.
         await _store_interrupted(record, messages, started, persist, error=None)
         raise
     except Exception as error:

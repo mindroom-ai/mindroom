@@ -25,6 +25,8 @@ from tests.agent_loop.helpers import add, boom, context, echo, external, gated, 
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.llm.messages import Message
 
 # --- prepare_run_tools -----------------------------------------------------------------------------------------------
@@ -222,6 +224,65 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
         assert execution.metrics.duration > 0
         assert execution.metrics.end_time is not None
         assert execution.metrics.start_time == pytest.approx(execution.metrics.end_time - execution.metrics.duration)
+
+
+def _linger(release: asyncio.Event, finished: list[str]) -> Callable[[], Awaitable[str]]:
+    """Return a tool that waits for ``release`` and records when it unwinds, released or cancelled."""
+
+    async def linger() -> str:
+        """Wait to be released."""
+        try:
+            await release.wait()
+            return "lingered"
+        finally:
+            finished.append("linger")
+
+    return linger
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_on_its_own_lets_its_siblings_finish_before_the_batch_raises() -> None:
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def give_up() -> str:
+        """Cancel this call."""
+        raise asyncio.CancelledError
+
+    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished), give_up))).functions
+    batch = plan_tool_batch(
+        [tool_call("linger", "c1"), tool_call("give_up", "c2")],
+        functions,
+        [],
+        calls_so_far=0,
+        tool_call_limit=None,
+    )
+    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not dispatch.done()  # give_up is gone, but linger still runs: the batch waits for it.
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    assert finished == ["linger"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_dispatch_waits_for_every_call_to_unwind() -> None:
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    functions = prepare_run_tools(spec(ScriptedModel([]), toolkit(_linger(release, finished)))).functions
+    batch = plan_tool_batch([tool_call("linger", "c1")], functions, [], calls_so_far=0, tool_call_limit=None)
+    dispatch = asyncio.create_task(dispatch_tool_calls(batch.planned, run=context()))
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    assert finished == ["linger"]
 
 
 @pytest.mark.asyncio

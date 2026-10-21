@@ -203,11 +203,14 @@ async def dispatch_tool_calls(
     """Run the batch's unpaused calls concurrently and return their result messages in call order.
 
     Each call's execution is filled in place with its result, error flag, stop flag, and timing. A tool's exception
-    is its error text; only cancellation propagates, and then every call of the batch is cancelled.
+    is its error text; only cancellation propagates, and no call of the batch is still running when it does: a
+    cancelled dispatcher cancels every call and waits for it, and a call cancelled on its own lets its siblings
+    finish first, so nothing a call does lands after the run stores its terminal record.
     """
     runnable = [call for call in calls if not call.execution.is_paused]
-    outcomes = await asyncio.gather(*(_timed(call, run, middleware) for call in runnable))
-    return [_complete_call(call, outcome, elapsed) for call, (outcome, elapsed) in zip(runnable, outcomes, strict=True)]
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(_timed(call, run, middleware)) for call in runnable]
+    return [_complete_call(call, *task.result()) for call, task in zip(runnable, tasks, strict=True)]
 
 
 async def _timed(call: PlannedCall, run: RunContext, middleware: Sequence[ToolMiddleware]) -> tuple[ToolOutcome, float]:

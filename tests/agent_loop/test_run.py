@@ -248,6 +248,28 @@ async def test_cancellation_mid_stream_stores_a_cancelled_record_once_before_the
 
 
 @pytest.mark.asyncio
+async def test_closing_the_run_while_handling_an_event_stores_a_cancelled_record_before_aclose_returns() -> None:
+    model = ScriptedModel([[UsageReported(usage(50, 2), final=False), TextDelta("Par"), Await(asyncio.Event().wait)]])
+    store = _Store()
+
+    stream = run_agent(spec(model), _prompt(), ctx=context(), persist=store)
+    async for _ in stream:
+        break  # A stop that lands while the consumer handles an event closes the run instead of cancelling it.
+    assert store.saved == []
+    await stream.aclose()
+
+    [stored] = store.saved
+    assert stored["status"] == "CANCELLED"
+    assert "content" not in stored
+    assert stored["messages"][-1]["metrics"] == {"input_tokens": 50, "output_tokens": 2, "total_tokens": 52}
+    assert {key: stored["metrics"][key] for key in ("input_tokens", "output_tokens", "total_tokens")} == {
+        "input_tokens": 50,
+        "output_tokens": 2,
+        "total_tokens": 52,
+    }
+
+
+@pytest.mark.asyncio
 async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_record() -> None:
     model = ScriptedModel([calls(tool_call("add", "c1", a=6, b=7), metrics=usage(1, 1))])
     saved: list[dict[str, Any]] = []
@@ -526,6 +548,60 @@ async def test_an_external_result_resumes_into_agno_s_delegation_approved_row() 
 
     assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
+
+
+@pytest.mark.parametrize("second_decision", ["approve", "deny"])
+@pytest.mark.asyncio
+async def test_a_second_resume_answers_only_the_calls_it_decided(second_decision: str) -> None:
+    executed: list[tuple[int, int]] = []
+
+    def add(a: int, b: int) -> str:
+        """Add two integers.
+
+        Args:
+            a: First number.
+            b: Second number.
+
+        """
+        executed.append((a, b))
+        return str(a + b)
+
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "c1", a=1, b=2), metrics=usage(1, 1)),
+            calls(tool_call("add", "c2", a=3, b=4), metrics=usage(1, 1)),
+            answer("done", usage(1, 1)),
+        ],
+    )
+    agent = spec(model, gated(add))
+    _, first = await collect(run_agent(agent, [Message(role="user", content="go")], ctx=context()))
+    _, second, _ = await _resume(agent, first, approved=[_approval("c1", "add", {"a": 1, "b": 2})])
+    assert second.status is RunStatus.paused
+    assert [(r.tool_execution.tool_call_id, r.confirmation) for r in second.requirements or ()] == [
+        ("c1", True),
+        ("c2", None),
+    ]
+
+    if second_decision == "approve":
+        events, third, _ = await _resume(agent, second, approved=[_approval("c2", "add", {"a": 3, "b": 4})])
+    else:
+        events, third, _ = await _resume(agent, second, denied={"c2": "no"})
+
+    # The call the first resume approved ran once; this resume answered only c2, so the model sees each result once.
+    assert executed == [(1, 2), (3, 4)] if second_decision == "approve" else [(1, 2)]
+    assert third.status is RunStatus.completed
+    tool_messages = [message for message in model.requests[-1].messages if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == ["c1", "c2"]
+    assert tool_messages[0].content == "3"
+    assert tool_messages[1].content == ("7" if second_decision == "approve" else "no")
+    assert [event.tool.tool_call_id for event in events if isinstance(event, ToolStarted | ToolCompleted)] == (
+        ["c2", "c2"] if second_decision == "approve" else []
+    )
+    assert [(r.tool_execution.tool_call_id, r.confirmation) for r in third.requirements or ()] == [
+        ("c1", True),
+        ("c2", second_decision == "approve"),
+    ]
+    assert all(not tool.is_paused for tool in third.tools or ())
 
 
 # --- resume guards ---------------------------------------------------------------------------------------------------
