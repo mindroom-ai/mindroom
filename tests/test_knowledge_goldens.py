@@ -27,8 +27,6 @@ if TYPE_CHECKING:
 
 GOLDEN_DIR = Path(__file__).parent / "fixtures" / "agno_parity" / "knowledge"
 EMBEDDER_GOLDENS: dict[str, Any] = json.loads((GOLDEN_DIR / "embedders.json").read_text(encoding="utf-8"))
-#: The width Agno's Ollama embedder accepted, so these canned replies pass any width check.
-_OLLAMA_REPLY_WIDTH = 4096
 
 
 class _Recorder:
@@ -44,7 +42,7 @@ class _Recorder:
 
     def ollama(self, request: httpx.Request) -> httpx.Response:
         self.requests.append({"method": request.method, "url": str(request.url), "body": json.loads(request.content)})
-        return httpx.Response(200, json={"model": "parity", "embeddings": [[0.5] * _OLLAMA_REPLY_WIDTH]})
+        return httpx.Response(200, json={"model": "parity", "embeddings": [[0.5, 0.25]]})
 
 
 class _RecordingModel:

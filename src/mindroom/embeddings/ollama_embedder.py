@@ -19,16 +19,16 @@ if TYPE_CHECKING:
 
     from mindroom.embeddings.base import EmbeddingPurpose
 
-#: The ``dimensions`` every request has asked Ollama for; it only shortens vectors wider than this.
+#: The ``dimensions`` every request has asked Ollama for, so vectors in existing indexes keep their width.
+#: Ollama only shortens vectors wider than this; narrower models answer with their own width.
 _REQUESTED_DIMENSIONS = 4096
 
 
 def _vector(response: EmbedResponse) -> list[float]:
-    """Return the single vector of a one-text response."""
-    vector = [float(value) for value in response.embeddings[0]] if response.embeddings else []
-    if len(vector) != _REQUESTED_DIMENSIONS:
+    """Return the single vector of a one-text response, whatever width the model produces."""
+    if not response.embeddings or not response.embeddings[0]:
         raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
-    return vector
+    return [float(value) for value in response.embeddings[0]]
 
 
 @dataclass
