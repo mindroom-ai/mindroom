@@ -2553,7 +2553,6 @@ class TestGenerateSummary:
                 for model_id in ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
             ),
             pytest.param({"provider": "google", "id": "gemini-3.1-pro-preview"}, True, id="google-gemini-3.1-pro"),
-            pytest.param({"provider": "ollama", "id": "qwen3.8:27b"}, True, id="ollama"),
         ],
     )
     async def test_summary_requests_send_only_the_summary_temperature(
@@ -2581,6 +2580,38 @@ class TestGenerateSummary:
         [body] = wire.bodies
         expected = summary_temperature if sends_temperature else None
         assert _sent_temperature(model_config["provider"], body) == expected
+
+    @pytest.mark.parametrize("summary_temperature", [0.2, None], ids=["configured", "null"])
+    @pytest.mark.parametrize(
+        "options",
+        [None, {"temperature": 0.9, "num_ctx": 8192}],
+        ids=["no-options", "authored-options"],
+    )
+    async def test_ollama_summaries_send_the_authored_options_unchanged(
+        self,
+        tmp_path: Path,
+        summary_temperature: float | None,
+        options: dict[str, Any] | None,
+    ) -> None:
+        """Ollama summaries never send the summary temperature: Agno's Ollama model had no temperature field."""
+        wire = _SummaryWire()
+        config = _mock_config(summary_temperature=summary_temperature)
+        model_config = _wire_model_config({"provider": "ollama", "id": "qwen3.8:27b"}, wire)
+        if options is not None:
+            extra_kwargs = {**(model_config.extra_kwargs or {}), "options": options}
+            model_config = model_config.model_copy(update={"extra_kwargs": extra_kwargs})
+        config.models["summary"] = model_config
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={},
+        )
+
+        with pytest.raises(ProviderError):
+            await _generate_summary(_make_thread_history(3), config, runtime_paths, model_name="summary")
+
+        [body] = wire.bodies
+        assert body.get("options") == options
 
     async def test_prompt_good_examples_are_stable_and_within_hard_limit(self) -> None:
         """Prompt GOOD examples should be short and avoid transient-status wording."""
@@ -2656,8 +2687,6 @@ def _wire_model_config(fields: dict[str, Any], wire: _SummaryWire) -> ModelConfi
 def _sent_temperature(provider: str, body: dict[str, Any]) -> float | None:
     if provider == "google":
         return body.get("generationConfig", {}).get("temperature")
-    if provider == "ollama":
-        return body.get("options", {}).get("temperature")
     return body.get("temperature")
 
 

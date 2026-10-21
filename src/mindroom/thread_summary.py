@@ -130,8 +130,8 @@ class _ThreadEnrichment(_ThreadSummary):
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
     """Return the summary model's provider without the temperature its config authors.
 
-    Summaries send ``defaults.thread_summary_temperature`` instead, and no temperature at all when it is null or
-    the route keeps its provider's sampling default.
+    Summaries send ``_summary_temperature`` instead, and no temperature at all when that is None or the route keeps
+    its provider's sampling default.
     """
     model_config = config.models.get(model_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
@@ -139,6 +139,16 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
         models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
         config = config.model_copy(update={"models": models})
     return build_model_provider(config, runtime_paths, model_name)
+
+
+def _summary_temperature(provider: ModelProvider, config: Config) -> float | None:
+    """Return the temperature a summary request overrides, or None to keep the model's authored sampling.
+
+    Agno's Ollama model had no temperature field, so Ollama summaries sent the authored ``options`` unchanged.
+    """
+    if provider.identity.provider == "Ollama":
+        return None
+    return config.defaults.thread_summary_temperature
 
 
 def _normalize_thread_summary_text(raw_text: str) -> str:
@@ -608,7 +618,7 @@ async def _generate_summary(
         prompt,
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
-        overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
+        overrides=RequestOverrides(temperature=_summary_temperature(provider, config)),
     )
     await record_system_usage(response.record, runtime_paths=runtime_paths, kind="thread_summary")
     content = response.content
