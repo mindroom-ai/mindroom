@@ -909,7 +909,7 @@ async def test_missing_key_message_names_the_calling_agents_credential_managers(
 
 _NO_PERSONAL_PAGE_KEY = (
     "No github key: each user sets this agent's keys on the Connections page, "
-    "which this deployment does not serve. "
+    "which nobody can sign in to here. "
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _NO_CHAT_SIGN_IN = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}

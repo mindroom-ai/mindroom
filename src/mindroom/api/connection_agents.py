@@ -108,7 +108,7 @@ def resolve_connection_user(
     if config is None:
         raise HTTPException(503, "Connections are unavailable", headers=CONNECTIONS_HEADERS)
     if agent_name and (agent_name not in config.agents or config.agents[agent_name].private is None):
-        raise HTTPException(403, "Connections require a configured private agent", headers=CONNECTIONS_HEADERS)
+        raise HTTPException(403, "MINDROOM_CONNECTIONS_AGENT must name a private agent", headers=CONNECTIONS_HEADERS)
     if try_parse_historical_matrix_user_id(authenticated_user_id) is None:
         raise HTTPException(
             403,

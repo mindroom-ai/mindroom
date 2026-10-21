@@ -488,7 +488,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   It is `false` when the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null`.
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
-- For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that this deployment serves no page for the agent's keys, that an administrator can enable Connections sign-in or make the agent shared, and that an account can still be connected at the `connect_url` in the broker's refusal.
+- For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, and that an account can still be connected at the `connect_url` in the broker's refusal.
 - The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
 

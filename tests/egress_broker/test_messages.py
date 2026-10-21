@@ -185,7 +185,7 @@ def test_path_not_allowed_by_the_operator_names_an_administrator_whatever_the_sc
 
 # Where the personal page is not served, a personal scope's keys and services cannot be set anywhere.
 _PAGE_NOT_SERVED = (
-    "on the Connections page, which this deployment does not serve. "
+    "on the Connections page, which nobody can sign in to here. "
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _PATH = {"host": "api.github.com", "path": "/repos/o/b?page=2", "service": "github-limited"}

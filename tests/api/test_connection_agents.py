@@ -202,6 +202,7 @@ def test_personal_scope_rejects_nonprivate_agent(personal_snapshot: ApiSnapshot)
     with pytest.raises(HTTPException) as error:
         connection_agents.resolve_connection_user(personal_snapshot, "@alice:example.org")
     assert error.value.status_code == 403
+    assert error.value.detail == "MINDROOM_CONNECTIONS_AGENT must name a private agent"
 
 
 def test_connection_user_fails_closed_without_configuration(personal_snapshot: ApiSnapshot) -> None:
