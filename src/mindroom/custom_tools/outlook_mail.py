@@ -586,7 +586,8 @@ class OutlookMailTools(Toolkit):
             path = f"/me/messages/{path_segment(message_id, 'message_id')}/{action}"
             draft = session.json("POST", path, json={"comment": text_to_html(body)})
             draft_path = f"/me/messages/{path_segment(draft.get('id'), 'draft id')}"
-            actual = [*(draft.get("toRecipients") or []), *(draft.get("ccRecipients") or [])]
+            fields = ("toRecipients", "ccRecipients", "bccRecipients")
+            actual = [recipient for field in fields for recipient in draft.get(field) or []]
             if not _address_set(actual) <= _address_set(_recipients(recipients, "recipients")):
                 session.request("DELETE", draft_path)
                 raise MicrosoftGraphError(

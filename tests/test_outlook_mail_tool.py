@@ -88,7 +88,7 @@ def _attachment(kind: str = "fileAttachment", **overrides: object) -> dict[str, 
 
 def _reply_draft(**overrides: object) -> httpx.Response:
     """Return Graph's answer to createReply: the new reply draft, addressed like the message unless overridden."""
-    return httpx.Response(201, json=_message(id=DRAFT_ID, isDraft=True, bccRecipients=[], **overrides))
+    return httpx.Response(201, json=_message(**{"id": DRAFT_ID, "isDraft": True, "bccRecipients": [], **overrides}))
 
 
 def _selected(resource: dict[str, object], request: httpx.Request) -> dict[str, object]:
@@ -745,10 +745,16 @@ def test_reply_sends_the_body_as_an_escaped_comment(
     assert (result["sent"], result["recipients"]) == (True, ["Sam Example <sam@contoso.com>", "team@contoso.com"])
 
 
-def test_reply_to_a_recipient_not_named_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("field", ["toRecipients", "bccRecipients"])
+def test_reply_to_a_recipient_not_named_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
     mail = _Graph()
-    # Graph addresses the reply to the original's reply_to, an outside address the caller did not name.
-    mail.write = _reply_draft(toRecipients=[{"emailAddress": {"address": "desk@outside.example"}}], ccRecipients=[])
+    # The draft reaches an outside address the caller did not name, such as the original's reply_to.
+    outside = [{"emailAddress": {"address": "desk@outside.example"}}]
+    mail.write = _reply_draft(**{"toRecipients": [], "ccRecipients": [], field: outside})
     mail.override = lambda request: httpx.Response(204) if request.method == "DELETE" else None
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
