@@ -354,7 +354,7 @@ describe("egress broker panel", () => {
     ).toBeTruthy();
   });
 
-  it("says that per-user keys need trusted upstream auth where their page is not served", async () => {
+  it("says nobody can sign in to the Agent Keys page while Chat sign-in and trusted upstream JWT are both off", async () => {
     keyAgents = { ...keyAgents, personal_page_served: false };
     render(<EgressBroker />);
     await screen.findByText("GitHub");

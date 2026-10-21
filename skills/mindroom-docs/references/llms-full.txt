@@ -15217,7 +15217,8 @@ MindRoom answers 401 when that header names a different account than the request
 Requests without the header, such as OAuth popup navigations, still work.
 At sign-in, MindRoom also records in the signed cookie whether the session may open the dashboard.
 It may only when the user is in `administrators` and the homeserver's `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true`, which MindRoom's Tuwunel fork does while it binds tokens.
-Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here, except between deployments that all leave `MINDROOM_PUBLIC_URL` unset and so share the default `http://localhost:<MINDROOM_PORT>` audience: a backend a user opens at that origin can replay the token to any such deployment it reaches; without binding they could, and the dashboard is full control.
+Under binding, a token that verified with this deployment's audience was requested for this deployment, so another deployment's operator cannot replay it here; without binding they could, and the dashboard is full control.
+The exception is deployments that all leave `MINDROOM_PUBLIC_URL` unset and so share the default `http://localhost:<MINDROOM_PORT>` audience: a backend a user opens at that origin can replay the token to any such deployment it reaches.
 MindRoom verifies the token a second time after reading `/versions`, because `/versions` shows only the setting after the first verification: if binding came on in between, the second verification refuses the unbound token, and if it went off, the first one already proved the token bound to this deployment.
 The record is fixed at sign-in, because a session started before binding was never proven bound, while `administrators` is read again on every dashboard request.
 Such a session authenticates dashboard routes as the administrator's Matrix ID, except in hosted platform mode and on OAuth callbacks, which keep finishing each flow as the identity that started it.
@@ -18139,7 +18140,7 @@ Workers do not inherit the runtime's `.env` or provider keys; for per-workspace 
 ### Brokered Egress
 
 Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
-The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section lists the [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) and gateway settings that users without dashboard access need.
+The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section explains opening the page from MindRoom Chat and lists the [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) and gateway settings for signing users in through a gateway instead.
 [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
 
 ### Knowledge Source Visibility

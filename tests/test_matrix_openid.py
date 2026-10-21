@@ -218,7 +218,7 @@ async def test_binding_probe_false_without_an_audience_to_send(
     versions_server: _VersionsServer,
     env: dict[str, str],
 ) -> None:
-    """A binding homeserver accepts any token checked without an audience, so no audience counts as no binding."""
+    """Without an audience a binding homeserver still accepts unbound tokens, so no audience counts as no binding."""
     paths = await versions_server(
         web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}}),
     )

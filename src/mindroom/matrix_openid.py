@@ -95,8 +95,9 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
 
     While it does, a token that `verify_matrix_openid` accepts was requested for this deployment's origin. Anything
     other than a small, direct JSON answer listing the feature as `true` counts as no binding, and so does having no
-    audience to send, as with `MINDROOM_PORT=tcp://<ip>:8765` from Kubernetes service links: a binding homeserver
-    accepts any token checked without one.
+    audience to send, as with `MINDROOM_PORT=tcp://<ip>:8765` from Kubernetes service links: without an audience, a
+    binding homeserver still accepts unbound tokens, which clients other than current MindRoom Chat request, so a
+    verification then proves nothing about this deployment.
     """
     if _openid_audience(paths) is None:
         return False
