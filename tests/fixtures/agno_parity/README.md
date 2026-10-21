@@ -206,7 +206,7 @@ Decoding errors embed the message of Python's `ast.literal_eval`, and probes tha
 Every scenario runs MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider is replaced, by the synthetic provider answering from a script.
 Regenerate with `.venv/bin/python -m tests.agno_parity.capture_storage`, which re-runs itself with `PYTHONHASHSEED=0`; never edit these files by hand.
-`tests/agno_parity/test_storage_goldens_current.py` proves the current code reproduces every file.
+`tests/session_storage/test_store_goldens.py` proves the owned store reads and writes every `storage/` file as Agno did.
 
 ### Scenarios
 

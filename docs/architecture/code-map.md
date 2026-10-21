@@ -244,7 +244,13 @@ Matrix sync callback
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Agent session SQLite storage helpers |
+| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the one-time migrations first |
+| `session_storage/store.py` | The owned conversation store: one SQLite database of sessions, their run log, summary rows, and usage ledger, each operation in one transaction on its own connection |
+| `session_storage/schema.py` | Table names and the layout of a conversation database, column for column as Agno 3 created it |
+| `session_storage/codec.py` | Run rows to run records and back, with the JSON keys stored runs carry |
+| `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
+| `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
+| `session_storage/legacy_agno2_runs.py` | Run data older Agno releases stored: Agno 2 run blobs, JSON columns encoded twice, and rows without a position |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks, the event ids each row folds, and edit and redaction cuts |
 | `history/summary_rows_schema.py` | Summary-row table layout and the shared SQL for which runs a session load returns |
 | `history/legacy_compaction_state.py` | One-time conversion, when a conversation database opens, of earlier compaction state, the compaction archive, and unpositioned run rows into the log |
