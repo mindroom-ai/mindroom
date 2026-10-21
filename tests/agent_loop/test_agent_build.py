@@ -6,13 +6,15 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from agno.tools import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
 from mindroom.agent_loop.tools import prepare_run_tools
-from mindroom.agents import create_agent
+from mindroom.agents import _tool_owners, create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.provider import ModelRequest
 from mindroom.session_storage.store import ConversationStore
@@ -223,3 +225,44 @@ def test_deferred_toolkits_fill_the_request_template_and_the_surface(tmp_path: P
         assert build.request_template.deferred_tool_names == frozenset()
         assert [deferred.name for deferred in build.surface.deferred] == ["wikipedia"]
         assert build.surface.mode == "minimal"
+
+
+def test_tool_owners_keep_the_first_function_of_a_name_even_without_an_authored_toolkit() -> None:
+    """The run offers the first function of a repeated name, so it owns the name; a later one never fills it in."""
+
+    def add(a: int, b: int) -> str:
+        """Add two integers.
+
+        Args:
+            a: First number.
+            b: Second number.
+
+        """
+        return str(a + b)
+
+    generated = Toolkit(name="generated", tools=[add])
+    authored = Toolkit(name="calculator", tools=[add])
+    authored.functions["add"].owning_toolkit = "calculator"
+
+    assert _tool_owners([generated, authored]) == {"add": None}
+    assert _tool_owners([authored, generated]) == {"add": "calculator"}
+
+
+def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_path: Path) -> None:
+    """An authored subagent persona narrows the child to its tool list and replaces the agent's prompt with its own."""
+    config, runtime_paths = _config(tmp_path)
+    persona = SubagentPersona(
+        source_kind="inline",
+        source_name="",
+        system_prompt="You are the reviewer.",
+        tools=("calculator",),
+    )
+
+    build = _build(config, runtime_paths, knowledge=_knowledge(), persona=persona)
+
+    assert set(_offered(build)) == _CALCULATOR_FUNCTIONS
+    assert build.tool_owners == dict.fromkeys(_CALCULATOR_FUNCTIONS, "calculator")
+    assert build.prompt.description == "You are the reviewer."
+    assert "Answer questions about the team handbook." not in (build.prompt.role or "")
+    assert (build.prompt.knowledge_block, build.prompt.skills_block) == (None, None)
+    assert build.surface.knowledge_sources == ()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import AsyncExitStack, nullcontext
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -12,24 +12,9 @@ from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
-from agno.db.base import BaseDb
-from agno.models.response import ToolExecution
-from agno.run.agent import RunErrorEvent, RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.base import RunStatus
-from agno.run.requirement import RunRequirement
-from agno.run.team import RunErrorEvent as TeamRunErrorEvent
-from agno.run.team import RunPausedEvent as TeamRunPausedEvent
-from agno.run.team import TeamRunOutput
-from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
-from mindroom.approval.tool_owners import (
-    approval_denial_context,
-    approved_executions_context,
-    required_approval_tool_names,
-    toolkit_owners_for_agents,
-    validate_approval_tool_owners,
-)
+from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import (
     delegation_outcome,
     delegation_result,
@@ -65,11 +50,14 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
-from mindroom.error_handling import run_error_event_text
-from mindroom.history.native import restore_native_history
+from mindroom.history.types import HistoryScope
+from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
@@ -104,17 +92,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from agno.agent import Agent
-    from agno.session.agent import AgentSession
-    from agno.team import Team
-
     from mindroom.agent_modes import AgentMode
+    from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.records import DelegationTerminalStatus
     from mindroom.delegation.state import ChildResponseRunner, DelegationHookState, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.events import RunEvent
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -142,7 +131,7 @@ _RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child"
 class _ChildOutcome:
     """Retained outcome and executable ownership observed by its actual envelope."""
 
-    response: RunOutput
+    response: RunRecord
     toolkit_owners: dict[tuple[str, str], str | None]
 
 
@@ -158,42 +147,38 @@ class _DelegationTarget:
     model: str | None = None
 
 
-def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequirement]:
+def _external_requirements(response: AnyRunRecord) -> list[RunRequirement]:
     return [
         requirement
         for requirement in response.requirements or ()
         if requirement.needs_external_execution
-        and requirement.tool_execution is not None
         and requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent"}
     ]
 
 
-def has_delegation_state(response: RunOutput | TeamRunOutput) -> bool:
+def has_delegation_state(response: AnyRunRecord) -> bool:
     """Return whether the native delegation driver owns this run's pause."""
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
 
 
 async def persist_delegation_state(
-    entity: Agent | Team,
-    response: RunOutput | TeamRunOutput,
+    store: ConversationStore | None,
+    session: ConversationSession,
+    response: AnyRunRecord,
     state: DelegationState,
 ) -> None:
-    """Save native child ownership on its real parent run, including hidden calls."""
+    """Save native child ownership on its real parent run, including hidden calls.
+
+    The run's row is rewritten in place without touching the usage ledger: the loop recorded the run's usage when
+    it stored the pause, and records the continuation's when that ends.
+    """
     response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
-    if not isinstance(entity.db, BaseDb) or not response.session_id:
+    if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
-    # Agno scrubs only the copy it saves itself, so this write applies the same storage scrub, dropping replayed history.
-    stored = deepcopy(response)
-    if isinstance(stored, TeamRunOutput):
-        cast("Team", entity).scrub_run_output_for_storage(stored)
-    else:
-        cast("Agent", entity).scrub_run_output_for_storage(stored)
-    await asyncio.to_thread(
-        entity.db.upsert_run,
-        run=stored,
-        session_id=response.session_id,
-        user_id=response.user_id,
+    await run_session_storage_operation(
+        lambda: store,
+        lambda opened: opened.save_run(session, response, record_usage=False),
     )
 
 
@@ -230,7 +215,6 @@ async def _run_child(
                 ),
             )
             observation.response = response.response
-            observation.terminal = None
             return response
     finally:
         _RUNNING_CHILD_ID.reset(token)
@@ -252,7 +236,7 @@ async def _execute_child(
     # These imports cross the creation/envelope cycle only during execution.
     from mindroom.agents import create_agent  # noqa: PLC0415
     from mindroom.knowledge.utils import resolve_agent_knowledge_access_async  # noqa: PLC0415
-    from mindroom.response_turn import apply_local_approval_decisions  # noqa: PLC0415
+    from mindroom.response_turn import local_approval_requirements  # noqa: PLC0415
 
     identity = child_execution_identity(child)
     context = get_tool_runtime_context()
@@ -310,7 +294,7 @@ async def _execute_child(
         runtime_paths,
         execution_identity=identity,
     )
-    agent = await asyncio.to_thread(
+    build = await asyncio.to_thread(
         create_agent,
         child.child_agent_name,
         config,
@@ -327,24 +311,26 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
     )
-    session = await agent.aget_session(session_id=child.session_id, user_id=identity.requester_id)
-    restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession | None", session))
-    requirements = apply_local_approval_decisions(
-        persisted,
-        decisions=decisions,
-        denial_reasons=denial_reasons or {},
+    session = await asyncio.to_thread(storage.load_session, child.session_id, "agent")
+    if session is None:
+        msg = "Delegated run's session is no longer available"
+        raise RuntimeError(msg)
+    toolkit_owners = {(child.child_agent_name, name): owner for name, owner in build.tool_owners.items()}
+    validate_approval_tool_owners(toolkit_owners, approved_calls, local_approval_requirements(persisted))
+    runner = ResumeRunner(
+        build=build,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=child.child_agent_name,
+        model_name=child.model_name,
+        store=storage,
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
+        user_id=identity.requester_id,
     )
-    validate_approval_tool_owners([agent], approved_calls, requirements)
-    with (
-        tool_runtime_context(child_context),
-        approved_executions_context(agent, {child.run_id: approved_calls}),
-        approval_denial_context(
-            agent,
-            {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
-        ),
-    ):
+    with tool_runtime_context(child_context):
         response = await _continue_child(
-            agent,
+            runner,
             run_child,
             child,
             persisted,
@@ -356,7 +342,6 @@ async def _execute_child(
             denial_reasons=denial_reasons,
             approval_calls=approval_calls,
         )
-    toolkit_owners = toolkit_owners_for_agents([agent])
 
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(response.tools, original_prompt=child.task, continuation_count=0)
@@ -413,10 +398,10 @@ async def _start_child_envelope(
 
 
 async def _continue_child(
-    agent: Agent,
+    runner: ResumeRunner,
     run_child: ChildResponseRunner,
     child: DelegationChild,
-    persisted: RunOutput,
+    persisted: RunRecord,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -425,61 +410,50 @@ async def _continue_child(
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
-) -> RunOutput:
+) -> RunRecord:
     """Apply child decisions and drive any further nested delegations."""
-    from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
+
+    async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
+        # The child's events are this context's own; the audit and progress observers read them here.
+        events = runner.events(paused, resume)
+        record: RunRecord | None = None
+        async with closing_async_stream(events):
+            async for event in events:
+                await observe_child_event(event)
+                if isinstance(event, RunFinished):
+                    assert isinstance(event.record, RunRecord)
+                    record = event.record
+        if record is None:
+            msg = "Delegated continuation did not yield its retained outcome"
+            raise RuntimeError(msg)
+        return record
 
     if not has_delegation_state(persisted):
         if decisions is None:
             return persisted
-        requirements = apply_exact_approval_decisions(
-            deepcopy(persisted.requirements or []),
-            decisions=decisions,
-            denial_reasons=denial_reasons or {},
+        persisted = await continue_run(
+            persisted,
+            approval_decisions(approval_calls, decisions, denial_reasons or {}),
+            None,
         )
-        events = agent.acontinue_run(
-            run_id=persisted.run_id,
-            requirements=requirements,
-            session_id=child.session_id,
-            user_id=identity.requester_id,
-            metadata=deepcopy(persisted.metadata),
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        )
-        continued = None
-        error_event: RunErrorEvent | None = None
-        async for event in events:
-            await observe_child_event(event)
-            if isinstance(event, RunOutput):
-                continued = event
-            elif isinstance(event, RunErrorEvent):
-                error_event = event
-        if error_event is not None and (continued is None or continued.status == RunStatus.error):
-            raise RuntimeError(run_error_event_text(error_event))
-        if continued is None:
-            msg = "Delegated continuation did not yield its retained outcome"
-            raise RuntimeError(msg)
-        persisted = continued
         decisions = None
         denial_reasons = None
         approval_calls = ()
-    return cast(
-        "RunOutput",
-        await drive_delegations(
-            agent,
-            persisted,
-            agent_name=child.child_agent_name,
-            run_child=run_child,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=identity,
-            delegation_depth=child.depth,
-            refresh_scheduler=refresh_scheduler,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-            approval_calls=approval_calls,
-        ),
+    return await drive_delegations(
+        persisted,
+        store=runner.store,
+        session=runner.session,
+        continue_parent=continue_run,
+        agent_name=child.child_agent_name,
+        run_child=run_child,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        delegation_depth=child.depth,
+        refresh_scheduler=refresh_scheduler,
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+        approval_calls=approval_calls,
     )
 
 
@@ -535,10 +509,9 @@ async def _resolved_child_tool(
 
 
 async def _complete_approved_child_tools(
-    response: RunOutput | TeamRunOutput,
     pending_tools: list[dict[str, object]],
     tool_sources: Mapping[str, DelegationPendingTool],
-    on_event: Callable[[object], None],
+    on_event: ResumeEvents,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -553,13 +526,12 @@ async def _complete_approved_child_tools(
             runtime_paths=runtime_paths,
         )
         if completed_tool is not None:
-            on_event(_child_completion_event(response, completed_tool))
+            on_event(ToolCompleted(completed_tool))
 
 
 def _settle_pending_child_tools(
-    response: RunOutput | TeamRunOutput,
     pending_tools: list[dict[str, object]],
-    on_event: Callable[[object], None],
+    on_event: ResumeEvents,
     *,
     reason: str,
 ) -> None:
@@ -567,20 +539,10 @@ def _settle_pending_child_tools(
     for pending_tool in pending_tools:
         cancelled_tool = ToolExecution.from_dict(pending_tool)
         cancelled_tool.requires_confirmation = False
-        cancelled_tool.requires_user_input = False
         cancelled_tool.external_execution_required = False
         cancelled_tool.result = reason
         cancelled_tool.tool_call_error = True
-        on_event(_child_completion_event(response, cancelled_tool))
-
-
-def _child_completion_event(
-    response: RunOutput | TeamRunOutput,
-    tool: ToolExecution,
-) -> ToolCallCompletedEvent | TeamToolCallCompletedEvent:
-    """Complete a projected child call in the parent presentation's root scope."""
-    event_type = TeamToolCallCompletedEvent if isinstance(response, TeamRunOutput) else ToolCallCompletedEvent
-    return event_type(tool=tool, run_id=response.run_id, session_id=response.session_id)
+        on_event(ToolCompleted(cancelled_tool))
 
 
 def _prepare_delegation_output(
@@ -623,25 +585,18 @@ def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | No
 def _resolve_delegation_requirement(
     requirement: RunRequirement,
     result: str,
-    response: RunOutput | TeamRunOutput,
-    agent_name: str,
-    on_event: Callable[[object], None] | None,
+    on_event: ResumeEvents | None,
     *,
     output_request: ToolOutputFileRequest | None = None,
 ) -> str:
-    """Resolve one external call and close its live tool trace, including rejections."""
-    result = _finalize_delegation_output(result, output_request)
-    requirement.set_external_execution_result(result)
-    if on_event is not None:
-        on_event(
-            ToolCallCompletedEvent(
-                tool=deepcopy(requirement.tool_execution),
-                run_id=response.run_id,
-                session_id=response.session_id,
-                agent_id=requirement.member_agent_id or agent_name,
-            ),
-        )
+    """Return one external call's finished result and close its live tool trace, including rejections.
 
+    The requirement itself stays unresolved: the parent's continuation answers it with this result, through the
+    loop's own decision check.
+    """
+    result = _finalize_delegation_output(result, output_request)
+    if on_event is not None:
+        on_event(ToolCompleted(replace(requirement.tool_execution, result=result, external_execution_required=False)))
     return result
 
 
@@ -709,7 +664,7 @@ async def _background_child_outcome(
                     child,
                     config=config,
                     runtime_paths=runtime_paths,
-                    reason=str(error),
+                    reason=redact_sensitive_text(str(error)),
                     status="failed",
                 )
             except Exception as cleanup_error:
@@ -759,11 +714,12 @@ async def _detach_from_job(
     runtime_paths: RuntimePaths,
     result: str | None,
     error: BaseException | None = None,
-) -> None:
-    """Close the parent call; the child's job keeps owning and settling the child."""
+) -> str | None:
+    """Close the parent call with ``result``; the child's job keeps owning and settling the child."""
     _forget_child(state, child)
     await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result, error=error)
     await persist(state)
+    return result
 
 
 class _ParentCall(NamedTuple):
@@ -785,13 +741,15 @@ async def _await_background_child(
     owner: ToolExecutionIdentity,
     depth: int,
     background_after: float | None,
-    settle: Callable[[str], Awaitable[None]],
+    settle: Callable[[str], Awaitable[str]],
     record_return: Callable[[object], Awaitable[None]],
     parent_call: _ParentCall,
-) -> None:
+) -> str:
     """Hand a new child to its job, or find the job a crash left it with, then wait for it as the parent's call.
 
-    ``record_return`` records on the reply what the parent's call returned.
+    Returns what the parent's call returns: the child's result, or its job handle while the job keeps working.
+    ``settle`` closes the parent call with that text and returns it as the model reads it; ``record_return``
+    records it on the reply.
 
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
@@ -817,16 +775,16 @@ async def _await_background_child(
             # No job owns the child yet, so it settles as an ordinary child failure.
             raise
         # Revoked access or a closed runtime ends this wait; the parent's call reports it.
-        await settle(str(error))
+        settled = await settle(str(error))
         await record_return(str(error))
-        return
+        return settled
     except BaseException:
         await background.release_wait(child.delegation_id, claim)
         raise
     try:
         result = await delegation_result(background, waited.job) if waited.claim is not None else None
         returned = result or format_job_handle(waited.job)
-        await settle(returned)
+        settled = await settle(returned)
         await record_return(returned)
         if waited.claim is not None:
             # The outcome counts as read once the parent run saves this call's result, as a native call's does.
@@ -842,6 +800,7 @@ async def _await_background_child(
     finally:
         if not retained:
             await background.release_wait(child.delegation_id, waited.claim)
+    return settled
 
 
 async def _resolve_delegation_target(
@@ -1003,10 +962,16 @@ def _validate_child_scope(
         raise RuntimeError(msg)
 
 
+def _delegation_requirement_key(requirement: RunRequirement) -> str:
+    """Return the id a delegation's gate and approval card use: ``member_id:call_id`` for a member's call."""
+    call_id = requirement.tool_execution.tool_call_id or ""
+    return f"{requirement.member_agent_id}:{call_id}" if requirement.member_agent_id else call_id
+
+
 async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     requirement: RunRequirement,
     *,
-    response: RunOutput | TeamRunOutput,
+    response: AnyRunRecord,
     state: DelegationState,
     previous_state: DelegationState,
     persist: Callable[[DelegationState], Awaitable[None]],
@@ -1021,10 +986,10 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
     member_config_names: Mapping[str, str] | None = None,
-    on_event: Callable[[object], None] | None = None,
+    on_event: ResumeEvents | None = None,
     background: ToolJobRuntime | None = None,
-) -> bool:
-    """Advance one existing child operation; return whether it needs approval.
+) -> str | None:
+    """Advance one existing child operation; return the parent call's result, or None while it waits for approval.
 
     The native driver owns parent continuation. Hidden callers supply a sink
     that saves the real parent without adding a provider requirement or message.
@@ -1038,21 +1003,12 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     prior_pending_tools = previous_state.pending_tools
     prior_tool_sources = previous_state.pending_tool_sources
     tool = requirement.tool_execution
-    if tool is None or not tool.tool_call_id:
+    if not tool.tool_call_id:
         msg = "Delegation requirement has no exact tool-call identity"
         raise RuntimeError(msg)
-    requirement_key = (
-        f"{requirement.member_agent_id}:{tool.tool_call_id}" if requirement.member_agent_id else tool.tool_call_id
-    )
+    requirement_key = _delegation_requirement_key(requirement)
     if on_event is not None:
-        on_event(
-            ToolCallStartedEvent(
-                tool=deepcopy(tool),
-                run_id=response.run_id,
-                session_id=response.session_id,
-                agent_id=requirement.member_agent_id or agent_name,
-            ),
-        )
+        on_event(ToolStarted(deepcopy(tool)))
     caller = agent_name
     if requirement.member_agent_id is not None:
         caller = (member_config_names or {}).get(requirement.member_agent_id, "")
@@ -1060,13 +1016,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             msg = "Delegation requirement has no frozen member config identity"
             raise RuntimeError(msg)
     caller_identity = replace(execution_identity, agent_name=caller)
-    resolve_result = partial(
-        _resolve_delegation_requirement,
-        requirement,
-        response=response,
-        agent_name=agent_name,
-        on_event=on_event,
-    )
+    resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
     excluded = toolkit_is_background_excluded("delegate", config, runtime_paths)
     # A child saved before a crash keeps its accepted owner when startup policy changes.
@@ -1078,8 +1028,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         background = None
         if BACKGROUND_AFTER in (tool.tool_args or {}):
             tool.tool_call_error = True
-            resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
-            return False
+            return resolve_result(f"{BACKGROUND_AFTER} is unavailable for the excluded delegate toolkit.")
     try:
         background_after = read_background_after(
             tool.tool_args,
@@ -1087,8 +1036,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         )
     except ValueError as error:
         tool.tool_call_error = True
-        resolve_result(str(error))
-        return False
+        return resolve_result(str(error))
     args = application_arguments(tool.tool_args) or {}
     target = await _resolve_delegation_target(
         tool,
@@ -1099,8 +1047,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth=delegation_depth,
     )
     if isinstance(target, str):
-        resolve_result(target)
-        return False
+        return resolve_result(target)
     model = target.model
 
     # Recheck current authorization and output policy, including resumed calls.
@@ -1141,8 +1088,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     reason=authorization,
                 )
             if pending_id == retained.delegation_id and on_event is not None:
-                _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=authorization)
-        resolve_result(authorization)
+                _settle_pending_child_tools(prior_pending_tools, on_event, reason=authorization)
+        result = resolve_result(authorization)
         if requirement.id in state.hooks:
             await after_delegation(
                 state.hooks[requirement.id],
@@ -1150,7 +1097,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 runtime_paths=runtime_paths,
                 result=authorization,
             )
-        return False
+        return result
     if output_request is not None:
         resolve_result = partial(resolve_result, output_request=output_request)
 
@@ -1171,10 +1118,9 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         state.pending_requirements = [RunRequirement(projected).to_dict()]
         state.pending_agent_name = caller
         await persist(state)
-        return True
+        return None
     if state.gates.get(requirement_key) is False:
-        resolve_result("Delegation denied by requester; child was not executed.")
-        return False
+        return resolve_result("Delegation denied by requester; child was not executed.")
     if decisions is not None and requirement_key in decisions:
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         call = next((call for call in approval_calls if call.tool_call_id == requirement_key), None)
@@ -1201,7 +1147,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             result=blocked_result,
         )
         await persist(state)
-        return False
+        return blocked_result
 
     child = retained
     fresh = child is None
@@ -1269,7 +1215,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     await persist(state)
                 if background is not None:
                     assert record_return is not None
-                    await _await_background_child(
+                    return await _await_background_child(
                         background,
                         child,
                         fresh=fresh,
@@ -1289,15 +1235,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         depth=delegation_depth,
                         background_after=background_after,
                         parent_call=_ParentCall(
-                            run_id=response.run_id or "",
-                            team=isinstance(response, TeamRunOutput),
-                            call_id=tool.tool_call_id or "",
+                            run_id=response.run_id,
+                            team=not isinstance(response, RunRecord),
+                            call_id=tool.tool_call_id,
                         ),
                         # The job already applied the output policy to the child's result.
                         settle=lambda result: detach(result=resolve_result(result, output_request=None)),
                         record_return=record_return,
                     )
-                    return False
                 child_outcome = await _run_child(
                     child,
                     run_child=run_child,
@@ -1312,17 +1257,16 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
                 if child_decisions is not None and on_event is not None:
                     await _complete_approved_child_tools(
-                        response,
                         prior_pending_tools,
                         prior_tool_sources,
                         on_event,
                         config=config,
                         runtime_paths=runtime_paths,
                     )
-                if child_outcome.response.status == RunStatus.paused:
+                if child_outcome.response.status is RunStatus.paused:
                     _pending_child(state, child, child_outcome)
                     await persist(state)
-                    return True
+                    return None
             except asyncio.CancelledError:
                 if background is not None and background.has_job(child.delegation_id):
                     await detach(
@@ -1346,15 +1290,17 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if background is not None and background.has_job(child.delegation_id):
                     await detach(result=None, error=error)
                     raise
+                # The cause reaches the parent model and the child's record, so credentials in it are redacted.
+                reason = redact_sensitive_text(str(error))
                 await interrupt_child(
                     child,
                     config=config,
                     runtime_paths=runtime_paths,
-                    reason=str(error),
+                    reason=reason,
                     status="failed",
                 )
                 if child_decisions is not None and on_event is not None:
-                    _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
+                    _settle_pending_child_tools(prior_pending_tools, on_event, reason=reason)
             await persist(state)
 
         # Completed and failed children both close the parent call and its after hook.
@@ -1366,24 +1312,30 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         runtime_paths=runtime_paths,
         result=result,
     )
-    return False
+    return result
 
 
 def prepare_delegation_state(
-    response: RunOutput | TeamRunOutput,
+    response: AnyRunRecord,
     *,
     agent_name: str,
     config: Config,
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
-) -> tuple[DelegationState, DelegationState]:
-    """Consume exact approval decisions and return the parent's state with its pre-decision snapshot."""
+    approval_calls: Sequence[ApprovalCall] = (),
+) -> tuple[DelegationState, DelegationState, ResumeDecisions]:
+    """Consume exact approval decisions and return the parent's state, its pre-decision snapshot, and its own decisions.
+
+    Decisions on the parent's own calls, asked about after its delegations, resume the parent; decisions on a
+    delegation's gate are kept as gates for the call they name.
+    """
     from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
 
     state = DelegationState.from_metadata(response.metadata)
-    if not state.storage_bindings and isinstance(response, RunOutput):
+    if not state.storage_bindings and isinstance(response, RunRecord):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
     previous_state = deepcopy(state)
+    own = ResumeDecisions()
     if decisions is not None:
         # Validate every presented identity before touching any child or gate.
         apply_exact_approval_decisions(
@@ -1393,19 +1345,21 @@ def prepare_delegation_state(
         )
         if state.pending_child_id is None:
             ordinary = [item for item in response.requirements or () if item.needs_confirmation]
-            ordinary_ids = {item.tool_execution.tool_call_id for item in ordinary if item.tool_execution}
+            ordinary_ids = {item.tool_execution.tool_call_id for item in ordinary}
             if set(decisions) == ordinary_ids:
-                apply_exact_approval_decisions(ordinary, decisions=decisions, denial_reasons=denial_reasons or {})
+                own = approval_decisions(approval_calls, decisions, denial_reasons or {})
             else:
                 state.gates.update(decisions)
     state.clear_pending()
-    return state, previous_state
+    return state, previous_state, own
 
 
-async def drive_delegations(  # noqa: C901, PLR0912
-    entity: Agent | Team,
-    response: RunOutput | TeamRunOutput,
+async def drive_delegations[R: AnyRunRecord](
+    response: R,
     *,
+    store: ConversationStore | None,
+    session: ConversationSession,
+    continue_parent: ContinueRun[R],
     agent_name: str,
     run_child: ChildResponseRunner,
     config: Config,
@@ -1417,41 +1371,53 @@ async def drive_delegations(  # noqa: C901, PLR0912
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
     member_config_names: Mapping[str, str] | None = None,
-    on_event: Callable[[object], None] | None = None,
-) -> RunOutput | TeamRunOutput:
-    """Advance one durable parent; sequential children preserve completed sibling results."""
+    on_event: ResumeEvents | None = None,
+) -> R:
+    """Advance one durable parent; sequential children preserve completed sibling results.
+
+    ``continue_parent`` resumes the parent with the decisions on its own calls and its children's results, and
+    returns its new terminal record; the loop behind it refuses anything but exact coverage of the calls the parent
+    waits for. ``store`` and ``session`` are where the parent's row lives.
+    """
     if not has_delegation_state(response):
         return response
     if execution_identity is None or execution_identity.channel != "matrix":
         msg = "Native delegation requires a Matrix execution owner"
         raise RuntimeError(msg)
-    state, previous_state = prepare_delegation_state(
+    state, previous_state, own = prepare_delegation_state(
         response,
         agent_name=agent_name,
         config=config,
         decisions=decisions,
         denial_reasons=denial_reasons,
+        approval_calls=approval_calls,
     )
     background = get_background_runtime(runtime_paths) if delegation_depth == 0 and not job_owns_execution() else None
-    while response.status == RunStatus.paused:
+    while response.status is RunStatus.paused:
         external = _external_requirements(response)
         # Worker code can write the stored run, and one approval binds a call ID, so a copied call must not start twice.
-        call_keys = [
-            (item.member_agent_id, cast("ToolExecution", item.tool_execution).tool_call_id) for item in external
-        ]
+        call_keys = [(item.member_agent_id, item.tool_execution.tool_call_id) for item in external]
         if len(set(call_keys)) < len(call_keys):
             msg = "Paused run holds the same delegation call more than once; retry the request"
             raise RuntimeError(msg)
-        ordinary = [requirement for requirement in response.requirements or () if requirement.needs_confirmation]
+        # The parent's own calls this resume decided are answered by its continuation, not asked about again.
+        decided = {call.tool_call_id for call in own.approved} | set(own.denied)
+        ordinary = [
+            requirement
+            for requirement in response.requirements or ()
+            if requirement.needs_confirmation and requirement.tool_execution.tool_call_id not in decided
+        ]
         if not external and not ordinary and any(not item.is_resolved() for item in response.requirements or ()):
             return response
+        persist = partial(persist_delegation_state, store, session, response)
+        results: dict[str, str] = {}
         for requirement in external:
-            if await advance_delegation_call(
+            result = await advance_delegation_call(
                 requirement,
                 response=response,
                 state=state,
                 previous_state=previous_state,
-                persist=partial(persist_delegation_state, entity, response),
+                persist=persist,
                 agent_name=agent_name,
                 run_child=run_child,
                 config=config,
@@ -1465,133 +1431,68 @@ async def drive_delegations(  # noqa: C901, PLR0912
                 member_config_names=member_config_names,
                 on_event=on_event,
                 background=background,
-            ):
+            )
+            if result is None:
                 return response
+            results[requirement.tool_execution.tool_call_id or ""] = result
         # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them.
         if ordinary:
             state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
-            state.pending_tools = [
-                requirement.tool_execution.to_dict() for requirement in ordinary if requirement.tool_execution
-            ]
-            await persist_delegation_state(entity, response, state)
+            state.pending_tools = [requirement.tool_execution.to_dict() for requirement in ordinary]
+            await persist(state)
             return response
-        await persist_delegation_state(entity, response, state)
-        if isinstance(response, RunOutput):
-            continuation_stream = cast("Agent", entity).acontinue_run(
-                run_id=response.run_id,
-                requirements=list(response.requirements or ()),
-                session_id=response.session_id,
-                user_id=execution_identity.requester_id,
-                metadata=deepcopy(response.metadata),
-                stream=True,
-                stream_events=True,
-                yield_run_output=True,
-            )
-        else:
-            continuation_stream = cast("Team", entity).acontinue_run(
-                run_response=response,
-                requirements=list(response.requirements or ()),
-                session_id=response.session_id,
-                user_id=execution_identity.requester_id,
-                metadata=deepcopy(response.metadata),
-                stream=True,
-                stream_events=True,
-                yield_run_output=True,
-            )
-        continued = None
-        error_event: RunErrorEvent | TeamRunErrorEvent | None = None
-        # Agno re-reads this run from storage worker code can write, and without decisions no stored call is approved.
-        unapproved_refusal = (
-            approved_executions_context(cast("Agent", entity), {})
-            if decisions is None and isinstance(response, RunOutput)
-            else nullcontext()
-        )
-        with unapproved_refusal:
-            async with closing_async_stream(continuation_stream):
-                async for event in continuation_stream:
-                    if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
-                        error_event = event
-                    if isinstance(event, (RunOutput, TeamRunOutput)):
-                        continued = event
-                    elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
-                        on_event(event)
-        entity_label = "Team" if isinstance(response, TeamRunOutput) else "Agent"
-        if continued is None:
-            if error_event is not None:
-                raise RuntimeError(run_error_event_text(error_event, entity_label=entity_label))
-            msg = "Delegation continuation did not yield its terminal run"
-            raise RuntimeError(msg)
-        response = continued
+        await persist(state)
+        response = await continue_parent(response, replace(own, external_results=results), on_event)
+        own = ResumeDecisions()
         state.clear_pending()
-        await persist_delegation_state(entity, response, state)
-        if error_event is not None and response.status == RunStatus.error:
-            raise RuntimeError(run_error_event_text(error_event, entity_label=entity_label))
+        await persist_delegation_state(store, session, response, state)
     return response
 
 
-async def drive_delegation_stream(
-    entity: Agent | Team,
-    events: AsyncIterator[object],
-    **kwargs: Unpack[_DelegationOptions],
-) -> AsyncIterator[object]:
-    """Drain native pauses before driving children, preserving Agno's stored status."""
-    paused_event: RunPausedEvent | TeamRunPausedEvent | None = None
-    response: RunOutput | TeamRunOutput | None = None
-    async for event in events:
-        if isinstance(event, (RunPausedEvent, TeamRunPausedEvent)):
-            paused_event = event
-        elif isinstance(event, (RunOutput, TeamRunOutput)):
-            response = event
-        else:
-            yield event
-    if response is None and paused_event is not None:
-        response = await _load_paused_output(entity, paused_event)
-    if response is None or response.status != RunStatus.paused or not has_delegation_state(response):
-        for terminal in filter(None, (paused_event, response)):
-            yield terminal
-        return
-    driven = response
-    driven_stream = _stream_driven_run(entity, response, cast("_DelegationOptions", kwargs))
-    async with closing_async_stream(driven_stream):
-        async for event in driven_stream:
-            if isinstance(event, (RunOutput, TeamRunOutput)):
-                driven = event
+async def drive_delegation_stream[R: AnyRunRecord](
+    events: AsyncIterator[RunEvent],
+    *,
+    store: ConversationStore | None,
+    session: ConversationSession,
+    continue_parent: ContinueRun[R],
+    **options: Unpack[_DelegationOptions],
+) -> AsyncIterator[RunEvent]:
+    """Pass a run's events through; when it ends paused on delegations, drive them and end with the driven record.
+
+    The driven record is paused when a child waits for approval or the parent's own calls do, else the parent's
+    continuation ended it.
+    """
+    record: AnyRunRecord | None = None
+    async with closing_async_stream(events):
+        async for event in events:
+            if isinstance(event, RunFinished):
+                record = event.record
             else:
                 yield event
-    if driven.status == RunStatus.paused:
-        yield _project_pause_event(paused_event, driven)
-    yield driven
+    if record is None:
+        return
+    if record.status is not RunStatus.paused or not has_delegation_state(record):
+        yield RunFinished(record)
+        return
 
+    paused = cast("R", record)
 
-async def _load_paused_output(
-    entity: Agent | Team,
-    event: RunPausedEvent | TeamRunPausedEvent,
-) -> RunOutput | TeamRunOutput | None:
-    if event.run_id is None:
-        msg = "Delegation pause has no persisted run identity"
-        raise RuntimeError(msg)
-    return await entity.aget_run_output(event.run_id, session_id=event.session_id)
+    async def drive(on_event: Callable[[object], None]) -> R:
+        return await drive_delegations(
+            paused,
+            store=store,
+            session=session,
+            continue_parent=continue_parent,
+            on_event=on_event,
+            **options,
+        )
 
-
-def _project_pause_event(
-    event: RunPausedEvent | TeamRunPausedEvent | None,
-    response: RunOutput | TeamRunOutput,
-) -> RunPausedEvent | TeamRunPausedEvent:
-    state = DelegationState.from_metadata(response.metadata)
-    if event is None:
-        pause_type = TeamRunPausedEvent if isinstance(response, TeamRunOutput) else RunPausedEvent
-        event = pause_type(run_id=response.run_id, session_id=response.session_id)
-    event.tools = [ToolExecution.from_dict(item) for item in state.pending_tools]
-    event.requirements = [RunRequirement.from_dict(item) for item in state.pending_requirements]
-    return event
-
-
-def _stream_driven_run(
-    entity: Agent | Team,
-    response: RunOutput | TeamRunOutput,
-    options: _DelegationOptions,
-) -> AsyncIterator[object]:
-    async def drive(on_event: Callable[[object], None]) -> RunOutput | TeamRunOutput:
-        return await drive_delegations(entity, response, on_event=on_event, **options)
-
-    return callback_event_stream(drive)
+    driven: AnyRunRecord = paused
+    driven_stream = callback_event_stream(drive)
+    async with closing_async_stream(driven_stream):
+        async for event in driven_stream:
+            if isinstance(event, RunRecord | TeamRunRecord):
+                driven = event
+            else:
+                yield cast("RunEvent", event)
+    yield RunFinished(driven)

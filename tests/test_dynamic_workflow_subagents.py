@@ -20,11 +20,11 @@ from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import _call
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 from tests.test_delegation_envelopes import _InstructionRecordingModel
-from tests.test_delegation_execution import _call
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
