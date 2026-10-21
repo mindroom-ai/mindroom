@@ -18,6 +18,7 @@ from mindroom.oauth.microsoft import (
     ACCOUNT_LOOKUP_TIMEOUT_SECONDS,
     GRAPH_ME_URL,
     microsoft_files_oauth_provider,
+    microsoft_onenote_oauth_provider,
     microsoft_todo_oauth_provider,
 )
 from mindroom.oauth.providers import OAuthProviderError
@@ -112,6 +113,16 @@ def test_todo_provider_requests_only_tasks_read_write() -> None:
     assert (provider.id, provider.display_name) == ("microsoft_todo", "Microsoft To Do")
     assert provider.scopes == ("Tasks.ReadWrite", "User.Read", "offline_access")
     assert provider.credential_service == "microsoft_todo_oauth"
+    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
+    assert provider.requester_scoped_credentials is True
+
+
+def test_onenote_provider_requests_only_notes_read_write_all() -> None:
+    provider = microsoft_onenote_oauth_provider()
+
+    assert (provider.id, provider.display_name) == ("microsoft_onenote", "Microsoft OneNote")
+    assert provider.scopes == ("Notes.ReadWrite.All", "User.Read", "offline_access")
+    assert provider.credential_service == "microsoft_onenote_oauth"
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.requester_scoped_credentials is True
 

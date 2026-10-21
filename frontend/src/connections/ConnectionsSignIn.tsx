@@ -73,8 +73,6 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
     });
     if (response.status === 401) return blocked(OPEN_FROM_CHAT);
     if (response.status === 403) return blocked(NOT_AVAILABLE);
-    // The portal is off, so only the Agent Keys page is served, and it relies on trusted-upstream sign-in.
-    if (response.status === 404) return { state: "ready" };
     return response.ok ? signedIn(response) : blocked(RELOAD);
   }
   const answer = await askOpener(opener, signal);
@@ -100,8 +98,7 @@ async function signIn(signal: AbortSignal): Promise<Gate> {
  * Render a Connections page for the Matrix user signed in to MindRoom Chat.
  *
  * When MindRoom Chat opened the portal and its tab is still open, it ignores any existing session and only renders after
- * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports, or renders as is when the
- * portal is off.
+ * Chat's OpenID handshake succeeds. Otherwise the page shows the session the server reports.
  *
  * @param children - Page content shown only after sign-in succeeds.
  */

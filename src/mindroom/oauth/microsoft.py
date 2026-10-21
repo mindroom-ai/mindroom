@@ -20,6 +20,7 @@ __all__ = [
     "microsoft_files_oauth_provider",
     "microsoft_meetings_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_onenote_oauth_provider",
     "microsoft_teams_oauth_provider",
     "microsoft_todo_oauth_provider",
     "microsoft_token_url",
@@ -190,4 +191,14 @@ def microsoft_meetings_oauth_provider() -> OAuthProvider:
         display_name="Microsoft Teams Meetings",
         scopes=("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"),
         status_capabilities=("find Teams meetings and read their transcripts",),
+    )
+
+
+def microsoft_onenote_oauth_provider() -> OAuthProvider:
+    """Return the OneNote notebooks provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_onenote",
+        display_name="Microsoft OneNote",
+        scopes=("Notes.ReadWrite.All",),
+        status_capabilities=("read, create, and append to OneNote pages",),
     )

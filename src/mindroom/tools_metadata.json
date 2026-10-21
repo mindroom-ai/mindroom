@@ -9256,6 +9256,50 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_onenote",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow creating pages and appending text to pages.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "List, read, create, and append to pages in the connected user's OneNote notebooks",
+      "display_name": "Microsoft OneNote",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_onenote_list_notebooks",
+        "microsoft_onenote_list_sections",
+        "microsoft_onenote_list_pages",
+        "microsoft_onenote_get_page",
+        "microsoft_onenote_create_page",
+        "microsoft_onenote_append_to_page"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "NotebookPen",
+      "icon_color": "text-purple-600",
+      "name": "microsoft_onenote",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": "microsoft_todo",
       "category": "productivity",
       "config_fields": [
@@ -9569,6 +9613,7 @@
         "outlook_calendar_list_calendars",
         "outlook_calendar_list_events",
         "outlook_calendar_get_event",
+        "outlook_calendar_get_free_busy",
         "outlook_calendar_create_event",
         "outlook_calendar_update_event",
         "outlook_calendar_delete_event",

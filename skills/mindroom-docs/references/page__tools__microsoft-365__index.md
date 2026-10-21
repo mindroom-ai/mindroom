@@ -1,6 +1,6 @@
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, and Teams through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, Teams, and OneNote through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
 
@@ -12,6 +12,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
+| `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -53,7 +54,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint or Teams.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint, Teams, or OneNote, whose `Notes.ReadWrite.All` personal accounts cannot grant.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -70,6 +71,7 @@ agents:
       - microsoft_todo
       - microsoft_teams
       - microsoft_meetings
+      - microsoft_onenote
 ```
 
 | Option | Tool | Type | Default | Notes |
@@ -79,6 +81,7 @@ agents:
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
+| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 `microsoft_meetings` only reads, so it has no `write` option.
@@ -108,6 +111,7 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 | `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
+Replacing a file, uploading into a folder, and writing a range also take the target's `web_url` from its details, download, or folder listing (search results show another form) as `expected_web_url`, so an approval card shows where the write lands, and fail with `target_mismatch`, naming the target's `web_url`, when it differs.
 Uploads read from the agent's workspace and follow its [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting, and downloads always land in the workspace.
 
 To edit a document, the agent downloads it, saves its edited copy under a new name outside `microsoft-files-downloads/`, and replaces the original with the `etag` from the download.
@@ -156,15 +160,19 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 | `outlook_calendar_list_calendars` | no | List the requester's calendars, whether the requester can edit each, and which one is the default. |
 | `outlook_calendar_list_events` | no | List events between two moments in the default calendar or another, in start order, up to 50, with attendees and their responses and the online meeting link. |
 | `outlook_calendar_get_event` | no | Read an event with its description as plain text, up to 20,000 characters. |
+| `outlook_calendar_get_free_busy` | no | Look up when up to 20 colleagues, distribution lists, or rooms are busy, with their working hours, to find a time to meet. |
 | `outlook_calendar_create_event` | yes | Create an event, optionally with attendees, a location, a description, and an online meeting; Outlook emails each attendee an invitation. |
 | `outlook_calendar_update_event` | yes | Change an event's subject, start, end, location, or description; attendees of a meeting the requester organizes receive the update. |
 | `outlook_calendar_delete_event` | yes | Delete an event; for a meeting the requester organizes, Outlook sends every attendee a cancellation. |
 | `outlook_calendar_respond_to_event` | yes | Accept, tentatively accept, or decline a meeting invitation, optionally with a comment to the organizer. |
 
-Event times in results are in UTC, and the agent converts them to the requester's time zone.
+Event times in event results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
 Calendar and event listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 New and changed events take local times plus a time zone, either a Windows name such as `W. Europe Standard Time` or an IANA name Outlook accepts such as `Europe/Berlin`.
+Free/busy lookups take local times plus a time zone, like new events, and return times in that zone.
+A free/busy window must be shorter than 62 days, and each member of a distribution list counts toward the 20.
+Free/busy shows another person's event subjects and locations only when their calendar sharing allows it, and it needs a work or school account.
 Each occurrence of a recurring meeting has its own ID, and changing or deleting an occurrence affects only that occurrence.
 Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
 Changing or deleting the series master changes or deletes every occurrence.
@@ -228,6 +236,23 @@ Microsoft Graph serves them only to the meeting's organizer and the people its c
 Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_find` reports when a meeting expires.
 Two Teams administrator settings also govern transcripts: with Graph access to transcripts turned off, listing and reading transcripts return `transcripts_disabled`, and with speaker attribution turned off, reading a transcript returns `speaker_attribution_disabled`.
 
+## OneNote
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, by name, and which one is the default. |
+| `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
+| `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
+| `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
+| `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
+| `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
+
+Only the notebooks the requester owns are listed; notebooks other people share with the requester, and group or SharePoint site notebooks, are not.
+Sections inside section groups are not listed either.
+Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
+Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
+Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
@@ -266,6 +291,10 @@ tool_approval:
     - match: microsoft_teams_reply_to_channel_message
       action: require_approval
     - match: microsoft_teams_send_chat_message
+      action: require_approval
+    - match: microsoft_onenote_create_page
+      action: require_approval
+    - match: microsoft_onenote_append_to_page
       action: require_approval
 ```
 

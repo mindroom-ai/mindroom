@@ -1,4 +1,4 @@
-"""Static-serving gate for the personal egress page and its assets."""
+"""Static serving of the Connections bundle and its Agent Keys page."""
 
 from __future__ import annotations
 
@@ -56,21 +56,13 @@ def gate_client(
     (portal / "assets" / "portal.js").write_text("portal asset")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
 
-    def client(
-        *,
-        portal_agent: str | None,
-        trusted_upstream: bool,
-        broker_on: bool = True,
-        require_jwt: bool = False,
-    ) -> TestClient:
+    def client(*, trusted_upstream: bool, broker_on: bool = True, require_jwt: bool = False) -> TestClient:
         env = {
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true" if trusted_upstream else "false",
             "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
         }
         if require_jwt:
             env.update(_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
-        if portal_agent is not None:
-            env["MINDROOM_CONNECTIONS_AGENT"] = portal_agent
         if broker_on:
             env["MINDROOM_EGRESS_BROKER_PORT"] = "8768"
         runtime_paths = constants.resolve_primary_runtime_paths(
@@ -87,76 +79,44 @@ def gate_client(
     return client
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/connections/egress",
-        "/connections/egress/",
-        "/connections/egress/agents",
-        "/connections/assets/portal.js",
-    ],
-)
-def test_signed_trusted_upstream_serves_egress_page_without_portal(
+_PORTAL_PATHS = ["/connections", "/connections/", "/connections/nested", "/connections/egressx"]
+_EGRESS_PATHS = ["/connections/egress", "/connections/egress/", "/connections/egress/agents"]
+
+
+@pytest.mark.parametrize("path", [*_PORTAL_PATHS, *_EGRESS_PATHS, "/connections/assets/portal.js"])
+@pytest.mark.parametrize("trusted_upstream", [False, True])
+def test_connections_bundle_is_served_with_no_settings(
     path: str,
+    trusted_upstream: bool,
     gate_client: Callable[..., TestClient],
-    signed_headers: dict[str, str],
 ) -> None:
-    """The egress page and its assets load for signed trusted users even when the portal is disabled."""
-    response = gate_client(portal_agent=None, trusted_upstream=True, require_jwt=True).get(path, headers=signed_headers)
+    """The pages are static shells that sign themselves in from MindRoom Chat, so they load before any sign-in."""
+    response = gate_client(trusted_upstream=trusted_upstream).get(path, headers=_TRUSTED_HEADERS)
     assert response.status_code == 200
     assert response.text in {"connections bundle", "portal asset"}
 
 
-@pytest.mark.parametrize(
-    "path",
-    ["/connections/egress", "/connections/egress/", "/connections/egress/agents", "/connections/assets/portal.js"],
-)
-def test_trusted_upstream_without_jwt_serves_no_egress_page(
+@pytest.mark.parametrize("path", _EGRESS_PATHS)
+def test_signed_trusted_upstream_serves_egress_page(
+    path: str,
+    gate_client: Callable[..., TestClient],
+    signed_headers: dict[str, str],
+) -> None:
+    """Signed trusted users load the Agent Keys page too."""
+    response = gate_client(trusted_upstream=True, require_jwt=True).get(path, headers=signed_headers)
+    assert response.status_code == 200
+    assert response.text == "connections bundle"
+
+
+@pytest.mark.parametrize("path", [*_PORTAL_PATHS, *_EGRESS_PATHS])
+def test_agent_keys_page_is_absent_while_the_broker_is_off(
     path: str,
     gate_client: Callable[..., TestClient],
 ) -> None:
-    """The personal API answers 403 without signed requests, so the page and its portal-bypassing assets are 404s."""
-    response = gate_client(portal_agent=None, trusted_upstream=True).get(path, headers=_TRUSTED_HEADERS)
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Connections are not enabled"
-
-
-@pytest.mark.parametrize("portal_agent", [None, "", "   "])
-@pytest.mark.parametrize("path", ["/connections", "/connections/", "/connections/nested", "/connections/egressx"])
-def test_other_connections_paths_stay_gated_by_portal(
-    portal_agent: str | None,
-    path: str,
-    gate_client: Callable[..., TestClient],
-) -> None:
-    """Only the egress page and assets bypass the MINDROOM_CONNECTIONS_AGENT gate."""
-    response = gate_client(portal_agent=portal_agent, trusted_upstream=True).get(path, headers=_TRUSTED_HEADERS)
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Connections are not enabled"
-
-
-@pytest.mark.parametrize("path", ["/connections/egress", "/connections/egress/", "/connections/assets/portal.js"])
-def test_egress_page_is_not_served_without_trusted_upstream_or_portal(
-    path: str,
-    gate_client: Callable[..., TestClient],
-) -> None:
-    """With neither the portal nor trusted upstream auth enabled, the egress page is a 404."""
-    response = gate_client(portal_agent=None, trusted_upstream=False).get(path)
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Connections are not enabled"
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["/connections/egress", "/connections/egress/", "/connections/egress/agents", "/connections/assets/portal.js"],
-)
-def test_trusted_upstream_serves_no_egress_page_while_the_broker_is_off(
-    path: str,
-    gate_client: Callable[..., TestClient],
-) -> None:
-    """Without a broker port the Agent Keys page and the assets that bypass the portal setting for it are 404s."""
-    response = gate_client(portal_agent=None, trusted_upstream=True, broker_on=False).get(
-        path,
-        headers=_TRUSTED_HEADERS,
-    )
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Connections are not enabled"
+    """Without a broker port only the Agent Keys page is a 404; the Agents page still loads."""
+    response = gate_client(trusted_upstream=True, broker_on=False).get(path, headers=_TRUSTED_HEADERS)
+    if path in _EGRESS_PATHS:
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Agent Keys are not enabled"
+    else:
+        assert response.status_code == 200

@@ -41,7 +41,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.origins"
-depends_on = []
+depends_on = ["mindroom.runtime_env_policy"]
 
 [[modules]]
 path = "mindroom.embeddings.factory"

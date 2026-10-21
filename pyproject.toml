@@ -312,6 +312,7 @@ mem0 = [
 memory = []
 microsoft_files = []
 microsoft_meetings = []
+microsoft_onenote = []
 microsoft_teams = []
 microsoft_todo = []
 modelslabs = [

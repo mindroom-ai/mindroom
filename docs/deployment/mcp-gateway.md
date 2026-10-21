@@ -5,7 +5,7 @@ icon: simple/modelcontextprotocol
 # MCP Gateway
 
 The optional MCP gateway lets external MCP clients, such as desktop AI apps, use MindRoom agents' tools through one endpoint at `/mcp`.
-Each signed-in user sees only the agents they are authorized to use and have selected in the [Connections portal](trusted-upstream-auth.md#connections-portal), and only those agents' compatible tools.
+Each signed-in user sees only the agents they are authorized to use and have selected in the [Connections portal](../connections-portal.md), and only those agents' compatible tools.
 Calls run with the selected agent's credential scope, tool filters, and worker routing, so each user connects only the services they need.
 The gateway exposes tools only; it does not run the agent's model or load its prompt, memories, or conversation history, so use MindRoom chat to talk to agents.
 
@@ -22,7 +22,7 @@ The gateway offers exactly three MCP tools:
 A client starts with `search_tools` and `{}` (or a query such as `{"query": "calendar"}`) to discover agent/toolkit pairs.
 It passes a returned `agent` and `toolkit` to another `search_tools` call to list functions, then calls `get_tool` with the returned `agent`, `toolkit`, and `function`, and finally `invoke_tool` with the same selectors and an `arguments` object.
 Clients must copy identifiers from these results; display names and agent directories such as `list_agents` do not show which agents the gateway exposes.
-MCP initialization instructions name the configured personal agent from `MINDROOM_CONNECTIONS_AGENT` and the instance's `/connections` URL, but the personal agent is usable only when it appears in discovery.
+MCP initialization instructions name the personal agent from `MINDROOM_CONNECTIONS_AGENT`, when set, and the instance's `/connections` URL, but the personal agent is usable only when it appears in discovery.
 
 When a service needs authorization, the result contains `error.code: connection_required` and a `connection_url` pointing to `/connections`.
 The user connects that service in the browser and the client retries.
@@ -31,8 +31,9 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 
 ## Enable the gateway
 
-First configure the [Connections portal](trusted-upstream-auth.md#connections-portal), including strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`) and a private personal agent.
-The gateway stays disabled without strict signed upstream authentication, even when users could sign in to the portal through [Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat).
+First configure strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`), so the [Connections portal](../connections-portal.md#trusted-upstream-sign-in) accepts your gateway's users.
+The gateway stays disabled without it, even though users can open the portal from MindRoom Chat.
+When more than one user signs in through the upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](trusted-upstream-auth.md#security-boundary)); it names the private agent each user's selection starts with.
 Then enable the gateway:
 
 ```bash
@@ -41,7 +42,7 @@ MINDROOM_PUBLIC_URL=https://assistant.example.org
 MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
-The gateway is disabled by default and stays disabled unless all of these settings are present.
+The gateway is disabled by default and stays disabled unless the strict signed upstream settings, `MINDROOM_PUBLIC_URL`, and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
 Internationalized hostnames must be written in their ASCII `xn--` form.
 Restart the API after changing any gateway environment variable.
@@ -81,7 +82,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
-[Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) sessions carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
+[Connections sessions from MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
 Without such a template, when a signed trusted upstream Matrix claim is configured, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
 
 ## Route browser and machine traffic
@@ -91,7 +92,7 @@ Forward these paths to the MindRoom API:
 
 | Paths | Authentication at the access proxy |
 |-------|------------------------------------|
-| `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [Matrix sign-in](trusted-upstream-auth.md#matrix-sign-in-from-mindroom-chat) |
+| `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, existing `/api/oauth/*` | Existing signed browser authentication, or pass through for [sign-in from MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) |
 | `/mcp` | Pass through to gateway bearer authentication |
 | `/mcp/oauth/authorize`, `/mcp/oauth/register`, `/mcp/oauth/token`, `/mcp/oauth/revoke` | Public OAuth endpoints; pass through |
 | `/.well-known/oauth-authorization-server/mcp/oauth`, `/.well-known/oauth-protected-resource/mcp` | Public client discovery |
@@ -111,7 +112,7 @@ MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS=https://client.example.org,http://localhost
 ```
 
 The gateway's public origin is allowed automatically.
-Additional origins must be HTTPS or loopback HTTP; wildcards are rejected.
+Additional origins must be HTTPS, or HTTP on `localhost` or a loopback or private IP address; wildcards are rejected.
 Internationalized hostnames in `MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS` must be written in their ASCII `xn--` form, and an invalid entry disables the gateway.
 Cross-origin MCP requests never carry browser cookies and do not grant access to dashboard APIs.
 The public registration, token, revocation, and discovery endpoints accept noncredentialed cross-origin requests.
