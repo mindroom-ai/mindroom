@@ -31,26 +31,11 @@ SCHEMAS = json.loads(support.SCHEMAS_PATH.read_text(encoding="utf-8"))
 ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
 
 
-def _flag(value: bool | None) -> bool:
-    """Agno leaves an unset flag at None and reads it as False everywhere; ``ToolFunction`` stores that bool."""
-    return bool(value)
-
-
 def expected_entry(golden: dict[str, object]) -> dict[str, object]:
-    """Return a golden entry as the adapter reports it: instructions only when Agno adds them, flags as bools."""
-    functions = golden["functions"]
-    assert isinstance(functions, list)
+    """Return a golden entry as the adapter reports it: instructions only when Agno adds them, functions verbatim."""
     return {
         "instructions": golden["instructions"] if golden["add_instructions"] else None,
-        "functions": [
-            {
-                **function,
-                "strict": _flag(function["strict"]),
-                "requires_confirmation": _flag(function["requires_confirmation"]),
-                "external_execution": _flag(function["external_execution"]),
-            }
-            for function in functions
-        ],
+        "functions": golden["functions"],
     }
 
 
@@ -174,18 +159,40 @@ def test_instructions_are_adapted_only_when_agno_adds_them() -> None:
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:
-    """``definition()`` carries the processed name, description, schema, and strict flag; no description is empty."""
+    """``definition()`` carries every field Agno serialized into a tool definition, with each tri-state kept."""
     [function] = adapt_toolkit(Toolkit(name="probes", tools=[probes.probe_choice])).functions
+    [gated] = adapt_toolkit(
+        Toolkit(
+            name="gated",
+            tools=[probes.probe_choice],
+            requires_confirmation_tools=["probe_choice"],
+            external_execution_required_tools=["probe_choice"],
+        ),
+    ).functions
+    bare = adapt_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
 
+    # A plain Toolkit leaves ``strict`` unset and the approval flags False; MindRoom's wrappers set ``strict`` False.
     assert function.definition() == ToolSpec(
         name="probe_choice",
         description="Record a constrained choice.",
         parameters=function.parameters,
-        strict=False,
+        strict=None,
+        requires_confirmation=False,
+        external_execution=False,
+        approval_type=None,
     )
-    bare = adapt_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
-    assert bare.description is None
-    assert bare.definition().description == ""
+    assert (gated.requires_confirmation, gated.external_execution) == (True, True)
+    assert (gated.definition().requires_confirmation, gated.definition().external_execution) == (True, True)
+    # Agno omitted these from the wire; the definition keeps None so a provider adapter can omit them too.
+    assert bare.definition() == ToolSpec(
+        name="bare",
+        description=None,
+        parameters=bare.parameters,
+        strict=None,
+        requires_confirmation=None,
+        external_execution=None,
+        approval_type=None,
+    )
 
 
 def test_injected_parameters_are_the_names_the_framework_supplies() -> None:

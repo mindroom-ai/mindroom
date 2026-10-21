@@ -16,6 +16,8 @@ class ToolFunction:
     """One callable tool with its model-facing definition and the flags the loop reads.
 
     ``parameters`` is the final JSON schema the model receives; readers must not mutate it.
+    ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` keep Agno's tri-state: None
+    means the tool never set the value, which the loop reads as False and the wire omits.
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
     """
@@ -23,20 +25,23 @@ class ToolFunction:
     name: str
     description: str | None
     parameters: Mapping[str, Any]
-    strict: bool = False
-    requires_confirmation: bool = False
+    strict: bool | None = None
+    requires_confirmation: bool | None = None
     approval_type: str | None = None
-    external_execution: bool = False
+    external_execution: bool | None = None
     stop_after_tool_call: bool = False
     show_result: bool = False
     entrypoint: Callable[..., Any]
     injected_params: frozenset[str] = frozenset()
 
     def definition(self) -> ToolSpec:
-        """Return the model-facing definition a provider adapter formats."""
+        """Return the model-facing definition a provider adapter formats: every field Agno serialized, None kept."""
         return ToolSpec(
             name=self.name,
-            description=self.description or "",
+            description=self.description,
             parameters=self.parameters,
             strict=self.strict,
+            requires_confirmation=self.requires_confirmation,
+            external_execution=self.external_execution,
+            approval_type=self.approval_type,
         )
