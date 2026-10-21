@@ -33,7 +33,12 @@ _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
 _LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
     (_PARITY / "storage" / "loaded_sessions.json").read_text(),
 )
-_HISTORY_GOLDENS = sorted((_PARITY / "history").glob("*.json"))
+_SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
+    (_PARITY / "history" / "scoped_selections.json").read_text(),
+)
+_HISTORY_GOLDENS = sorted(
+    path for path in (_PARITY / "history").glob("*.json") if path.name != "scoped_selections.json"
+)
 _SETTINGS = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="squad")
@@ -112,6 +117,36 @@ def test_selection_matches_agno_get_messages(golden_name: str, selection_name: s
         scope=_stored_scope(golden),
         num_history_runs=params.get("last_n_runs"),
         num_history_messages=params.get("limit"),
+    )
+
+    assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
+
+
+@pytest.mark.parametrize(
+    ("session_key", "selection_name"),
+    [
+        pytest.param(session_key, name, id=f"{session_key}/{name}")
+        for session_key, selections in _SCOPED_SELECTIONS.items()
+        for name in selections
+    ],
+)
+def test_scoped_selection_matches_agno_get_messages(session_key: str, selection_name: str) -> None:
+    store, session_id = session_key.split(":", 1)
+    selection = _SCOPED_SELECTIONS[session_key][selection_name]
+    params = selection["params"]
+    scope = (
+        HistoryScope(kind="team", scope_id=params["team_id"])
+        if "team_id" in params
+        else HistoryScope(kind="agent", scope_id=params["agent_id"])
+    )
+    runs = [run_record_from_dict(run) for run in _LOADED_SESSIONS[store][session_id]["runs"] or []]
+
+    history = scope_history_messages(
+        runs,
+        _SETTINGS,
+        scope=scope,
+        num_history_runs=params["last_n_runs"],
+        num_history_messages=params["limit"],
     )
 
     assert [message.to_dict() for message in history] == [_as_replayed(message) for message in selection["messages"]]
