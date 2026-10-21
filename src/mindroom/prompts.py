@@ -27,6 +27,7 @@ __all__ = [
     "DYNAMIC_TOOLING_INSTRUCTION_TEMPLATE",
     "EXPLORATION_PROMPT_TEMPLATE",
     "FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE",
+    "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE",
     "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE",
     "HIDDEN_TOOL_CALLS_PROMPT",
     "INLINE_MEDIA_FALLBACK_PROMPT",
@@ -285,9 +286,12 @@ Previous {context_type} memories that might be related:
 {memory_lines}"""
 FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE = (
     "[File memory entrypoint (agent)] Your curated long-term memory file `{memory_path}` is inlined below "
-    "automatically every turn, as this conversation last loaded it, so entries added from other conversations "
-    "since then may be missing. Do not re-read it to recall what it says; open it to edit it, to look for such "
-    "newer entries, or when a marker says lines were omitted."
+    "automatically every turn. Do not re-read it to recall what it says; open it to edit it, "
+    "or when a marker says lines were omitted."
+)
+FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE = (
+    "This conversation keeps the copy it last loaded, so entries added from other conversations since then "
+    "may be missing; open the file to look for them."
 )
 FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE = (
     "[Memory entrypoint truncated - showing the first {included_lines} of {total_lines} lines "

@@ -187,11 +187,12 @@ async def delete_agent_memory(
     )
 
 
-def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config) -> str:
+def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config, *, kept_copy: bool) -> str:
     """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
 
     A file whose preloaded head is blank still reports its truncation, so the
-    cap never withholds lines silently.
+    cap never withholds lines silently. A ``kept_copy`` preamble, one a
+    conversation may keep while entries are added, says newer entries may be missing.
     """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
@@ -209,7 +210,8 @@ def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Con
         if entrypoint.omitted_lines
         else ""
     )
-    return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
+    kept_copy_notice = config.get_prompt("FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE") if kept_copy else ""
+    return "\n".join(part for part in (header, kept_copy_notice, entrypoint.text, truncation_notice) if part)
 
 
 async def _entrypoint_preamble(
@@ -230,7 +232,11 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
-    preamble = _render_entrypoint_preamble(entrypoint, config) if entrypoint.text or entrypoint.omitted_lines else ""
+    preamble = (
+        _render_entrypoint_preamble(entrypoint, config, kept_copy=conversation is not None)
+        if entrypoint.text or entrypoint.omitted_lines
+        else ""
+    )
     if conversation is None or entrypoint.source_path is None:
         return preamble
     return stable_entrypoint_preamble(

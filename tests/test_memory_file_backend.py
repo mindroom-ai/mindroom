@@ -29,6 +29,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
@@ -1586,7 +1587,10 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     storage_path: Path,
     config: Config,
 ) -> None:
-    """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it."""
+    """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it.
+
+    Only a kept copy tells the agent that newer entries may be missing.
+    """
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1611,7 +1615,10 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
     assert await preamble(ConversationRef("thread", (None, None))) == first
     assert "Added fact." not in first
     assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
-    assert "Added fact." in await preamble(None)
+    assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] in first
+    fresh = await preamble(None)
+    assert "Added fact." in fresh
+    assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] not in fresh
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
