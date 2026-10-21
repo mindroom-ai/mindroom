@@ -2903,12 +2903,9 @@ class TestAgentBot(AgentBotTestBase):
         ).with_thread_root(root_event_id)
         scope = HistoryScope(kind="agent", scope_id=bot.agent_name)
         storage = bot._conversation_state_writer.create_storage(None, scope=scope)
-        try:
-            session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
-            set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-            seed_session(storage, session)
-        finally:
-            storage.close()
+        session = AgentSession(session_id=resolved_target.session_id, created_at=1, updated_at=1)
+        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+        seed_session(storage, session)
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 
         with (

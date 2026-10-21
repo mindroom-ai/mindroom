@@ -124,26 +124,23 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
                 "runtime_paths": paths,
                 "execution_identity": identity,
             }
-            try:
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-                if expect_child:
-                    assert response.status == RunStatus.paused
-                    state = DelegationState.from_metadata(response.metadata)
-                    assert state.children[0].child_agent_name == "leader"
-                    assert state.children[0].caller_agent_name == "leader"
-                    response = await drive_delegations(
-                        parent,
-                        response,
-                        run_child=run_delegated_child_response,
-                        **options,
-                        decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
-                        approval_calls=_saved_approval_calls(state),
-                        denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
-                    )
-                assert response.status == RunStatus.completed
-            finally:
-                storage.close()
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+            if expect_child:
+                assert response.status == RunStatus.paused
+                state = DelegationState.from_metadata(response.metadata)
+                assert state.children[0].child_agent_name == "leader"
+                assert state.children[0].caller_agent_name == "leader"
+                response = await drive_delegations(
+                    parent,
+                    response,
+                    run_child=run_delegated_child_response,
+                    **options,
+                    decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
+                    approval_calls=_saved_approval_calls(state),
+                    denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
+                )
+            assert response.status == RunStatus.completed
 
     records = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
     assert len(records) == int(expect_child)

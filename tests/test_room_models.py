@@ -19,7 +19,6 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import (
     _store_path,
@@ -399,11 +398,8 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=None,
         ),
     )
-    try:
-        assert members.agents[0].model is not None
-        assert members.agents[0].model.id == "large-model"
-    finally:
-        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
+    assert members.agents[0].model is not None
+    assert members.agents[0].model.id == "large-model"
 
     thread_id = "$thread:localhost"
     set_thread_model_override(
@@ -427,11 +423,8 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             session_id=f"{ROOM_ID}:{thread_id}",
         ),
     )
-    try:
-        assert thread_members.agents[0].model is not None
-        assert thread_members.agents[0].model.id == "default-model"
-    finally:
-        close_team_runtime_state_dbs(agents=thread_members.agents, team_db=None)
+    assert thread_members.agents[0].model is not None
+    assert thread_members.agents[0].model.id == "default-model"
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(

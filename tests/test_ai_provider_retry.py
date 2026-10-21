@@ -18,7 +18,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.providers import stream_retry as provider_stream_retry
-from mindroom.session_storage.agent_storage import get_agent_session
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.test_openai_responses_stream import _created, _event, _response
 from tests.test_provider_stream_retry import _answer as _chat_answer
@@ -138,13 +137,10 @@ def _stream(config: Config, run_id: str) -> AsyncIterator[AIStreamChunk]:
 def _stored_runs(agent: Agent) -> list[RunOutput]:
     assert isinstance(agent.db, SqliteDb)
     storage = SqliteDb(db_file=agent.db.db_file, session_table=agent.db.session_table_name)
-    try:
-        session = get_agent_session(storage, "retry-session")
-        assert session is not None
-        assert session.runs is not None
-        return session.runs
-    finally:
-        storage.close()
+    session = storage.load_session("retry-session", "agent")
+    assert session is not None
+    assert session.runs is not None
+    return session.runs
 
 
 @pytest.mark.asyncio

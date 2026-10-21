@@ -191,8 +191,6 @@ def test_scope_session_context_closes_its_storage_on_exit_and_on_error(
     with pytest.raises(RuntimeError, match="reply failed"):
         fail_inside()
     assert closed == [scope_context.storage, opened[0].storage]
-    for storage in (scope_context.storage, opened[0].storage):
-        storage.close()
 
 
 def test_private_ad_hoc_bound_team_scope_is_requester_partitioned(tmp_path: Path) -> None:

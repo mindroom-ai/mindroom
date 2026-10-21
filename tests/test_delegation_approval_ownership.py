@@ -150,210 +150,200 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: C90
     ) as scope:
         assert scope is not None
         storage = scope.storage if parent_kind == "team" else create_session_storage("leader", config, paths, identity)
-        try:
-            member = Agent(id="leader", name="Leader", model=parent_model, tools=[toolkit], db=storage)
-            parent = (
-                Team(id="squad", name="Squad", members=[member], model=team_model, db=storage)
-                if parent_kind == "team"
-                else member
+        member = Agent(id="leader", name="Leader", model=parent_model, tools=[toolkit], db=storage)
+        parent = (
+            Team(id="squad", name="Squad", members=[member], model=team_model, db=storage)
+            if parent_kind == "team"
+            else member
+        )
+        with tool_runtime_context(context):
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            response = await drive_delegations(
+                parent,
+                response,
+                run_child=run_delegated_child_response,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                member_config_names={"leader": "leader"},
             )
-            with tool_runtime_context(context):
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    agent_name="leader",
+        assert response.status == RunStatus.paused
+        assert executed == []
+        paused = paused_attempt_from_response(
+            response,
+            fallback_session_id=identity.session_id,
+            fallback_run_id=response.run_id,
+            toolkit_owners=toolkit_owners_for_agents([member]),
+        )
+        assert paused is not None
+        if parent_kind == "team":
+            paused = _attach_team_pause_presentation(
+                paused,
+                response=response,
+                config_names=["leader"],
+                display_names=["Leader"],
+                show_tool_calls=True,
+            )
+        invoking_agent = "leader" if gate else child_name
+        function_name = "run_subagent" if gate else "add"
+        toolkit_name = "delegate" if gate else "calculator"
+        assert paused.toolkit_owners[(invoking_agent, function_name)] == toolkit_name
+        call = ApprovalCall(
+            tool_call_id=paused.tools[0].tool_call_id,
+            tool_name=function_name,
+            invoking_agent=invoking_agent,
+            toolkit_name="file" if decision == "wrong_owner" else toolkit_name,
+            expires_at_ns=2**62,
+            arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
+        )
+        if decision.endswith("removed"):
+            config.agents[child_name].tools = []
+        if decision == "rewrite_gate":
+            # Only the separate external requirement changes; the approved gate card keeps its arguments.
+            rewritten = deepcopy(response)
+            external = next(item for item in rewritten.requirements or () if item.needs_external_execution)
+            assert external.tool_execution is not None
+            external.tool_execution.tool_args = {
+                **(external.tool_execution.tool_args or {}),
+                "task": "Add 40 and 2",
+            }
+            storage.upsert_run(run=rewritten, session_id=identity.session_id, user_id=identity.requester_id)
+        elif decision.endswith("planted_gate"):
+            # A second delegation and an approved gate for it appear only in the stored run.
+            planted_run = deepcopy(response)
+            external = next(item for item in planted_run.requirements or () if item.needs_external_execution)
+            assert external.tool_execution is not None
+            planted_tool = deepcopy(external.tool_execution)
+            planted_tool.tool_call_id = "planted"
+            planted_tool.tool_args = {**(planted_tool.tool_args or {}), "task": "Add 40 and 2"}
+            planted = RunRequirement(planted_tool)
+            planted.member_agent_id = external.member_agent_id
+            planted.member_agent_name = external.member_agent_name
+            planted.member_run_id = external.member_run_id
+            planted_run.requirements = [*(planted_run.requirements or ()), planted]
+            planted_key = f"{planted.member_agent_id}:planted" if planted.member_agent_id else "planted"
+            planted_state = DelegationState.from_metadata(planted_run.metadata)
+            planted_state.gates[planted_key] = True
+            planted_run.metadata = {**(planted_run.metadata or {}), DELEGATION_STATE_KEY: planted_state.to_dict()}
+            storage.upsert_run(run=planted_run, session_id=identity.session_id, user_id=identity.requester_id)
+        elif decision == "approve_planted":
+            child = DelegationState.from_metadata(response.metadata).children[0]
+            child_run = await read_child_run(child, config, paths)
+            assert child_run is not None
+            child_run.tools = [
+                *(child_run.tools or ()),
+                ToolExecution(
+                    tool_call_id="planted",
+                    tool_name="add",
+                    tool_args={"a": 40, "b": 2},
+                    requires_confirmation=True,
+                    confirmed=True,
+                ),
+            ]
+            child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
+            child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
+        elif decision == "approve_user_input":
+            # The approved call keeps its arguments, but answered user input would replace them before it runs.
+            child = DelegationState.from_metadata(response.metadata).children[0]
+            child_run = await read_child_run(child, config, paths)
+            assert child_run is not None
+            pending = (child_run.requirements or [])[0]
+            child_run.metadata = {
+                **(child_run.metadata or {}),
+                DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
+            }
+            for tool in (*(child_run.tools or ()), *(item.tool_execution for item in child_run.requirements or ())):
+                assert tool is not None
+                tool.requires_confirmation = False
+                tool.requires_user_input = True
+                tool.answered = True
+                tool.user_input_schema = [UserInputField(name="a", field_type=int, value=40)]
+            child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
+            child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
+        decisions = {call.tool_call_id: not decision.startswith("deny")}
+        reasons = {call.tool_call_id: "Requester declined"}
+        with (
+            tool_runtime_context(context),
+            pytest.raises(RuntimeError, match="pending arguments") if decision == "rewrite_gate" else nullcontext(),
+        ):
+            if parent_kind == "team":
+                result = await continue_paused_team_run(
+                    member_names=("leader",),
+                    mode=TeamMode.COORDINATE,
                     config=config,
                     runtime_paths=paths,
-                    execution_identity=identity,
-                    member_config_names={"leader": "leader"},
+                    execution_identity=replace(identity, agent_name="squad"),
+                    session_id=identity.session_id,
+                    run_id=paused.run_id,
+                    user_id=identity.requester_id,
+                    configured_team_name="squad",
+                    model_name="default",
+                    decisions=decisions,
+                    denial_reasons=reasons,
+                    refresh_scheduler=None,
+                    approval_calls=(call,),
+                    history_scope=history_scope,
+                    prior_presentation_state=paused.response_presentation_state,
+                    prior_tool_trace=paused.tool_trace,
+                    progress=None,
                 )
-            assert response.status == RunStatus.paused
-            assert executed == []
-            paused = paused_attempt_from_response(
-                response,
-                fallback_session_id=identity.session_id,
-                fallback_run_id=response.run_id,
-                toolkit_owners=toolkit_owners_for_agents([member]),
-            )
-            assert paused is not None
-            if parent_kind == "team":
-                paused = _attach_team_pause_presentation(
-                    paused,
-                    response=response,
-                    config_names=["leader"],
-                    display_names=["Leader"],
-                    show_tool_calls=True,
-                )
-            invoking_agent = "leader" if gate else child_name
-            function_name = "run_subagent" if gate else "add"
-            toolkit_name = "delegate" if gate else "calculator"
-            assert paused.toolkit_owners[(invoking_agent, function_name)] == toolkit_name
-            call = ApprovalCall(
-                tool_call_id=paused.tools[0].tool_call_id,
-                tool_name=function_name,
-                invoking_agent=invoking_agent,
-                toolkit_name="file" if decision == "wrong_owner" else toolkit_name,
-                expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(paused.tools[0].tool_args),
-            )
-            if decision.endswith("removed"):
-                config.agents[child_name].tools = []
-            if decision == "rewrite_gate":
-                # Only the separate external requirement changes; the approved gate card keeps its arguments.
-                rewritten = deepcopy(response)
-                external = next(item for item in rewritten.requirements or () if item.needs_external_execution)
-                assert external.tool_execution is not None
-                external.tool_execution.tool_args = {
-                    **(external.tool_execution.tool_args or {}),
-                    "task": "Add 40 and 2",
-                }
-                storage.upsert_run(run=rewritten, session_id=identity.session_id, user_id=identity.requester_id)
-            elif decision.endswith("planted_gate"):
-                # A second delegation and an approved gate for it appear only in the stored run.
-                planted_run = deepcopy(response)
-                external = next(item for item in planted_run.requirements or () if item.needs_external_execution)
-                assert external.tool_execution is not None
-                planted_tool = deepcopy(external.tool_execution)
-                planted_tool.tool_call_id = "planted"
-                planted_tool.tool_args = {**(planted_tool.tool_args or {}), "task": "Add 40 and 2"}
-                planted = RunRequirement(planted_tool)
-                planted.member_agent_id = external.member_agent_id
-                planted.member_agent_name = external.member_agent_name
-                planted.member_run_id = external.member_run_id
-                planted_run.requirements = [*(planted_run.requirements or ()), planted]
-                planted_key = f"{planted.member_agent_id}:planted" if planted.member_agent_id else "planted"
-                planted_state = DelegationState.from_metadata(planted_run.metadata)
-                planted_state.gates[planted_key] = True
-                planted_run.metadata = {**(planted_run.metadata or {}), DELEGATION_STATE_KEY: planted_state.to_dict()}
-                storage.upsert_run(run=planted_run, session_id=identity.session_id, user_id=identity.requester_id)
-            elif decision == "approve_planted":
-                child = DelegationState.from_metadata(response.metadata).children[0]
-                child_run = await read_child_run(child, config, paths)
-                assert child_run is not None
-                child_run.tools = [
-                    *(child_run.tools or ()),
-                    ToolExecution(
-                        tool_call_id="planted",
-                        tool_name="add",
-                        tool_args={"a": 40, "b": 2},
-                        requires_confirmation=True,
-                        confirmed=True,
-                    ),
-                ]
-                child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
-                try:
-                    child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
-                finally:
-                    child_storage.close()
-            elif decision == "approve_user_input":
-                # The approved call keeps its arguments, but answered user input would replace them before it runs.
-                child = DelegationState.from_metadata(response.metadata).children[0]
-                child_run = await read_child_run(child, config, paths)
-                assert child_run is not None
-                pending = (child_run.requirements or [])[0]
-                child_run.metadata = {
-                    **(child_run.metadata or {}),
-                    DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
-                }
-                for tool in (*(child_run.tools or ()), *(item.tool_execution for item in child_run.requirements or ())):
-                    assert tool is not None
-                    tool.requires_confirmation = False
-                    tool.requires_user_input = True
-                    tool.answered = True
-                    tool.user_input_schema = [UserInputField(name="a", field_type=int, value=40)]
-                child_storage = create_session_storage(child_name, config, paths, child_execution_identity(child))
-                try:
-                    child_storage.upsert_run(run=child_run, session_id=child.session_id, user_id=identity.requester_id)
-                finally:
-                    child_storage.close()
-            decisions = {call.tool_call_id: not decision.startswith("deny")}
-            reasons = {call.tool_call_id: "Requester declined"}
-            with (
-                tool_runtime_context(context),
-                pytest.raises(RuntimeError, match="pending arguments") if decision == "rewrite_gate" else nullcontext(),
-            ):
-                if parent_kind == "team":
-                    result = await continue_paused_team_run(
-                        member_names=("leader",),
-                        mode=TeamMode.COORDINATE,
-                        config=config,
-                        runtime_paths=paths,
-                        execution_identity=replace(identity, agent_name="squad"),
-                        session_id=identity.session_id,
-                        run_id=paused.run_id,
-                        user_id=identity.requester_id,
-                        configured_team_name="squad",
-                        model_name="default",
-                        decisions=decisions,
-                        denial_reasons=reasons,
-                        refresh_scheduler=None,
-                        approval_calls=(call,),
-                        history_scope=history_scope,
-                        prior_presentation_state=paused.response_presentation_state,
-                        prior_tool_trace=paused.tool_trace,
-                        progress=None,
-                    )
-                else:
-                    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-                    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
-                    monkeypatch.setattr(
-                        execution.knowledge_access,
-                        "resolve_for_agent_async",
-                        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
-                    )
-                    monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
-                    continuation = approval_continuation(
-                        approval_id="saved-child-approval",
-                        run_id=paused.run_id,
-                        session_id=identity.session_id,
-                        entity_name="leader",
-                        room_id=identity.room_id,
-                        thread_id=identity.thread_id,
-                        requester_id=identity.requester_id,
-                        state="claimed",
-                        calls=(call,),
-                    )
-                    result = await execution.continue_run(
-                        continuation,
-                        paused_answer=PausedAnswer(),
-                        execution_identity=identity,
-                        tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=context),
-                        decisions=decisions,
-                        denial_reasons=reasons,
-                        tool_trace_collector=[],
-                        typing_log_context={},
-                        progress=None,
-                    )
-            if decision == "rewrite_gate":
-                assert executed == []
-                assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
-                return
-            if decision.endswith("planted_gate"):
-                # Only the approved delegation may start; the planted one waits for its own card.
-                approved = decision.startswith("approve")
-                runs = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
-                assert len(runs) == (1 if approved else 0)
-                assert executed == ([(2, 3)] if approved else [])
-                assert isinstance(result, PausedAttempt)
-                assert [tool.tool_call_id for tool in result.tools] == [planted_key]
-                return
-            assert isinstance(result, CompletedApprovalRun)
-            assert executed == ([(2, 3)] if decision in {"approve", "approve_gate"} else [])
-            child_result = str(
-                next(message.content for message in parent_model.seen_messages if message.role == "tool"),
-            )
-            if decision == "deny_gate":
-                assert "child was not executed" in child_result
-                assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
-            elif decision in {"approve_removed", "wrong_owner", "approve_planted", "approve_user_input"}:
-                assert "failed" in child_result
             else:
-                assert "Child finished." in child_result
-        finally:
-            if storage is not scope.storage:
-                storage.close()
+                runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+                execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+                monkeypatch.setattr(
+                    execution.knowledge_access,
+                    "resolve_for_agent_async",
+                    AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+                )
+                monkeypatch.setattr("mindroom.approval.execution.typing_indicator", _noop_typing)
+                continuation = approval_continuation(
+                    approval_id="saved-child-approval",
+                    run_id=paused.run_id,
+                    session_id=identity.session_id,
+                    entity_name="leader",
+                    room_id=identity.room_id,
+                    thread_id=identity.thread_id,
+                    requester_id=identity.requester_id,
+                    state="claimed",
+                    calls=(call,),
+                )
+                result = await execution.continue_run(
+                    continuation,
+                    paused_answer=PausedAnswer(),
+                    execution_identity=identity,
+                    tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=context),
+                    decisions=decisions,
+                    denial_reasons=reasons,
+                    tool_trace_collector=[],
+                    typing_log_context={},
+                    progress=None,
+                )
+        if decision == "rewrite_gate":
+            assert executed == []
+            assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
+            return
+        if decision.endswith("planted_gate"):
+            # Only the approved delegation may start; the planted one waits for its own card.
+            approved = decision.startswith("approve")
+            runs = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
+            assert len(runs) == (1 if approved else 0)
+            assert executed == ([(2, 3)] if approved else [])
+            assert isinstance(result, PausedAttempt)
+            assert [tool.tool_call_id for tool in result.tools] == [planted_key]
+            return
+        assert isinstance(result, CompletedApprovalRun)
+        assert executed == ([(2, 3)] if decision in {"approve", "approve_gate"} else [])
+        child_result = str(
+            next(message.content for message in parent_model.seen_messages if message.role == "tool"),
+        )
+        if decision == "deny_gate":
+            assert "child was not executed" in child_result
+            assert not list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
+        elif decision in {"approve_removed", "wrong_owner", "approve_planted", "approve_user_input"}:
+            assert "failed" in child_result
+        else:
+            assert "Child finished." in child_result
 
 
 @pytest.mark.asyncio
@@ -455,43 +445,39 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     ) as scope:
         assert scope is not None
         storage = scope.storage if parent_kind == "team" else create_session_storage("leader", config, paths, identity)
-        try:
-            member = Agent(id="leader", name="Leader", model=parent_model, tools=[calculator, delegate], db=storage)
-            parent = (
-                Team(id="squad", name="Squad", members=[member], model=team_model, db=storage)
-                if parent_kind == "team"
-                else member
-            )
-            with tool_runtime_context(context):
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    agent_name="leader",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                    member_config_names={"leader": "leader"},
-                )
-            result = paused_attempt_from_response(
+        member = Agent(id="leader", name="Leader", model=parent_model, tools=[calculator, delegate], db=storage)
+        parent = (
+            Team(id="squad", name="Squad", members=[member], model=team_model, db=storage)
+            if parent_kind == "team"
+            else member
+        )
+        with tool_runtime_context(context):
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            response = await drive_delegations(
+                parent,
                 response,
-                fallback_session_id=identity.session_id,
-                fallback_run_id=response.run_id,
-                toolkit_owners=toolkit_owners_for_agents([member]),
+                run_child=run_delegated_child_response,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                member_config_names={"leader": "leader"},
             )
-            assert result is not None
-            if parent_kind == "team":
-                result = _attach_team_pause_presentation(
-                    result,
-                    response=response,
-                    config_names=["leader"],
-                    display_names=["Leader"],
-                    show_tool_calls=True,
-                )
-        finally:
-            if storage is not scope.storage:
-                storage.close()
+        result = paused_attempt_from_response(
+            response,
+            fallback_session_id=identity.session_id,
+            fallback_run_id=response.run_id,
+            toolkit_owners=toolkit_owners_for_agents([member]),
+        )
+        assert result is not None
+        if parent_kind == "team":
+            result = _attach_team_pause_presentation(
+                result,
+                response=response,
+                config_names=["leader"],
+                display_names=["Leader"],
+                show_tool_calls=True,
+            )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
     monkeypatch.setattr(

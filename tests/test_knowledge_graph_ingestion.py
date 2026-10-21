@@ -161,39 +161,33 @@ def _seed(
 ) -> None:
     """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
     storage = create_session_storage(agent, config, paths, execution_identity=None)
-    try:
-        runs = [
-            _run(
-                run_id,
-                session_id,
-                at + index * spacing,
-                RunStatus.paused if run_id in paused else RunStatus.completed,
-                agent,
-                matrix=matrix,
-            )
-            for index, run_id in enumerate(run_ids)
-        ]
-        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
-        with storage.db_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
-            )
-    finally:
-        storage.close()
+    runs = [
+        _run(
+            run_id,
+            session_id,
+            at + index * spacing,
+            RunStatus.paused if run_id in paused else RunStatus.completed,
+            agent,
+            matrix=matrix,
+        )
+        for index, run_id in enumerate(run_ids)
+    ]
+    seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
+    with storage.db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
+        )
 
 
 def _edit_runs(config: Config, paths: RuntimePaths, session_id: str, edit: Callable[[list[RunOutput]], None]) -> None:
     """Change a seeded conversation's stored runs in place."""
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        session = storage.get_session(session_id, SessionType.AGENT)
-        assert isinstance(session, AgentSession)
-        edit(session.runs)
-        for run in session.runs:
-            storage.upsert_run(run=run, session_id=session_id, user_id=None)
-    finally:
-        storage.close()
+    session = storage.get_session(session_id, SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    edit(session.runs)
+    for run in session.runs:
+        storage.upsert_run(run=run, session_id=session_id, user_id=None)
 
 
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:

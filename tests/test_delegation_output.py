@@ -248,4 +248,3 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         release.set()
         if runtime is not None:
             await runtime.shutdown()
-        storage.close()

@@ -8,7 +8,6 @@ import asyncio
 import json
 import time
 from dataclasses import replace
-from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -41,7 +40,6 @@ from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.history.types import HistoryScope
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_sources import ResponseSources
@@ -51,7 +49,7 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -171,7 +169,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     )
     storage.upsert_session(session)
     storage.upsert_run(persisted, session_id=runtime.session_id)
-    storage.close()
     switch_arguments = {"model_name": "default", "when": "next-turn"}
     requirement = RunRequirement(
         ToolExecution(
@@ -291,7 +288,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[function, shell_toolkit])
     catalog.run_response.agent_id = "helper"
     catalog.run_response.metadata = {"source": "original"}
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     catalog.run_response.messages = [
         Message(
             role="assistant",
@@ -419,7 +416,7 @@ async def test_restart_settles_outer_bash_approval_without_running_it(
     bind_toolkit_authority(shell_toolkit, authored_name="shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     marker = tmp_path / "ran"
     arguments = {"command": f"touch {marker}"}
     requirement = RunRequirement(
@@ -494,7 +491,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     agents._set_toolkit_approval_origin(shell_toolkit, "shell")
     catalog.agent = minimal_agent.MinimalAgent(id="helper", model=catalog.agent.model, tools=[shell_toolkit])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     folded = ToolExecution(
         tool_call_id="folded-bash",
         tool_name="run_shell_command",
@@ -580,7 +577,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
             progress=None,
         )
 
-    stored = get_agent_session(catalog.agent.db, "session")
+    stored = catalog.agent.db.load_session("session", "agent")
     assert stored is not None
     saved = "\n".join(
         str(message.content) for run in stored.runs or [] if run.run_id == "run" for message in run.messages or []
@@ -601,7 +598,6 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
     shell: bool,
     missing_shell_function: str | None,
     nested: str | None,
@@ -670,7 +666,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         agent_mode="minimal",
         supports_native_tool_approval=True,
     )
-    request.addfinalizer(partial(close_agent_runtime_state_dbs, agent))
     requests = []
     sibling_image = Image(url="https://example.test/completed-sibling.png")
     image = Image(content=b"saved-image", mime_type="image/png")
@@ -808,7 +803,6 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             agent_mode="minimal",
             supports_native_tool_approval=True,
         )
-        request.addfinalizer(partial(close_agent_runtime_state_dbs, agent))
         agent.add_tool(toolkit)
 
     async def send(**request):
@@ -1037,7 +1031,6 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
     )
     storage.upsert_session(session)
     storage.upsert_run(persisted, session_id=runtime.session_id)
-    storage.close()
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="remember-id",

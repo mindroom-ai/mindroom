@@ -33,7 +33,7 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
 
     catalog = await _catalog(tmp_path, [])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def bash(command: str) -> str:
         return command
@@ -136,7 +136,7 @@ async def test_real_fallback_batch_checkpoints_resolved_model(tmp_path: Path) ->
 
     catalog = await _catalog(tmp_path, [])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     catalog.agent.model = Primary()
     fallback = Fallback()
     catalog.agent.fallback_config = FallbackConfig(on_error=[fallback])
@@ -173,7 +173,7 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
 
     catalog = await _catalog(tmp_path, [])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def bash(command: str) -> str:
         return command
@@ -228,7 +228,7 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(tmp_path: Path
 
     catalog = await _catalog(tmp_path, [])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def bash(command: str) -> str:
         return command

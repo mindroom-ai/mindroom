@@ -55,7 +55,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -174,7 +174,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"
@@ -285,7 +285,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_mo
             compaction_lifecycle=lifecycle,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_decision.mode == "required"
@@ -528,8 +528,8 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
             session=thread_session,
         )
 
-    persisted_room = get_agent_session(storage, room_session_id)
-    persisted_thread = get_agent_session(storage, thread_session_id)
+    persisted_room = storage.load_session(room_session_id, "agent")
+    persisted_thread = storage.load_session(thread_session_id, "agent")
     assert persisted_room is not None
     assert persisted_thread is not None
     assert persisted_room.summary is None
@@ -679,7 +679,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
             execution_plan=execution_plan,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == second_summary_text
@@ -802,7 +802,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
             execution_plan=execution_plan,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == second_summary_text
@@ -889,7 +889,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
             allow_native_compaction=allow_native_compaction,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     if allow_native_compaction:
         assert prepared.compaction_decision.mode == "none"
@@ -1028,7 +1028,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
             compaction_lifecycle=lifecycle,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.runs == []
@@ -1061,7 +1061,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         ),
     ]
     seed_session(storage, persisted)
-    current_run_session = get_agent_session(storage, "session-1")
+    current_run_session = storage.load_session("session-1", "agent")
     assert current_run_session is not None
     assert [run.run_id for run in current_run_session.runs or []] == ["run-24"]
     assert "run-24" not in folded_run_ids(storage)
@@ -1208,7 +1208,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
             execution_plan=execution_plan,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == first_summary_text
@@ -1340,7 +1340,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     assert [event.summary_model for event in progress_events] == ["fallback-model"]
     failure_events = [event for event in lifecycle.events if isinstance(event, CompactionLifecycleFailure)]
     assert [event.summary_model for event in failure_events] == ["fallback-model"]
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == first_summary_text
@@ -1421,7 +1421,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     assert len(fallback_warnings) == 1
     assert fallback_warnings[0].kwargs["fallback_model"] == "fallback-model"
     assert not any(isinstance(event, CompactionLifecycleFailure) for event in lifecycle.events)
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "primary summary"
@@ -1498,7 +1498,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             session=session,
             available_history_budget=100,
         )
-        persisted_before_second = get_agent_session(storage, "session-1")
+        persisted_before_second = storage.load_session("session-1", "agent")
         assert persisted_before_second is not None
         second_prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
@@ -1513,7 +1513,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             available_history_budget=100,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "all runs summary"
@@ -1569,7 +1569,7 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
         storage=storage,
         session=session,
     )
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
@@ -1609,7 +1609,7 @@ async def test_prepare_history_for_run_context_window_guard_preserves_custom_sys
         ],
     )
     seed_session(storage, session)
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     agent = _agent(db=storage)
 
@@ -1665,7 +1665,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     @dataclass
     class _FlagAtFailure(RecordingCompactionLifecycle):
         async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-            stored = get_agent_session(storage, "session-1")
+            stored = storage.load_session("session-1", "agent")
             assert stored is not None
             flag_at_failure_notice.append(read_scope_state(stored, scope).force_compact_before_next_run)
             await super().complete_failure(event)
@@ -1696,7 +1696,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     # The failed manual request is cleared before its failure notice, so a reply cannot retry it.
     assert flag_at_failure_notice == [False]
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3", "run-4"]
@@ -1759,7 +1759,7 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
             compaction_lifecycle=lifecycle,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert read_scope_state(persisted, scope).force_compact_before_next_run is True
@@ -1800,7 +1800,7 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]

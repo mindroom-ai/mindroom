@@ -264,7 +264,6 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         assert results[1].result == "saved member answer"
         assert (await lookup(runtime, "member-job", owner=owner, depth=0)).consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -331,7 +330,6 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         assert tool.result == expected_result
         assert (await lookup(runtime, "ordinary", owner=owner, depth=0)).consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -624,7 +622,7 @@ def _payload(text: str, *, error: str | None = None) -> EncodedResultPayload:
 @pytest.mark.asyncio
 async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
     """One collect returns every ended job's result, and acknowledging them makes a second collect find none."""
-    response, runtime, tools, owner, (storage, context) = await _collect_in_a_run(
+    response, runtime, tools, owner, (_storage, context) = await _collect_in_a_run(
         tmp_path,
         {
             "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
@@ -642,7 +640,6 @@ async def test_collect_returns_every_ended_job_once(tmp_path: Path) -> None:
         with tool_runtime_context(context):
             assert await tools.job("collect") == "No ended background jobs."
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -661,7 +658,7 @@ async def test_collect_reports_the_others_when_one_result_cannot_be_read(
         return await original(runtime, job)
 
     monkeypatch.setattr(consumption_module, "read_result_payload", read)
-    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(
         tmp_path,
         {
             "job_a": BackgroundOutcome("completed", "result a", result_payload=_payload("result a")),
@@ -675,14 +672,13 @@ async def test_collect_reports_the_others_when_one_result_cannot_be_read(
         assert (await lookup(runtime, "job_a", owner=owner, depth=0)).consumed
         assert not (await lookup(runtime, "job_b", owner=owner, depth=0)).consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_collect_acknowledges_a_cancelled_job_without_a_result(tmp_path: Path) -> None:
     """A cancelled job is reported as cancelled and acknowledged, though it has no result."""
-    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(
         tmp_path,
         {"job_a": BackgroundOutcome("cancelled")},
     )
@@ -692,27 +688,25 @@ async def test_collect_acknowledges_a_cancelled_job_without_a_result(tmp_path: P
         assert "cancelled" in result
         assert (await lookup(runtime, "job_a", owner=owner, depth=0)).consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_collect_leaves_running_jobs_alone(tmp_path: Path) -> None:
     """A job still running is neither returned nor claimed."""
-    response, runtime, _tools, owner, (storage, _context) = await _collect_in_a_run(tmp_path, {"running": None})
+    response, runtime, _tools, owner, (_storage, _context) = await _collect_in_a_run(tmp_path, {"running": None})
     try:
         assert response.tools[0].result == "No ended background jobs."
         job = await lookup(runtime, "running", owner=owner, depth=0)
         assert (job.status, job.consumed) == ("running", False)
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_collect_returns_a_background_subagents_answer(tmp_path: Path) -> None:
     """A finished background subagent's answer is collected like any other job's result."""
-    response, runtime, _tools, _owner, (storage, _context) = await _collect_in_a_run(
+    response, runtime, _tools, _owner, (_storage, _context) = await _collect_in_a_run(
         tmp_path,
         {"child": delegation_outcome("completed", "the child's answer")},
         kind="delegation",
@@ -720,7 +714,6 @@ async def test_collect_returns_a_background_subagents_answer(tmp_path: Path) -> 
     try:
         assert "the child's answer" in str(response.tools[0].result)
     finally:
-        storage.close()
         await runtime.shutdown()
 
 

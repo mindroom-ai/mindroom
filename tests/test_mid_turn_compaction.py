@@ -66,7 +66,7 @@ from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIR
 from mindroom.providers.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.providers.portable_tool_search import install_portable_deferred_tool_search
 from mindroom.providers.synthetic_model import SyntheticModel
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import TeamMode, _create_team_instance, prepare_materialized_team_execution
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
@@ -1057,13 +1057,10 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
     config, paths = _config(tmp_path)
     model = _ToolLoopModel(tool_rounds=5)
     storage = SqliteDb(db_file=str(tmp_path / "usage.db"), session_table="test_agent_sessions")
-    try:
-        await _run(_agent(model, config, paths, db=storage), "Do the task")
+    await _run(_agent(model, config, paths, db=storage), "Do the task")
 
-        with storage.db_engine.begin() as connection:
-            rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
-    finally:
-        storage.close()
+    with storage.db_engine.begin() as connection:
+        rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
 
     summaries = [json.loads(row) for row in rows if json.loads(row).get("kind") == "compaction_summary"]
     assert len(summaries) == len(summary_calls.inputs) >= 1
@@ -1078,13 +1075,10 @@ async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
     config, paths = _config(tmp_path)
     storage = _seeded_storage(config, paths)
     assert isinstance(storage, SqliteDb)
-    try:
-        await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+    await _run_in_session(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
 
-        with storage.db_engine.begin() as connection:
-            rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
-    finally:
-        storage.close()
+    with storage.db_engine.begin() as connection:
+        rows = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
 
     summaries = [json.loads(row) for row in rows if json.loads(row).get("kind") == "compaction_summary"]
     assert len(summaries) == len(summary_calls.inputs) >= 1
@@ -1114,11 +1108,8 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
         helper_usage._HELPER_USAGE_OWNER.reset(token)
 
     storage = owner_storage()
-    try:
-        with storage.db_engine.begin() as connection:
-            rows = connection.exec_driver_sql("SELECT session_id, usage_data FROM owner_sessions_usage").all()
-    finally:
-        storage.close()
+    with storage.db_engine.begin() as connection:
+        rows = connection.exec_driver_sql("SELECT session_id, usage_data FROM owner_sessions_usage").all()
     summaries = [
         (session_id, json.loads(data))
         for session_id, data in rows
@@ -1437,7 +1428,7 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
         f"run:{output.run_id}",
     ]
     assert [run_id for run_id, _segment in segments_of(storage, _SCOPE.key)] == [output.run_id] * len(rows)
-    stored = get_agent_session(storage, "session-1")
+    stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.summary == rows[-1].summary
@@ -1483,7 +1474,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
         f"run:{output.run_id}",
     ]
     assert {run_id for run_id, _segment in segments_of(storage, _TEAM_SCOPE.key)} == {output.run_id}
-    stored = get_team_session(storage, "session-1")
+    stored = storage.load_session("session-1", "team")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.summary == rows[-1].summary
@@ -1523,7 +1514,7 @@ async def test_scoped_team_compaction_keeps_the_turns_member_runs(
     assert isinstance(output, TeamRunOutput)
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
-    stored = get_team_session(storage, "session-1")
+    stored = storage.load_session("session-1", "team")
     assert stored is not None
     assert any(run.parent_run_id == output.run_id for run in stored.runs or [])
 
@@ -1758,7 +1749,7 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
     await agent.acontinue_run(run_id=paused.run_id, requirements=paused.requirements, session_id="session-1")
 
     assert len(summary_calls.inputs) > compactions_before_resume
-    stored = get_agent_session(storage, "session-1")
+    stored = storage.load_session("session-1", "agent")
     rows = summary_rows_of(storage, _SCOPE.key)
     assert stored is not None
     assert stored.summary is not None
@@ -1794,7 +1785,7 @@ async def test_team_approval_resume_after_mid_turn_compaction(tmp_path: Path, su
     summaries = [message for message in resumed.messages if is_compaction_summary(message)]
     assert len(summaries) == 1
     assert summaries[0].content == next(m.content for m in paused_request.messages if is_compaction_summary(m))
-    stored = get_team_session(storage, "session-1")
+    stored = storage.load_session("session-1", "team")
     rows = summary_rows_of(storage, _TEAM_SCOPE.key)
     assert stored is not None
     assert stored.summary is not None
@@ -1828,7 +1819,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
     # The second chunk failed, so nothing was written and the request kept every exchange unchanged.
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
     assert summary_rows_of(storage, _SCOPE.key) == []
-    stored = get_agent_session(storage, "session-1")
+    stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert stored.summary is None
 
@@ -1882,7 +1873,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
 async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     storage = _seeded_storage(config, paths)
-    stored = get_agent_session(storage, "session-1")
+    stored = storage.load_session("session-1", "agent")
     assert stored is not None
     set_force_compaction_state(stored, _SCOPE, HistoryScopeState(), force=True)
     storage.upsert_session(stored)
@@ -1891,7 +1882,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     await _run_in_session(_scoped_agent(model, config, paths, storage), "Do the task")
 
     assert summary_calls.inputs
-    after = get_agent_session(storage, "session-1")
+    after = storage.load_session("session-1", "agent")
     assert after is not None
     assert read_scope_state(after, _SCOPE).force_compact_before_next_run is True
 
@@ -2191,7 +2182,7 @@ async def test_oversized_native_request_in_a_stored_conversation_covers_the_turn
         *(f"row:{row.summary}" for row in rows),
         f"run:{output.run_id}",
     ]
-    stored = get_agent_session(storage, "session-1")
+    stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.summary == rows[-1].summary

@@ -97,21 +97,18 @@ async def test_subagent_model_selection(
                     ],
                 ),
             )
-            try:
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    agent_name="leader",
-                    run_child=run_delegated_child_response,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                )
-                assert response.status == RunStatus.completed
-                result = next(str(tool.result) for tool in response.tools or () if tool.tool_name == "run_subagent")
-            finally:
-                storage.close()
+            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+            response = await drive_delegations(
+                parent,
+                response,
+                agent_name="leader",
+                run_child=run_delegated_child_response,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+            )
+            assert response.status == RunStatus.completed
+            result = next(str(tool.result) for tool in response.tools or () if tool.tool_name == "run_subagent")
         else:
             result = await toolkit.run_subagent(task="Report", agent_name=agent_name, model=model)
 

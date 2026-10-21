@@ -254,7 +254,6 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
         assert all(BACKGROUND_JOBS_ENDED_NOTICE not in result for result in results), results
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio

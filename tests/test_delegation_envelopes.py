@@ -209,7 +209,6 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
             assert child_payload["record_locator"]
     finally:
         release.set()
-        storage.close()
 
 
 def _continuation_responses(continuation: str) -> list[ModelResponse]:
@@ -323,86 +322,79 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             ],
         ),
     )
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            paused = await drive_delegations(
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+        paused = await drive_delegations(
+            parent,
+            response,
+            run_child=run_delegated_child_response,
+            agent_name="leader",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+        )
+        state = DelegationState.from_metadata(paused.metadata)
+        events: list[object] = []
+        completed = paused
+        if approval:
+            assert paused.status == RunStatus.paused
+            persisted = storage.get_run(paused.run_id)
+            assert isinstance(persisted, RunOutput)
+            decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
+            assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
+            approval_calls = tuple(
+                ApprovalCall(
+                    tool_call_id=str(tool["tool_call_id"]),
+                    tool_name=str(tool["tool_name"]),
+                    invoking_agent="child",
+                    toolkit_name="calculator",
+                    expires_at_ns=2**62,
+                    arguments_digest=approval_arguments_digest(tool["tool_args"]),
+                )
+                for tool in state.pending_tools
+            )
+            completed = await drive_delegations(
                 parent,
-                response,
+                persisted,
                 run_child=run_delegated_child_response,
                 agent_name="leader",
                 config=config,
                 runtime_paths=paths,
                 execution_identity=identity,
+                decisions=decisions,
+                denial_reasons=dict.fromkeys(decisions),
+                approval_calls=approval_calls,
+                on_event=events.append,
             )
-            state = DelegationState.from_metadata(paused.metadata)
-            events: list[object] = []
-            completed = paused
-            if approval:
-                assert paused.status == RunStatus.paused
-                persisted = storage.get_run(paused.run_id)
-                assert isinstance(persisted, RunOutput)
-                decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-                assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
-                approval_calls = tuple(
-                    ApprovalCall(
-                        tool_call_id=str(tool["tool_call_id"]),
-                        tool_name=str(tool["tool_name"]),
-                        invoking_agent="child",
-                        toolkit_name="calculator",
-                        expires_at_ns=2**62,
-                        arguments_digest=approval_arguments_digest(tool["tool_args"]),
-                    )
-                    for tool in state.pending_tools
-                )
-                completed = await drive_delegations(
-                    parent,
-                    persisted,
-                    run_child=run_delegated_child_response,
-                    agent_name="leader",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                    decisions=decisions,
-                    denial_reasons=dict.fromkeys(decisions),
-                    approval_calls=approval_calls,
-                    on_event=events.append,
-                )
 
-        assert completed.status == RunStatus.completed
-        if continuation == "model_switch":
-            assert state.children[0].model_name == "alternate"
-            assert models_loaded == ["default", "alternate", "alternate"]
-        child_id = state.children[0].delegation_id
-        run_path = next(tmp_path.glob(f"agents/child/workspace/.mindroom/delegations/*/{child_id}/run.json"))
-        if continuation in {"provider_error", "preparation_error"}:
-            settled = DelegationState.from_metadata(completed.metadata).children[0]
-            assert settled.status == "failed"
-            assert json.loads(run_path.read_text())["status"] == "failed"
-            assert settled.result
-            assert any(
-                "failed" in str(tool.result) for tool in completed.tools or () if tool.tool_name == "run_subagent"
-            )
-            return
-        assert model.responses == []
-        assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."
-        approved = next(
-            event.tool
-            for event in events
-            if isinstance(event, ToolCallCompletedEvent) and event.tool is not None and event.tool.tool_name == "add"
-        )
-        assert not approved.tool_call_error
-        assert "3" in str(approved.result)
-        assert model.system_prompts
-        assert all("UNSUPPORTED_INTERACTIVE_MARKER" not in prompt for prompt in model.system_prompts)
-        if continuation in {"deferred_tool", "nested_deferred_tool"}:
-            events = [
-                json.loads(line)
-                for event_path in tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/events.jsonl")
-                for line in event_path.read_text().splitlines()
-            ]
-            assert any(
-                event["kind"] == "tool_result" and event["data"]["tool_name"] == "list_files" for event in events
-            )
-    finally:
-        storage.close()
+    assert completed.status == RunStatus.completed
+    if continuation == "model_switch":
+        assert state.children[0].model_name == "alternate"
+        assert models_loaded == ["default", "alternate", "alternate"]
+    child_id = state.children[0].delegation_id
+    run_path = next(tmp_path.glob(f"agents/child/workspace/.mindroom/delegations/*/{child_id}/run.json"))
+    if continuation in {"provider_error", "preparation_error"}:
+        settled = DelegationState.from_metadata(completed.metadata).children[0]
+        assert settled.status == "failed"
+        assert json.loads(run_path.read_text())["status"] == "failed"
+        assert settled.result
+        assert any("failed" in str(tool.result) for tool in completed.tools or () if tool.tool_name == "run_subagent")
+        return
+    assert model.responses == []
+    assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."
+    approved = next(
+        event.tool
+        for event in events
+        if isinstance(event, ToolCallCompletedEvent) and event.tool is not None and event.tool.tool_name == "add"
+    )
+    assert not approved.tool_call_error
+    assert "3" in str(approved.result)
+    assert model.system_prompts
+    assert all("UNSUPPORTED_INTERACTIVE_MARKER" not in prompt for prompt in model.system_prompts)
+    if continuation in {"deferred_tool", "nested_deferred_tool"}:
+        events = [
+            json.loads(line)
+            for event_path in tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/events.jsonl")
+            for line in event_path.read_text().splitlines()
+        ]
+        assert any(event["kind"] == "tool_result" and event["data"]["tool_name"] == "list_files" for event in events)

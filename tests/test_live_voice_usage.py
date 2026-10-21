@@ -12,7 +12,6 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
-from mindroom.session_storage.agent_storage import save_independent_usage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage
 from tests.conftest import test_runtime_paths
@@ -21,9 +20,8 @@ from tests.test_request_usage import request_usage  # noqa: F401
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.sqlite import SqliteDb
-
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
 
 
 @pytest.mark.asyncio
@@ -119,12 +117,11 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
 
 
 def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],  # noqa: F811
 ) -> None:
     """Known voice duration must survive missing attribution without claiming complete coverage."""
     config, paths, storage = request_usage
-    save_independent_usage(
-        storage,
+    storage.save_independent_usage(
         session_id="session",
         usage_id="live_voice:unattributed",
         kind="live_voice",
@@ -145,13 +142,12 @@ def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_covera
 
 @pytest.mark.parametrize("seconds", [-1, True, "12", math.nan, math.inf, None, pytest.param(10**400, id="overflow")])
 def test_invalid_voice_duration_is_excluded_without_discarding_delegate_tokens(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],  # noqa: F811
     seconds: object,
 ) -> None:
     """Malformed voice records cannot become billable seconds or erase sound token counters."""
     config, paths, storage = request_usage
-    save_independent_usage(
-        storage,
+    storage.save_independent_usage(
         session_id="session",
         usage_id="live_voice:invalid",
         kind="live_voice",

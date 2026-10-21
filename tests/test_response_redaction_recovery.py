@@ -13,20 +13,20 @@ from unittest.mock import MagicMock
 import nio
 import pytest
 from agno.agent import Agent
-from agno.db.base import BaseDb, SessionType
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, journal
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.turn_store import TurnStore
+from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.test_orderly_shutdown_recovery import _dispatcher
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventJournalStore, JournalEvent
     from mindroom.event_journal.backend import Transaction
+    from mindroom.session_storage.store import ConversationStore
 
 ROOM = "!redaction:localhost"
 SOURCE = "$deleted"
@@ -174,24 +175,22 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     scope = HistoryScope(kind="agent", scope_id="agent")
     store = await _store(journal_store)
 
-    def storage_factory(*_args: object, **_kwargs: object) -> BaseDb:
-        return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
+    def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
+        return create_state_storage("agent", tmp_path, session_table="agent_sessions")
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
-    original_run = RunOutput(
+    store.deps.state_writer.session_type_for_scope.return_value = "agent"
+    original_run = RunRecord(
         run_id="interrupted",
         agent_id="agent",
         session_id=target.session_id,
         messages=[Message(role="user", content="deleted prompt")],
         metadata={"matrix_event_id": SOURCE},
     )
-    session = AgentSession(session_id=target.session_id, agent_id="agent", runs=[original_run])
+    session = ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[original_run])
     storage = storage_factory()
-    storage.upsert_session(session)
-    storage.upsert_run(original_run, session_id=target.session_id)
-    storage.close()
+    seed_session(storage, session)
     initial_dispatcher = _dispatcher(principal, MagicMock())
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
     for event in (_message(), _message("$survivor", "keep prompt")):
@@ -223,16 +222,13 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
             terminal_source_event_ids=(),
         )
         recovered_storage = storage_factory()
-        try:
-            await remove_redacted_history_like_next_response(reopened, target, recovered_storage, scope=scope)
-            answer = await Agent(
-                id="agent",
-                db=recovered_storage,
-                model=model,
-                add_history_to_context=True,
-            ).arun(event.body, session_id=target.session_id)
-        finally:
-            recovered_storage.close()
+        await remove_redacted_history_like_next_response(reopened, target, recovered_storage, scope=scope)
+        answer = await Agent(
+            id="agent",
+            db=recovered_storage,
+            model=model,
+            add_history_to_context=True,
+        ).arun(event.body, session_id=target.session_id)
         assert answer.content == "captured"
         await principal.enqueue_matrix_delivery(
             delivery_id="$survivor",
@@ -272,10 +268,9 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         terminal_source_event_ids=(),
     )
     storage = storage_factory()
-    persisted = get_agent_session(storage, target.session_id)
+    persisted = storage.load_session(target.session_id, "agent")
     assert persisted is not None
     assert "deleted prompt" not in str([run.messages for run in persisted.runs or []])
-    storage.close()
 
 
 @pytest.mark.asyncio

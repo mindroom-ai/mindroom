@@ -23,7 +23,6 @@ from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_h
 from mindroom.providers.media_fallback import install_provider_media_fallback
 from mindroom.providers.stream_retry import install_provider_stream_retry_hook
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.usage.storage import project_usage
 
 if TYPE_CHECKING:
@@ -103,157 +102,136 @@ def _session_usage(storage: object) -> dict[str, int]:
 @pytest.mark.asyncio
 async def test_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp_path: Path) -> None:
     """Anthropic bills the input and cache tokens it reported before the user stopped the reply."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     held = _HeldStream()
     run_output: RunOutput | None = None
-    try:
-        agent = _agent(
-            storage,
-            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
-            tmp_path / "logs",
-        )
-        async with asyncio.timeout(5):
-            async for event in agent.arun(
-                "Check status",
-                run_id="run",
-                session_id="session",
-                stream=True,
-                yield_run_output=True,
-            ):
-                if isinstance(event, RunContentEvent) and event.content == "Checking":
-                    # Agno checks this request when the next text chunk arrives.
-                    assert await acancel_run("run")
-                if isinstance(event, RunOutput):
-                    run_output = event
-            await held.closed.wait()
+    agent = _agent(
+        storage,
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+        tmp_path / "logs",
+    )
+    async with asyncio.timeout(5):
+        async for event in agent.arun(
+            "Check status",
+            run_id="run",
+            session_id="session",
+            stream=True,
+            yield_run_output=True,
+        ):
+            if isinstance(event, RunContentEvent) and event.content == "Checking":
+                # Agno checks this request when the next text chunk arrives.
+                assert await acancel_run("run")
+            if isinstance(event, RunOutput):
+                run_output = event
+        await held.closed.wait()
 
-        assert run_output is not None
-        assert run_output.status == RunStatus.cancelled
-        assert run_output.metrics is not None
-        assert (run_output.metrics.input_tokens, run_output.metrics.cache_read_tokens) == (1200, 48000)
-        assert run_output.metrics.cache_write_tokens == 800
-        assert _session_usage(storage) == {
-            "input_tokens": 1200,
-            "output_tokens": 1,
-            "cache_read_tokens": 48000,
-            "cache_write_tokens": 800,
-        }
-    finally:
-        storage.close()
+    assert run_output is not None
+    assert run_output.status == RunStatus.cancelled
+    assert run_output.metrics is not None
+    assert (run_output.metrics.input_tokens, run_output.metrics.cache_read_tokens) == (1200, 48000)
+    assert run_output.metrics.cache_write_tokens == 800
+    assert _session_usage(storage) == {
+        "input_tokens": 1200,
+        "output_tokens": 1,
+        "cache_read_tokens": 48000,
+        "cache_write_tokens": 800,
+    }
 
 
 @pytest.mark.asyncio
 async def test_hard_stopped_claude_reply_keeps_the_usage_reported_at_stream_start(tmp_path: Path) -> None:
     """MindRoom's Stop cancels the reply task while it waits for Claude's next chunk."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     held = _HeldStream()
     started = asyncio.Event()
-    try:
-        agent = _agent(
-            storage,
-            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
-            tmp_path / "logs",
-        )
-        async with drain_agent_cancellation(agent, "run") as bind:
+    agent = _agent(
+        storage,
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+        tmp_path / "logs",
+    )
 
-            async def consume() -> None:
-                with bind():
-                    events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
-                while True:
-                    with bind():
-                        event = await anext(events)
-                    if isinstance(event, RunContentEvent) and event.content:
-                        started.set()
+    async def consume() -> None:
+        events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
+        while True:
+            event = await anext(events)
+            if isinstance(event, RunContentEvent) and event.content:
+                started.set()
 
-            task = asyncio.create_task(consume())
-            async with asyncio.timeout(5):
-                await started.wait()
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-        await held.closed.wait()
+    task = asyncio.create_task(consume())
+    async with asyncio.timeout(5):
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await held.closed.wait()
 
-        assert _session_usage(storage) == {
-            "input_tokens": 1200,
-            "output_tokens": 1,
-            "cache_read_tokens": 48000,
-            "cache_write_tokens": 800,
-        }
-        session = storage.get_session("session", session_type=SessionType.AGENT)
-        assert isinstance(session, AgentSession)
-        requests = project_usage(session.runs[-1].to_dict())["requests"]
-        assert [
-            (request["metrics"]["input_tokens"], request["metrics"]["cache_read_tokens"]) for request in requests
-        ] == [
-            (1200, 48000),
-        ]
-    finally:
-        storage.close()
+    assert _session_usage(storage) == {
+        "input_tokens": 1200,
+        "output_tokens": 1,
+        "cache_read_tokens": 48000,
+        "cache_write_tokens": 800,
+    }
+    session = storage.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    requests = project_usage(session.runs[-1].to_dict())["requests"]
+    assert [(request["metrics"]["input_tokens"], request["metrics"]["cache_read_tokens"]) for request in requests] == [
+        (1200, 48000),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_claude_reply_closed_from_another_task_keeps_its_start_usage(tmp_path: Path) -> None:
     """The streaming path reads the reply in one task and can close the suspended stream from another."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     held = _HeldStream()
-    try:
-        agent = _agent(
-            storage,
-            httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
-            tmp_path / "logs",
-        )
-        async with drain_agent_cancellation(agent, "run") as bind:
-            with bind():
-                events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
+    agent = _agent(
+        storage,
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=held),
+        tmp_path / "logs",
+    )
+    events = agent.arun("Check status", run_id="run", session_id="session", stream=True)
 
-            async def read_until_text() -> None:
-                while True:
-                    with bind():
-                        event = await anext(events)
-                    if isinstance(event, RunContentEvent) and event.content:
-                        return
+    async def read_until_text() -> None:
+        while True:
+            event = await anext(events)
+            if isinstance(event, RunContentEvent) and event.content:
+                return
 
-            async with asyncio.timeout(5):
-                await asyncio.create_task(read_until_text())
-                with bind():
-                    await events.aclose()
-        await held.closed.wait()
+    async with asyncio.timeout(5):
+        await asyncio.create_task(read_until_text())
+        await events.aclose()
+    await held.closed.wait()
 
-        assert _session_usage(storage) == {
-            "input_tokens": 1200,
-            "output_tokens": 1,
-            "cache_read_tokens": 48000,
-            "cache_write_tokens": 800,
-        }
-    finally:
-        storage.close()
+    assert _session_usage(storage) == {
+        "input_tokens": 1200,
+        "output_tokens": 1,
+        "cache_read_tokens": 48000,
+        "cache_write_tokens": 800,
+    }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delta_usage", [_FINAL_USAGE, {"output_tokens": 50}], ids=["cumulative", "output_only"])
 async def test_completed_claude_stream_counts_its_usage_once(tmp_path: Path, delta_usage: dict[str, int]) -> None:
     """Usage known at the start of the stream is not counted again when the final usage arrives."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     events = _start_and_text("Ready") + _event("content_block_stop", index=0)
     events += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=delta_usage)
     events += _event("message_stop")
-    try:
-        agent = _agent(
-            storage,
-            httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events),
-            tmp_path / "logs",
-        )
-        async for _ in agent.arun("Check status", session_id="session", stream=True):
-            pass
+    agent = _agent(
+        storage,
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events),
+        tmp_path / "logs",
+    )
+    async for _ in agent.arun("Check status", session_id="session", stream=True):
+        pass
 
-        assert _session_usage(storage) == {
-            "input_tokens": 1200,
-            "output_tokens": 50,
-            "cache_read_tokens": 48000,
-            "cache_write_tokens": 800,
-        }
-    finally:
-        storage.close()
+    assert _session_usage(storage) == {
+        "input_tokens": 1200,
+        "output_tokens": 50,
+        "cache_read_tokens": 48000,
+        "cache_write_tokens": 800,
+    }
 
 
 @pytest.mark.asyncio
@@ -263,7 +241,7 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
 ) -> None:
     """A stream that has only started is retried after an overload, and the retry's usage counts once."""
     monkeypatch.setattr("mindroom.providers.stream_retry._retry_delay_seconds", lambda _attempt: 0)
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
     completed = _start_and_text("Ready") + _event("content_block_stop", index=0)
     completed += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=_FINAL_USAGE)
@@ -282,32 +260,29 @@ async def test_claude_stream_still_retries_an_overload_after_it_starts(
     )
     model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
     install_provider_stream_retry_hook(model)
-    try:
-        agent = Agent(id="status", model=model, db=storage, telemetry=False)
-        content = "".join(
-            [
-                event.content
-                async for event in agent.arun("Check status", session_id="session", stream=True)
-                if isinstance(event, RunContentEvent) and event.content
-            ],
-        )
+    agent = Agent(id="status", model=model, db=storage, telemetry=False)
+    content = "".join(
+        [
+            event.content
+            async for event in agent.arun("Check status", session_id="session", stream=True)
+            if isinstance(event, RunContentEvent) and event.content
+        ],
+    )
 
-        assert content == "Ready"
-        assert len(requests) == 2
-        assert _session_usage(storage) == {
-            "input_tokens": 1200,
-            "output_tokens": 50,
-            "cache_read_tokens": 48000,
-            "cache_write_tokens": 800,
-        }
-    finally:
-        storage.close()
+    assert content == "Ready"
+    assert len(requests) == 2
+    assert _session_usage(storage) == {
+        "input_tokens": 1200,
+        "output_tokens": 50,
+        "cache_read_tokens": 48000,
+        "cache_write_tokens": 800,
+    }
 
 
 @pytest.mark.asyncio
 async def test_claude_stream_that_fails_after_starting_counts_nothing(tmp_path: Path) -> None:
     """A failed attempt is retried or reported as an error, so only a stopped stream keeps its start usage."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     overloaded = _start_and_text() + _event("error", error={"type": "overloaded_error", "message": "Overloaded"})
     client = AsyncAnthropic(
         api_key="test-key",
@@ -319,23 +294,20 @@ async def test_claude_stream_that_fails_after_starting_counts_nothing(tmp_path: 
         ),
     )
     model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
-    try:
-        agent = Agent(id="status", model=model, db=storage, telemetry=False)
-        async for _ in agent.arun("Check status", session_id="session", stream=True):
-            pass
+    agent = Agent(id="status", model=model, db=storage, telemetry=False)
+    async for _ in agent.arun("Check status", session_id="session", stream=True):
+        pass
 
-        assert model.take_unfinished_stream_usage() is None
-        session = storage.get_session("session", session_type=SessionType.AGENT)
-        assert isinstance(session, AgentSession)
-        assert not session.session_data["session_metrics"].get("input_tokens")
-    finally:
-        storage.close()
+    assert model.take_unfinished_stream_usage() is None
+    session = storage.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    assert not session.session_data["session_metrics"].get("input_tokens")
 
 
 @pytest.mark.asyncio
 async def test_stalled_claude_stream_counts_nothing(tmp_path: Path) -> None:
     """A stream that starts and then goes silent fails as a stall and leaves no start usage behind."""
-    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    storage = create_state_storage("status", tmp_path, session_table="status_sessions")
     held = _HeldStream()
     client = AsyncAnthropic(
         api_key="test-key",
@@ -349,15 +321,12 @@ async def test_stalled_claude_stream_counts_nothing(tmp_path: Path) -> None:
     model = MindRoomAnthropicClaude(id="claude-sonnet-5-5", async_client=client, max_tokens=1024)
     # The stream already sent text, so the stall is not retried and ends the run as an error.
     install_provider_stream_retry_hook(model, idle_timeout_seconds=0.2)
-    try:
-        agent = Agent(id="status", model=model, db=storage, telemetry=False)
-        async with asyncio.timeout(10):
-            async for _ in agent.arun("Check status", session_id="session", stream=True):
-                pass
+    agent = Agent(id="status", model=model, db=storage, telemetry=False)
+    async with asyncio.timeout(10):
+        async for _ in agent.arun("Check status", session_id="session", stream=True):
+            pass
 
-        assert model.take_unfinished_stream_usage() is None
-        session = storage.get_session("session", session_type=SessionType.AGENT)
-        assert isinstance(session, AgentSession)
-        assert not session.session_data["session_metrics"].get("input_tokens")
-    finally:
-        storage.close()
+    assert model.take_unfinished_stream_usage() is None
+    session = storage.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(session, AgentSession)
+    assert not session.session_data["session_metrics"].get("input_tokens")

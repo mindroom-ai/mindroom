@@ -22,12 +22,11 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.prompt_tokens import _agent_prompt_tool_surface
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -305,16 +304,13 @@ def _assert_saved_run(
     """Observe normalized persistence through a new SQLite handle, not an actor cache."""
     assert identity.session_id is not None
     storage = create_session_storage("general", config, paths, identity)
-    try:
-        session = get_agent_session(storage, identity.session_id)
-        assert session is not None
-        run = session.get_run(run_id)
-        assert run is not None
-        assert run.status == status
-        assert run.metadata is not None
-        assert run.metadata["approval_probe"] == "saved"
-    finally:
-        storage.close()
+    session = storage.load_session(identity.session_id, "agent")
+    assert session is not None
+    run = session.get_run(run_id)
+    assert run is not None
+    assert run.status == status
+    assert run.metadata is not None
+    assert run.metadata["approval_probe"] == "saved"
 
 
 def _observe_ordinary_calculator_calls(
@@ -482,7 +478,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         else:
             assert function_name in original_names
         initial_discoveries = list(transport.discoveries)
-        close_agent_runtime_state_dbs(initial, shared_scope_storage=storage)
         actor = create_agent(
             "general",
             config,
@@ -513,8 +508,6 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         assert requirement.tool_execution is not None
         tool_call_id = requirement.tool_execution.tool_call_id
         assert tool_call_id is not None
-        close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
-        storage.close()
         _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.paused)
 
         transport.cached_catalog = None

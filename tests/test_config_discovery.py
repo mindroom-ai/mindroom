@@ -58,11 +58,7 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/response_runner.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-_AGENT_STORAGE_HELPERS = {
-    "create_session_storage",
-    "get_agent_session",
-    "get_team_session",
-}
+_AGENT_STORAGE_HELPERS = {"create_session_storage"}
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "_build_tool_instance": "worker_target",
     "build_agent_toolkit": "execution_identity",

@@ -211,18 +211,15 @@ async def test_disabled_participation_preserves_ordinary_response(  # noqa: C901
         assert any("cancelled" in body.lower() for body in bodies)
 
     storage = bot._conversation_state_writer.create_storage(None)
-    try:
-        session = storage.load_session(envelope.target.session_id, "agent")
-        assert session is not None
-        assert len(session.runs) == 1
-        run = session.runs[0]
-        if scenario in {"reply", "tool"}:
-            assert run.content == answer
-            if scenario == "tool":
-                assert any(message.role == "tool" and message.content == "42" for message in run.messages or [])
-        else:
-            assert run.metadata is not None
-            assert run.metadata["mindroom_original_status"] == ("error" if scenario == "error" else "cancelled")
-            assert any("Please help with this task." in str(message.content) for message in run.messages or [])
-    finally:
-        storage.close()
+    session = storage.load_session(envelope.target.session_id, "agent")
+    assert session is not None
+    assert len(session.runs) == 1
+    run = session.runs[0]
+    if scenario in {"reply", "tool"}:
+        assert run.content == answer
+        if scenario == "tool":
+            assert any(message.role == "tool" and message.content == "42" for message in run.messages or [])
+    else:
+        assert run.metadata is not None
+        assert run.metadata["mindroom_original_status"] == ("error" if scenario == "error" else "cancelled")
+        assert any("Please help with this task." in str(message.content) for message in run.messages or [])

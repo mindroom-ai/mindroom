@@ -126,18 +126,15 @@ def _seed(
 ) -> None:
     """Store a conversation, last updated a second after its newest run unless told otherwise."""
     storage = create_session_storage(agent, config, runtime_paths_for(config), execution_identity=identity)
-    try:
-        for run in runs:
-            run.agent_id = agent
-        seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
-        newest = max((run.created_at or 0 for run in runs), default=T0)
-        with storage.db_engine.begin() as connection:
-            connection.exec_driver_sql(
-                f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                (updated_at if updated_at is not None else newest + 1, session_id),
-            )
-    finally:
-        storage.close()
+    for run in runs:
+        run.agent_id = agent
+    seed_session(storage, AgentSession(session_id=session_id, agent_id=agent, runs=runs))
+    newest = max((run.created_at or 0 for run in runs), default=T0)
+    with storage.db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            f"UPDATE {storage.session_table_name} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (updated_at if updated_at is not None else newest + 1, session_id),
+        )
 
 
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:

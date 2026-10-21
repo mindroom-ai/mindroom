@@ -283,264 +283,251 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
 
     monkeypatch.setattr("mindroom.agents.create_agent", build_child)
     team_presentation: _TeamStreamPresentation | None = None
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("delegate", session_id="parent", user_id=identity.requester_id)
-            paused = await drive_delegations(
-                parent,
-                response,
-                run_child=start_child,
-                agent_name="leader",
-                config=config,
-                runtime_paths=paths,
-                execution_identity=identity,
-                member_config_names={"leader": "leader", "other": "other"},
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        response = await parent.arun("delegate", session_id="parent", user_id=identity.requester_id)
+        paused = await drive_delegations(
+            parent,
+            response,
+            run_child=start_child,
+            agent_name="leader",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+            member_config_names={"leader": "leader", "other": "other"},
+        )
+        state = DelegationState.from_metadata(paused.metadata)
+        assert paused.status == RunStatus.paused
+        assert side_effects == []
+        assert state.pending_agent_name == "code"
+        assert state.pending_tools[0]["tool_call_id"].startswith(f"{state.children[0].delegation_id}:")
+        assert state.pending_tools[0]["tool_call_id"].endswith(":same-call")
+        assert parent_storage.get_run(response.run_id).status == RunStatus.paused
+
+        if team_parent:
+            team_pause = paused_attempt_from_response(
+                paused,
+                fallback_session_id="parent",
+                fallback_run_id=response.run_id,
+                toolkit_owners={},
             )
-            state = DelegationState.from_metadata(paused.metadata)
-            assert paused.status == RunStatus.paused
-            assert side_effects == []
-            assert state.pending_agent_name == "code"
-            assert state.pending_tools[0]["tool_call_id"].startswith(f"{state.children[0].delegation_id}:")
-            assert state.pending_tools[0]["tool_call_id"].endswith(":same-call")
-            assert parent_storage.get_run(response.run_id).status == RunStatus.paused
+            assert team_pause is not None
+            config_names = ["leader", "other"] if siblings == 2 else ["leader"]
+            display_names = ["leader", "Other"] if siblings == 2 else ["leader"]
+            blocking_pause = _attach_team_pause_presentation(
+                team_pause,
+                response=paused,
+                config_names=config_names,
+                display_names=display_names,
+                show_tool_calls=True,
+            )
+            team_presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=True)
+            streaming_pause = _continued_team_pause(team_presentation, team_pause)
+            for presented in (blocking_pause, streaming_pause):
+                assert presented.approval_agent_name == "code"
+                require_ordered_pause_presentation(presented, show_tool_calls=True)
 
-            if team_parent:
-                team_pause = paused_attempt_from_response(
-                    paused,
-                    fallback_session_id="parent",
-                    fallback_run_id=response.run_id,
-                    toolkit_owners={},
-                )
-                assert team_pause is not None
-                config_names = ["leader", "other"] if siblings == 2 else ["leader"]
-                display_names = ["leader", "Other"] if siblings == 2 else ["leader"]
-                blocking_pause = _attach_team_pause_presentation(
-                    team_pause,
-                    response=paused,
-                    config_names=config_names,
-                    display_names=display_names,
-                    show_tool_calls=True,
-                )
-                team_presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=True)
-                streaming_pause = _continued_team_pause(team_presentation, team_pause)
-                for presented in (blocking_pause, streaming_pause):
-                    assert presented.approval_agent_name == "code"
-                    require_ordered_pause_presentation(presented, show_tool_calls=True)
-
-            if outcome in {"cancel", "cancel_removed", "cancel_completed"}:
-                original_config = config.model_copy(update={"agents": dict(config.agents)})
-                child = state.children[0]
-                child_identity = replace(identity, agent_name="code", session_id=child.session_id)
-                if outcome == "cancel_completed":
-                    # Simulate a crash after the child committed completion but
-                    # before its parent and audit record received that outcome.
-                    storage = create_session_storage("code", config, paths, child_identity)
-                    try:
-                        completed = storage.get_run(child.run_id)
-                        completed.status = RunStatus.completed
-                        completed.content = "Saved result"
-                        completed.tools = []
-                        completed.requirements = []
-                        storage.upsert_run(run=completed, session_id=child.session_id, user_id=identity.requester_id)
-                    finally:
-                        storage.close()
-                if outcome == "cancel_removed":
-                    config.agents.clear()
-                initial_pause = paused_attempt_from_response(
-                    paused,
-                    fallback_session_id="parent",
-                    fallback_run_id=response.run_id,
-                    toolkit_owners={},
-                )
-                if team_parent:
-                    await _cancel_delegations(paused, config=config, runtime_paths=paths)
-                else:
-                    await cancel_approval_delegations(
-                        approval_continuation(
-                            run_id=response.run_id,
-                            session_id="parent",
-                            entity_name="leader",
-                            room_id=identity.room_id,
-                            thread_id=None,
-                            requester_id=identity.requester_id,
-                            response_event_id="$response",
-                            state="failing",
-                            execution_identity=state.children[0].execution_identity
-                            | {"agent_name": "leader", "session_id": "parent"},
-                            delegation_storage_bindings=initial_pause.delegation_storage_bindings,
-                        ),
-                        config=config,
-                        runtime_paths=paths,
-                        reason="Cancelled by requester",
-                    )
-                expected_status = "completed" if outcome == "cancel_completed" else "cancelled"
-                storage = create_session_storage("code", original_config, paths, child_identity)
-                try:
-                    assert storage.get_run(child.run_id).status == (
-                        RunStatus.completed if outcome == "cancel_completed" else RunStatus.cancelled
-                    )
-                finally:
-                    storage.close()
-                record = await DelegationRecordOwner(original_config, paths).reopen(
-                    DelegationRecordLocator.from_dict(child.record_locator),
-                )
-                assert (
-                    json.loads((record.child_workspace / record.scoped_path / "run.json").read_text())["status"]
-                    == expected_status
-                )
-                assert side_effects == []
-                return
-            if outcome == "revoke":
-                config.agents["leader"].delegate_to = []
-                config.agents["other"].delegate_to = []
-            observed_ids = set()
-            presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
+        if outcome in {"cancel", "cancel_removed", "cancel_completed"}:
+            original_config = config.model_copy(update={"agents": dict(config.agents)})
+            child = state.children[0]
+            child_identity = replace(identity, agent_name="code", session_id=child.session_id)
+            if outcome == "cancel_completed":
+                # Simulate a crash after the child committed completion but
+                # before its parent and audit record received that outcome.
+                storage = create_session_storage("code", config, paths, child_identity)
+                completed = storage.get_run(child.run_id)
+                completed.status = RunStatus.completed
+                completed.content = "Saved result"
+                completed.tools = []
+                completed.requirements = []
+                storage.upsert_run(run=completed, session_id=child.session_id, user_id=identity.requester_id)
+            if outcome == "cancel_removed":
+                config.agents.clear()
             initial_pause = paused_attempt_from_response(
                 paused,
                 fallback_session_id="parent",
                 fallback_run_id=response.run_id,
                 toolkit_owners={},
             )
-            for tool in initial_pause.tools:
-                presentation.start_tool(tool)
-            for index in range(siblings):
-                rebuilt = Agent(
-                    name="leader",
+            if team_parent:
+                await _cancel_delegations(paused, config=config, runtime_paths=paths)
+            else:
+                await cancel_approval_delegations(
+                    approval_continuation(
+                        run_id=response.run_id,
+                        session_id="parent",
+                        entity_name="leader",
+                        room_id=identity.room_id,
+                        thread_id=None,
+                        requester_id=identity.requester_id,
+                        response_event_id="$response",
+                        state="failing",
+                        execution_identity=state.children[0].execution_identity
+                        | {"agent_name": "leader", "session_id": "parent"},
+                        delegation_storage_bindings=initial_pause.delegation_storage_bindings,
+                    ),
+                    config=config,
+                    runtime_paths=paths,
+                    reason="Cancelled by requester",
+                )
+            expected_status = "completed" if outcome == "cancel_completed" else "cancelled"
+            storage = create_session_storage("code", original_config, paths, child_identity)
+            assert storage.get_run(child.run_id).status == (
+                RunStatus.completed if outcome == "cancel_completed" else RunStatus.cancelled
+            )
+            record = await DelegationRecordOwner(original_config, paths).reopen(
+                DelegationRecordLocator.from_dict(child.record_locator),
+            )
+            assert (
+                json.loads((record.child_workspace / record.scoped_path / "run.json").read_text())["status"]
+                == expected_status
+            )
+            assert side_effects == []
+            return
+        if outcome == "revoke":
+            config.agents["leader"].delegate_to = []
+            config.agents["other"].delegate_to = []
+        observed_ids = set()
+        presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
+        initial_pause = paused_attempt_from_response(
+            paused,
+            fallback_session_id="parent",
+            fallback_run_id=response.run_id,
+            toolkit_owners={},
+        )
+        for tool in initial_pause.tools:
+            presentation.start_tool(tool)
+        for index in range(siblings):
+            rebuilt = Agent(
+                name="leader",
+                db=parent_storage,
+                tools=[external],
+                model=DelegationModel(id="test", responses=[ModelResponse(content="parent result")]),
+            )
+            if team_parent:
+                rebuilt.model = DelegationModel(id="test", responses=[ModelResponse(content="member result")])
+                members = [rebuilt]
+                if siblings == 2:
+                    members.append(
+                        Agent(
+                            id="other",
+                            name="Other",
+                            tools=[external],
+                            model=DelegationModel(id="test", responses=[ModelResponse(content="member result")]),
+                        ),
+                    )
+                rebuilt = Team(
+                    id="squad",
+                    name="Squad",
                     db=parent_storage,
-                    tools=[external],
+                    members=members,
+                    delegate_to_all_members=siblings == 2,
                     model=DelegationModel(id="test", responses=[ModelResponse(content="parent result")]),
                 )
-                if team_parent:
-                    rebuilt.model = DelegationModel(id="test", responses=[ModelResponse(content="member result")])
-                    members = [rebuilt]
-                    if siblings == 2:
-                        members.append(
-                            Agent(
-                                id="other",
-                                name="Other",
-                                tools=[external],
-                                model=DelegationModel(id="test", responses=[ModelResponse(content="member result")]),
-                            ),
-                        )
-                    rebuilt = Team(
-                        id="squad",
-                        name="Squad",
-                        db=parent_storage,
-                        members=members,
-                        delegate_to_all_members=siblings == 2,
-                        model=DelegationModel(id="test", responses=[ModelResponse(content="parent result")]),
-                    )
-                persisted = await rebuilt.aget_run_output(response.run_id, session_id="parent")
-                assert isinstance(persisted, (RunOutput, TeamRunOutput))
-                state = DelegationState.from_metadata(persisted.metadata)
-                call_id = state.pending_tools[0]["tool_call_id"]
-                assert call_id not in observed_ids
-                observed_ids.add(call_id)
-                assert sum(child.status == "completed" for child in state.children) == index
-                options = {
-                    "agent_name": "leader",
-                    "config": config,
-                    "runtime_paths": paths,
-                    "execution_identity": identity,
-                    "member_config_names": {"leader": "leader", "other": "other"},
-                    "decisions": {call_id: outcome in {"approve", "parent_provider_error", "child_provider_error"}},
-                    "denial_reasons": {call_id: None},
-                    "approval_calls": (
-                        ApprovalCall(
-                            tool_call_id=call_id,
-                            tool_name="write_report",
-                            invoking_agent="code",
-                            toolkit_name="file",
-                            expires_at_ns=2**62,
-                            arguments_digest=approval_arguments_digest(state.pending_tools[0]["tool_args"]),
-                        ),
+            persisted = await rebuilt.aget_run_output(response.run_id, session_id="parent")
+            assert isinstance(persisted, (RunOutput, TeamRunOutput))
+            state = DelegationState.from_metadata(persisted.metadata)
+            call_id = state.pending_tools[0]["tool_call_id"]
+            assert call_id not in observed_ids
+            observed_ids.add(call_id)
+            assert sum(child.status == "completed" for child in state.children) == index
+            options = {
+                "agent_name": "leader",
+                "config": config,
+                "runtime_paths": paths,
+                "execution_identity": identity,
+                "member_config_names": {"leader": "leader", "other": "other"},
+                "decisions": {call_id: outcome in {"approve", "parent_provider_error", "child_provider_error"}},
+                "denial_reasons": {call_id: None},
+                "approval_calls": (
+                    ApprovalCall(
+                        tool_call_id=call_id,
+                        tool_name="write_report",
+                        invoking_agent="code",
+                        toolkit_name="file",
+                        expires_at_ns=2**62,
+                        arguments_digest=approval_arguments_digest(state.pending_tools[0]["tool_args"]),
                     ),
-                }
+                ),
+            }
 
-                async def stored_run(
-                    persisted_response: RunOutput | TeamRunOutput = persisted,
-                ) -> AsyncIterator[RunOutput | TeamRunOutput]:
-                    yield persisted_response
+            async def stored_run(
+                persisted_response: RunOutput | TeamRunOutput = persisted,
+            ) -> AsyncIterator[RunOutput | TeamRunOutput]:
+                yield persisted_response
 
-                events = drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options)
-                if team_parent:
-                    assert team_presentation is not None
-                    continuation = _collect_team_continuation(events, team_presentation, progress=None)
-                else:
-                    continuation = _collect_agent_continuation(events, presentation, progress=None)
-                if outcome == "parent_provider_error":
-                    with pytest.raises(RuntimeError, match="provider connection lost") as caught:
-                        await continuation
-                    assert "example-secret" not in str(caught.value)
-                    assert side_effects == ["written"]
-                    failed_run = await rebuilt.aget_run_output(response.run_id, session_id="parent")
-                    assert failed_run.status == RunStatus.error
-                    return
-                collected = await continuation
-                if team_parent:
-                    resumed = collected
-                else:
-                    resumed = collected.response
-                    presentation.append_text(collected.terminal_content)
-                visible_trace = team_presentation.tool_trace if team_parent else presentation.tool_trace
-                assert any(
-                    entry.tool_call_id == call_id and entry.type == "tool_call_completed" for entry in visible_trace
-                )
-                if resumed.status == RunStatus.completed:
-                    break
-                assert resumed.status == RunStatus.paused
-                next_pause = paused_attempt_from_response(
-                    resumed,
-                    toolkit_owners={},
-                    fallback_session_id="parent",
-                    fallback_run_id=response.run_id,
-                )
-                assert next_pause is not None
-                if team_parent:
-                    require_ordered_pause_presentation(
-                        _continued_team_pause(team_presentation, next_pause),
-                        show_tool_calls=True,
-                    )
-                else:
-                    require_ordered_pause_presentation(
-                        replace(
-                            next_pause,
-                            response_text=presentation.final_text(),
-                            tool_trace=tuple(presentation.tool_trace),
-                        ),
-                        show_tool_calls=True,
-                    )
-                assert len(side_effects) == (index + 1 if outcome == "approve" else 0)
-            assert resumed.status == RunStatus.completed
-            assert resumed.content == "parent result"
-            assert side_effects == (["written"] * siblings if outcome in {"approve", "child_provider_error"} else [])
-            messages = resumed.member_responses[0].messages if team_parent else resumed.messages
-            result_message = next(message.content for message in messages if message.tool_call_id == "delegate-0")
-            if outcome == "child_provider_error":
-                assert "provider connection lost" in result_message
-                assert "example-secret" not in result_message
+            events = drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options)
+            if team_parent:
+                assert team_presentation is not None
+                continuation = _collect_team_continuation(events, team_presentation, progress=None)
+            else:
+                continuation = _collect_agent_continuation(events, presentation, progress=None)
+            if outcome == "parent_provider_error":
+                with pytest.raises(RuntimeError, match="provider connection lost") as caught:
+                    await continuation
+                assert "example-secret" not in str(caught.value)
+                assert side_effects == ["written"]
+                failed_run = await rebuilt.aget_run_output(response.run_id, session_id="parent")
+                assert failed_run.status == RunStatus.error
                 return
-            expected_result = (
-                "Cannot delegate"
-                if outcome == "revoke"
-                else "resume failed"
-                if outcome == "resume_error"
-                else "child result"
+            collected = await continuation
+            if team_parent:
+                resumed = collected
+            else:
+                resumed = collected.response
+                presentation.append_text(collected.terminal_content)
+            visible_trace = team_presentation.tool_trace if team_parent else presentation.tool_trace
+            assert any(entry.tool_call_id == call_id and entry.type == "tool_call_completed" for entry in visible_trace)
+            if resumed.status == RunStatus.completed:
+                break
+            assert resumed.status == RunStatus.paused
+            next_pause = paused_attempt_from_response(
+                resumed,
+                toolkit_owners={},
+                fallback_session_id="parent",
+                fallback_run_id=response.run_id,
             )
-            assert expected_result in result_message
-            if outcome == "resume_error":
-                records = [
-                    json.loads(path.read_text())
-                    for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
-                ]
-                assert sorted(record["status"] for record in records) == ["cancelled", "failed"]
-                for storage in child_storages:
-                    for session in storage.get_sessions():
-                        assert all(run.status != RunStatus.paused and not run.requirements for run in session.runs)
-    finally:
-        parent_storage.close()
-        for storage in child_storages:
-            storage.close()
+            assert next_pause is not None
+            if team_parent:
+                require_ordered_pause_presentation(
+                    _continued_team_pause(team_presentation, next_pause),
+                    show_tool_calls=True,
+                )
+            else:
+                require_ordered_pause_presentation(
+                    replace(
+                        next_pause,
+                        response_text=presentation.final_text(),
+                        tool_trace=tuple(presentation.tool_trace),
+                    ),
+                    show_tool_calls=True,
+                )
+            assert len(side_effects) == (index + 1 if outcome == "approve" else 0)
+        assert resumed.status == RunStatus.completed
+        assert resumed.content == "parent result"
+        assert side_effects == (["written"] * siblings if outcome in {"approve", "child_provider_error"} else [])
+        messages = resumed.member_responses[0].messages if team_parent else resumed.messages
+        result_message = next(message.content for message in messages if message.tool_call_id == "delegate-0")
+        if outcome == "child_provider_error":
+            assert "provider connection lost" in result_message
+            assert "example-secret" not in result_message
+            return
+        expected_result = (
+            "Cannot delegate"
+            if outcome == "revoke"
+            else "resume failed"
+            if outcome == "resume_error"
+            else "child result"
+        )
+        assert expected_result in result_message
+        if outcome == "resume_error":
+            records = [
+                json.loads(path.read_text())
+                for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+            ]
+            assert sorted(record["status"] for record in records) == ["cancelled", "failed"]
+            for storage in child_storages:
+                for session in storage.get_sessions():
+                    assert all(run.status != RunStatus.paused and not run.requirements for run in session.runs)
 
 
 @pytest.mark.asyncio
@@ -699,39 +686,36 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path) -> None
             ],
         ),
     )
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
-            response = await drive_delegations(
-                parent,
-                response,
-                run_child=run_delegated_child_response,
-                agent_name="leader",
-                config=config,
-                runtime_paths=paths,
-                execution_identity=identity,
-            )
-            state = DelegationState.from_metadata(response.metadata)
-            assert state.children == []
-            assert state.pending_tools[0]["tool_call_id"] == "policy-gated"
-            response = await drive_delegations(
-                parent,
-                response,
-                run_child=run_delegated_child_response,
-                agent_name="leader",
-                config=config,
-                runtime_paths=paths,
-                execution_identity=identity,
-                decisions={"policy-gated": False},
-                denial_reasons={"policy-gated": "No"},
-            )
-            assert response.status == RunStatus.completed
-            assert DelegationState.from_metadata(response.metadata).children == []
-            assert "child was not executed" in next(
-                message.content for message in response.messages if message.tool_call_id == "policy-gated"
-            )
-    finally:
-        storage.close()
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
+        response = await drive_delegations(
+            parent,
+            response,
+            run_child=run_delegated_child_response,
+            agent_name="leader",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+        )
+        state = DelegationState.from_metadata(response.metadata)
+        assert state.children == []
+        assert state.pending_tools[0]["tool_call_id"] == "policy-gated"
+        response = await drive_delegations(
+            parent,
+            response,
+            run_child=run_delegated_child_response,
+            agent_name="leader",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+            decisions={"policy-gated": False},
+            denial_reasons={"policy-gated": "No"},
+        )
+        assert response.status == RunStatus.completed
+        assert DelegationState.from_metadata(response.metadata).children == []
+        assert "child was not executed" in next(
+            message.content for message in response.messages if message.tool_call_id == "policy-gated"
+        )
 
 
 @pytest.mark.asyncio
@@ -787,34 +771,31 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
         "runtime_paths": paths,
         "execution_identity": identity,
     }
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
-            response = await drive_delegations(parent, response, **options)
-            state = DelegationState.from_metadata(response.metadata)
-            stored = storage.get_run(response.run_id)
-            assert isinstance(stored, RunOutput)
-            copy = RunRequirement.from_dict(stored.requirements[0].to_dict())
-            copy.id = str(uuid4())
-            stored.requirements.append(copy)
-            storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
-            stored = storage.get_run(response.run_id)
-            assert isinstance(stored, RunOutput)
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
+        response = await drive_delegations(parent, response, **options)
+        state = DelegationState.from_metadata(response.metadata)
+        stored = storage.get_run(response.run_id)
+        assert isinstance(stored, RunOutput)
+        copy = RunRequirement.from_dict(stored.requirements[0].to_dict())
+        copy.id = str(uuid4())
+        stored.requirements.append(copy)
+        storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
+        stored = storage.get_run(response.run_id)
+        assert isinstance(stored, RunOutput)
 
-            with pytest.raises(RuntimeError, match="same delegation call more than once"):
-                await drive_delegations(
-                    parent,
-                    stored,
-                    **options,
-                    decisions={"gated": True},
-                    denial_reasons={"gated": None},
-                    approval_calls=_saved_approval_calls(state),
-                )
+        with pytest.raises(RuntimeError, match="same delegation call more than once"):
+            await drive_delegations(
+                parent,
+                stored,
+                **options,
+                decisions={"gated": True},
+                denial_reasons={"gated": None},
+                approval_calls=_saved_approval_calls(state),
+            )
 
-        assert DelegationState.from_metadata(storage.get_run(response.run_id).metadata).children == []
-        assert not list(tmp_path.glob("agents/code/workspace/.mindroom/delegations/*/*/run.json"))
-    finally:
-        storage.close()
+    assert DelegationState.from_metadata(storage.get_run(response.run_id).metadata).children == []
+    assert not list(tmp_path.glob("agents/code/workspace/.mindroom/delegations/*/*/run.json"))
 
 
 @pytest.mark.asyncio
@@ -913,15 +894,12 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
             response = await parent.arun("Delegate", session_id="parent", user_id=identity.requester_id)
             await drive_delegations(parent, response, **options)
 
-    try:
-        with (
-            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-            pytest.raises(RuntimeError, match="does not cover"),
-        ):
-            await delegate_fresh_turn()
-        assert executed == []
-    finally:
-        storage.close()
+    with (
+        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+        pytest.raises(RuntimeError, match="does not cover"),
+    ):
+        await delegate_fresh_turn()
+    assert executed == []
 
 
 def test_workflow_grant_authorizes_without_delegate_to(tmp_path: Path) -> None:

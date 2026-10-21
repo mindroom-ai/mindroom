@@ -127,13 +127,10 @@ def _stored_team(
         execution_identity=None,
     )
     assert isinstance(storage, SqliteDb)
-    try:
-        storage.upsert_session(session)
-        for run in (leader, member, grandchild, member):
-            storage.upsert_run(run, session_id="session")
-        yield storage
-    finally:
-        storage.close()
+    storage.upsert_session(session)
+    for run in (leader, member, grandchild, member):
+        storage.upsert_run(run, session_id="session")
+    yield storage
 
 
 @pytest.mark.parametrize("team_id", ["engineering", "team_code+research"])

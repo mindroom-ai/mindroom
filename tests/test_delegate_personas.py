@@ -39,10 +39,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.execution import _DelegationTarget
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _CRITIC = """---
@@ -101,17 +100,14 @@ def _native_parent(
     paths: RuntimePaths,
     workspace: Path,
     responses: list[ModelResponse],
-) -> Iterator[tuple[Agent, BaseDb]]:
+) -> Iterator[tuple[Agent, ConversationStore]]:
     """A native-path leader whose delegate tool may run itself, scripted with ``responses``."""
     identity = _identity()
     toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity, workspace_root=workspace)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
-    try:
-        model = DelegationModel(id="test-parent", responses=responses)
-        yield Agent(name="leader", db=storage, tools=[toolkit], model=model), storage
-    finally:
-        storage.close()
+    model = DelegationModel(id="test-parent", responses=responses)
+    yield Agent(name="leader", db=storage, tools=[toolkit], model=model), storage
 
 
 class _Harness:

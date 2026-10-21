@@ -38,7 +38,7 @@ from mindroom.history.summary_message import is_scope_summary, mark_summary_foll
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids, segment_tool_call_ids
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.native_compaction import NativeCompactionModel, record_native_checkpoint
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of
 
@@ -53,7 +53,7 @@ _TEAM_SCOPE = HistoryScope(kind="team", scope_id="crew")
 @pytest.fixture
 def storage(tmp_path: Path) -> Iterator[SqliteDb]:
     """Use the production conversation storage owner."""
-    db = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
+    db = create_state_storage("code", tmp_path, session_table="code_sessions")
     assert isinstance(db, SqliteDb)
     try:
         yield db
@@ -128,7 +128,7 @@ def _fold(
 
 
 def _loaded(storage: SqliteDb) -> AgentSession:
-    session = get_agent_session(storage, "session")
+    session = storage.load_session("session", "agent")
     assert session is not None
     return session
 
@@ -217,7 +217,7 @@ def test_a_team_run_loads_without_the_messages_its_segments_hold(storage: Sqlite
     )
     seed_session(storage, TeamSession(session_id="session", team_id="crew", runs=[team_run]))
     assert _fold(storage, team_run, "T", folded=[call, result])
-    team_loaded = get_team_session(storage, "session")
+    team_loaded = storage.load_session("session", "team")
     assert team_loaded is not None
     stored_team_run = next(run for run in team_loaded.runs or [] if run.run_id == "team-paused")
     assert [message.content for message in stored_team_run.messages or []] == ["do it", "step after the fold"]
@@ -437,13 +437,13 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Sqli
     assert _fold(storage, team_run, "S", member_responses=[member])
     _save(storage, team_run)
     _save(storage, member)
-    session = get_team_session(storage, "session")
+    session = storage.load_session("session", "team")
     assert session is not None
 
     assert _remove_redacted_event_from_history(storage, session, _TEAM_SCOPE, event_id="$team")
 
     assert log_of(storage, _TEAM_SCOPE.key, "session") == ["run:t0"]
-    reloaded = get_team_session(storage, "session")
+    reloaded = storage.load_session("session", "team")
     assert reloaded is not None
     assert [run.run_id for run in reloaded.runs or []] == ["t0"]
 

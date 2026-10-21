@@ -29,7 +29,6 @@ from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.event_journal.approval_continuations import ApprovalDecision
 from mindroom.history.session_context import (
-    close_team_runtime_state_dbs,
     open_bound_scope_session_context,
     open_resolved_scope_session_context,
 )
@@ -446,7 +445,6 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 display_names=["Alpha", "Beta"],
                 show_tool_calls=False,
             )
-            close_team_runtime_state_dbs(agents=members.agents, team_db=team.db, shared_scope_storage=scope.storage)
         assert executed == []
         if scenario != "approved":
             config.agents["alpha"].tools = []

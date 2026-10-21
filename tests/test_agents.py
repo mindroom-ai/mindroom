@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.db.in_memory import InMemoryDb
 from agno.knowledge.knowledge import Knowledge
 from agno.run import RunContext
 from agno.run.agent import RunOutput
@@ -58,7 +57,6 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
@@ -80,7 +78,7 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_runtime_state_db
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams import materialize_exact_team_members
 from mindroom.tool_call_budget import install_model_call_cap
@@ -782,13 +780,6 @@ def test_restricted_agent_omits_tool_execution_environment(
     agent = _create_agent_for_test("general", config=config, disable_runtime_capabilities=True)
 
     assert "## Tool Execution Environment" not in agent.role
-
-
-def test_get_agent_runtime_state_db_accepts_backend_neutral_agno_storage() -> None:
-    """Runtime DB discovery should not require SQLite-specific storage handles."""
-    history_db = InMemoryDb()
-
-    assert get_agent_runtime_state_db(Agent(db=history_db)) is history_db
 
 
 @patch("mindroom.session_storage.agent_storage._ConversationSqliteDb")
@@ -5649,31 +5640,28 @@ def test_team_member_matches_solo_agent_construction() -> None:
         runtime_paths=runtime_paths,
         execution_identity=None,
     ).agents[0]
-    try:
-        assert member.role == solo.role
-        assert member.name == solo.name
-        assert member.id == solo.id
-        assert type(member.model) is type(solo.model)
-        assert member.model is not None
-        assert solo.model is not None
-        assert member.model.id == solo.model.id
-        assert [tool.name for tool in member.tools or []] == [tool.name for tool in solo.tools or []]
-        assert member.markdown == solo.markdown
-        assert member.add_history_to_context == solo.add_history_to_context
-        assert member.num_history_runs == solo.num_history_runs
-        assert member.num_history_messages == solo.num_history_messages
-        assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
-        assert member.knowledge == solo.knowledge
+    assert member.role == solo.role
+    assert member.name == solo.name
+    assert member.id == solo.id
+    assert type(member.model) is type(solo.model)
+    assert member.model is not None
+    assert solo.model is not None
+    assert member.model.id == solo.model.id
+    assert [tool.name for tool in member.tools or []] == [tool.name for tool in solo.tools or []]
+    assert member.markdown == solo.markdown
+    assert member.add_history_to_context == solo.add_history_to_context
+    assert member.num_history_runs == solo.num_history_runs
+    assert member.num_history_messages == solo.num_history_messages
+    assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
+    assert member.knowledge == solo.knowledge
 
-        # The only authored construction delta: members never get the Matrix
-        # reaction-based interactive question prompt.
-        interactive_prompt = config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
-        assert interactive_prompt in solo.instructions
-        assert list(member.instructions or []) == [
-            instruction for instruction in solo.instructions or [] if instruction != interactive_prompt
-        ]
-    finally:
-        close_team_runtime_state_dbs(agents=[solo, member], team_db=None)
+    # The only authored construction delta: members never get the Matrix
+    # reaction-based interactive question prompt.
+    interactive_prompt = config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
+    assert interactive_prompt in solo.instructions
+    assert list(member.instructions or []) == [
+        instruction for instruction in solo.instructions or [] if instruction != interactive_prompt
+    ]
 
 
 def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:

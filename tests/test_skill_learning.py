@@ -195,10 +195,7 @@ def _seed(
     for run in runs:
         run.session_id = session_id
     storage = create_session_storage("mind", config, paths, execution_identity=identity)
-    try:
-        seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=list(runs)))
-    finally:
-        storage.close()
+    seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=list(runs)))
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
@@ -1351,23 +1348,20 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     runner = _runner(paths)
     assert await _count(runner, config) is None
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    try:
-        storage.delete_runs(["r1"])
-        later = _tool_turn("r2", result="deployed to canary")
-        later.session_id = "session"
-        seed_session(storage, AgentSession(session_id="session", agent_id="mind", runs=[later]))
-        # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
-        assert summary_rows.append_summary(
-            storage,
-            session_id="session",
-            scope_key="agent:mind",
-            based_on=None,
-            covered=[],
-            summary="The user wants release notes in the #deploys channel.",
-            summary_model="summary-model",
-        )
-    finally:
-        storage.close()
+    storage.delete_runs(["r1"])
+    later = _tool_turn("r2", result="deployed to canary")
+    later.session_id = "session"
+    seed_session(storage, AgentSession(session_id="session", agent_id="mind", runs=[later]))
+    # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
+    assert summary_rows.append_summary(
+        storage,
+        session_id="session",
+        scope_key="agent:mind",
+        based_on=None,
+        covered=[],
+        summary="The user wants release notes in the #deploys channel.",
+        summary_model="summary-model",
+    )
     model = _model()
     with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
         task = await _count(runner, config, run_id="r2")

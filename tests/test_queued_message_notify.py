@@ -44,7 +44,6 @@ from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
 from mindroom.dispatch_source import (
@@ -86,7 +85,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -431,7 +430,6 @@ def _queued_notice_storage(tmp_path: Path) -> BaseDb:
         "queued_notice",
         tmp_path,
         session_table="queued_notice_sessions",
-        prompt_roles=prompt_roles_for_history_storage(),
     )
 
 
@@ -3397,7 +3395,6 @@ async def test_ai_response_preserves_stale_notice_before_prepare(tmp_path: Path)
             side_effect=lambda **_kwargs: _open_scope(storage),
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(side_effect=fake_prepare)),
-        patch("mindroom.ai.close_agent_runtime_state_dbs"),
     ):
         response = await ai_response(
             make_turn_context("general", session_id="session-1"),
@@ -3472,7 +3469,6 @@ async def test_ai_response_preserves_notice_in_session(tmp_path: Path) -> None:
             side_effect=lambda **_kwargs: _open_scope(storage),
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_state_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
@@ -3536,7 +3532,6 @@ async def test_ai_response_preserves_notice_in_session_after_exception(tmp_path:
             side_effect=lambda **_kwargs: _open_scope(storage),
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_state_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         response = await ai_response(
@@ -3598,7 +3593,6 @@ async def test_stream_agent_response_preserves_notice_in_session(tmp_path: Path)
             side_effect=lambda **_kwargs: _open_scope(storage),
         ),
         patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(agent))),
-        patch("mindroom.ai.close_agent_runtime_state_dbs"),
         queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context,
     ):
         chunks = [
@@ -4453,13 +4447,9 @@ def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path
             updated_at=1,
         ),
     )
-    storage.close()
 
     reopened_storage = _queued_notice_storage(tmp_path)
-    try:
-        session = get_agent_session(reopened_storage, "session-1")
-    finally:
-        reopened_storage.close()
+    session = reopened_storage.load_session("session-1", "agent")
 
     assert session is not None
     assert session.runs is not None
@@ -4505,19 +4495,16 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
             status=RunStatus.completed,
         )
         storage = _queued_notice_storage(tmp_path)
-        try:
-            seed_session(
-                storage,
-                AgentSession(
-                    session_id="session-1",
-                    agent_id="general",
-                    runs=[run_output],
-                    created_at=1,
-                    updated_at=1,
-                ),
-            )
-        finally:
-            storage.close()
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="general",
+                runs=[run_output],
+                created_at=1,
+                updated_at=1,
+            ),
+        )
         register_queued_notice_storage(
             storage_factory=lambda: _queued_notice_storage(tmp_path),
             session_id="session-1",
@@ -4557,59 +4544,56 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         num_history_runs=10,
         store_history_messages=False,
     )
-    try:
-        with queued_message_signal_context(_StaticQueuedState(pending=False)) as response_2_context:
-            response_2 = await response_2_agent.arun("Second request", session_id="session-1")
-            prior = next(
-                message for message in recording_model.seen_messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT
-            )
-            assert prior.from_history is True
-            assert prior.provider_data == {
-                _QUEUED_NOTICE_MARKER_KEY: "persisted",
-                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
+    with queued_message_signal_context(_StaticQueuedState(pending=False)) as response_2_context:
+        response_2 = await response_2_agent.arun("Second request", session_id="session-1")
+        prior = next(
+            message for message in recording_model.seen_messages if message.content == QUEUED_MESSAGE_NOTICE_TEXT
+        )
+        assert prior.from_history is True
+        assert prior.provider_data == {
+            _QUEUED_NOTICE_MARKER_KEY: "persisted",
+            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
+        }
+        assert [
+            (message.role, message.content)
+            for message in recording_model.seen_messages
+            if message.content
+            in {
+                QUEUED_MESSAGE_NOTICE_TEXT,
+                "First response handoff",
+                "Second request",
             }
-            assert [
-                (message.role, message.content)
-                for message in recording_model.seen_messages
-                if message.content
-                in {
-                    QUEUED_MESSAGE_NOTICE_TEXT,
-                    "First response handoff",
-                    "Second request",
-                }
-            ] == [
-                ("user", QUEUED_MESSAGE_NOTICE_TEXT),
-                ("assistant", "First response handoff"),
-                ("user", "Second request"),
-            ]
-            original_prior = prior.model_dump()
+        ] == [
+            ("user", QUEUED_MESSAGE_NOTICE_TEXT),
+            ("assistant", "First response handoff"),
+            ("user", "Second request"),
+        ]
+        original_prior = prior.model_dump()
 
-            recording_model.format_function_call_results(
-                messages=recording_model.seen_messages,
-                function_call_results=[Message(role="tool", content="Second tool result")],
-            )
+        recording_model.format_function_call_results(
+            messages=recording_model.seen_messages,
+            function_call_results=[Message(role="tool", content="Second tool result")],
+        )
 
-            assert prior.model_dump() == original_prior
-            assert (
-                _notice_count(
-                    recording_model.seen_messages,
-                    marker="persisted",
-                    response_turn_id=response_1_id,
-                )
-                == 1
+        assert prior.model_dump() == original_prior
+        assert (
+            _notice_count(
+                recording_model.seen_messages,
+                marker="persisted",
+                response_turn_id=response_1_id,
             )
-            assert (
-                _notice_count(
-                    recording_model.seen_messages,
-                    response_turn_id=response_2_context.response_turn_id,
-                )
-                == 0
+            == 1
+        )
+        assert (
+            _notice_count(
+                recording_model.seen_messages,
+                response_turn_id=response_2_context.response_turn_id,
             )
+            == 0
+        )
 
-        assert response_2.content == "ok"
-        persisted = get_agent_session(response_2_storage, "session-1")
-    finally:
-        response_2_storage.close()
+    assert response_2.content == "ok"
+    persisted = response_2_storage.load_session("session-1", "agent")
 
     assert persisted is not None
     assert persisted.runs is not None

@@ -51,7 +51,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import seed_session
 
@@ -730,7 +730,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     Redacting it, or the reply that read it, must remove that run and everything after it
     before the history is used again, while the history before it stays.
     """
-    storage = create_state_storage("crew", tmp_path, subdir="sessions", session_table="crew_sessions")
+    storage = create_state_storage("crew", tmp_path, session_table="crew_sessions")
     runs = [
         _history_run("earlier", team=team, event_id="$earlier", seen=["$earlier"]),
         _history_run("newer", team=team, event_id="$newer", seen=["$older", "$newer"]),
@@ -744,7 +744,7 @@ async def test_turn_removes_history_derived_from_a_redacted_event_no_turn_owns(
     )
 
     def _stored_session() -> AgentSession | TeamSession | None:
-        return get_team_session(storage, "session-1") if team else get_agent_session(storage, "session-1")
+        return storage.load_session("session-1", "team") if team else storage.load_session("session-1", "agent")
 
     lookups: list[tuple[str, ...]] = []
 

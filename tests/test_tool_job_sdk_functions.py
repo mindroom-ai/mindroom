@@ -16,7 +16,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.session_storage.agent_storage import get_agent_runtime_state_db
 from mindroom.tool_jobs.agno_execution import wrap_tool_execution
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution_authority import authorized_tool_call
@@ -122,8 +121,6 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         assert await saved_jobs(paths.storage_root) == {}
     finally:
         await coordinator.stop()
-        if (db := get_agent_runtime_state_db(agent)) is not None:
-            db.close()
 
 
 @pytest.mark.asyncio

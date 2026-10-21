@@ -246,9 +246,6 @@ class DelegationFuzzRunner:
         self.gate.set()
         await self._end_tasks()
         await self.runtime.close_journal()
-        self.storage.close()
-        for storage in self._storages:
-            storage.close()
 
     def _build_child(self, *args: object, **kwargs: object) -> Agent:
         child_identity = args[3]

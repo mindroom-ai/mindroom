@@ -180,7 +180,6 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         finally:
             if runtime is not None:
                 await runtime.shutdown()
-            storage.close()
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         first = await invoke("run_subagent", task="Remember this secret word: cobalt", model=model)

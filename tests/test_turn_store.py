@@ -10,6 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -17,14 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent
-from agno.db.base import BaseDb, SessionType
-from agno.models.message import Message
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
-from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
 from mindroom import constants
@@ -44,13 +38,16 @@ from mindroom.history.storage import (
     read_scope_state,
     update_scope_seen_event_ids,
 )
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_record import (
     PreparedVoiceSource,
@@ -78,6 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.event_journal import EventJournalStore
+    from mindroom.session_storage.store import ConversationStore
 
 
 async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent") -> TurnStore:
@@ -257,21 +255,34 @@ async def test_cancelling_provisional_load_does_not_cancel_owning_write(
 
 def _seeded_storage(
     tmp_path: Path,
-    session: AgentSession | TeamSession | None = None,
+    session: ConversationSession | None = None,
     *,
     name: str = "agent",
-) -> BaseDb:
+) -> ConversationStore:
     """Return real conversation storage, seeded with ``session`` as an older release could have left it.
 
     Reopening after seeding runs the storage-open migrations, as a restart onto this release would.
     """
-    storage = create_state_storage(name, tmp_path / name, subdir="sessions", session_table=f"{name}_sessions")
+    storage = create_state_storage(name, tmp_path / name, session_table=f"{name}_sessions")
     if session is None:
         return storage
-    seed_session(storage, session)
-    storage.close()
+    _seed_as_older_release(storage, session)
     _as_older_release(tmp_path / name / "sessions" / f"{name}.db", name)
-    return create_state_storage(name, tmp_path / name, subdir="sessions", session_table=f"{name}_sessions")
+    return create_state_storage(name, tmp_path / name, session_table=f"{name}_sessions")
+
+
+_EPOCH = datetime.fromtimestamp(0, UTC)
+
+
+def _seed_as_older_release(storage: ConversationStore, session: ConversationSession) -> None:
+    """Seed ``session`` as an older release stored it: a replayed summary lived in the session row's ``summary``."""
+    seed_session(storage, session)
+    if session.summary is not None:
+        with storage.transaction(write=True) as connection:
+            connection.execute(
+                f"UPDATE {storage.names.sessions} SET summary = ? WHERE session_id = ?",  # noqa: S608
+                (json.dumps({"summary": session.summary.text}), session.session_id),
+            )
 
 
 def _as_older_release(db_file: Path, name: str) -> None:
@@ -281,26 +292,30 @@ def _as_older_release(db_file: Path, name: str) -> None:
         connection.execute(f'DROP TABLE IF EXISTS "{name}_sessions_removed_runs"')
 
 
-def _stored(storage: BaseDb, session: AgentSession | TeamSession) -> AgentSession | TeamSession:
+def _stored(storage: ConversationStore, session: ConversationSession) -> ConversationSession:
     """Reload ``session`` from storage."""
-    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
-    stored = storage.get_session(session.session_id, session_type)
-    assert isinstance(stored, type(session))
+    stored = storage.load_session(session.session_id, session.kind)
+    assert stored is not None
     return stored
 
 
-def _stored_run_ids(storage: BaseDb, session: AgentSession | TeamSession) -> list[str | None]:
+def _stored_run_ids(storage: ConversationStore, session: ConversationSession) -> list[str | None]:
     return [run.run_id for run in _stored(storage, session).runs or []]
 
 
-def _seeded_storage_with_runs(tmp_path: Path, session: AgentSession | TeamSession, *, name: str = "agent") -> BaseDb:
+def _seeded_storage_with_runs(
+    tmp_path: Path,
+    session: ConversationSession,
+    *,
+    name: str = "agent",
+) -> ConversationStore:
     """Seed ``session`` and prove every run is readable, so later emptiness is meaningful."""
     storage = _seeded_storage(tmp_path, session, name=name)
     assert _stored_run_ids(storage, session) == [run.run_id for run in session.runs or []]
     return storage
 
 
-def _legacy_compacted_event_ids(run: RunOutput) -> list[str]:
+def _legacy_compacted_event_ids(run: RunRecord) -> list[str]:
     """Return the ids the destructive compactor preserved for one compacted run."""
     metadata = run.metadata or {}
     event_ids = list(metadata.get(constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY, []))
@@ -311,13 +326,13 @@ def _legacy_compacted_event_ids(run: RunOutput) -> list[str]:
 
 async def _store_with_storage(
     journal_store: EventJournalStore,
-    storage: BaseDb,
+    storage: ConversationStore,
     *,
     agent_name: str = "agent",
 ) -> TurnStore:
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
-    state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    state_writer.session_type_for_scope.return_value = "agent"
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
@@ -966,17 +981,18 @@ async def test_terminal_turn_keeps_claim_until_response_task_finishes(journal_st
 async def test_prepare_redaction_removes_causal_run_suffix(journal_store: EventJournalStore, tmp_path: Path) -> None:
     """Redacting a source must delete later output that may depend on that run."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-1",
                 agent_id="agent",
                 session_id=target.session_id,
                 metadata={"matrix_event_id": "$user_msg"},
             ),
-            RunOutput(
+            RunRecord(
                 run_id="run-2",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1003,8 +1019,8 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
     target = MessageTarget.resolve("!room:example.org", "$thread", "$a")
     scope = HistoryScope(kind="agent", scope_id="agent")
 
-    def run(event_id: str) -> RunOutput:
-        return RunOutput(
+    def run(event_id: str) -> RunRecord:
+        return RunRecord(
             run_id=f"{event_id}-run",
             agent_id="agent",
             session_id=target.session_id,
@@ -1017,9 +1033,9 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
 
     storage = _seeded_storage_with_runs(
         tmp_path,
-        AgentSession(session_id=target.session_id, agent_id="agent", runs=[run("$a"), run("$b")]),
+        ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[run("$a"), run("$b")]),
     )
-    stored = get_agent_session(storage, target.session_id)
+    stored = storage.load_session(target.session_id, "agent")
     assert stored is not None
     compact_runs(storage, stored, scope, [run.run_id for run in stored.runs or [] if run.run_id], "summary of a and b")
     store = await _store_with_storage(journal_store, storage)
@@ -1041,7 +1057,7 @@ async def test_editing_a_folded_turn_beside_a_redacted_one_leaves_no_runs_or_sum
     await store.remove_stale_runs_for_edit(turn_record=records["$a"], requester_user_id="@user:example.org")
     await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
 
-    persisted = get_agent_session(storage, target.session_id)
+    persisted = storage.load_session(target.session_id, "agent")
     assert persisted is not None
     assert [stored_run.run_id for stored_run in persisted.runs or []] == []
     assert persisted.summary is None
@@ -1055,11 +1071,12 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     """Editing a source must remove later output before its replacement is persisted."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$source")
     scope = HistoryScope(kind="agent", scope_id="agent")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="source-run",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1069,7 +1086,7 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
                     constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
                 },
             ),
-            RunOutput(
+            RunRecord(
                 run_id="dependent-run",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1099,18 +1116,20 @@ async def test_edit_then_redaction_never_replays_the_old_causal_suffix(
     )
     assert _stored_run_ids(storage, session) == []
 
-    storage.upsert_run(
-        run=RunOutput(
-            run_id="replacement-run",
-            agent_id="agent",
-            session_id=target.session_id,
-            metadata={
-                constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
-                constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
-                constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
-            },
-        ),
-        session_id=target.session_id,
+    storage.save_runs(
+        session,
+        [
+            RunRecord(
+                run_id="replacement-run",
+                agent_id="agent",
+                session_id=target.session_id,
+                metadata={
+                    constants.MATRIX_EVENT_ID_METADATA_KEY: "$source",
+                    constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$source"],
+                    constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$source"],
+                },
+            ),
+        ],
     )
     should_suppress = await _prepare_redaction(store, target, redacted_event_id="$source")
 
@@ -1125,11 +1144,12 @@ async def test_prepare_redaction_removes_runs_that_consumed_the_source(
 ) -> None:
     """A later run that consumed redacted context must not remain eligible for replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="later-run",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1160,11 +1180,12 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     agent_scope = HistoryScope(kind="agent", scope_id="agent")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
-    agent_session = AgentSession(
+    agent_session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="agent-run",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1172,11 +1193,12 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
             ),
         ],
     )
-    team_session = TeamSession(
+    team_session = ConversationSession(
+        kind="team",
         session_id=target.session_id,
-        team_id=team_scope.scope_id,
+        owner_id=team_scope.scope_id,
         runs=[
-            TeamRunOutput(
+            TeamRunRecord(
                 run_id="team-run",
                 session_id=target.session_id,
                 team_id=team_scope.scope_id,
@@ -1193,9 +1215,7 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
     }
     state_writer = MagicMock()
     state_writer.create_storage.side_effect = lambda _identity, *, scope: storages[scope.key]
-    state_writer.session_type_for_scope.side_effect = lambda scope: (
-        SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
-    )
+    state_writer.session_type_for_scope.side_effect = lambda scope: scope.kind
     state_writer.history_scope.return_value = agent_scope
     store = TurnStore(
         TurnStoreDeps(
@@ -1242,11 +1262,12 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     default_scope = HistoryScope(kind="agent", scope_id="agent")
     team_scope = HistoryScope(kind="team", scope_id="team_private")
-    team_session = TeamSession(
+    team_session = ConversationSession(
+        kind="team",
         session_id=target.session_id,
-        team_id=team_scope.scope_id,
+        owner_id=team_scope.scope_id,
         runs=[
-            TeamRunOutput(
+            TeamRunRecord(
                 run_id="team-run",
                 session_id=target.session_id,
                 team_id=team_scope.scope_id,
@@ -1265,9 +1286,7 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
     state_writer = MagicMock()
     state_writer.history_scope.return_value = default_scope
     state_writer.create_storage.side_effect = lambda identity, *, scope: storages[(scope.key, identity)]
-    state_writer.session_type_for_scope.side_effect = lambda scope: (
-        SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
-    )
+    state_writer.session_type_for_scope.side_effect = lambda scope: scope.kind
     tool_runtime = MagicMock()
     tool_runtime.build_execution_identity.side_effect = lambda *, target, user_id: user_id  # noqa: ARG005
     store = TurnStore(
@@ -1316,11 +1335,12 @@ async def test_redaction_before_its_turn_registers_still_removes_the_replay(
 ) -> None:
     """A redaction that lands before its source turn registers is still found by the next response."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-1",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1365,18 +1385,19 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
     """Redaction must remove content that a pre-archive compaction folded into the summary."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="post-compaction",
                 agent_id="agent",
                 session_id=target.session_id,
                 metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: "$post-compaction"},
             ),
         ],
-        summary=SessionSummary(summary="The user disclosed REDACTED_SECRET."),
+        summary=ScopeSummary(text="The user disclosed REDACTED_SECRET.", updated_at=_EPOCH),
     )
     update_scope_seen_event_ids(session, scope, ["$user_msg", "$older"])
     session.metadata = {
@@ -1536,18 +1557,19 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
     requester_user_id = "@alice:example.org"
     target = MessageTarget.resolve("!room:example.org", "$thread", human_event_id)
     scope = HistoryScope(kind="agent", scope_id="agent")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="human-run",
                 agent_id="agent",
                 session_id=target.session_id,
                 metadata={constants.MATRIX_EVENT_ID_METADATA_KEY: human_event_id},
             ),
         ],
-        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+        summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
     update_scope_seen_event_ids(session, scope, [human_event_id])
     storage = _seeded_storage_with_runs(tmp_path, session)
@@ -1606,11 +1628,12 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
     """A team scope recorded before generation drops the redacted source when it next opens."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="team", scope_id="team_private")
-    session = TeamSession(
+    session = ConversationSession(
+        kind="team",
         session_id=target.session_id,
-        team_id=scope.scope_id,
+        owner_id=scope.scope_id,
         runs=[
-            TeamRunOutput(
+            TeamRunRecord(
                 run_id="team-run",
                 session_id=target.session_id,
                 team_id=scope.scope_id,
@@ -1621,7 +1644,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
     storage = _seeded_storage_with_runs(tmp_path, session, name="team_private")
     state_writer = MagicMock()
     state_writer.create_storage.return_value = storage
-    state_writer.session_type_for_scope.return_value = SessionType.TEAM
+    state_writer.session_type_for_scope.return_value = "team"
     state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
     store = TurnStore(
         TurnStoreDeps(
@@ -1729,11 +1752,12 @@ async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source
     """Each bot drops only the history that derives from the redacted source."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     scope = HistoryScope(kind="agent", scope_id="agent")
-    owner_session = AgentSession(
+    owner_session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[],
-        summary=SessionSummary(summary="contains REDACTED_SECRET"),
+        summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
     update_scope_seen_event_ids(owner_session, scope, ["$user_msg"])
     owner_storage = _seeded_storage(tmp_path, owner_session, name="owner")
@@ -1748,11 +1772,12 @@ async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source
             response_owner="owner",
         ),
     )
-    unrelated_session = AgentSession(
+    unrelated_session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="unrelated",
+        owner_id="unrelated",
         runs=[],
-        summary=SessionSummary(summary="unrelated"),
+        summary=ScopeSummary(text="unrelated", updated_at=_EPOCH),
     )
     unrelated_storage = _seeded_storage(tmp_path, unrelated_session, name="unrelated")
     unrelated_store = await _store_with_storage(
@@ -1845,11 +1870,12 @@ async def test_redaction_cleanup_survives_restart_until_next_response(
 ) -> None:
     """A ledger tombstone alone still lets the next response after a restart remove the replay."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-1",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -1890,11 +1916,12 @@ async def test_next_response_removes_replay_of_a_redacted_source(
 ) -> None:
     """The next response's history scope drops the run that answered a redacted source."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-1",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -2485,14 +2512,14 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     )
     await store.record_turn(original)
 
-    def storage_factory(*_args: object, **_kwargs: object) -> BaseDb:
-        return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
+    def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
+        return create_state_storage("agent", tmp_path, session_table="agent_sessions")
 
     storage = storage_factory()
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
-    edited = RunOutput(
+    store.deps.state_writer.session_type_for_scope.return_value = "agent"
+    edited = RunRecord(
         run_id="edited",
         agent_id="agent",
         session_id=target.session_id,
@@ -2570,12 +2597,13 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         )
         edited.messages = list(messages)
         edited.metadata = {constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: consumed}
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
+        owner_id="agent",
         runs=[
             edited,
-            RunOutput(
+            RunRecord(
                 run_id="dependent",
                 agent_id="agent",
                 session_id=target.session_id,
@@ -2589,19 +2617,16 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
             scope,
             _legacy_compacted_event_ids(edited),
         )
-        session.summary = SessionSummary(summary="DELETED_EDIT_MARKER")
+        session.summary = ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH)
         session.runs = session.runs[1:]
-    storage.upsert_session(session)
-    for run in session.runs or []:
-        storage.upsert_run(run, session_id=session.session_id)
-    storage.close()
+    _seed_as_older_release(storage, session)
     _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
     storage = storage_factory()
-    initial_persisted = get_agent_session(storage, target.session_id)
+    initial_persisted = storage.load_session(target.session_id, "agent")
     assert initial_persisted is not None
     if compacted:
         assert initial_persisted.summary is not None
-        assert initial_persisted.summary.summary == "DELETED_EDIT_MARKER"
+        assert initial_persisted.summary.text == "DELETED_EDIT_MARKER"
     else:
         assert "DELETED_EDIT_MARKER" in str([run.messages for run in initial_persisted.runs or []])
     before_model = _ReplayCaptureModel(id="test", name="test", provider="test")
@@ -2613,7 +2638,6 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         add_session_summary_to_context=True,
     ).arun("BASELINE_INPUT", session_id=target.session_id)
     assert "DELETED_EDIT_MARKER" in str(before_model.requests)
-    storage.close()
     await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reopened = TurnStore(store.deps)
@@ -2621,7 +2645,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     assert not await reopened._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()
     await remove_redacted_history_like_next_response(reopened, target, storage, scope=scope)
-    persisted = get_agent_session(storage, target.session_id)
+    persisted = storage.load_session(target.session_id, "agent")
     assert persisted is not None
     next_model = _ReplayCaptureModel(id="test", name="test", provider="test")
     await Agent(
@@ -2643,7 +2667,6 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     assert owner.response_event_id == "$reply"
     assert owner.replay_source_event_ids == ("$user_msg",)
     assert owner.source_event_prompts == ({"$user_msg": "CURRENT_SOURCE"} if context_only else None)
-    storage.close()
 
 
 @pytest.mark.asyncio
@@ -2729,7 +2752,7 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
 ) -> None:
     """A superseded edit removes only runs that actually consumed that physical revision."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
-    newest = RunOutput(
+    newest = RunRecord(
         run_id="newest",
         agent_id="agent",
         session_id=target.session_id,
@@ -2737,9 +2760,9 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
             constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [20, "$surviving-edit"]},
         },
     )
-    session = AgentSession(session_id=target.session_id, agent_id="agent", runs=[newest])
+    session = ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[newest])
     if compacted:
-        session.summary = SessionSummary(summary="Independent surviving summary")
+        session.summary = ScopeSummary(text="Independent surviving summary", updated_at=_EPOCH)
         update_scope_seen_event_ids(
             session,
             HistoryScope(kind="agent", scope_id="agent"),
@@ -2767,7 +2790,7 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
     assert [run.run_id for run in stored.runs or []] == ["newest"]
     if compacted:
         assert stored.summary is not None
-        assert stored.summary.summary == "Independent surviving summary"
+        assert stored.summary.text == "Independent surviving summary"
     owner = store.get_turn_record("$user_msg")
     assert owner.source_event_prompts == {"$user_msg": "SURVIVING_EDIT"}
     assert owner.source_event_revisions == {"$user_msg": (20, "$surviving-edit")}
@@ -2957,11 +2980,11 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         record_json=json.dumps(raw),
     )
 
-    def storage_factory(*_args: object, **_kwargs: object) -> BaseDb:
-        return create_state_storage("agent", tmp_path, subdir="sessions", session_table="agent_sessions")
+    def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
+        return create_state_storage("agent", tmp_path, session_table="agent_sessions")
 
     storage = storage_factory()
-    later_run = RunOutput(
+    later_run = RunRecord(
         run_id="later",
         agent_id="agent",
         session_id=target.session_id,
@@ -2970,21 +2993,20 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
             constants.MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY: {"$user_msg": [10, "$physical-edit"]},
         },
     )
-    session = AgentSession(
+    session = ConversationSession(
+        kind="agent",
         session_id=target.session_id,
-        agent_id="agent",
-        summary=SessionSummary(summary="DELETED_EDIT_MARKER"),
+        owner_id="agent",
+        summary=ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH),
         runs=[later_run] if later_run_names_revision else [],
     )
     update_scope_seen_event_ids(session, scope, ["$user_msg"])
-    storage.upsert_session(session)
-    for run in session.runs or []:
-        storage.upsert_run(run, session_id=session.session_id)
-    storage.close()
+    _seed_as_older_release(storage, session)
+    _as_older_release(tmp_path / "sessions" / "agent.db", "agent")
     if later_run_names_revision:
         # A modern compaction folds the later run on top of the legacy summary.
         storage = storage_factory()
-        reopened_session = get_agent_session(storage, target.session_id)
+        reopened_session = storage.load_session(target.session_id, "agent")
         assert reopened_session is not None
         compact_runs(
             storage,
@@ -2993,28 +3015,26 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
             [run.run_id for run in reopened_session.runs or [] if run.run_id],
             "DELETED_EDIT_MARKER and later",
         )
-        storage.close()
     _reset_handled_turn_ledger_runtime()
     store = await _store(journal_store)
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
-    store.deps.state_writer.session_type_for_scope.return_value = SessionType.AGENT
+    store.deps.state_writer.session_type_for_scope.return_value = "agent"
     await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     await store._prepare_response_for_redactions(target=target, source_event_ids=("$next",))
     storage = storage_factory()
     await remove_redacted_history_like_next_response(store, target, storage, scope=scope)
-    persisted = get_agent_session(storage, target.session_id)
+    persisted = storage.load_session(target.session_id, "agent")
     assert persisted is not None
     if historical_summary_owner:
         assert persisted.summary is None
     else:
         assert persisted.summary is not None
-        assert persisted.summary.summary == "DELETED_EDIT_MARKER"
+        assert persisted.summary.text == "DELETED_EDIT_MARKER"
     owner = store.get_turn_record("$user_msg")
     assert owner is not None
     assert owner.replay_source_event_ids == ("$user_msg",)
     assert owner.revision_replay["$physical-edit"].legacy_summary_provenance is historical_summary_owner
-    storage.close()
 
 
 @pytest.mark.asyncio

@@ -184,7 +184,6 @@ async def _run_silent_turn(
         return _SilentTurn(answer, trace, recorder, pending_outcomes(runtime))
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio

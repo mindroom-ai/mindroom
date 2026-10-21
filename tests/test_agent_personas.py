@@ -135,11 +135,8 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path) -> No
         messages=[Message(role="user", content="Earlier task"), Message(role="assistant", content="Earlier answer")],
     )
     storage = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
-    try:
-        session = seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
-        compact_runs(storage, session, HistoryScope(kind="agent", scope_id="helper"), ["old-run"], "EARLIER-WORK")
-    finally:
-        storage.close()
+    session = seed_session(storage, AgentSession(session_id="session-1", agent_id="helper", runs=[old_run]))
+    compact_runs(storage, session, HistoryScope(kind="agent", scope_id="helper"), ["old-run"], "EARLIER-WORK")
 
     with open_resolved_scope_session_context(
         agent_name="helper",

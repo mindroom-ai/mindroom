@@ -58,7 +58,6 @@ from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
-    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -152,7 +151,6 @@ from mindroom.runtime_shutdown import (
     SYNC_RESTART_SHUTDOWN,
     RuntimeShutdownIntent,
 )
-from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import (
     INTERRUPTED_RESPONSE_NOTE,
@@ -197,7 +195,6 @@ from tests.response_runner_helpers import (
     _bot,
     _envelope,
     _noop_typing,
-    _PersistenceSeamProbe,
     _plain_request,
     _target,
 )
@@ -2884,7 +2881,6 @@ async def test_agent_continuation_executes_real_agno_confirmation(  # noqa: PLR0
         patch("mindroom.approval.execution.create_agent", return_value=agent) as create_agent,
         patch.object(agent, "acontinue_run", new=continue_run),
         patch("mindroom.approval.execution.typing_indicator", _noop_typing),
-        patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
         patch("mindroom.approval.execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
         patch("mindroom.approval.execution.install_approval_receipt_hooks") as install_receipt,
         patch("mindroom.approval.execution.ai_runtime.register_queued_notice_storage") as register_notice,
@@ -3134,7 +3130,6 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
     storage = runner.deps.state_writer.create_storage(identity)
     storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
     storage.upsert_run(run=persisted, session_id="session-1", user_id="@user:localhost")
-    storage.close()
     continuation = approval_continuation(
         approval_id="approval-invalid-agent",
         execution_identity={},
@@ -3151,7 +3146,6 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
             return_value=SimpleNamespace(knowledge=MagicMock()),
         ),
         patch("mindroom.approval.execution.create_agent", return_value=agent),
-        patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
         pytest.raises(RuntimeError, match="no longer match the approval continuation"),
     ):
         await runner._approval_execution.continue_run(
@@ -3279,7 +3273,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         session_id="session-1",
         user_id="@user:localhost",
     )
-    storage.close()
 
     def create_from_live_config(_name: str, config: object, *_args: object, **_kwargs: object) -> None:
         assert config is reloaded
@@ -7634,93 +7627,6 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
     assert [(outcome.terminal_status, outcome.failure_reason) for outcome in effect_outcomes] == [
         ("error", "delivery_failed"),
     ]
-
-
-@pytest.mark.asyncio
-async def test_agent_finalization_persists_response_link_behind_pending_save(tmp_path: Path) -> None:
-    """Agent finalization must join the real SQLite save lane and close its handle."""
-    bot = _bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    target = _target(thread_id="$thread")
-    request = _plain_request(target)
-    execution_identity = runner.deps.tool_runtime.build_execution_identity(
-        target=target,
-        user_id=request.user_id,
-    )
-    original_create_storage = runner.deps.state_writer.create_storage
-    save_storage = original_create_storage(execution_identity)
-    probe = _PersistenceSeamProbe(save_storage, original_create_storage)
-    save_task: asyncio.Task[None] | None = None
-
-    async def persist_session_before_delivery(*_args: object, **kwargs: object) -> _ResponseGenerationOutcome:
-        nonlocal save_task
-        run_id = cast("str", kwargs["run_id"])
-        attempt_run_ids = cast("list[str]", kwargs["attempt_run_id_collector"])
-        attempt_run_ids.append(run_id)
-        owner = AgnoAgent(db=save_storage, telemetry=False)
-        session = AgentSession(
-            session_id=target.session_id,
-            agent_id=runner.deps.agent_name,
-            session_data={"session_state": {"durable": "kept"}},
-            created_at=1,
-            updated_at=1,
-            runs=[
-                RunOutput(
-                    run_id=run_id,
-                    agent_id=runner.deps.agent_name,
-                    session_id=target.session_id,
-                    metadata={"preserved": True},
-                ),
-            ],
-        )
-        # The run row the link lands on exists before the contended session save starts.
-        probe.seed(save_storage, session)
-        save_task = asyncio.create_task(owner.asave_session(session))
-        assert await asyncio.to_thread(probe.save_started.wait, 5)
-        probe.arm_link_storage()
-        return _ResponseGenerationOutcome(
-            delivery=_completed_outcome("$answer", body="answer"),
-            run_succeeded=True,
-        )
-
-    response_task: asyncio.Task[str | None] | None = None
-    persisted: AgentSession | None = None
-    try:
-        with (
-            patch.object(save_storage, "upsert_session", new=probe.blocked_upsert),
-            patch.object(runner.deps.state_writer, "create_storage", new=probe.create_storage),
-            patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
-            patch.object(runner, "_process_and_respond", new=persist_session_before_delivery),
-            patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
-        ):
-            response_task = asyncio.create_task(runner.generate_response(request))
-            assert await asyncio.to_thread(probe.link_storage_created.wait, 5)
-            assert not response_task.done()
-            assert not probe.link_storage_closed.is_set()
-            probe.release_save.set()
-            assert await asyncio.wait_for(response_task, timeout=5) == "$answer"
-    finally:
-        probe.release_save.set()
-        await asyncio.gather(
-            *([response_task] if response_task is not None else []),
-            *([save_task] if save_task is not None else []),
-            return_exceptions=True,
-        )
-        try:
-            persisted = get_agent_session(save_storage, target.session_id)
-        finally:
-            save_storage.close()
-
-    assert persisted is not None
-    assert persisted.session_data == {"session_state": {"durable": "kept"}}
-    assert persisted.runs is not None
-    assert len(persisted.runs) == 1
-    persisted_run = persisted.runs[0]
-    assert persisted_run.metadata == {
-        "preserved": True,
-        MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$answer",
-    }
-    assert probe.link_storage_closed.is_set()
 
 
 @pytest.mark.asyncio

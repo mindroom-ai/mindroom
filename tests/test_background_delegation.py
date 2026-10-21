@@ -187,7 +187,6 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -283,7 +282,6 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     finally:
         release_writer.set()
         await runtime.shutdown()
-        storage.close()
 
 
 @dataclass
@@ -545,9 +543,6 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     finally:
         release.set()
         await runtime.shutdown()
-        storage.close()
-        for child_storage in child_storages:
-            child_storage.close()
 
 
 @pytest.mark.asyncio
@@ -668,8 +663,6 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
         assert side_effects == []
     finally:
         await runtime.shutdown()
-        for storage in storages:
-            storage.close()
 
 
 def _child_policy_config(rules: list[ApprovalRuleConfig]) -> Config:
@@ -813,8 +806,6 @@ async def test_a_resumed_child_runs_under_the_policy_current_when_it_resumes(  #
         assert [card[2] for card in cards.requested] == ["write_report", "delete_report"]
     finally:
         await runtime.shutdown()
-        for storage in storages:
-            storage.close()
 
 
 @pytest.mark.asyncio
@@ -938,7 +929,6 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         assert "No job with this ID is available to you in this conversation." in content
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -1069,32 +1059,29 @@ async def test_inline_child_failure_retains_liveness_through_settlement(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
-    try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
-            paused = await parent.arun("Delegate", session_id=owner.session_id, user_id=owner.requester_id)
-            pending = asyncio.create_task(
-                drive_delegations(
-                    parent,
-                    paused,
-                    run_child=run_child,
-                    agent_name="leader",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=owner,
-                ),
-            )
-            try:
-                await asyncio.wait_for(settling.wait(), JOB_TEST_TIMEOUT)
-                with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
-                    assert not acquired, "Failure settlement released its exact live child too early"
-            finally:
-                release.set()
-            response = await pending
-        assert response.status == RunStatus.completed
-        with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
-            assert acquired
-    finally:
-        storage.close()
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+        paused = await parent.arun("Delegate", session_id=owner.session_id, user_id=owner.requester_id)
+        pending = asyncio.create_task(
+            drive_delegations(
+                parent,
+                paused,
+                run_child=run_child,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=owner,
+            ),
+        )
+        try:
+            await asyncio.wait_for(settling.wait(), JOB_TEST_TIMEOUT)
+            with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
+                assert not acquired, "Failure settlement released its exact live child too early"
+        finally:
+            release.set()
+        response = await pending
+    assert response.status == RunStatus.completed
+    with subagent_recovery_lock(children[0].subagent_id, paths) as acquired:
+        assert acquired
 
 
 async def _drive_background_child(
@@ -1155,7 +1142,6 @@ async def _drive_background_child(
             return await asyncio.wait_for(pending, JOB_TEST_TIMEOUT)
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 _BACKGROUND_PARENT = ToolExecutionIdentity(

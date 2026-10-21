@@ -178,4 +178,3 @@ async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  #
     finally:
         await runtime.shutdown()
         release_background_tool_jobs(paths, instance)
-        storage.close()

@@ -40,7 +40,7 @@ from mindroom.hooks import HookRegistry
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session, get_team_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
@@ -377,7 +377,7 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     session = _session("session", runs=[run])
     session.user_id = "@user:localhost"
     session.session_data = {"session_metrics": run.metrics.to_dict()}
-    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
+    config, paths, _storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
     usage = CompletionUsage(prompt_tokens=120, completion_tokens=30, total_tokens=150)
     create = MagicMock(return_value=SimpleNamespace(usage=usage))
     llm = SimpleNamespace(
@@ -385,37 +385,32 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
         client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
     )
     install_mem0_usage_capture(llm, "openai")
-    try:
-        with counted_mem0_usage() as calls:
-            llm.client.chat.completions.create()
-            llm.client.chat.completions.create()
-        extraction = mem0_usage_run(calls)
-        assert extraction is not None
-        await record_helper_usage(
-            extraction,
-            owner=HelperUsageOwner(
-                storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
-                session_id="session",
-            ),
-            invocation_id=extraction.run_id or "",
-            kind="memory_extraction",
-            requester_id="@user:localhost",
-        )
+    with counted_mem0_usage() as calls:
+        llm.client.chat.completions.create()
+        llm.client.chat.completions.create()
+    extraction = mem0_usage_run(calls)
+    assert extraction is not None
+    await record_helper_usage(
+        extraction,
+        owner=HelperUsageOwner(
+            storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
+            session_id="session",
+        ),
+        invocation_id=extraction.run_id or "",
+        kind="memory_extraction",
+        requester_id="@user:localhost",
+    )
 
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-        assert report.totals.total_tokens == 310
-        assert report.request_breakdown is not None
-        assert [
-            (row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown
-        ] == [
-            ("run", "test-provider", "reply-model", 10),
-            ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
-            ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
-        ]
-        assert report.request_coverage is not None
-        assert report.request_coverage.unavailable_sources == 0
-    finally:
-        storage.close()
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 310
+    assert report.request_breakdown is not None
+    assert [(row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown] == [
+        ("run", "test-provider", "reply-model", 10),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+    ]
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == 0
 
 
 @pytest.mark.asyncio
@@ -452,45 +447,42 @@ async def test_memory_usage_survives_rejected_output_and_retry(
         ],
     )
     monkeypatch.setattr("mindroom.memory.auto_flush.model_loading.get_model_instance", lambda *_args: model)
-    try:
-        for _ in range(2):
-            await _extract_memory_summary(
-                config=config,
-                runtime_paths=paths,
-                agent_name="test_agent",
-                session_id="session",
-                lines=["Synthetic conversation excerpt."],
-                existing_context="",
-                execution_identity=identity if has_requester else None,
-            )
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-        assert report.totals.total_tokens == 175
-        assert sum(row.run_count for row in report.model_breakdown) == 1
-        assert sum(row.totals.total_tokens for row in report.cumulative_model_breakdown) == 175
-        assert report.request_breakdown is not None
-        assert [row.totals.total_tokens for row in report.request_breakdown] == [110, 55]
-        assert {row.kind for row in report.request_breakdown} == {"memory_auto_flush"}
-        expected_requester = "@user:localhost" if has_requester else None
-        assert {row.user_id for row in report.request_breakdown} == {expected_requester}
-        own = collect_self_usage(
-            agent_name="test_agent",
-            requester_id="@user:localhost",
+    for _ in range(2):
+        await _extract_memory_summary(
             config=config,
             runtime_paths=paths,
-            execution_identity=identity,
+            agent_name="test_agent",
+            session_id="session",
+            lines=["Synthetic conversation excerpt."],
+            existing_context="",
+            execution_identity=identity if has_requester else None,
         )
-        assert own.totals.total_tokens == (165 if has_requester else 0)
-        with storage.db_engine.connect() as connection:
-            snapshots = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
-        helpers = [json.loads(value) for value in snapshots if json.loads(value).get("kind") == "memory_auto_flush"]
-        assert len(helpers) == 2
-        assert len({row["run_id"] for row in helpers}) == 2
-        assert "Synthetic conversation" not in json.dumps(helpers)
-        assert "Remember" not in json.dumps(helpers)
-        storage.upsert_session(session)
-        assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
-    finally:
-        storage.close()
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 175
+    assert sum(row.run_count for row in report.model_breakdown) == 1
+    assert sum(row.totals.total_tokens for row in report.cumulative_model_breakdown) == 175
+    assert report.request_breakdown is not None
+    assert [row.totals.total_tokens for row in report.request_breakdown] == [110, 55]
+    assert {row.kind for row in report.request_breakdown} == {"memory_auto_flush"}
+    expected_requester = "@user:localhost" if has_requester else None
+    assert {row.user_id for row in report.request_breakdown} == {expected_requester}
+    own = collect_self_usage(
+        agent_name="test_agent",
+        requester_id="@user:localhost",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=identity,
+    )
+    assert own.totals.total_tokens == (165 if has_requester else 0)
+    with storage.db_engine.connect() as connection:
+        snapshots = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
+    helpers = [json.loads(value) for value in snapshots if json.loads(value).get("kind") == "memory_auto_flush"]
+    assert len(helpers) == 2
+    assert len({row["run_id"] for row in helpers}) == 2
+    assert "Synthetic conversation" not in json.dumps(helpers)
+    assert "Remember" not in json.dumps(helpers)
+    storage.upsert_session(session)
+    assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 
 @pytest.mark.asyncio
@@ -559,7 +551,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             _WorkflowRun("sample-workflow"),
         )
         assert result.content == "Sample output."
-        loaded = (get_team_session if caller.endswith("team") else get_agent_session)(storage, context.session_id)
+        loaded = storage.load_session(context.session_id, "team" if caller.endswith("team") else "agent")
         assert loaded is not None, "First-turn helper usage needs its actual caller session row"
         assert not loaded.runs
         with storage.db_engine.connect() as connection:
@@ -613,7 +605,7 @@ async def test_workflow_retains_paid_status_without_inventing_request_detail(
     response_id: str | None,
 ) -> None:
     """Repeated final outputs upsert once; incomplete request details never become a combined request."""
-    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
+    config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     messages = [
         Message(
             role="assistant",
@@ -654,25 +646,20 @@ async def test_workflow_retains_paid_status_without_inventing_request_detail(
         runtime_paths=paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
-    try:
-        with open_scope() as scope_context, helper_usage_context(scope_context):
-            if status == RunStatus.error:
-                with pytest.raises(DynamicWorkflowExecutionError, match="Sample output"):
-                    await _arun_agent(context, actor, "Sample task.")
-            else:
-                assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-        assert report.totals.total_tokens == 33
-        assert sum(row.run_count for row in report.model_breakdown) == 0
-        assert report.user_breakdown[0].user_id == "@user:localhost"
-        assert report.request_breakdown is not None
-        assert [row.totals.total_tokens for row in report.request_breakdown] == (
-            [11, 22] if details == "complete" else []
-        )
-        assert report.request_coverage is not None
-        assert report.request_coverage.unavailable_sources == (0 if details == "complete" else 1)
-    finally:
-        storage.close()
+    with open_scope() as scope_context, helper_usage_context(scope_context):
+        if status == RunStatus.error:
+            with pytest.raises(DynamicWorkflowExecutionError, match="Sample output"):
+                await _arun_agent(context, actor, "Sample task.")
+        else:
+            assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 33
+    assert sum(row.run_count for row in report.model_breakdown) == 0
+    assert report.user_breakdown[0].user_id == "@user:localhost"
+    assert report.request_breakdown is not None
+    assert [row.totals.total_tokens for row in report.request_breakdown] == ([11, 22] if details == "complete" else [])
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == (0 if details == "complete" else 1)
 
 
 @pytest.mark.asyncio
@@ -710,7 +697,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
             kind="dynamic_workflow",
             requester_id=None,
         )
-        loaded = get_agent_session(context.storage, "session")
+        loaded = context.storage.load_session("session", "agent")
         assert loaded is not None
         assert loaded.metadata == {"marker": "concurrent session"}
         raise asyncio.CancelledError
@@ -748,16 +735,13 @@ async def test_persisted_participant_usage_is_not_added_again(tmp_path: Path) ->
         runtime_paths=paths,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
-    try:
-        with open_scope() as scope_context, helper_usage_context(scope_context):
-            assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-        assert report.totals.total_tokens == 22
-        assert sum(row.run_count for row in report.model_breakdown) == 1
-        assert report.request_breakdown is not None
-        assert {row.kind for row in report.request_breakdown} == {"run"}
-    finally:
-        storage.close()
+    with open_scope() as scope_context, helper_usage_context(scope_context):
+        assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 22
+    assert sum(row.run_count for row in report.model_breakdown) == 1
+    assert report.request_breakdown is not None
+    assert {row.kind for row in report.request_breakdown} == {"run"}
 
 
 @pytest.mark.asyncio
@@ -793,5 +777,4 @@ async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path:
             connection.rollback()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=3)
-            storage.close()
     assert collect_admin_usage(config=config, runtime_paths=paths).totals.total_tokens == 22

@@ -4201,7 +4201,6 @@ class TestTeamCompletion:
                 storage=fake_storage,
                 session=None,
             )
-            fake_storage.close()
 
         async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
             assert fake_storage.closed is False

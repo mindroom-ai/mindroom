@@ -355,24 +355,20 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         runtime_paths=runtime_paths,
         execution_identity=second_identity,
     )
-    try:
-        session = TeamSession(
-            session_id="session-1",
-            team_id="super_team",
-            metadata={"source": "alice"},
-            created_at=1,
-            updated_at=1,
-        )
-        set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-        seed_session(first_storage, session)
+    session = TeamSession(
+        session_id="session-1",
+        team_id="super_team",
+        metadata={"source": "alice"},
+        created_at=1,
+        updated_at=1,
+    )
+    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    seed_session(first_storage, session)
 
-        persisted = second_storage.get_session("session-1", SessionType.TEAM)
+    persisted = second_storage.get_session("session-1", SessionType.TEAM)
 
-        assert first_storage.db_file == second_storage.db_file
-        assert isinstance(persisted, TeamSession)
-        assert persisted.metadata["source"] == "alice"
-        state = read_scope_state(persisted, scope)
-        assert state.force_compact_before_next_run is True
-    finally:
-        first_storage.close()
-        second_storage.close()
+    assert first_storage.db_file == second_storage.db_file
+    assert isinstance(persisted, TeamSession)
+    assert persisted.metadata["source"] == "alice"
+    state = read_scope_state(persisted, scope)
+    assert state.force_compact_before_next_run is True

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -29,12 +28,8 @@ from tests.conftest import (
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
-
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
     from mindroom.bot import AgentBot
 
@@ -102,62 +97,6 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
             logical_source_event_ids=(source_event_id,),
         ),
     )
-
-
-class _PersistenceSeamProbe:
-    """Observe one real queued save followed by one runner-owned linkage handle."""
-
-    def __init__(
-        self,
-        save_storage: BaseDb,
-        create_storage: Callable[..., BaseDb],
-    ) -> None:
-        self.save_started = threading.Event()
-        self.release_save = threading.Event()
-        self.link_storage_created = threading.Event()
-        self.link_storage_closed = threading.Event()
-        self._save_upsert = save_storage.upsert_session
-        self._create_storage = create_storage
-        self._state_lock = threading.Lock()
-        self._track_next_storage = False
-
-    def seed(self, storage: BaseDb, session: AgentSession | TeamSession) -> None:
-        """Write the session row and its run rows through the unblocked path before the held save."""
-        self._save_upsert(session)
-        for run in session.runs or []:
-            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
-
-    def blocked_upsert(self, session: object, deserialize: bool | None = True) -> object:
-        """Hold the accepted save in its real persistence lane."""
-        self.save_started.set()
-        assert self.release_save.wait(timeout=5)
-        return self._save_upsert(session, deserialize=deserialize)  # type: ignore[arg-type]
-
-    def arm_link_storage(self) -> None:
-        """Mark the next real factory result as the response-link handle."""
-        with self._state_lock:
-            self._track_next_storage = True
-
-    def create_storage(self, *args: object, **kwargs: object) -> BaseDb:
-        """Delegate to the real factory and observe exactly one real close."""
-        storage = self._create_storage(*args, **kwargs)
-        with self._state_lock:
-            track_storage = self._track_next_storage
-            self._track_next_storage = False
-        if not track_storage:
-            return storage
-
-        original_close = storage.close
-
-        def close() -> None:
-            try:
-                original_close()
-            finally:
-                self.link_storage_closed.set()
-
-        storage.close = close  # type: ignore[method-assign]
-        self.link_storage_created.set()
-        return storage
 
 
 @asynccontextmanager

@@ -17,7 +17,6 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import resolve_agent_preparation_inputs
-from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.model_loading import get_model_instance
@@ -112,30 +111,27 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> Iterator[tuple[Agent, Agen
     assert config is not None
     agent = create_agent("general", config, runtime.runtime_paths, execution_identity=None)
     agents = [agent]
-    try:
-        members = materialize_exact_team_members(
-            ["general"],
-            config=config,
-            runtime_paths=runtime.runtime_paths,
-            execution_identity=None,
-        )
-        agents.extend(members.agents)
-        member = members.agents[0]
-        team = build_materialized_team_instance(
-            requested_agent_names=["general"],
-            agents=members.agents,
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime.runtime_paths,
-            scope_context=None,
-            model_name=config.resolve_entity("team").model_name,
-            configured_team_name="team",
-            execution_identity=None,
-        )
-        router_model = get_model_instance(config, runtime.runtime_paths, config.router.model)
-        yield agent, member, team, router_model
-    finally:
-        close_team_runtime_state_dbs(agents=agents, team_db=None)
+    members = materialize_exact_team_members(
+        ["general"],
+        config=config,
+        runtime_paths=runtime.runtime_paths,
+        execution_identity=None,
+    )
+    agents.extend(members.agents)
+    member = members.agents[0]
+    team = build_materialized_team_instance(
+        requested_agent_names=["general"],
+        agents=members.agents,
+        mode=TeamMode.COORDINATE,
+        config=config,
+        runtime_paths=runtime.runtime_paths,
+        scope_context=None,
+        model_name=config.resolve_entity("team").model_name,
+        configured_team_name="team",
+        execution_identity=None,
+    )
+    router_model = get_model_instance(config, runtime.runtime_paths, config.router.model)
+    yield agent, member, team, router_model
 
 
 def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:

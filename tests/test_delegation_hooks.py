@@ -75,7 +75,7 @@ async def test_member_subagent_hooks_keep_live_room_capabilities(tmp_path: Path)
     "outcome",
     ["blocked", "approved", "cancel", "recovery_cancel", "live_cancel", "cancelled_output", "revoke"],
 )
-async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, PLR0912, PLR0915
+async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
@@ -152,57 +152,54 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
         ),
     )
     options = {"agent_name": "leader", "config": config, "runtime_paths": paths, "execution_identity": identity}
-    try:
-        with tool_runtime_context(context):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            if outcome == "live_cancel":
-                with pytest.raises(asyncio.CancelledError):
-                    await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-                paused = response
-            else:
-                paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-            if outcome in {"approved", "cancel", "recovery_cancel", "revoke"}:
-                assert paused.status == RunStatus.paused
-                assert calls == [("before", "leader", identity.session_id)]
-                stored = storage.get_run(paused.run_id)
-                assert isinstance(stored, RunOutput)
-                state = DelegationState.from_metadata(stored.metadata)
-                assert state.children[0].task == "Do original task"
-                if outcome in {"cancel", "recovery_cancel"}:
-                    if outcome == "recovery_cancel":
-                        monkeypatch.setattr("mindroom.tool_system.plugins.load_plugins", lambda *_args: [plugin])
-                    with tool_runtime_context(None if outcome == "recovery_cancel" else context):
-                        await _cancel_delegations(stored, config=config, runtime_paths=paths)
-                        await _cancel_delegations(stored, config=config, runtime_paths=paths)
-                else:
-                    if outcome == "revoke":
-                        config.agents["leader"].delegate_to = []
-                    decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-                    await drive_delegations(
-                        parent,
-                        stored,
-                        run_child=run_delegated_child_response,
-                        **options,
-                        decisions=decisions,
-                        approval_calls=_saved_approval_calls(state),
-                        denial_reasons=dict.fromkeys(decisions),
-                    )
-
-        assert calls == [("before", "leader", identity.session_id), ("after", "leader", identity.session_id)]
-        observed = after_contexts[0]
-        assert observed.arguments["task"] == "Do original task"
-        assert observed.blocked == (outcome == "blocked")
-        if outcome == "blocked":
-            assert "TOOL CALL DECLINED" in observed.result
-            assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
-        elif outcome == "approved":
-            assert "Child done" in observed.result
+    with tool_runtime_context(context):
+        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+        if outcome == "live_cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+            paused = response
         else:
-            assert _only_run(tmp_path)["status"] == "cancelled"
-            if outcome in {"cancel", "recovery_cancel", "live_cancel"}:
-                assert isinstance(observed.error, asyncio.CancelledError)
-    finally:
-        storage.close()
+            paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+        if outcome in {"approved", "cancel", "recovery_cancel", "revoke"}:
+            assert paused.status == RunStatus.paused
+            assert calls == [("before", "leader", identity.session_id)]
+            stored = storage.get_run(paused.run_id)
+            assert isinstance(stored, RunOutput)
+            state = DelegationState.from_metadata(stored.metadata)
+            assert state.children[0].task == "Do original task"
+            if outcome in {"cancel", "recovery_cancel"}:
+                if outcome == "recovery_cancel":
+                    monkeypatch.setattr("mindroom.tool_system.plugins.load_plugins", lambda *_args: [plugin])
+                with tool_runtime_context(None if outcome == "recovery_cancel" else context):
+                    await _cancel_delegations(stored, config=config, runtime_paths=paths)
+                    await _cancel_delegations(stored, config=config, runtime_paths=paths)
+            else:
+                if outcome == "revoke":
+                    config.agents["leader"].delegate_to = []
+                decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
+                await drive_delegations(
+                    parent,
+                    stored,
+                    run_child=run_delegated_child_response,
+                    **options,
+                    decisions=decisions,
+                    approval_calls=_saved_approval_calls(state),
+                    denial_reasons=dict.fromkeys(decisions),
+                )
+
+    assert calls == [("before", "leader", identity.session_id), ("after", "leader", identity.session_id)]
+    observed = after_contexts[0]
+    assert observed.arguments["task"] == "Do original task"
+    assert observed.blocked == (outcome == "blocked")
+    if outcome == "blocked":
+        assert "TOOL CALL DECLINED" in observed.result
+        assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+    elif outcome == "approved":
+        assert "Child done" in observed.result
+    else:
+        assert _only_run(tmp_path)["status"] == "cancelled"
+        if outcome in {"cancel", "recovery_cancel", "live_cancel"}:
+            assert isinstance(observed.error, asyncio.CancelledError)
 
 
 @pytest.mark.asyncio
@@ -251,38 +248,35 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
         ),
     )
     options = {"agent_name": "leader", "config": config, "runtime_paths": paths, "execution_identity": identity}
-    try:
-        with tool_runtime_context(context):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-            assert paused.status == RunStatus.paused
-            assert calls == []
-            stored = storage.get_run(paused.run_id)
-            assert isinstance(stored, RunOutput)
-            state = DelegationState.from_metadata(stored.metadata)
-            planted = DelegationState.from_metadata(stored.metadata)
-            planted.hooks[stored.requirements[0].id] = DelegationHookState(
-                execution_identity=serialize_tool_execution_identity(identity),
-                arguments={"agent_name": "child", "task": "Do task"},
-                started_at=0.0,
-                after_called=True,
-            )
-            stored.metadata = {**(stored.metadata or {}), DELEGATION_STATE_KEY: planted.to_dict()}
-            storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
-            stored = storage.get_run(paused.run_id)
-            decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-            completed = await drive_delegations(
-                parent,
-                stored,
-                run_child=run_delegated_child_response,
-                **options,
-                decisions=decisions,
-                approval_calls=_saved_approval_calls(state),
-                denial_reasons=dict.fromkeys(decisions),
-            )
+    with tool_runtime_context(context):
+        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+        paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+        assert paused.status == RunStatus.paused
+        assert calls == []
+        stored = storage.get_run(paused.run_id)
+        assert isinstance(stored, RunOutput)
+        state = DelegationState.from_metadata(stored.metadata)
+        planted = DelegationState.from_metadata(stored.metadata)
+        planted.hooks[stored.requirements[0].id] = DelegationHookState(
+            execution_identity=serialize_tool_execution_identity(identity),
+            arguments={"agent_name": "child", "task": "Do task"},
+            started_at=0.0,
+            after_called=True,
+        )
+        stored.metadata = {**(stored.metadata or {}), DELEGATION_STATE_KEY: planted.to_dict()}
+        storage.upsert_run(run=stored, session_id=stored.session_id, user_id=stored.user_id)
+        stored = storage.get_run(paused.run_id)
+        decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
+        completed = await drive_delegations(
+            parent,
+            stored,
+            run_child=run_delegated_child_response,
+            **options,
+            decisions=decisions,
+            approval_calls=_saved_approval_calls(state),
+            denial_reasons=dict.fromkeys(decisions),
+        )
 
-        assert calls == ["before"]
-        assert DelegationState.from_metadata(completed.metadata).children == []
-        assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
-    finally:
-        storage.close()
+    assert calls == ["before"]
+    assert DelegationState.from_metadata(completed.metadata).children == []
+    assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))

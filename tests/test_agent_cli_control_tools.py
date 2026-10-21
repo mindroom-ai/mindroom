@@ -113,7 +113,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="control", tools=[switch, mutate])],
     )
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     receipts = []
 
     async def authorize(key, arguments):
@@ -825,7 +825,7 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
 async def test_interactive_context_renders_native_question_and_keeps_session(tmp_path) -> None:
 
     catalog = await _catalog(tmp_path, [])
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments):
         return None

@@ -99,7 +99,6 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
         assert "mindroom_tool_authority" not in (saved.metadata or {})
         assert ("mindroom_tool_authority" in vars(agent)) is enabled
     finally:
-        storage.close()
         release_background_tool_jobs(paths, instance)
 
 

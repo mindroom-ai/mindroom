@@ -23,7 +23,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
-from mindroom.session_storage.agent_storage import create_session_storage, save_runs
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
 from mindroom.tool_system.runtime_context import ToolDispatchContext
@@ -74,7 +74,6 @@ async def _resume_approval(
             ),
             patch("mindroom.approval.execution.create_agent", return_value=actor),
             patch("mindroom.approval.execution.typing_indicator", _noop_typing),
-            patch("mindroom.approval.execution.close_agent_runtime_state_dbs"),
         ):
             result = await runner._approval_execution.continue_run(
                 continuation,
@@ -110,7 +109,6 @@ async def _resume_approval(
             patch("mindroom.teams.materialize_exact_team_members", return_value=members),
             patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
-            patch("mindroom.teams.close_team_runtime_state_dbs"),
         ):
             result = await continue_paused_team_run(
                 member_names=(),
@@ -319,7 +317,7 @@ async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
             latest.provider_data.pop("mindroom_portable_replay", None)
             if provenance == "malformed":
                 latest.provider_data["mindroom_portable_replay"] = "false"
-            save_runs(db, session, [persisted])
+            db.save_runs(session, [persisted])
         result = await _resume_approval(
             build_actor(portable=not portable_before_pause),
             identity=identity,

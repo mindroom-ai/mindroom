@@ -147,4 +147,3 @@ async def test_expired_native_job_stays_unavailable_to_sdk_wait_after_restart(
         assert executions == 1
     finally:
         await coordinator.stop()
-        storage.close()

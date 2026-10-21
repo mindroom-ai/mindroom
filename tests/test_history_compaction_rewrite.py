@@ -63,7 +63,7 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.llm.runs import RunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (
@@ -375,7 +375,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert rewrite_result.served_by.model is fallback
     assert rewrite_result.served_by.name == "fallback-model"
     assert served_models == ["fallback-model", "fallback-model"]
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"
@@ -643,7 +643,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         registry_state.registry = HookRegistry.empty()
         active_states.append(ctx.is_active())
         registry_state.registry = registry
-        persisted = get_agent_session(storage, "session-1")
+        persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
         assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
         observed.append(
@@ -792,7 +792,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     @hook(EVENT_COMPACTION_BEFORE)
     async def before(ctx: CompactionHookContext) -> None:
-        persisted = get_agent_session(storage, "session-1")
+        persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
         observed.append(
             (
@@ -804,7 +804,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     @hook(EVENT_COMPACTION_AFTER)
     async def after(ctx: CompactionHookContext) -> None:
-        persisted = get_agent_session(storage, "session-1")
+        persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
         observed.append(
             (
@@ -1010,7 +1010,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs or []) == 2
@@ -1622,7 +1622,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
     assert outcome is None
     # The durable row moved relative to the state this run read (nothing was
     # ever persisted), so the concurrent-writer-wins clear refuses to write.
-    assert get_agent_session(storage, "session-1") is None
+    assert storage.load_session("session-1", "agent") is None
     assert mock_generate.await_count == 0
     assert working_session.summary is None
     assert working_session.runs == [unremovable_run]
@@ -1716,7 +1716,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         )
 
     assert outcome is not None
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs or []] == [run.run_id for run in remaining_runs]
     remaining_messages = [message for run in persisted.runs or [] for message in run.messages or []]
@@ -1786,7 +1786,7 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
     replay_model = MindRoomOpenAIResponses(id="gpt-6-astra") if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
-        persisted = get_agent_session(storage, "session-1")
+        persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
         assert persisted.summary is not None
         assert [run.run_id for run in persisted.runs or []] == ["run-2"]
@@ -1952,7 +1952,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")]))
-    session = get_agent_session(storage, "session-1")
+    session = storage.load_session("session-1", "agent")
     assert session is not None
     summary_mock = AsyncMock(return_value=SessionSummary(summary="unused", updated_at=datetime.now(UTC)))
 

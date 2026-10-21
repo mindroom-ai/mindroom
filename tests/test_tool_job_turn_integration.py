@@ -113,7 +113,6 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
         assert pending_outcomes(runtime) == []
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -282,5 +281,4 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
                 pending.cancel()
             if pending is not None:
                 await asyncio.gather(pending, return_exceptions=True)
-        storage.close()
         await runtime.shutdown()

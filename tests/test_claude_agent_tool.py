@@ -1194,7 +1194,7 @@ async def _send_metered_turns(
     model: str | None = None,
 ) -> tuple[list[str], list[tuple[str | None, str, int, int, int, int]]]:
     """Send one prompt per requester on one session; return the replies and each requester's usage by model."""
-    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
+    config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
     open_scope = partial(
         open_resolved_scope_session_context,
         agent_name="test_agent",
@@ -1206,46 +1206,43 @@ async def _send_metered_turns(
     )
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
     replies: list[str] = []
-    try:
-        for requester in requesters:
-            # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
-            requester_context = (
-                detached_requester_context(
-                    DetachedRequesterContext(
-                        requester_id=requester,
-                        config=config,
-                        runtime_paths=paths,
-                        agent_reply_memberships=AgentReplyMembershipIndex(),
-                        config_provider=lambda: config,
-                        budget_monitor=None,
-                    ),
-                )
-                if api_requests
-                else tool_runtime_context(replace(context, requester_id=requester))
+    for requester in requesters:
+        # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
+        requester_context = (
+            detached_requester_context(
+                DetachedRequesterContext(
+                    requester_id=requester,
+                    config=config,
+                    runtime_paths=paths,
+                    agent_reply_memberships=AgentReplyMembershipIndex(),
+                    config_provider=lambda: config,
+                    budget_monitor=None,
+                ),
             )
-            with open_scope() as scope_context, helper_usage_context(scope_context), requester_context:
-                replies.append(
-                    await tools.claude_send(
-                        "Fix the bug",
-                        run_context=RunContext(run_id="run-1", session_id="session"),
-                        agent=SimpleNamespace(name="test_agent"),
-                    ),
-                )
-        report = collect_admin_usage(config=config, runtime_paths=paths)
-        return replies, sorted(
-            (
-                user.user_id,
-                model.model,
-                model.totals.input_tokens,
-                model.totals.output_tokens,
-                model.totals.cache_read_tokens,
-                model.totals.cache_write_tokens,
-            )
-            for user in report.user_breakdown
-            for model in user.model_breakdown
+            if api_requests
+            else tool_runtime_context(replace(context, requester_id=requester))
         )
-    finally:
-        storage.close()
+        with open_scope() as scope_context, helper_usage_context(scope_context), requester_context:
+            replies.append(
+                await tools.claude_send(
+                    "Fix the bug",
+                    run_context=RunContext(run_id="run-1", session_id="session"),
+                    agent=SimpleNamespace(name="test_agent"),
+                ),
+            )
+    report = collect_admin_usage(config=config, runtime_paths=paths)
+    return replies, sorted(
+        (
+            user.user_id,
+            model.model,
+            model.totals.input_tokens,
+            model.totals.output_tokens,
+            model.totals.cache_read_tokens,
+            model.totals.cache_write_tokens,
+        )
+        for user in report.user_breakdown
+        for model in user.model_breakdown
+    )
 
 
 @pytest.mark.asyncio

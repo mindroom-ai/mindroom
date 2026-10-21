@@ -268,10 +268,6 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         if interrupted_task is not None and not interrupted_task.done():
             interrupted_task.cancel()
             await asyncio.gather(interrupted_task, return_exceptions=True)
-        original_storage.close()
-        interrupted_storage.close()
-        if final_storage is not None:
-            final_storage.close()
         if restored is not None:
             await restored.shutdown()
         await runtime.shutdown()

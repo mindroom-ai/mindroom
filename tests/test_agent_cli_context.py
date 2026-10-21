@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -17,7 +16,6 @@ from agno.session.summary import SessionSummary
 
 from mindroom import agents
 from mindroom.config.agent import AgentConfig
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -126,8 +124,7 @@ async def test_hidden_generated_learning_keeps_authenticated_requester(tmp_path:
 
     store = cast("LearningStore", SimpleNamespace(aget_tools=tools))
     agent._learning = LearningMachine(custom_stores={"local": store})
-    with ExitStack() as resources, tool_runtime_context(runtime):
-        resources.callback(close_agent_runtime_state_dbs, agent)
+    with tool_runtime_context(runtime):
         catalog = await agent.prepare_execution_catalog(
             RunOutput(run_id="run"),
             RunContext(run_id="run", session_id=runtime.session_id, user_id=requester, session_state={}),

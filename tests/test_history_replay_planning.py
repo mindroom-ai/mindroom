@@ -40,7 +40,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens
 from tests.conftest import (
     FakeModel,
@@ -262,7 +262,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -323,7 +323,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -362,7 +362,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -1380,7 +1380,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -1544,7 +1544,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             available_history_budget=1,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"

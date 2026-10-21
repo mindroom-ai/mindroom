@@ -37,7 +37,7 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.conftest import (
     FakeModel,
@@ -110,7 +110,7 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         ("tool", "tool result"),
     ]
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.runs is not None
     assert [(message.role, message.content) for message in persisted.runs[0].messages or []] == [
@@ -732,7 +732,7 @@ async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
     assert model.seen_messages[-1].role == "user"
     assert model.seen_messages[-1].content == "Current prompt"
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     latest_run = persisted.runs[-1]
     assert isinstance(latest_run, RunOutput)
@@ -957,7 +957,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     assert third_request[-2]["add_to_agent_memory"] is True
     assert third_request[-1]["add_to_agent_memory"] is False
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     persisted_contents = [str(message.content) for run in persisted.runs or [] for message in run.messages or []]
     assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]

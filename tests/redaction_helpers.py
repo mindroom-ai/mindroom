@@ -8,12 +8,10 @@ from typing import TYPE_CHECKING
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.response_turn import ResponseTurnContext, _remove_history_of_redacted_events
-from mindroom.session_storage.agent_storage import get_agent_session, get_team_session
 
 if TYPE_CHECKING:
-    from agno.db.base import BaseDb
-
     from mindroom.message_target import MessageTarget
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.turn_store import TurnStore
 
 _AGENT_SCOPE = HistoryScope(kind="agent", scope_id="agent")
@@ -22,16 +20,12 @@ _AGENT_SCOPE = HistoryScope(kind="agent", scope_id="agent")
 async def remove_redacted_history_like_next_response(
     store: TurnStore,
     target: MessageTarget,
-    storage: BaseDb,
+    storage: ConversationStore,
     *,
     scope: HistoryScope = _AGENT_SCOPE,
 ) -> None:
     """Open one history scope the way the next response's turn driver does."""
-    session = (
-        get_team_session(storage, target.session_id)
-        if scope.kind == "team"
-        else get_agent_session(storage, target.session_id)
-    )
+    session = storage.load_session(target.session_id, scope.kind)
     await _remove_history_of_redacted_events(
         ResponseTurnContext(
             entity_label="agent",

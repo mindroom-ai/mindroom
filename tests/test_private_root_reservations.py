@@ -32,7 +32,7 @@ def test_primary_state_written_beside_a_private_workspace_is_reserved(tmp_path: 
 
     with session_storage_preflight(state_root, storage_name="mind", session_table="sessions", timeout_seconds=1):
         pass
-    create_state_storage("mind", state_root, subdir="sessions", session_table="sessions")
+    create_state_storage("mind", state_root, session_table="sessions")
     # Retired Agno Learning left its databases here, and a worker must never mount them.
     (state_root / "learning").mkdir()
     _get_memory_config(state_root, config, runtime_paths)

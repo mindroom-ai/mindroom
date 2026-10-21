@@ -113,7 +113,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
     catalog = await _catalog(tmp_path, [shell, Toolkit(name="state", tools=[mutate])])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments) -> None:
         return None
@@ -175,7 +175,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
 
     catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[mutate])])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments) -> None:
         return None
@@ -224,7 +224,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     catalog = await _catalog(tmp_path, [Toolkit(name="media", tools=[produce])])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     (tmp_path / "workspace").mkdir()
 
     async def authorize(key, arguments) -> None:
@@ -261,7 +261,7 @@ async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools
     catalog = await _catalog(tmp_path, [Toolkit(name="calls", tools=tools)])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = LiveTurnTools(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
@@ -341,7 +341,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command]), function])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def decide_later(paused):
         # The person decides after the command's timeout has passed.
@@ -541,7 +541,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
 
     catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command])])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     owner = LiveTurnTools(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
@@ -879,7 +879,7 @@ async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog
         assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
         new = await _catalog(tmp_path, [Toolkit(name="calls", tools=[ping])])
         new.run_response.agent_id = "helper"
-        new.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+        new.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
         owner.bind_catalog(new)
         rebuilt.set()
         assert await window == "completed"
@@ -947,7 +947,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
 
     catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command])])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments) -> None:
         effects.append("authorize")
@@ -1051,7 +1051,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         binding.function.requires_confirmation = True
         catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=pause)
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments) -> None:
         return None
@@ -1154,7 +1154,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
 
         catalog = await _catalog(tmp_path / name, [Toolkit(name="shell", tools=[run_shell_command])])
         catalog.run_response.agent_id = "helper"
-        catalog.agent.db = create_state_storage("helper", tmp_path / name, subdir="sessions", session_table="sessions")
+        catalog.agent.db = create_state_storage("helper", tmp_path / name, session_table="sessions")
         owner = LiveTurnTools(
             CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
             catalog=catalog,
@@ -1242,7 +1242,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="state", tools=[change])],
     )
     new.run_response.agent_id = "helper"
-    new.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    new.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     owner.bind_catalog(new)
 
     async def bash(command: str) -> str:
@@ -1302,7 +1302,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="state", tools=[wait])],
     )
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     owner = LiveTurnTools(
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
@@ -1728,7 +1728,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
     shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
     catalog = await _catalog(tmp_path, [shell, Toolkit(name="state", tools=[change])])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def authorize(key, arguments):
         return None
@@ -1867,7 +1867,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     function.requires_confirmation = True
     catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command]), function])
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
 
     async def pause(paused):
         assert not catalog._lock.locked()

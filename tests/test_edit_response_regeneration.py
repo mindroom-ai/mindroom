@@ -39,7 +39,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import get_agent_session
 from mindroom.teams import TeamMode, TeamOutcome, TeamResolution
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
@@ -2432,10 +2431,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]:
     """Return the metadata of the newest run this bot persisted for one session."""
     storage = bot._conversation_state_writer.create_storage(None)
-    try:
-        session = get_agent_session(storage, session_id)
-    finally:
-        storage.close()
+    session = storage.load_session(session_id, "agent")
     assert session is not None
     assert session.runs is not None
     return session.runs[0].metadata

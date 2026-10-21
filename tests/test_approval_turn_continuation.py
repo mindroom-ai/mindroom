@@ -25,7 +25,6 @@ from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.message_target import MessageTarget
 from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
@@ -290,20 +289,16 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         supports_native_tool_approval=True,
     )
     prompt = "Calculate the sum, wait, and finish."
-    try:
-        paused = await actor.arun(prompt, session_id=identity.session_id, user_id=identity.requester_id)
-        assert paused.status == RunStatus.paused
-        assert executed == []
-        captured = paused_attempt_from_response(
-            paused,
-            fallback_session_id=identity.session_id,
-            fallback_run_id=paused.run_id,
-            toolkit_owners=toolkit_owners_for_agents([actor]),
-        )
-        assert captured is not None
-    finally:
-        close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
-        storage.close()
+    paused = await actor.arun(prompt, session_id=identity.session_id, user_id=identity.requester_id)
+    assert paused.status == RunStatus.paused
+    assert executed == []
+    captured = paused_attempt_from_response(
+        paused,
+        fallback_session_id=identity.session_id,
+        fallback_run_id=paused.run_id,
+        toolkit_owners=toolkit_owners_for_agents([actor]),
+    )
+    assert captured is not None
     continuation = approval_continuation(
         approval_id="approval-example",
         run_id=paused.run_id,
@@ -672,16 +667,12 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         history_storage=storage,
         supports_native_tool_approval=True,
     )
-    try:
-        paused = await actor.arun(
-            "Add, then keep going.",
-            session_id=identity.session_id,
-            user_id=identity.requester_id,
-        )
-        assert paused.status == RunStatus.paused
-    finally:
-        close_agent_runtime_state_dbs(actor, shared_scope_storage=storage)
-        storage.close()
+    paused = await actor.arun(
+        "Add, then keep going.",
+        session_id=identity.session_id,
+        user_id=identity.requester_id,
+    )
+    assert paused.status == RunStatus.paused
     saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
     saved.start_tool((paused.tools or [])[0])
     continuation = approval_continuation(

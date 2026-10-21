@@ -141,7 +141,6 @@ async def test_approved_call_follows_exclusions_current_at_resume(
         assert len(await runtime.list_jobs(owner=owner, depth=0)) == (1 if initially_excluded else 0)
     finally:
         await runtime.shutdown()
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -287,7 +286,6 @@ class _GatedRun:
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.runtime.shutdown()
-        self.storage.close()
 
     def agent(self, **budget: float) -> Agent:
         toolkit = apply_tool_approval_capability(

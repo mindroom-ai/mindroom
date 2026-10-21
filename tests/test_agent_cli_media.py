@@ -76,7 +76,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     catalog = await _catalog(tmp_path, [shell, media])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
     catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.agent.db = create_state_storage("helper", tmp_path, session_table="sessions")
     receipts = []
 
     async def authorize(key, arguments):

@@ -798,7 +798,6 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
         finally:
             await restored.shutdown()
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -1023,7 +1022,6 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
         # The job had already ended, so its outcome stays for the next notice or collect to report.
         assert [pending.job_id for pending in pending_outcomes(runtime)] == [job.job_id]
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -1109,7 +1107,6 @@ async def test_saved_result_reread_preserves_later_session_state(
         assert saved.tools[0].result == "original output"
         assert pending_outcomes(runtime) == []
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -1152,7 +1149,6 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
         result = await run()
         assert [message.content for message in result.messages if message.tool_call_id == "list-call"] == ["[]"]
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -1595,7 +1591,6 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
         assert "cancelled" in str(message.content)
         assert "do not call it again" in str(message.content)
     finally:
-        storage.close()
         await runtime.shutdown()
 
 
@@ -1657,7 +1652,6 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
         assert job.status == "completed"
         assert job.consumed
     finally:
-        storage.close()
         await runtime.shutdown()
 
 

@@ -26,7 +26,6 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.lifecycle import child_execution_identity
-from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -292,11 +291,8 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
     finally:
         clear_api_server_address()
 
-    try:
-        assert isinstance(agent, CliShellAgent) is jobs
-        assert (STANDARD_CLI_NOTE in agent.instructions) is jobs
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert isinstance(agent, CliShellAgent) is jobs
+    assert (STANDARD_CLI_NOTE in agent.instructions) is jobs
 
 
 @pytest.mark.parametrize("managed", [False, True], ids=["excluded-shell", "managed-shell"])
@@ -320,10 +316,7 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
     finally:
         clear_api_server_address()
 
-    try:
-        assert isinstance(agent, CliShellAgent)
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert isinstance(agent, CliShellAgent)
 
 
 @pytest.mark.parametrize(
@@ -353,13 +346,10 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
     finally:
         clear_api_server_address()
 
-    try:
-        eligible = channel == "matrix" and api_running and response_turn
-        assert isinstance(agent, CliShellAgent) is eligible
-        assert isinstance(agent, KnowledgeToolDescribingAgent)
-        assert (STANDARD_CLI_NOTE in agent.instructions) is eligible
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    eligible = channel == "matrix" and api_running and response_turn
+    assert isinstance(agent, CliShellAgent) is eligible
+    assert isinstance(agent, KnowledgeToolDescribingAgent)
+    assert (STANDARD_CLI_NOTE in agent.instructions) is eligible
 
 
 def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> None:
@@ -378,15 +368,12 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
     finally:
         clear_api_server_address()
 
-    try:
-        assert not isinstance(agent, CliShellAgent)
-        assert STANDARD_CLI_NOTE not in agent.instructions
-        shell = next(tool for tool in agent.tools if isinstance(tool, Toolkit) and tool.name == "shell_tools")
-        run = shell.get_async_functions()["run_shell_command"].entrypoint
-        assert run is not None
-        assert run.__name__ != "windowed"
-    finally:
-        close_agent_runtime_state_dbs(agent)
+    assert not isinstance(agent, CliShellAgent)
+    assert STANDARD_CLI_NOTE not in agent.instructions
+    shell = next(tool for tool in agent.tools if isinstance(tool, Toolkit) and tool.name == "shell_tools")
+    run = shell.get_async_functions()["run_shell_command"].entrypoint
+    assert run is not None
+    assert run.__name__ != "windowed"
 
 
 @pytest.mark.asyncio

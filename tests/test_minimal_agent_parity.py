@@ -400,7 +400,6 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     assert any(item["memory"] == "Release parity durable lesson" for item in found.results)
     await h.respond(["standard sees same history"], mode="standard", prompt="after switch")
     session = storage.get_session(h.runtime.session_id)
-    storage.close()
     assert len(session.runs) == 3
     assert [message.to_dict() for message in session.runs[0].messages] == old_messages
     final = h.provider.requests[-1]

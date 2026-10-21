@@ -21,7 +21,7 @@ from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
 from mindroom.history.types import HistoryScope
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, folded_run_ids, stored_run_ids, summary_rows_of
 
@@ -33,7 +33,7 @@ _SCOPE = HistoryScope(kind="agent", scope_id="code")
 
 
 def _open(tmp_path: Path) -> SqliteDb:
-    db = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
+    db = create_state_storage("code", tmp_path, session_table="code_sessions")
     assert isinstance(db, SqliteDb)
     return db
 
@@ -95,7 +95,7 @@ def _compact(storage: SqliteDb, session: AgentSession, run_ids: list[str], summa
 
 
 def _stored(storage: SqliteDb) -> AgentSession:
-    session = get_agent_session(storage, "session")
+    session = storage.load_session("session", "agent")
     assert session is not None
     return session
 

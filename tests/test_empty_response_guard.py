@@ -30,7 +30,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.session_storage.agent_storage import create_state_storage, get_agent_session, get_team_session
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import make_turn_context, seed_session
 
@@ -149,41 +149,38 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         tmp_path,
         session_table="general_sessions",
     )
-    try:
-        session = AgentSession(
-            session_id="session-1",
-            agent_id="general",
-            runs=[
-                _completed_run("run-good", "First response"),
-                _completed_run("run-empty", None),
-            ],
-            metadata={},
-            created_at=1,
-            updated_at=1,
-        )
-        seed_session(storage, session)
-        scope_context = ScopeSessionContext(
-            scope=HistoryScope(kind="agent", scope_id="general"),
-            storage=storage,
-            session=session,
-        )
+    session = AgentSession(
+        session_id="session-1",
+        agent_id="general",
+        runs=[
+            _completed_run("run-good", "First response"),
+            _completed_run("run-empty", None),
+        ],
+        metadata={},
+        created_at=1,
+        updated_at=1,
+    )
+    seed_session(storage, session)
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=storage,
+        session=session,
+    )
 
-        discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id="session-1",
-            run_id="run-empty",
-            entity_name="general",
-            output_tokens=2,
-        )
+    discard_empty_completed_run(
+        scope_context=scope_context,
+        session_id="session-1",
+        run_id="run-empty",
+        entity_name="general",
+        output_tokens=2,
+    )
 
-        assert session.runs is not None
-        assert [run.run_id for run in session.runs] == ["run-good"]
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert [run.run_id for run in persisted.runs] == ["run-good"]
-    finally:
-        storage.close()
+    assert session.runs is not None
+    assert [run.run_id for run in session.runs] == ["run-good"]
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [run.run_id for run in persisted.runs] == ["run-good"]
 
 
 def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
@@ -193,37 +190,34 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
         tmp_path,
         session_table="general_sessions",
     )
-    try:
-        live_session = seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="general",
-                runs=[_completed_run("run-good", "First response")],
-                metadata={},
-                created_at=1,
-                updated_at=1,
-            ),
-        )
-        # What agno's run does behind the live session's back.
-        storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
-
-        discard_empty_completed_run(
-            scope_context=ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id="general"),
-                storage=storage,
-                session=live_session,
-            ),
+    live_session = seed_session(
+        storage,
+        AgentSession(
             session_id="session-1",
-            run_id="run-empty",
-            entity_name="general",
-            output_tokens=2,
-        )
+            agent_id="general",
+            runs=[_completed_run("run-good", "First response")],
+            metadata={},
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+    # What agno's run does behind the live session's back.
+    storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
 
-        assert [run.run_id for run in live_session.runs or []] == ["run-good"]
-        persisted = get_agent_session(storage, "session-1")
-    finally:
-        storage.close()
+    discard_empty_completed_run(
+        scope_context=ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id="general"),
+            storage=storage,
+            session=live_session,
+        ),
+        session_id="session-1",
+        run_id="run-empty",
+        entity_name="general",
+        output_tokens=2,
+    )
+
+    assert [run.run_id for run in live_session.runs or []] == ["run-good"]
+    persisted = storage.load_session("session-1", "agent")
 
     assert persisted is not None
     assert [run.run_id for run in persisted.runs or []] == ["run-good"]
@@ -236,42 +230,39 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
         tmp_path,
         session_table="team_general_sessions",
     )
-    try:
-        session = TeamSession(
-            session_id="session-1",
-            team_id="team_general",
-            runs=[
-                _completed_team_run_output("run-good", "First response"),
-                _completed_team_run_output("run-empty", None),
-                RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
-            ],
-            metadata={},
-            created_at=1,
-            updated_at=1,
-        )
-        seed_session(storage, session)
-        scope_context = ScopeSessionContext(
-            scope=HistoryScope(kind="team", scope_id="team_general"),
-            storage=storage,
-            session=session,
-        )
+    session = TeamSession(
+        session_id="session-1",
+        team_id="team_general",
+        runs=[
+            _completed_team_run_output("run-good", "First response"),
+            _completed_team_run_output("run-empty", None),
+            RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
+        ],
+        metadata={},
+        created_at=1,
+        updated_at=1,
+    )
+    seed_session(storage, session)
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope(kind="team", scope_id="team_general"),
+        storage=storage,
+        session=session,
+    )
 
-        discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id="session-1",
-            run_id="run-empty",
-            entity_name="team_general",
-            output_tokens=2,
-        )
+    discard_empty_completed_run(
+        scope_context=scope_context,
+        session_id="session-1",
+        run_id="run-empty",
+        entity_name="team_general",
+        output_tokens=2,
+    )
 
-        assert session.runs is not None
-        assert [run.run_id for run in session.runs] == ["run-good"]
-        persisted = get_team_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert [run.run_id for run in persisted.runs] == ["run-good"]
-    finally:
-        storage.close()
+    assert session.runs is not None
+    assert [run.run_id for run in session.runs] == ["run-good"]
+    persisted = storage.load_session("session-1", "team")
+    assert persisted is not None
+    assert persisted.runs is not None
+    assert [run.run_id for run in persisted.runs] == ["run-good"]
 
 
 @pytest.mark.asyncio

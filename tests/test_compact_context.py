@@ -39,7 +39,7 @@ from mindroom.history.types import (
 )
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import (
@@ -168,10 +168,7 @@ def _open_scope_context(
 
 @contextmanager
 def _patched_scope_context(scope_context: ScopeSessionContext | SimpleNamespace) -> Iterator[object]:
-    try:
-        yield scope_context
-    finally:
-        scope_context.storage.close()
+    yield scope_context
 
 
 @pytest.fixture(autouse=True)
@@ -195,7 +192,6 @@ def _close_test_storages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         if storage_id in seen_storage_ids:
             continue
         seen_storage_ids.add(storage_id)
-        storage.close()
 
 
 def test_compact_context_runtime_annotations_resolve_for_agno_registration(tmp_path: Path) -> None:
@@ -234,7 +230,7 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
 
     result = await tool.compact_context(agent=_agent())
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
@@ -259,7 +255,7 @@ def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Pa
         session_state=session_state,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is True
@@ -284,7 +280,7 @@ async def test_compact_context_requires_compaction_window(tmp_path: Path) -> Non
 
     result = await tool.compact_context(agent=_agent())
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -368,7 +364,7 @@ async def test_compact_context_requires_positive_summary_input_budget(tmp_path: 
 
     result = await tool.compact_context(agent=_agent())
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -398,7 +394,7 @@ async def test_compact_context_requires_summary_input_budget_with_retry_headroom
 
     result = await tool.compact_context(agent=_agent())
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False
@@ -474,7 +470,7 @@ async def test_compact_context_can_use_compaction_model_window_when_active_model
             storage=storage,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "merged summary"
@@ -601,7 +597,7 @@ async def test_compact_context_sets_force_flag_for_team_scope_only(tmp_path: Pat
         seed_session(team_context.storage, team_context.session)
     await tool.compact_context(agent=team_agent)
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     direct_state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     with _open_scope_context(
@@ -651,7 +647,7 @@ async def test_prepare_history_for_run_clears_forced_flag_when_no_visible_runs(t
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     state = read_scope_state(persisted, scope)
@@ -700,7 +696,7 @@ async def test_prepare_history_for_run_forced_compaction_compacts_single_run(tmp
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.summary == "single run summary"
@@ -772,7 +768,7 @@ async def test_compact_context_persists_pending_force_flag_across_stale_run_save
             storage=storage,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     state = read_scope_state(persisted, HistoryScope(kind="agent", scope_id="test_agent"))
     assert state.force_compact_before_next_run is False

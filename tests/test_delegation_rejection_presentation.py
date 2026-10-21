@@ -44,7 +44,7 @@ if TYPE_CHECKING:
         ("private", "Cannot delegate to 'child': a private agent runs only for a person or bot account."),
     ],
 )
-async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR0915
+async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
     tmp_path: Path,
     rejection: str,
     expected_result: str,
@@ -97,50 +97,47 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
     )
     options = {"agent_name": "leader", "config": config, "runtime_paths": paths, "execution_identity": identity}
     presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-    try:
-        with tool_runtime_context(context):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            if rejection == "arguments":
-                assert response.requirements
-                assert response.requirements[0].tool_execution is not None
-                response.requirements[0].tool_execution.tool_args = {"agent_name": "child", "task": 1}
-            elif rejection == "authorization":
-                config.agents["leader"].delegate_to = []
-            decisions = None
-            if rejection == "policy":
-                response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-                assert isinstance(response, RunOutput)
-                assert response.status == RunStatus.paused
-                state = DelegationState.from_metadata(response.metadata)
-                decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}
+    with tool_runtime_context(context):
+        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+        if rejection == "arguments":
+            assert response.requirements
+            assert response.requirements[0].tool_execution is not None
+            response.requirements[0].tool_execution.tool_args = {"agent_name": "child", "task": 1}
+        elif rejection == "authorization":
+            config.agents["leader"].delegate_to = []
+        decisions = None
+        if rejection == "policy":
+            response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+            assert isinstance(response, RunOutput)
+            assert response.status == RunStatus.paused
+            state = DelegationState.from_metadata(response.metadata)
+            decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}
 
-            async def stored_run() -> AsyncIterator[RunOutput]:
-                yield response
+        async def stored_run() -> AsyncIterator[RunOutput]:
+            yield response
 
-            completed = None
-            async for event in drive_delegation_stream(
-                parent,
-                stored_run(),
-                run_child=run_delegated_child_response,
-                **options,
-                decisions=decisions,
-                denial_reasons=dict.fromkeys(decisions or {}),
-            ):
-                if isinstance(event, ToolCallStartedEvent):
-                    presentation.start_tool(event.tool)
-                elif isinstance(event, ToolCallCompletedEvent):
-                    presentation.complete_tool(event.tool)
-                elif isinstance(event, RunOutput):
-                    completed = event
+        completed = None
+        async for event in drive_delegation_stream(
+            parent,
+            stored_run(),
+            run_child=run_delegated_child_response,
+            **options,
+            decisions=decisions,
+            denial_reasons=dict.fromkeys(decisions or {}),
+        ):
+            if isinstance(event, ToolCallStartedEvent):
+                presentation.start_tool(event.tool)
+            elif isinstance(event, ToolCallCompletedEvent):
+                presentation.complete_tool(event.tool)
+            elif isinstance(event, RunOutput):
+                completed = event
 
-        assert completed is not None
-        assert completed.status == RunStatus.completed
-        assert len(presentation.tool_trace) == 1
-        trace = presentation.tool_trace[0]
-        assert trace.tool_name == "run_subagent"
-        assert trace.type == "tool_call_completed"
-        assert expected_result in trace.result_preview
-        assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
-        assert private_instances_for_agent(paths.storage_root, "child", "user") == ()
-    finally:
-        storage.close()
+    assert completed is not None
+    assert completed.status == RunStatus.completed
+    assert len(presentation.tool_trace) == 1
+    trace = presentation.tool_trace[0]
+    assert trace.tool_name == "run_subagent"
+    assert trace.type == "tool_call_completed"
+    assert expected_result in trace.result_preview
+    assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+    assert private_instances_for_agent(paths.storage_root, "child", "user") == ()

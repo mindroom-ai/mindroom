@@ -41,7 +41,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
-from mindroom.session_storage.agent_storage import create_session_storage, get_agent_session
+from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import (
     FakeModel,
     prepare_history_for_run_for_test,
@@ -404,7 +404,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         )
         await wait_for_background_tasks(timeout=0.2)
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 4
