@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import threading
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from functools import partial
 from types import SimpleNamespace
@@ -13,8 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
+from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, RunStatus
@@ -37,6 +38,8 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
+from mindroom.llm import usage as llm_usage
+from mindroom.llm.runs import RunRecord
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
@@ -75,6 +78,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.session_storage.store import ConversationStore
+
 
 @dataclass
 class _HelperModel(RecordingModel):
@@ -85,6 +90,14 @@ class _HelperModel(RecordingModel):
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield self.responses.pop(0)
+
+
+def _usage_rows(storage: ConversationStore) -> list[tuple[str, str]]:
+    """Return every stored usage row as ``(session_id, usage_data)``."""
+    with storage.transaction(write=False) as connection:
+        return connection.execute(
+            f"SELECT session_id, usage_data FROM {quote_identifier(storage.names.usage)}",  # noqa: S608
+        ).fetchall()
 
 
 @pytest.mark.asyncio
@@ -226,7 +239,8 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         if is_cli:
             # Reconstruct an interrupted minimal response using its exact saved approval.
             paused.metadata = {**(paused.metadata or {}), "agent_mode": "minimal"}
-            scope_context.storage.upsert_run(paused, session_id="approval-session")
+            assert scope_context.session is not None
+            scope_context.storage.save_runs(scope_context.session, [RunRecord.from_dict(paused.to_dict())])
         if caller == "team":
             captured = _attach_team_pause_presentation(
                 captured,
@@ -327,12 +341,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     assert helper_results == ["Sample helper output."]
     with open_scope() as scope_context:
         assert scope_context is not None
-        storage = scope_context.storage
-        assert isinstance(storage, SqliteDb)
-        with storage.db_engine.connect() as connection:
-            rows = connection.exec_driver_sql(
-                f"SELECT session_id, usage_data FROM {quote_identifier(storage.session_table_name + '_usage')}",  # noqa: S608
-            ).all()
+        rows = _usage_rows(scope_context.storage)
     helpers = [
         (session_id, json.loads(value))
         for session_id, value in rows
@@ -355,13 +364,13 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     run.user_id = "@user:localhost"
     run.model = "reply-model"
     run.model_provider = "test-provider"
-    run.metrics = RunMetrics(
+    run.metrics = llm_usage.RunMetrics(
         input_tokens=7,
         output_tokens=3,
         total_tokens=10,
         details={
             "model": [
-                ModelMetrics(
+                llm_usage.ModelMetrics(
                     id="reply-model",
                     provider="test-provider",
                     input_tokens=7,
@@ -373,12 +382,11 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     )
     for message in run.messages or []:
         if message.role == "assistant":
-            message.metrics = MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+            message.metrics = llm_usage.MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
             message.created_at = 1_790_000_000
             message.provider_data = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
     session = _session("session", runs=[run])
     session.user_id = "@user:localhost"
-    session.session_data = {"session_metrics": run.metrics.to_dict()}
     config, paths, _storage, _scope, _context = _forced_compaction_context(tmp_path, session=session)
     usage = CompletionUsage(prompt_tokens=120, completion_tokens=30, total_tokens=150)
     create = MagicMock(return_value=SimpleNamespace(usage=usage))
@@ -427,12 +435,10 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     """Discarding a returned extractor's metrics loses paid retries and rejected output."""
     run = _completed_run("ordinary")
     run.user_id = "@previous:localhost"
-    run.metrics = RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
+    run.metrics = llm_usage.RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10)
     session = _session("session", runs=[run])
     session.user_id = "@previous:localhost"
-    session.session_data = {"session_metrics": run.metrics.to_dict()}
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
-    assert isinstance(storage, SqliteDb)
     identity = build_execution_identity_from_runtime_context(context)
     model = ScriptedModel(
         [answer(content, owned_usage(100, 10)), answer("Remember another preference.", owned_usage(50, 5))],
@@ -465,14 +471,16 @@ async def test_memory_usage_survives_rejected_output_and_retry(
         execution_identity=identity,
     )
     assert own.totals.total_tokens == (165 if has_requester else 0)
-    with storage.db_engine.connect() as connection:
-        snapshots = connection.exec_driver_sql("SELECT usage_data FROM test_agent_sessions_usage").scalars().all()
-    helpers = [json.loads(value) for value in snapshots if json.loads(value).get("kind") == "memory_auto_flush"]
+    helpers = [
+        json.loads(value)
+        for _session_id, value in _usage_rows(storage)
+        if json.loads(value).get("kind") == "memory_auto_flush"
+    ]
     assert len(helpers) == 2
     assert len({row["run_id"] for row in helpers}) == 2
     assert "Synthetic conversation" not in json.dumps(helpers)
     assert "Remember" not in json.dumps(helpers)
-    storage.upsert_session(session)
+    storage.save_session_fields(session, "metadata", "session_state")
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 
@@ -534,7 +542,6 @@ async def test_workflow_first_turn_uses_actual_caller_store(
     with open_scope() as scope_context, helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage
-        assert isinstance(storage, SqliteDb)
         result = await _aexecute_participant(
             context,
             {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
@@ -545,10 +552,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         loaded = storage.load_session(context.session_id, "team" if caller.endswith("team") else "agent")
         assert loaded is not None, "First-turn helper usage needs its actual caller session row"
         assert not loaded.runs
-        with storage.db_engine.connect() as connection:
-            rows = connection.exec_driver_sql(
-                f"SELECT session_id, usage_data FROM {quote_identifier(storage.session_table_name + '_usage')}",  # noqa: S608
-            ).all()
+        rows = _usage_rows(storage)
         assert len(rows) == 1
         assert rows[0][0] == "first-turn"
         snapshot = json.loads(rows[0][1])
@@ -680,7 +684,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         assert owner.initial_session is not None
         session = _session("session")
         session.metadata = {"marker": "concurrent session"}
-        context.storage.upsert_session(session)
+        context.storage.save_session_fields(session, "metadata")
         await record_helper_usage(
             RunOutput(run_id="paid", metrics=RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11)),
             owner=owner,
@@ -696,10 +700,10 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
     assert collect_admin_usage(config=config, runtime_paths=paths).totals.total_tokens == 11
     with open_scope() as context:
         assert context is not None
-        assert isinstance(context.storage, SqliteDb)
-        context.storage.delete_session("session")
-        with context.storage.db_engine.connect() as connection:
-            assert connection.exec_driver_sql("SELECT COUNT(*) FROM test_agent_sessions_usage").scalar_one() == 0
+        sessions = quote_identifier(context.storage.names.sessions)
+        with context.storage.transaction(write=True) as connection:
+            connection.execute(f"DELETE FROM {sessions} WHERE session_id = ?", ("session",))  # noqa: S608
+        assert _usage_rows(context.storage) == []
 
 
 @pytest.mark.asyncio
@@ -739,17 +743,14 @@ async def test_persisted_participant_usage_is_not_added_again(tmp_path: Path) ->
 async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path: Path) -> None:
     """Once counters are returned, cancellation must wait for the accepted SQLite write."""
     config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=_session("session"))
-    assert isinstance(storage, SqliteDb)
     started = threading.Event()
 
-    def create_storage() -> SqliteDb:
+    def create_storage() -> ConversationStore:
         started.set()
-        opened = create_session_storage("test_agent", config, paths, execution_identity=None)
-        assert isinstance(opened, SqliteDb)
-        return opened
+        return create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    with storage.db_engine.connect() as connection:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    with closing(sqlite3.connect(storage.path, isolation_level=None)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
         task = asyncio.create_task(
             record_helper_usage(
                 RunOutput(metrics=RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22)),
