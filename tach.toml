@@ -9334,15 +9334,17 @@ visibility = [
 [[modules]]
 path = "mindroom.skill_learning.reviewer"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
-    "mindroom.agno_compat_model_hooks",
     "mindroom.helper_usage",
-    "mindroom.providers.model_loading",
+    "mindroom.llm",
     "mindroom.model_usage",
+    "mindroom.providers.registry",
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
-    "mindroom.tool_call_budget",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 

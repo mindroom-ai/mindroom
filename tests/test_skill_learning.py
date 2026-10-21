@@ -1,4 +1,4 @@
-"""Automatic skill learning through real persistence, reply counts, workspace files, and Agno tool loops."""
+"""Automatic skill learning through real persistence, reply counts, workspace files, and the owned tool loop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import shutil
-import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -17,19 +16,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import structlog
-from agno.models.message import Message, MessageMetrics
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.tools.function import Function
-from anthropic import AsyncAnthropic
-from google import genai
-from google.genai.types import HttpOptions, HttpRetryOptions
-from openai import AsyncOpenAI
+from agno.tools import Toolkit
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_background_tasks
@@ -39,14 +30,16 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
-from mindroom.llm.messages import Message as OwnedMessage
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, TurnCompleted, UsageReported
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -58,7 +51,9 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
+from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
@@ -67,12 +62,12 @@ from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from pathlib import Path
 
-    from agno.models.base import Model
-
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.tool_system.tool_function import ToolFunction
 
 LEARNED = (
     "---\nname: deploy-checks\ndescription: Use when deploying the web service\n"
@@ -92,56 +87,48 @@ BOB = replace(ALICE, requester_id="@bob:example.test")
 
 
 _Call = tuple[str, dict[str, object]]
+# The review's replayed model, which the review builds when it cannot fork the response's request.
+_REVIEW_MODEL = "mindroom.skill_learning.reviewer.build_model_provider"
 
 
 @dataclass
-class _ScriptedModel(SyntheticModel):
-    """Provider double that plays a fixed tool-call script, then answers."""
+class _ScriptedModel:
+    """Provider double that plays a fixed tool-call script, then answers, recording what each request sent."""
 
     script: list[_Call | list[_Call]] = field(default_factory=list)
+    identity: ModelIdentity = field(default=ModelIdentity(id="scripted", provider="test", provider_name="test"))
+    capabilities: Capabilities = field(default_factory=Capabilities)
+    received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
     input_tokens: list[int] = field(default_factory=list)
-    offered_tools: list[set[str]] = field(default_factory=list)
-    tool_requests: list[list[Mapping[str, Any]]] = field(default_factory=list)
-    tool_parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
     provider_tools_blocked: list[bool] = field(default_factory=list)
     # The structured-log and LLM-request-log fields bound while each request was sent.
     log_contexts: list[dict[str, object]] = field(default_factory=list)
     request_log_contexts: list[dict[str, object]] = field(default_factory=list)
-    failure: Exception | None = None
-    started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event | None = None
     # Requests after this many wait for ``release``, announcing themselves in ``blocked`` first.
     released_requests: int = 0
     blocked: asyncio.Queue[None] = field(default_factory=asyncio.Queue)
 
-    async def ainvoke(
-        self,
-        messages: list[Message],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None = None,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        contents = [message.get_content_string() for message in messages]
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Answer with the script's next tool calls, or with "Done." once it ran out."""
+        contents = [message.get_content_string() for message in request.messages]
+        self.received.append(request)
         self.requests.append(contents)
-        self.offered_tools.append({tool["function"]["name"] for tool in tools or []})
-        self.tool_requests.append(list(tools or []))
-        self.tool_parameters = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools or []}
         self.provider_tools_blocked.append(provider_tools_disabled())
         self.log_contexts.append(structlog.contextvars.get_contextvars())
         self.request_log_contexts.append(current_llm_request_log_context())
-        self.started.set()
         if self.release is not None and len(self.requests) > self.released_requests:
             self.blocked.put_nowait(None)
             await self.release.wait()
-        if self.failure is not None:
-            raise self.failure
         # Like a provider, usage reports what the request sent, so input budgets see real sizes.
         input_tokens = sum(map(len, contents)) // 4
         self.input_tokens.append(input_tokens)
         usage = MessageMetrics(input_tokens=input_tokens, output_tokens=3, total_tokens=input_tokens + 3)
+        yield UsageReported(usage)
         if not self.script:
-            return ModelResponse(content="Done.", response_usage=usage)
+            yield TurnCompleted(message=Message(role="assistant", content="Done.", metrics=usage), stop_reason="end")
+            return
         step = self.script.pop(0)
         calls = [
             {
@@ -151,11 +138,27 @@ class _ScriptedModel(SyntheticModel):
             }
             for index, (name, arguments) in enumerate(step if isinstance(step, list) else [step])
         ]
-        return ModelResponse(content="", tool_calls=calls, response_usage=usage)
+        message = Message(role="assistant", content="", tool_calls=calls, metrics=usage)
+        yield TurnCompleted(message=message, stop_reason="tool_use")
+
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
+        """Append each result as its own tool message."""
+        del messages
+        return list(results)
+
+    @property
+    def offered_tools(self) -> list[set[str]]:
+        """The names of the tools each request offered."""
+        return [{tool.name for tool in request.tools} for request in self.received]
+
+    @property
+    def tool_parameters(self) -> dict[str, Any]:
+        """The parameter schemas of the tools the last request offered."""
+        return {tool.name: tool.parameters for tool in self.received[-1].tools}
 
 
 def _model(*script: _Call | list[_Call]) -> _ScriptedModel:
-    return _ScriptedModel(id="scripted", name="scripted", provider="test", script=list(script))
+    return _ScriptedModel(script=list(script))
 
 
 def _learner(
@@ -177,11 +180,11 @@ def _learner(
     return config, resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
 
-def _run(run_id: str, *messages: Message) -> RunOutput:
-    return RunOutput(run_id=run_id, agent_id="mind", session_id="session", messages=list(messages))
+def _run(run_id: str, *messages: Message) -> RunRecord:
+    return RunRecord(run_id=run_id, agent_id="mind", session_id="session", messages=list(messages))
 
 
-def _tool_turn(run_id: str, result: str = "tests passed") -> RunOutput:
+def _tool_turn(run_id: str, result: str = "tests passed") -> RunRecord:
     """One run with two model replies: a tool-calling step and the final answer."""
     return _run(
         run_id,
@@ -195,7 +198,7 @@ def _tool_turn(run_id: str, result: str = "tests passed") -> RunOutput:
 def _seed(
     config: Config,
     paths: RuntimePaths,
-    *runs: RunOutput,
+    *runs: RunRecord,
     identity: ToolExecutionIdentity | None = None,
     session_id: str = "session",
 ) -> None:
@@ -205,10 +208,9 @@ def _seed(
     seed_session(storage, _stored(session_id, *runs))
 
 
-def _stored(session_id: str, *runs: RunOutput) -> ConversationSession:
-    """Return the session the owned store holds for Agno runs, as their stored rows load."""
-    records = [RunRecord.from_dict(run.to_dict()) for run in runs]
-    return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=records)
+def _stored(session_id: str, *runs: RunRecord) -> ConversationSession:
+    """Return the agent session that holds ``runs``."""
+    return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=list(runs))
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
@@ -549,12 +551,15 @@ def test_archive_moves_only_inactive_learned_skills(tmp_path: Path) -> None:
     assert library.archive_unused_skills(root, archive_after_days=0, now=now + timedelta(days=90)) == []
 
 
-def _transcript(*runs: RunOutput, summary: str | None = None, budget_chars: int) -> str:
+def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int) -> str:
     """Render stored runs the way a replayed review reads them."""
     for run in runs:
         run.user_id = "@alice:x"
-    session = AgentSession(session_id="session", agent_id="mind", runs=list(runs))
-    return render_transcript(conversation_messages(session), summary=summary, budget_chars=budget_chars)
+    return render_transcript(
+        conversation_messages(_stored("session", *runs)),
+        summary=summary,
+        budget_chars=budget_chars,
+    )
 
 
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
@@ -740,7 +745,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
         ("skill_manage", {**patch_step, "name": "deploy-checks", "new_string": "1. Run the smoke test.\n2. Retry."}),
     )
     progress = ReviewProgress()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -804,7 +809,7 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(tmp
         ),
     )
     progress = ReviewProgress()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -880,11 +885,10 @@ _VIEW = json.dumps({"skill_name": "older-lesson"})
 
 @dataclass(frozen=True)
 class _ProviderWire:
-    """One provider's real adapter, its HTTP replies, and how its requests offer and select tools."""
+    """One provider's real adapter, its HTTP replies, and how its requests select tools."""
 
     model: ModelConfig
     replies: tuple[dict[str, object], dict[str, object]]
-    offered: Callable[[dict[str, Any]], set[str]]
     selection_disabled: Callable[[dict[str, Any]], bool]
 
 
@@ -907,7 +911,6 @@ _PROVIDER_WIRES = {
             ),
             _chat_reply({"content": "Nothing to save."}, "stop"),
         ),
-        lambda request: {tool["function"]["name"] for tool in request.get("tools", [])},
         lambda request: request.get("tool_choice") == "none",
     ),
     "openai-responses": _ProviderWire(
@@ -933,7 +936,6 @@ _PROVIDER_WIRES = {
                 },
             ),
         ),
-        lambda request: {tool["name"] for tool in request.get("tools", []) if tool.get("type") == "function"},
         lambda request: request.get("tool_choice") == "none",
     ),
     "anthropic": _ProviderWire(
@@ -945,7 +947,6 @@ _PROVIDER_WIRES = {
             ),
             _claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"),
         ),
-        lambda request: {tool["name"] for tool in request.get("tools", [])},
         lambda request: (request.get("tool_choice") or {}).get("type") == "none",
     ),
     "google": _ProviderWire(
@@ -954,11 +955,6 @@ _PROVIDER_WIRES = {
             _gemini_reply({"functionCall": {"name": "get_skill_instructions", "args": json.loads(_VIEW)}}),
             _gemini_reply({"text": "Nothing to save."}),
         ),
-        lambda request: {
-            declaration["name"]
-            for tool in request.get("tools", [])
-            for declaration in tool.get("functionDeclarations", [])
-        },
         lambda request: request.get("toolConfig", {}).get("functionCallingConfig", {}).get("mode") == "NONE",
     ),
 }
@@ -982,7 +978,7 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(tmp_pat
         *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
     )
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
@@ -1007,7 +1003,7 @@ async def test_the_budget_counts_what_each_request_sends(tmp_path: Path) -> None
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check logs."}),
     )
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
@@ -1024,7 +1020,7 @@ async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path) -
     client = object()
     send = AsyncMock(return_value=object())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
         runner = _runner(paths, client)
@@ -1070,7 +1066,7 @@ async def test_review_archives_inactive_learned_skills_without_announcing_them(t
         )
     send = AsyncMock(return_value=object())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=_model()),
+        patch(_REVIEW_MODEL, return_value=_model()),
         patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
         await _review_due(config, paths, object(), identity=ALICE)
@@ -1084,7 +1080,7 @@ async def test_review_requests_log_the_conversation_and_the_response_that_starte
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"), identity=ALICE)
     model = _model()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         task = await _count(_runner(paths), config, identity=ALICE, correlation_id="$request")
         assert task is not None
         await task
@@ -1108,7 +1104,7 @@ async def test_private_reviews_stay_in_the_requester_workspace(tmp_path: Path) -
     _seed(config, paths, _tool_turn("r1"), identity=ALICE)
     _seed(config, paths, _tool_turn("b1", result="bob private result"), identity=BOB)
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         await _review_due(config, paths, identity=ALICE)
     assert "tests passed" in model.requests[0][-1]
     assert "bob private result" not in model.requests[0][-1]
@@ -1132,7 +1128,7 @@ async def test_skill_manage_offers_its_actions_as_a_string_enum(tmp_path: Path) 
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
@@ -1177,7 +1173,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(tmp
     )
     progress = ReviewProgress()
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await review_conversation(
@@ -1203,7 +1199,7 @@ async def test_unreadable_user_skill_does_not_block_reviews(tmp_path: Path) -> N
     locked.chmod(0)
     model = _model()
     try:
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+        with patch(_REVIEW_MODEL, return_value=model):
             await _review_due(config, paths)
     finally:
         locked.chmod(0o755)
@@ -1219,7 +1215,7 @@ async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path) -> None:
         ("skill_manage", {"action": "write_file", "name": "", "file_path": "references/x.md", "file_content": "x"}),
     )
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
@@ -1278,7 +1274,7 @@ def test_edits_refuse_frontmatter_that_is_not_strict_yaml(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
-    """Providers send several tool calls per reply and Agno runs them together; each edit builds on the last."""
+    """Providers send several tool calls per reply and the loop runs them together; each edit builds on the last."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
@@ -1291,7 +1287,7 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path) -> None:
             ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
         ],
     )
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -1376,7 +1372,7 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
         summary_model="summary-model",
     )
     model = _model()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
+    with patch(_REVIEW_MODEL, return_value=model):
         task = await _count(runner, config, run_id="r2")
         assert task is not None
         await task
@@ -1400,8 +1396,14 @@ def test_transcript_keeps_the_compaction_summary_when_trimming() -> None:
     assert "earlier turns omitted" in transcript
 
 
-def _agent_tools(config: Config, paths: RuntimePaths, shell_calls: list[str]) -> list[Function]:
-    """The tools a learning agent's request offers: Agno's skill readers, skill_manage, and one more tool."""
+def _agent_tools(
+    config: Config,
+    paths: RuntimePaths,
+    shell_calls: list[str],
+    *,
+    deploy_calls: list[str] | None = None,
+) -> list[ToolFunction]:
+    """The tools a learning agent's request offers: its skill readers, skill_manage, a shell, and an approved deploy."""
     root = _skills_root(config, paths)
 
     def shell(cmd: str) -> str:
@@ -1409,47 +1411,56 @@ def _agent_tools(config: Config, paths: RuntimePaths, shell_calls: list[str]) ->
         shell_calls.append(cmd)
         return "ran"
 
+    def deploy(target: str) -> str:
+        """Deploy to a target once a person approves it."""
+        assert deploy_calls is not None
+        deploy_calls.append(target)
+        return "deployed"
+
     catalog = load_skill_catalog(config, paths, "mind", root)
-    functions = [
-        *(catalog.skills.get_tools() if catalog.skills is not None else []),
-        *SkillManageTools("mind", config, paths, root).get_async_functions().values(),
-        Function.from_callable(shell),
+    toolkits = [
+        *([catalog.skills] if catalog.skills is not None else []),
+        SkillManageTools("mind", config, paths, root),
+        Toolkit(name="shell", tools=[shell]),
     ]
-    for function in functions:
-        function.process_entrypoint()
-    return functions
+    functions = [function for toolkit in toolkits for function in adapt_toolkit(toolkit).functions]
+    if deploy_calls is None:
+        return functions
+    (gated,) = adapt_toolkit(Toolkit(name="deploy", tools=[deploy])).functions
+    return [*functions, replace(gated, requires_confirmation=True)]
 
 
 async def _answer(
-    model: _ScriptedModel | Model,
+    model: ModelProvider,
     capture: SkillReviewCapture,
-    tools: Sequence[Function | dict[str, Any]],
+    tools: Sequence[ToolFunction],
+    *,
     run_id: str = "r1",
     model_name: str = "default",
+    settings: ModelRequest = EMPTY_REQUEST,
 ) -> None:
-    """Run one Agno response loop and hand the review its final request, as the owned loop's capture hook does.
+    """Run one response on the owned loop with the skill review's capture installed, as a counting response does."""
+    agent = AgentSpec(
+        id="mind",
+        name="Mind",
+        model=model,
+        system_message=Message(role="system", content="You are Mind, a deployment assistant."),
+        toolkits=(AdaptedToolkit(name="agent", functions=tuple(tools), instructions=None),),
+    )
+    hooks = LoopHooks(on_loop_end=capture_final_request(capture, model, run_id=run_id, model_name=model_name))
+    await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="Deploy the web service")],
+            ctx=context(run_id=run_id, session_id="session"),
+            hooks=hooks,
+            request_template=settings,
+        ),
+    )
 
-    The reviews here still run on Agno models until F6 moves them onto the owned loop, so the request is recorded
-    from the loop's message list, which Agno extends with the model's final answer.
-    """
-    messages = [
-        Message(role="system", content="You are Mind, a deployment assistant."),
-        Message(role="user", content="Deploy the web service"),
-    ]
-    await model.aresponse(
-        messages=messages,
-        tools=list(tools),
-        run_response=RunOutput(run_id=run_id),
-    )
-    capture.latest = CapturedRequest(
-        model=cast("Any", model),
-        model_name=model_name,
-        run_id=run_id,
-        messages=cast("Any", tuple(messages)),
-        tools=cast("Any", tuple(tools)),
-        tool_choice=None,
-        response_format=None,
-    )
+
+def _with_final_request_messages(captured: CapturedRequest, messages: Sequence[Message]) -> CapturedRequest:
+    return replace(captured, request=replace(captured.request, messages=tuple(messages)))
 
 
 def _learning_agent_with_a_skill(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -1470,25 +1481,36 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     """Like Hermes' default review, the fork resends the request and tools unchanged and appends the review prompt."""
     config, paths = _learning_agent_with_a_skill(tmp_path)
     shell_calls: list[str] = []
+    deploy_calls: list[str] = []
     model = _model()
     capture = SkillReviewCapture()
-    await _answer(model, capture, _agent_tools(config, paths, shell_calls))
+    settings = ModelRequest(messages=(), deferred_tool_names=frozenset({"shell"}))
+    tools = _agent_tools(config, paths, shell_calls, deploy_calls=deploy_calls)
+    await _answer(model, capture, tools, settings=settings)
     model.script = [
         ("shell", {"cmd": "cat ~/.ssh/id_ed25519"}),
+        ("deploy", {"target": "production"}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
     ]
     await _review(config, paths, captured=capture.latest)
-    primary, fork, denied = model.requests[:3]
+    primary, fork, denied, missing = model.requests[:4]
     assert fork[: len(primary) + 1] == [*primary, "Done."]
     assert fork[-1].startswith("This turn is an automatic skill review")
     assert "- older-lesson (learner):" in fork[-1]
     assert "<conversation>" not in fork[-1]
-    assert model.tool_requests[1] == model.tool_requests[0]
-    assert shell_calls == []
+    sent, forked = model.received[:2]
+    # The fork offers every tool definition the response offered, the approved deploy too, with its settings.
+    assert forked.tools == sent.tools
+    assert "deploy" in {tool.name for tool in forked.tools}
+    assert forked.deferred_tool_names == sent.deferred_tool_names == {"shell"}
+    assert (sent.stream, forked.stream) == (True, False)
+    assert shell_calls == deploy_calls == []
     assert denied[-1] == (
-        "This tool is not available during a skill review; only get_skill_instructions, get_skill_reference, "
-        "get_skill_script, and skill_manage run here."
+        "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "
+        "get_skill_reference, and get_skill_script run here."
     )
+    # A call that would wait for a person is answered as unavailable instead of pausing the review.
+    assert missing[-1] == MISSING_TOOL_ERROR_TEXT
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
@@ -1518,31 +1540,28 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(tm
     elif reason == "no skill_manage":
         tools = [tool for tool in tools if tool.name != "skill_manage"]
     elif reason == "skill_manage needs approval":
-        (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
-        tool.requires_confirmation = True
+        tools = [replace(tool, requires_confirmation=True) if tool.name == "skill_manage" else tool for tool in tools]
     elif reason == "skill_manage asks as its job":
-        (tool,) = [tool for tool in tools if tool.name == "skill_manage"]
-        tool.approval_type = JOB_APPROVAL_TYPE
+        tools = [
+            replace(tool, approval_type=JOB_APPROVAL_TYPE) if tool.name == "skill_manage" else tool for tool in tools
+        ]
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
     await _answer(primary, capture, tools)
+    assert capture.latest is not None
+    captured = capture.latest
     if reason == "no final answer":
-        capture = replace(
-            capture,
-            latest=replace(capture.latest, messages=capture.latest.messages[:-1]) if capture.latest else None,
-        )
+        captured = _with_final_request_messages(captured, captured.request.messages[:-1])
     elif reason == "conversation too long to fork":
-        assert capture.latest is not None
-        final_metrics = capture.latest.messages[-1].metrics
-        assert final_metrics is not None
         # The final request already used more than a quarter of the default 120,000-token review budget.
-        final_metrics.input_tokens = 40_000
+        captured.request.messages[-1].metrics.input_tokens = 40_000
     replay = _model()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=replay):
-        await _review(config, paths, captured=None if reason == "no capture" else capture.latest)
+    with patch(_REVIEW_MODEL, return_value=replay):
+        await _review(config, paths, captured=None if reason == "no capture" else captured)
     assert len(replay.requests) == 1
     assert "<conversation>" in replay.requests[0][-1]
     assert "tests passed" in replay.requests[0][-1]
+    assert replay.received[0].stream is False
 
 
 @pytest.mark.asyncio
@@ -1555,22 +1574,23 @@ async def test_the_capture_keeps_only_its_attempts_final_request_as_sent() -> No
     _, record = await collect(
         run_agent(
             spec(model),
-            [OwnedMessage(role="user", content="Deploy the web service")],
+            [Message(role="user", content="Deploy the web service")],
             ctx=context(),
             hooks=hooks,
+            request_template=ModelRequest(messages=(), deferred_tool_names=frozenset({"search"})),
         ),
     )
     record.messages[-1].content = "rewritten after the loop"
 
     assert capture.latest is not None
     assert (capture.latest.run_id, capture.latest.model_name) == ("r1", "default")
-    assert [message.get_content_string() for message in capture.latest.messages] == [
+    request = capture.latest.request
+    assert [message.get_content_string() for message in request.messages] == [
         "You are Code.",
         "Deploy the web service",
         "Done.",
     ]
-    assert capture.latest.tools == ()
-    assert capture.latest.tool_choice is None
+    assert (request.tools, request.tool_choice, request.deferred_tool_names) == ((), None, {"search"})
 
 
 @pytest.mark.asyncio
@@ -1637,11 +1657,14 @@ _WIRE_REQUEST_PARTS = {
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire_name", list(_PROVIDER_WIRES))
-async def test_the_review_fork_replays_the_final_request_through_each_adapter(tmp_path: Path, wire_name: str) -> None:
+async def test_the_review_fork_replays_the_final_request_through_each_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wire_name: str,
+) -> None:
     """Each real adapter sends the fork's tools and conversation, tool calls included, unchanged."""
     wire = _PROVIDER_WIRES[wire_name]
     config, paths = _learning_agent_with_a_skill(tmp_path)
-    config.models["default"] = wire.model
     requests: list[dict[str, Any]] = []
     # The response calls a skill tool, then answers; the review answers at once.
     replies = [wire.replies[0], wire.replies[1], wire.replies[1]]
@@ -1650,19 +1673,20 @@ async def test_the_review_fork_replays_the_final_request_through_each_adapter(tm
         requests.append(json.loads(request.content))
         return httpx.Response(200, json=replies.pop(0))
 
-    model = get_model_instance(config, paths, "default")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
-        if wire.model.provider == "openai":
-            model.async_client = AsyncOpenAI(api_key="test-key", max_retries=0, http_client=http_client)
-        elif wire.model.provider == "anthropic":
-            model.async_client = AsyncAnthropic(api_key="test-key", max_retries=0, http_client=http_client)
-        else:
-            model.client = genai.Client(
-                api_key="test-key",
-                http_options=HttpOptions(httpx_async_client=http_client, retry_options=HttpRetryOptions(attempts=1)),
-            )
+        # The OpenAI-family and Claude routes send through the shared model client; Gemini through its own.
+        monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", http_client.send)
+        extra_kwargs = {"client_params": {"http_options": {"httpx_async_client": http_client}}}
+        config.models["default"] = (
+            wire.model.model_copy(update={"extra_kwargs": extra_kwargs})
+            if wire.model.provider == "google"
+            else wire.model
+        )
+        model = build_model_provider(config, paths, "default")
         capture = SkillReviewCapture()
-        await _answer(model, capture, _agent_tools(config, paths, []))
+        # The replies are whole responses, so the response asks for whole replies too.
+        settings = ModelRequest(messages=(), stream=False)
+        await _answer(model, capture, _agent_tools(config, paths, []), settings=settings)
         await _review(config, paths, captured=capture.latest)
     _first, primary, fork = (cast("dict[str, Any]", _without_cache_markers(request)) for request in requests)
     history, unchanged = _WIRE_REQUEST_PARTS[wire_name]
@@ -1699,7 +1723,7 @@ async def test_a_review_a_new_response_stops_after_its_writes_still_posts_its_no
     send = AsyncMock(return_value=object())
     runner = _runner(paths, object())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
         task = await _count(runner, config, identity=ALICE)
@@ -1728,7 +1752,7 @@ async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_p
 
     runner = _runner(paths, object())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.runner.send_message_result", send),
     ):
         assert await _count(runner, config, identity=ALICE) is not None
@@ -1741,13 +1765,13 @@ async def test_a_response_starting_while_the_notice_is_sent_never_stops_it(tmp_p
 
 @pytest.mark.asyncio
 async def test_a_review_runs_in_a_fresh_context(tmp_path: Path) -> None:
-    """The response's queued-message state never reaches the review, though the reused model keeps its notice hook."""
+    """The response's queued-message state never reaches the review's requests."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     notice = "Pause tool use and summarize before handling the newer message."
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         queued_message_signal_context(_PendingMessage()),
     ):
         await _review_due(config, paths)
@@ -1773,9 +1797,9 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
     capture = SkillReviewCapture()
     await _answer(primary, capture, _agent_tools(config, paths, []), model_name="thread")
     assert capture.latest is not None
-    unforkable = replace(capture.latest, messages=capture.latest.messages[:-1])
+    unforkable = _with_final_request_messages(capture.latest, capture.latest.request.messages[:-1])
     replay = _model()
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=replay) as load:
+    with patch(_REVIEW_MODEL, return_value=replay) as load:
         await _review(config, paths, captured=unforkable)
     assert load.call_args.args[2] == "thread"
     assert len(replay.requests) == 1
@@ -1810,8 +1834,8 @@ async def test_the_capture_names_each_attempts_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_review_validates_skill_tool_arguments_like_agno(tmp_path: Path) -> None:
-    """The review's copies skip Agno's entrypoint processing, so they validate arguments themselves."""
+async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(tmp_path: Path) -> None:
+    """The review runs its own skill tool methods, which validate their arguments as the agent's tools would."""
     config, paths = _learner(tmp_path)
     _seed(config, paths, _tool_turn("r1"))
     root = _skills_root(config, paths)
@@ -1826,7 +1850,7 @@ async def test_the_review_validates_skill_tool_arguments_like_agno(tmp_path: Pat
         ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
     )
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch(_REVIEW_MODEL, return_value=model),
         patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()),
     ):
         await _review(config, paths)
@@ -1853,7 +1877,7 @@ async def test_a_chat_skill_and_its_support_file_can_be_created_in_one_reply(tmp
 
 @pytest.mark.asyncio
 async def test_the_review_reads_support_files_by_the_paths_it_lists(tmp_path: Path) -> None:
-    """A support file listed as references/<name> loads by that path or by its bare file name, as Agno's schema says."""
+    """A support file listed as references/<name> loads by that path or by its bare file name, as the reader's schema says."""
     config, paths = _learner(tmp_path)
     root = _skills_root(config, paths)
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
@@ -1926,51 +1950,3 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
     recreated = library.read_skill_file(root, "deploy-checks")
     assert recreated is not None
     assert not recreated.learned
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["finished", "stopped while opening"])
-async def test_the_review_closes_the_claude_client_it_opens(tmp_path: Path, ending: str) -> None:
-    """The response closed its Claude client, so the review opens its own and closes it, even when stopped mid-open."""
-    config, paths = _learner(tmp_path)
-    config.models["default"] = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="test-key")
-    _seed(config, paths, _tool_turn("r1"))
-    requests: list[httpx.Request] = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json=_claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"))
-
-    model = get_model_instance(config, paths, "default")
-    model.api_key = "test-key"
-    model.http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    opened, release = threading.Event(), threading.Event()
-    if ending == "finished":
-        release.set()
-    clients: list[AsyncAnthropic] = []
-    real_open = model.get_async_client
-
-    def opening() -> AsyncAnthropic:
-        # Opening a client does blocking credential and TLS work.
-        opened.set()
-        assert release.wait(timeout=10)
-        clients.append(real_open())
-        return clients[-1]
-
-    with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
-        patch.object(model, "get_async_client", opening),
-    ):
-        review = asyncio.create_task(_review(config, paths))
-        assert await asyncio.to_thread(opened.wait, 10)
-        if ending == "stopped while opening":
-            review.cancel()
-            release.set()
-        await asyncio.wait_for(asyncio.gather(review, return_exceptions=True), timeout=10)
-    assert review.cancelled() == (ending == "stopped while opening")
-    if not review.cancelled():
-        review.result()
-    assert len(requests) == (1 if ending == "finished" else 0)
-    assert clients
-    assert all(client.is_closed() for client in clients)
-    assert model.async_client is None

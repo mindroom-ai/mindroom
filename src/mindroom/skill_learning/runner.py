@@ -165,8 +165,8 @@ class SkillReviewRunner:
                 correlation_id,
             ),
             name=f"skill_review:{scope.agent}",
-            # The response's context carries its queued-message and mid-turn state, which the reused model's hooks
-            # would otherwise apply to the review's requests.
+            # A fresh context keeps the response's turn state, such as its log fields and queued messages, out of
+            # the review.
             context=contextvars.Context(),
         )
         self._reviews[key] = task

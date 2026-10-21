@@ -158,23 +158,17 @@ def install_tool_result_callback(
 # get_function_calls_to_run before any limit accounting, so a model that keeps requesting tools
 # keeps its run alive indefinitely. The loop's counters are local to aresponse/aresponse_stream,
 # and one model object can serve concurrent runs, so bounding a run's model requests needs a
-# per-loop gate consulted before each request. The same missing pre-request hook also leaves callers no public way
-# to end a run on their own condition, which the skill review needs to stop at its aggregate input budget.
+# per-loop gate consulted before each request.
 # Upstream issue: https://github.com/agno-agi/agno/issues/8304 and
 # https://github.com/agno-agi/agno/issues/10041 cover refused tool_call_limit batches; no upstream
-# issue identified for loops of unknown-tool or unparseable-argument calls. Tracking gap: no issue proposes a
-# caller-owned hook, consulted before each model request, that can end the run.
+# issue identified for loops of unknown-tool or unparseable-argument calls.
 # Upstream PR: https://github.com/agno-agi/agno/pull/10042 and
 # https://github.com/agno-agi/agno/pull/8324 are open and stop only after a batch of limit refusals,
-# which unknown-tool and unparseable-argument batches never produce; none identified for a pre-request hook.
+# which unknown-tool and unparseable-argument batches never produce.
 # Remove when: Agno ends every async streaming and non-streaming response loop after a bounded
-# number of model requests, whatever the requested tool calls, through its normal completion path,
-# and offers a public hook consulted before each model request that can end the run; the owner's cap
-# derived from tool_call_limit, its once-per-run tool_call_limit_reached warning, and the skill
-# review's input budget must remain.
-# Coverage: tests/test_tool_call_budget.py,
-# tests/test_skill_learning.py::test_the_budget_counts_what_each_request_sends, and
-# tests/test_skill_learning.py::test_reviewer_refuses_protected_skills_and_stops_at_its_budget.
+# number of model requests, whatever the requested tool calls, through its normal completion path;
+# the owner's cap derived from tool_call_limit and its once-per-run tool_call_limit_reached warning must remain.
+# Coverage: tests/test_agno_compat_model_hooks.py::test_tool_call_cap_installed_later_refuses_before_preparation.
 def install_response_request_gate(
     model: Model,
     *,

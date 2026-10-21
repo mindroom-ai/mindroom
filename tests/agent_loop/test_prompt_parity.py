@@ -25,7 +25,6 @@ PENDING = {
     "delegated_child_run": "S3 drives the delegate tool's externally executed children through the owned loop",
     "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
     "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
-    "skill_review_fork": "F6 runs the skill review fork on the owned loop from the captured final request",
     "voice_call_cascaded": "F4 builds voice calls on the owned loop",
     "voice_call_realtime": "F4 builds voice calls on the owned loop",
 }
