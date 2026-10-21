@@ -328,6 +328,62 @@ def test_get_profile_reports_not_found_unless_exactly_one_user_has_the_address(
     assert len(graph.requests) == 2
 
 
+@pytest.mark.parametrize("me", ["me", "ME", "Me"])
+def test_get_profile_reads_the_requester_and_their_manager_as_me(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    me: str,
+) -> None:
+    manager = {"@odata.type": "#microsoft.graph.user", **_user(SAM, displayName="Sam Example", mail="sam@example.com")}
+    tools, graph = _tools(
+        tmp_path,
+        monkeypatch,
+        _routes({"/v1.0/me": httpx.Response(200, json=_user()), "/v1.0/me/manager": httpx.Response(200, json=manager)}),
+    )
+
+    result = _payload(tools.microsoft_people_get_profile(me))
+
+    assert [(_raw_path(request), dict(request.url.params)) for request in graph.requests] == [
+        ("/v1.0/me", {"$select": SELECT}),
+        ("/v1.0/me/manager", {"$select": SELECT}),
+    ]
+    assert result["person"] == _person()
+    assert result["manager"] == _person(SAM, name="Sam Example", email="sam@example.com")
+
+
+def test_get_profile_reports_no_manager_for_me(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(
+        tmp_path,
+        monkeypatch,
+        _routes({"/v1.0/me": httpx.Response(200, json=_user()), "/v1.0/me/manager": _not_found()}),
+    )
+
+    result = _payload(tools.microsoft_people_get_profile("me"))
+
+    assert (result["status"], result["person"], result["manager"]) == ("ok", _person(), None)
+
+
+def test_get_profile_keeps_the_original_not_found_when_the_email_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(
+        tmp_path,
+        monkeypatch,
+        _routes(
+            {
+                "/v1.0/users/dana@example.com": _not_found(),
+                "/v1.0/users": httpx.Response(400, json={"error": {"code": "Request_UnsupportedQuery"}}),
+            },
+        ),
+    )
+
+    result = _payload(tools.microsoft_people_get_profile("dana@example.com"))
+
+    assert (result["code"], result["graph_code"]) == ("not_found", "Request_ResourceNotFound")
+    assert len(graph.requests) == 2
+
+
 def test_get_profile_does_not_look_up_an_id_by_email(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, lambda _request: _not_found())
 
@@ -411,6 +467,28 @@ def test_list_direct_reports_refuses_a_foreign_page_token_before_any_request(
 
     assert result["code"] == "invalid_page_token"
     assert graph.requests == []
+
+
+def test_list_direct_reports_of_me_pages_from_the_requester(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    next_page = f"/me/directReports?$select={SELECT}&$skiptoken=mine2"
+    pages = iter(
+        [
+            httpx.Response(200, json={"value": [_user()], "@odata.nextLink": f"{GRAPH}{next_page}"}),
+            httpx.Response(200, json={"value": [_user(SAM, displayName="Sam Example")]}),
+        ],
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, lambda _request: next(pages))
+
+    first = _payload(tools.microsoft_people_list_direct_reports("Me"))
+    second = _payload(tools.microsoft_people_list_direct_reports("Me", page_token=first["next_page_token"]))
+
+    assert first["next_page_token"] == next_page
+    assert (first["direct_reports"], second["direct_reports"]) == ([_person()], [_person(SAM, name="Sam Example")])
+    assert second["next_page_token"] is None
+    assert [(_raw_path(request), dict(request.url.params)) for request in graph.requests] == [
+        ("/v1.0/me/directReports", {"$select": SELECT}),
+        ("/v1.0/me/directReports", {"$select": SELECT, "$skiptoken": "mine2"}),
+    ]
 
 
 def test_list_direct_reports_finds_an_email_address_that_is_not_the_sign_in_name(
@@ -497,6 +575,7 @@ def test_descriptions_point_the_agent_at_the_ids_and_addresses_it_needs(
     assert "ask the requester which one they mean" in _description(tools, "microsoft_people_search")
     person = Function.from_callable(tools.microsoft_people_get_profile).to_dict()["parameters"]["properties"]["person"]
     assert "email address" in person["description"]
+    assert '"me" for the requester' in person["description"]
 
 
 @pytest.mark.parametrize(("status", "code"), [(403, "forbidden"), (404, "not_found")])

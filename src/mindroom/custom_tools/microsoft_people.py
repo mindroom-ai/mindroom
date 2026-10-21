@@ -56,24 +56,36 @@ def _top(limit: object) -> str:
     return str(limit)
 
 
+def _is_me(person: object) -> bool:
+    return isinstance(person, str) and person.casefold() == "me"
+
+
 def _user_path(person: object) -> str:
-    """Return the Graph path of a user named by id, sign-in name, or email address.
+    """Return the Graph path of a user named by id, sign-in name, or email address, or of the requester as "me".
 
     A guest's sign-in name holds `#EXT#`, which Graph takes with each `#` percent-encoded, so the parts between
     hashes are checked and escaped one by one.
     """
+    if _is_me(person):
+        return "/me"
     parts = person.split("#") if isinstance(person, str) else [person]
     try:
         return "/users/" + "%23".join(path_segment(part, "person") for part in parts)
     except MicrosoftGraphError:
-        msg = "person must be a user id, an email address, or a sign-in name."
+        msg = 'person must be a user id, an email address, a sign-in name, or "me".'
         raise MicrosoftGraphError(code="invalid_argument", message=msg) from None
 
 
 def _user_id_by_mail(session: GraphSession, address: str) -> str | None:
-    """Return the id of the one user with this email address, which need not be their sign-in name."""
+    """Return the id of the one user with this email address, which need not be their sign-in name.
+
+    None when no single user has it or the lookup itself fails, so the caller reports its own not_found.
+    """
     literal = address.replace("'", "''")
-    payload = session.json("GET", "/users", params={"$filter": f"mail eq '{literal}'", "$select": "id"})
+    try:
+        payload = session.json("GET", "/users", params={"$filter": f"mail eq '{literal}'", "$select": "id"})
+    except MicrosoftGraphError:
+        return None
     ids = [entry.get("id") for entry in payload.get("value") or [] if isinstance(entry, dict)]
     return ids[0] if len(ids) == 1 and isinstance(ids[0], str) else None
 
@@ -197,15 +209,16 @@ class MicrosoftPeopleTools(Toolkit):
         manager is null when the directory names no manager for them, or names a contact instead of a user.
 
         Args:
-            person: The person's id from microsoft_people_search, their email address, or their sign-in name
-                (userPrincipalName).
+            person: The person's id from microsoft_people_search, their email address, their sign-in name
+                (userPrincipalName), or "me" for the requester.
 
         """
 
         def run(session: GraphSession, _path: str) -> Mapping[str, object]:
             profile = _read_user(session, person)
+            manager_path = f"{_user_path(person if _is_me(person) else profile.get('id'))}/manager"
             try:
-                manager = session.json("GET", f"{_user_path(profile.get('id'))}/manager", params={"$select": _SELECT})
+                manager = session.json("GET", manager_path, params={"$select": _SELECT})
             except MicrosoftGraphError as exc:
                 # Graph answers 404 for a person without a manager.
                 if exc.code != "not_found":
@@ -222,8 +235,8 @@ class MicrosoftPeopleTools(Toolkit):
         people, or none, while next_page_token still continues the listing.
 
         Args:
-            person: The manager's id from microsoft_people_search, their email address, or their sign-in name
-                (userPrincipalName).
+            person: The manager's id from microsoft_people_search, their email address, their sign-in name
+                (userPrincipalName), or "me" for the requester.
             page_token: The next_page_token of the previous call, to continue the same listing.
 
         """

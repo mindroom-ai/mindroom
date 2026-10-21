@@ -12767,7 +12767,7 @@ Shared channels from a team the requester is not a member of are not reachable.
 Agents use these functions to turn a name the requester mentions into a person and an email address for the mail, calendar, and Teams tools.
 Each person comes back with their id, name, email address, job title, department, office location, and business phones; mobile phones and other personal fields are never read.
 The email address is the person's primary email address, or their sign-in name when they have none.
-Profile and direct report lookups take a person's id, email address, or sign-in name.
+Profile and direct report lookups take a person's id, email address, or sign-in name, or `me` for the requester, so "who is my manager" needs no email address.
 Search matches names by whole words or their beginnings in any order, and email addresses from their beginning, and someone added to the directory in the last few minutes may not show up yet.
 A person without a manager, or whose manager is a contact instead of a user, comes back with `manager` set to `null`, and direct report listings leave out contacts.
 Direct report listings return a `next_page_token` while more results exist; passing it back continues the same listing.
