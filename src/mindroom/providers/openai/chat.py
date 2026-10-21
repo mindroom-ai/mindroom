@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import (
     ReasoningDelta,
@@ -19,7 +19,8 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
     ChatWire,
@@ -28,12 +29,10 @@ from mindroom.providers.openai.chat_wire import (
     parse_chat_completion,
 )
 from mindroom.providers.openai.errors import provider_error, sdk_failures
-from mindroom.providers.openrouter_prompt_cache import openrouter_prompt_cache_control, with_prompt_cache_ladder
+from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
-
-    from openai import AsyncOpenAI
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
@@ -55,20 +54,9 @@ class ChatAdapter:
     settings: ChatSettings
     clients: SDKClients
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Chat Completions takes one tool message per result, in order."""
-        return list(results)
-
-    async def _client(self, request: ModelRequest) -> AsyncOpenAI:
-        client = await self.clients.client(request.overrides)
-        if self.wire.route != "openrouter":
-            return client
-        control = openrouter_prompt_cache_control(
-            self.identity.id,
-            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache is not False,
-            extended_cache_time=self.settings.extended_cache_time,
-        )
-        return cast("AsyncOpenAI", with_prompt_cache_ladder(client, lambda: control))
+        return one_message_per_result(messages, results)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(
@@ -82,7 +70,7 @@ class ChatAdapter:
             settings=self.settings,
             wire=self.wire,
         )
-        return with_overrides(
+        kwargs = with_overrides(
             kwargs,
             request.overrides,
             temperature=not self.capabilities.provider_default_sampling,
@@ -90,6 +78,15 @@ class ChatAdapter:
             if self.wire.route in _MAX_COMPLETION_TOKENS_ROUTES
             else "max_tokens",
         )
+        if self.wire.route != "openrouter":
+            return kwargs
+        # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams; the ladder runs on the final body.
+        cache_control = openrouter_prompt_cache_control(
+            self.identity.id,
+            cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache is not False,
+            extended_cache_time=self.settings.extended_cache_time,
+        )
+        return kwargs if cache_control is None else request_kwargs_with_prompt_cache(kwargs, cache_control)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""
@@ -98,7 +95,7 @@ class ChatAdapter:
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         try:
-            client = await self._client(request)
+            client = await self.clients.client(request.overrides)
             if request.stream:
                 accumulator = ChatStream(self.wire)
                 sdk_stream = await client.chat.completions.create(**kwargs)
@@ -124,7 +121,7 @@ class ChatAdapter:
                     yield TextDelta(parts.content)
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
-        message = assistant_message(
+        message = finished_assistant_message(
             self.identity,
             content=parts.content,
             reasoning=parts.reasoning,
@@ -132,7 +129,7 @@ class ChatAdapter:
             provider_data=parts.provider_data,
             usage=parts.usage,
             started=started,
-            first_token=first_token,
+            first_output_at=first_token,
         )
         for call in parts.tool_calls:
             yield ToolCallReady(call)

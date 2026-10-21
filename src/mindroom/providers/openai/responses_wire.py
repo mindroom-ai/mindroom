@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
 
-from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
@@ -27,9 +27,9 @@ from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, s
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
+from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.openai_prompt_cache import formatted_input_with_shared_system_prefix
 from mindroom.providers.openai_response_replay import formatted_input_with_provider_items
-from mindroom.providers.openai_tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
 
 if TYPE_CHECKING:
@@ -58,7 +58,6 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
-_INCOMPLETE = "incomplete_stream"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -559,14 +558,19 @@ class ResponsesStream:
         if not self.exposed:
             return error
         message = f"OpenAI Responses stream failed after yielding output: {error}"
-        return ProviderError(message, provider=self.wire.provider_name, status_code=error.status_code, code=_INCOMPLETE)
+        return ProviderError(
+            message,
+            provider=self.wire.provider_name,
+            status_code=error.status_code,
+            code=INCOMPLETE_STREAM,
+        )
 
     def incomplete_error(self) -> ProviderError:
         """Return the error for a stream that ended without ``response.completed``."""
         message = "OpenAI Responses stream ended without response.completed"
         # Before any exposed output, the early end is retried like a dropped connection.
         return self.attempt_error(
-            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=_INCOMPLETE),
+            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=INCOMPLETE_STREAM),
         )
 
     def finish(self) -> ResponsesTurnParts:

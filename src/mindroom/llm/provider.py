@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -223,7 +223,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
             completed = event
     if completed is None:
         msg = "The provider stream ended without completing the turn"
-        raise ProviderError(msg, provider=provider.identity.provider_name, code="incomplete_stream")
+        raise ProviderError(msg, provider=provider.identity.provider_name, code=INCOMPLETE_STREAM)
     return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 

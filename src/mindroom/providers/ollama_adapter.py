@@ -22,14 +22,23 @@ from pydantic import BaseModel
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    Capabilities,
+    ModelIdentity,
+    ReasoningDelta,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result, split_thinking
+from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.remote_media import download_media
-from mindroom.providers.status_errors import provider_error_for_status, provider_unavailable
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -40,6 +49,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.media import Image
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
 
 logger = get_logger(__name__)
@@ -65,6 +75,7 @@ class OllamaSettings:
 @dataclass(slots=True)
 class _OllamaReply:
     content: str = ""
+    reasoning: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     usage: MessageMetrics | None = None
     done_reason: str | None = None
@@ -83,52 +94,65 @@ class OllamaProvider:
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append one stored message per tool result, as Ollama's wire format takes them."""
-        del messages
-        return list(results)
+        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Send one streamed chat request and yield its events."""
+        """Send one chat request, streamed unless ``request.stream`` is False, and yield its events.
+
+        A reply that arrives whole has its ``<think>`` reasoning split out, as Agno did for non-streamed replies.
+        """
         messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
         chat_kwargs = self._chat_kwargs(request)
         from ollama import ResponseError  # noqa: PLC0415 - provider SDK loads on first request
 
         reply = _OllamaReply()
-        started = time.perf_counter()
-        first_text_at: float | None = None
+        started = time.monotonic()
+        first_output_at: float | None = None
         try:
-            chunks = await self._sdk_client().chat(
-                model=self.identity.id.strip(),
-                messages=messages,
-                stream=True,
-                **chat_kwargs,
-            )
-            async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
-                async for chunk in responses:
-                    for event in _read_chunk(reply, chunk):
-                        if first_text_at is None and isinstance(event, TextDelta):
-                            first_text_at = time.perf_counter()
-                        yield event
+            if request.stream:
+                chunks = await self._sdk_client().chat(
+                    model=self.identity.id.strip(),
+                    messages=messages,
+                    stream=True,
+                    **chat_kwargs,
+                )
+                async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
+                    async for chunk in responses:
+                        events = _read_chunk(reply, chunk)
+                        if not events:
+                            yield StreamProgress()
+                        for event in events:
+                            first_output_at = first_output_at or time.monotonic()
+                            yield event
+            else:
+                response = await self._sdk_client().chat(
+                    model=self.identity.id.strip(),
+                    messages=messages,
+                    **chat_kwargs,
+                )
+                first_output_at = time.monotonic()
+                for event in _whole_reply_events(reply, cast("ChatResponse", response)):
+                    yield event
         except ResponseError as error:
             # The SDK reports an error the server streams after a 200 response with status -1.
-            raise provider_error_for_status(
+            raise classify_provider_error(
                 str(error),
                 provider=self.identity.provider_name,
                 status_code=error.status_code if error.status_code > 0 else None,
             ) from error
         except (httpx.TransportError, OSError) as error:
-            raise provider_unavailable(error, provider=self.identity.provider_name) from error
-        if reply.usage is not None:
-            yield UsageReported(reply.usage)
-        metrics = MessageMetrics() if reply.usage is None else replace(reply.usage)
-        metrics.duration = time.perf_counter() - started
-        metrics.time_to_first_token = None if first_text_at is None else first_text_at - started
-        message = Message(
-            role="assistant",
+            raise transport_error(error, provider=self.identity.provider_name) from error
+        message = finished_assistant_message(
+            self.identity,
             content=reply.content or None,
-            tool_calls=reply.tool_calls or None,
-            provider_data={"mindroom_model": {"id": self.identity.id, "provider": _PROVIDER}},
-            metrics=metrics,
+            reasoning=reply.reasoning,
+            tool_calls=reply.tool_calls,
+            usage=reply.usage,
+            started=started,
+            first_output_at=first_output_at,
         )
+        if reply.usage is not None:
+            yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
@@ -179,13 +203,13 @@ class OllamaProvider:
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return Ollama tool definitions sorted by name; an empty description is left out."""
+    """Return Ollama tool definitions sorted by name; a tool without a description sends none, as Agno's did."""
     return [
         {
             "type": "function",
             "function": {
                 "name": tool.name,
-                **({"description": tool.description} if tool.description else {}),
+                **({} if tool.description is None else {"description": tool.description}),
                 "parameters": tool.parameters,
             },
         }
@@ -255,6 +279,18 @@ def _read_image(path: Path, provider: str) -> bytes:
         logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
         msg = "The image attachment could not be read"
         raise InvalidRequest(msg, provider=provider) from error
+
+
+def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[StreamEvent]:
+    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text."""
+    calls = [event for event in _read_chunk(reply, response) if isinstance(event, ToolCallReady)]
+    reply.reasoning, reply.content = split_thinking(reply.content)
+    events: list[StreamEvent] = []
+    if reply.reasoning:
+        events.append(ReasoningDelta(reply.reasoning))
+    if reply.content:
+        events.append(TextDelta(reply.content))
+    return [*events, *calls]
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

@@ -8,16 +8,10 @@ from typing import TYPE_CHECKING
 
 from agno.models.google import Gemini
 from agno.utils.message import normalize_tool_messages
-from google.genai.types import (
-    FunctionCallingConfig,
-    FunctionCallingConfigMode,
-    GenerateContentConfig,
-    HttpOptions,
-    Tool,
-    ToolConfig,
-)
+from google.genai.types import GenerateContentConfig, HttpOptions
 
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.providers.gemini.wire import without_tool_selection
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -25,7 +19,7 @@ if TYPE_CHECKING:
 
     from agno.metrics import MessageMetrics
     from agno.models.message import Message
-    from google.genai.types import GenerateContentResponseUsageMetadata, ToolListUnion
+    from google.genai.types import GenerateContentResponseUsageMetadata
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
@@ -33,47 +27,6 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 def _provider_tool_call_id(value: object) -> str | None:
     """Return a non-empty provider tool-call ID."""
     return value if isinstance(value, str) and value else None
-
-
-def _without_tool_selection(config: object, *, vertexai: bool) -> GenerateContentConfig:
-    """Preserve function schemas, remove native tools, and request JSON output for a decision request.
-
-    JSON output is requested except on Vertex AI when the request keeps function declarations.
-    """
-    generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
-    if generation_config.cached_content:
-        # Cached content may contain native tools that this request cannot inspect.
-        msg = "Participation decisions cannot inspect tools in Gemini cached content"
-        raise ValueError(msg)
-    if generation_config.http_options is not None and generation_config.http_options.extra_body:
-        msg = "Participation decisions cannot safely apply Gemini body overrides"
-        raise ValueError(msg)
-    # Function-calling NONE does not disable grounding or other native tools.
-    declaration_tools: ToolListUnion = [
-        Tool(function_declarations=tool.function_declarations)
-        for tool in generation_config.tools or []
-        if isinstance(tool, Tool) and tool.function_declarations
-    ]
-    # Without declarations, function-calling settings govern nothing and are dropped.
-    function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
-    tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
-    # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
-    # Google documents JSON output beside function calling only for Gemini 3 models. Live Gemini API
-    # runs in September 2026 saw it accepted under NONE by the Gemini 3 and 2.5 models tried.
-    # Accepted risk: models that reject JSON output with declarations, or JSON output at all (reportedly
-    # older Gemini models and Gemma), fail every check closed, the same outcome as a leaked function call.
-    # Vertex AI acceptance beside declarations is unverified, so Vertex gets JSON only without them.
-    json_output = not (vertexai and declaration_tools)
-    # The reply's authored output schema never shapes a decision.
-    return generation_config.model_copy(
-        update={
-            "tools": declaration_tools or None,
-            "tool_config": tool_config,
-            "response_mime_type": "application/json" if json_output else None,
-            "response_schema": None,
-            "response_json_schema": None,
-        },
-    )
 
 
 @dataclass
@@ -104,7 +57,7 @@ class MindRoomGoogleGemini(Gemini):
             tool_choice=tool_choice,
         )
         if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
-            request_params["config"] = _without_tool_selection(generation_config, vertexai=self.get_client().vertexai)
+            request_params["config"] = without_tool_selection(generation_config, vertexai=self.get_client().vertexai)
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 

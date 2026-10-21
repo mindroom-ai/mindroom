@@ -523,7 +523,11 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
 
 
 def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
-    """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable."""
+    """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
+
+    A tool without a description gets an empty one, ``strict`` is sent only when it is True and the route accepts
+    it, and the approval flags never reach the wire.
+    """
     formatted: list[dict[str, Any]] = []
     for tool in sorted(tools, key=lambda item: item.name):
         parameters = dict(tool.parameters)
@@ -544,7 +548,11 @@ def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> l
         for key in ("$defs", "definitions"):
             if key in parameters:
                 input_schema[key] = parameters[key]
-        definition: dict[str, Any] = {"name": tool.name, "description": tool.description, "input_schema": input_schema}
+        definition: dict[str, Any] = {
+            "name": tool.name,
+            "description": tool.description or "",
+            "input_schema": input_schema,
+        }
         if tool.strict and strict_allowed:
             definition["strict"] = True
         formatted.append(definition)
@@ -605,7 +613,7 @@ def assistant_message_from_response(
     """Build the assistant message of one finished response.
 
     ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
-    ``server_tool_blocks`` (every block that is not text, thinking, or a tool use), the thinking ``signature``,
+    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
     the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool
     use becomes a tool call, including the calls of a response the output limit cut off.
     """
@@ -616,14 +624,18 @@ def assistant_message_from_response(
     server_tool_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
     for block in response.content:
-        if isinstance(block, (TextBlock, BetaTextBlock)):
+        # The SDK builds a block of a type it does not know as a text block that keeps its own ``type``.
+        if block.type == "text" and isinstance(block, (TextBlock, BetaTextBlock)):
             texts.append(block.text)
-        elif isinstance(block, (ThinkingBlock, BetaThinkingBlock)):
+        elif block.type == "thinking" and isinstance(block, (ThinkingBlock, BetaThinkingBlock)):
             thinking.append(block.thinking)
             signature = block.signature
-        elif isinstance(block, (RedactedThinkingBlock, BetaRedactedThinkingBlock)):
+        elif block.type == "redacted_thinking" and isinstance(
+            block,
+            (RedactedThinkingBlock, BetaRedactedThinkingBlock),
+        ):
             redacted = block.data
-        elif isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
+        elif block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
             tool_calls.append(tool_call_from_block(block))
         else:
             server_tool_blocks.append(block.model_dump())

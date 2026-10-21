@@ -24,6 +24,7 @@ from mindroom.model_defaults import (
     ZAI_BASE_URL_DEFAULT,
 )
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
@@ -46,9 +47,8 @@ from mindroom.providers.openai.settings import (
     RESPONSES_FIELDS,
     ChatSettings,
     ResponsesSettings,
-    parse_settings,
 )
-from mindroom.providers.openai_tool_search import openai_native_tool_search_supported
+from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.providers.prompt_cache_key import derive_agent_prompt_cache_key, derive_session_routing_key
 from mindroom.runtime_env_policy import AZURE_OPENAI_ENV_BY_KEY
 
@@ -396,7 +396,12 @@ def _build_chat(route_key: str, model_id: str, model_config: ModelConfig, runtim
         _with_agent_cache_key(extra_kwargs, runtime)
     if route_key == "azure":
         _populate_azure_env(extra_kwargs, runtime)
-    settings = parse_settings(ChatSettings, extra_kwargs, accepted=route.accepted, provider=model_config.provider)
+    settings = settings_from_extra_kwargs(
+        ChatSettings,
+        extra_kwargs,
+        provider=model_config.provider,
+        accepted=route.accepted,
+    )
     api_key = _configured_key(route_key, model_config, runtime)
     if route_key in {"openrouter", "zai"} and not api_key:
         logger.warning("No API key found in environment or CredentialsManager", provider=route_key)
@@ -475,7 +480,12 @@ def _build_responses(
                 runtime.execution_identity,
                 storage_root=runtime.runtime_paths.storage_root,
             )
-    settings = parse_settings(ResponsesSettings, extra_kwargs, accepted=accepted, provider=model_config.provider)
+    settings = settings_from_extra_kwargs(
+        ResponsesSettings,
+        extra_kwargs,
+        provider=model_config.provider,
+        accepted=accepted,
+    )
     # One storage setting drives both request building and history replay.
     store = (settings.request_params or {}).get("store", settings.store)
     authored_base_url = _authored_base_url(settings.client_params, settings.base_url)

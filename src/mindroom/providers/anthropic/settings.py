@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -108,16 +110,7 @@ class ClaudeSettings:
 
 def parse_claude_settings(route: ClaudeRouteKind, extra_kwargs: Mapping[str, Any] | None) -> ClaudeSettings:
     """Parse authored ``extra_kwargs`` for one route, rejecting keys the route does not accept."""
-    authored = dict(extra_kwargs or {})
-    accepted = ACCEPTED_KEYS[route]
-    unknown = sorted(set(authored) - accepted)
-    if unknown:
-        msg = (
-            f"Unsupported extra_kwargs for provider {route}: {', '.join(unknown)}. "
-            f"Accepted keys: {', '.join(sorted(accepted))}."
-        )
-        raise ValueError(msg)
-    return ClaudeSettings(**authored)
+    return settings_from_extra_kwargs(ClaudeSettings, extra_kwargs, provider=route, accepted=ACCEPTED_KEYS[route])
 
 
 __all__ = [

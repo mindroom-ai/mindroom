@@ -29,7 +29,12 @@ from mindroom.providers.remote_media import download_media
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from google.genai.types import GenerateContentResponse, GenerateContentResponseUsageMetadata, Part
+    from google.genai.types import (
+        GenerateContentConfig,
+        GenerateContentResponse,
+        GenerateContentResponseUsageMetadata,
+        Part,
+    )
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message
@@ -342,11 +347,62 @@ async def _remote_file_part(file: File, url: str, route: MediaRoute) -> dict[str
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
+    # Agno built each declaration with ``description or ""``, so a tool without one still sends an empty string.
     declarations = [
-        _without_none(name=tool.name, description=tool.description, parameters=convert_schema(tool.parameters))
+        _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
     return {"function_declarations": declarations} if declarations else None
+
+
+def without_tool_selection(config: object, *, vertexai: bool) -> GenerateContentConfig:
+    """Return the config of a decision request: function schemas kept, native tools gone, JSON output requested.
+
+    ``config`` is the request dict this adapter builds, or the typed config the Agno path built. JSON output is
+    requested except on Vertex AI when the request keeps function declarations.
+    """
+    from google.genai.types import (  # noqa: PLC0415 - provider SDK loads on first request
+        FunctionCallingConfig,
+        FunctionCallingConfigMode,
+        GenerateContentConfig,
+        Tool,
+        ToolConfig,
+    )
+
+    generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
+    if generation_config.cached_content:
+        # Cached content may contain native tools that this request cannot inspect.
+        msg = "Participation decisions cannot inspect tools in Gemini cached content"
+        raise ValueError(msg)
+    if generation_config.http_options is not None and generation_config.http_options.extra_body:
+        msg = "Participation decisions cannot safely apply Gemini body overrides"
+        raise ValueError(msg)
+    # Function-calling NONE does not disable grounding or other native tools.
+    declaration_tools: list[Tool] = [
+        Tool(function_declarations=tool.function_declarations)
+        for tool in generation_config.tools or []
+        if isinstance(tool, Tool) and tool.function_declarations
+    ]
+    # Without declarations, function-calling settings govern nothing and are dropped.
+    function_calling = FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE)
+    tool_config = ToolConfig(function_calling_config=function_calling) if declaration_tools else None
+    # Gemini can emit function calls under NONE and even without declarations; JSON output cannot.
+    # Google documents JSON output beside function calling only for Gemini 3 models. Live Gemini API
+    # runs in September 2026 saw it accepted under NONE by the Gemini 3 and 2.5 models tried.
+    # Accepted risk: models that reject JSON output with declarations, or JSON output at all (reportedly
+    # older Gemini models and Gemma), fail every check closed, the same outcome as a leaked function call.
+    # Vertex AI acceptance beside declarations is unverified, so Vertex gets JSON only without them.
+    json_output = not (vertexai and declaration_tools)
+    # The reply's authored output schema never shapes a decision.
+    return generation_config.model_copy(
+        update={
+            "tools": declaration_tools or None,
+            "tool_config": tool_config,
+            "response_mime_type": "application/json" if json_output else None,
+            "response_schema": None,
+            "response_json_schema": None,
+        },
+    )
 
 
 def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
@@ -534,7 +590,11 @@ def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far."""
+    """What one streamed Gemini reply produced so far.
+
+    ``hosted_tool_ran`` turns true once a chunk shows a native tool (grounding, code execution) at work, after
+    which a failed attempt must not be retried, since the retry would run the tool again.
+    """
 
     content: str = ""
     reasoning: str = ""
@@ -542,10 +602,11 @@ class GeminiReply:
     thought_signature: str | None = None
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
+    hosted_tool_ran: bool = False
 
 
 def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: str) -> list[StreamEvent]:
-    """Add one streamed chunk to ``reply`` and return the events it carries.
+    """Add one streamed chunk (or one whole non-streamed response) to ``reply`` and return the events it carries.
 
     Gemini repeats cumulative usage on every chunk, so only usage on a finished candidate counts.
     """
@@ -557,6 +618,10 @@ def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: 
         msg = f"Generation ended with finish reason: {finish_reason}"
         raise ProviderError(msg, provider=provider, code=MALFORMED_TOOL_CALL)
     parts = candidate.content.parts if candidate.content is not None else None
+    if candidate.grounding_metadata is not None or any(
+        part.executable_code is not None or part.code_execution_result is not None for part in parts or ()
+    ):
+        reply.hosted_tool_ran = True
     events = [event for part in parts or () for event in _read_part(reply, part)]
     if finish_reason is not None:
         reply.finish_reason = finish_reason
@@ -634,4 +699,5 @@ __all__ = [
     "response_schema",
     "stop_reason",
     "tool_config",
+    "without_tool_selection",
 ]

@@ -7,24 +7,17 @@ produce the same request (method, URL, kept headers, JSON body) and the same mes
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.providers.anthropic_family_support import (
-    FAMILIES,
-    FIXTURE_ROOT,
-    expected_parsed,
-    fixture_id,
-    fixture_paths,
-    run_golden,
-)
+from tests.providers.anthropic_family_support import FAMILIES, expected_parsed, run_golden
+from tests.providers.golden_support import FIXTURE_ROOT, expected_stop_reason, golden_id, golden_paths, load_golden
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_FIXTURES = fixture_paths()
+_FIXTURES = golden_paths(FAMILIES)
 
 
 def test_every_claude_route_has_goldens() -> None:
@@ -34,10 +27,11 @@ def test_every_claude_route_has_goldens() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", _FIXTURES, ids=fixture_id)
+@pytest.mark.parametrize("path", _FIXTURES, ids=golden_id)
 async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> None:
     """Replaying a golden's canned reply yields its exact request and parsed reply."""
-    fixture = json.loads(path.read_text(encoding="utf-8"))
-    produced = await run_golden(fixture, tmp_path)
-    assert produced["request"] == fixture["request"]
-    assert produced["parsed"] == expected_parsed(fixture)
+    fixture = load_golden(path)
+    replay = await run_golden(fixture, tmp_path)
+    assert replay.request == fixture["request"]
+    assert replay.parsed == expected_parsed(fixture)
+    assert replay.stop_reason == expected_stop_reason(fixture)

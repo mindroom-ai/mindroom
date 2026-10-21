@@ -3,8 +3,8 @@
 One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
 fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
 resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. Structured output requests, which no caller streams, are sent without streaming as
-before. The only state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
+finished message once. A request with ``stream=False`` is sent as one non-streaming call instead. The only
+state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
 """
 
 from __future__ import annotations
@@ -38,8 +38,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -47,6 +46,7 @@ from mindroom.llm.provider import (
     NativeCompactionReplay,
     ReasoningDelta,
     StreamEvent,
+    StreamProgress,
     TextDelta,
     ToolCallReady,
     TurnCompleted,
@@ -54,12 +54,12 @@ from mindroom.llm.provider import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
     MIN_COMPACTION_THRESHOLD,
     authored_native_compaction_supported,
     compaction_context_management,
-    native_compaction_route,
     native_compaction_supported,
     native_replay_messages_for_route,
     record_native_checkpoint_on,
@@ -67,7 +67,7 @@ from mindroom.providers.anthropic.native_compaction import (
     request_uses_native_checkpoint,
     uses_compaction_edit,
 )
-from mindroom.providers.anthropic.prompt_cache import prepare_request_body
+from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
 from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, parse_claude_settings
 from mindroom.providers.anthropic.wire import (
     OUTPUT_LIMIT_STOP_REASONS,
@@ -82,7 +82,8 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.claude_prompt_cache import native_tool_search_supported
+from mindroom.providers.assistant_turn import one_message_per_result, stamp_finished_turn
+from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -118,7 +119,6 @@ _VERTEX_ENDPOINTS = {
     "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
 }
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-_CONTEXT_WINDOW_MARKERS = ("prompt is too long", "context window", "exceeds the model", "too many tokens")
 
 
 def _canonical_route(provider: str) -> ClaudeRouteKind:
@@ -191,9 +191,9 @@ class ClaudeProvider:
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append each result as its own tool message; the wire formatter merges them into one user turn."""
-        return list(results)
+        return one_message_per_result(messages, results)
 
     def native_compaction_settings(
         self,
@@ -232,8 +232,8 @@ class ClaudeProvider:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
         ``message_start`` reports the input and cache usage as a partial ``UsageReported`` so a stream that
-        stops early still settles what Anthropic bills. A structured-output request is sent without streaming,
-        as every caller drains it whole.
+        stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
+        streaming and yields its usage and finished turn once the response arrives.
         """
         started = time.monotonic()
         messages = await inline_url_media(request.messages, self.http_client)
@@ -242,8 +242,9 @@ class ClaudeProvider:
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
+        server_tool_started = False
         try:
-            if request.response_format is not None:
+            if not request.stream:
                 response = await (
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
@@ -263,8 +264,13 @@ class ClaudeProvider:
                     elif (output := _output_event(event)) is not None:
                         first_output_at = first_output_at or time.monotonic()
                         yield output
+                    elif event.type in _PROVIDER_EVENT_TYPES:
+                        # Block starts, tool-call argument pieces, and server-tool blocks carry no output but
+                        # show the provider is still working; the SDK's own convenience events repeat them.
+                        server_tool_started = server_tool_started or _starts_server_tool(event)
+                        yield StreamProgress()
         except (anthropic.APIError, httpx.TransportError) as error:
-            self._raise_provider_error(error)
+            self._raise_provider_error(error, server_tool_started=server_tool_started)
 
     def _finish(
         self,
@@ -279,14 +285,7 @@ class ClaudeProvider:
             response,
             record_context_management=self.settings.context_management is not None,
         )
-        now = time.monotonic()
-        message.metrics.duration = now - started
-        if first_output_at is not None:
-            message.metrics.time_to_first_token = first_output_at - started
-        message.provider_data = {
-            **(message.provider_data or {}),
-            "mindroom_model": {"id": self.identity.id, "provider": self.identity.provider_name},
-        }
+        stamp_finished_turn(message, self.identity, started=started, first_output_at=first_output_at)
         record_native_checkpoint_on(message, request.native_compaction, checkpoint_prefix=prepared.checkpoint_prefix)
         raw_stop_reason = response.stop_reason
         if raw_stop_reason in OUTPUT_LIMIT_STOP_REASONS:
@@ -358,13 +357,16 @@ class ClaudeProvider:
         *,
         strict_tools: bool,
     ) -> dict[str, Any]:
-        """Return the request parameters beside ``messages``, ``system``, and ``tools``, with the betas they need."""
+        """Return the request parameters beside ``messages``, ``system``, and ``tools``, with the betas they need.
+
+        Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
+        """
         params = self._with_sampling_in_extra_body(self._authored_params(request))
         extra_body = params.get("extra_body") or {}
         context_management = extra_body.get("context_management", params.get("context_management")) or {}
         reject_paused_compaction(context_management)
         betas = list(self.settings.betas or [])
-        if output_format is not None or strict_tools:
+        if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or uses_compaction_edit(context_management):
             betas.append(COMPACTION_BETA)
@@ -391,7 +393,8 @@ class ClaudeProvider:
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
             enable_citations=output_format is None,
         )
-        strict_allowed = self.route == "anthropic"
+        # Vertex rejects the tool-level strict field.
+        strict_allowed = self.route != "vertexai_claude"
         tools = [
             *format_claude_tools(request.tools, strict_allowed=strict_allowed),
             *(dict(tool) for tool in request.native_tools),
@@ -422,7 +425,8 @@ class ClaudeProvider:
         return _PreparedRequest(
             client=self._client(overrides.timeout_seconds, overrides.sdk_max_retries),
             kwargs=body,
-            beta=bool(body.get("betas")) or "context_management" in body,
+            # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
+            beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=request_uses_native_checkpoint(projected, route),
         )
 
@@ -481,42 +485,57 @@ class ClaudeProvider:
             client.project_id = project_id
         return client
 
-    def _raise_provider_error(self, error: Exception) -> NoReturn:
-        """Translate an SDK or transport failure into the shared provider errors."""
+    def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
+        """Translate an SDK or transport failure into the shared provider errors.
+
+        Once a server tool (web search, code execution, tool search) started, a retry would run it again, so the
+        failure is final and carries the code that keeps the media fallback from resending the request.
+        """
         provider = self.identity.provider_name
-        if isinstance(error, anthropic.APIConnectionError):
-            raise ProviderUnavailable(error.message, provider=provider) from error
-        if isinstance(error, anthropic.RateLimitError):
-            raise RateLimited(error.message, provider=provider, status_code=error.status_code) from error
-        if isinstance(error, anthropic.APIStatusError):
-            status = error.status_code
-            if status == 529 or "overloaded_error" in str(error):
-                raise RateLimited(error.message, provider=provider, status_code=status) from error
-            if status in TRANSIENT_PROVIDER_STATUS_CODES:
-                raise ProviderUnavailable(error.message, provider=provider, status_code=status) from error
-            if status == 400 and any(marker in error.message.casefold() for marker in _CONTEXT_WINDOW_MARKERS):
-                raise ContextWindowExceeded(error.message, provider=provider, status_code=status) from error
-            if 400 <= status < 500:
-                raise InvalidRequest(error.message, provider=provider, status_code=status) from error
-            raise ProviderError(error.message, provider=provider, status_code=status) from error
-        if isinstance(error, httpx.TransportError):
-            raise ProviderUnavailable(str(error), provider=provider) from error
-        raise ProviderError(str(error), provider=provider) from error
+        if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
+            mapped: ProviderError = transport_error(error, provider=provider)
+        elif isinstance(error, anthropic.APIStatusError):
+            mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+        else:
+            mapped = ProviderError(str(error), provider=provider)
+        if server_tool_started and mapped.retryable:
+            msg = f"Claude stream failed after a server tool started: {mapped}"
+            raise ProviderError(
+                msg,
+                provider=provider,
+                status_code=mapped.status_code,
+                code=INCOMPLETE_STREAM,
+            ) from error
+        raise mapped from error
+
+
+# Raw API events the SDK forwards; its convenience events (text, thinking, input_json, ...) repeat them.
+_PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop", "message_delta"})
+# Blocks the model produces itself; any other block type is a server tool at work.
+_MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
+
+
+def _starts_server_tool(event: Any) -> bool:  # noqa: ANN401 - SDK stream event
+    """Return whether a ``content_block_start`` opens a block a server-side tool produces."""
+    return event.type == "content_block_start" and event.content_block.type not in _MODEL_BLOCK_TYPES
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:
-    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed."""
+    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed.
+
+    The SDK builds a delta or block of a type it does not know as the first model of its union, keeping the
+    unknown ``type``, so the type decides.
+    """
     if isinstance(event, (RawContentBlockDeltaEvent, BetaRawContentBlockDeltaEvent)):
         delta = event.delta
-        if isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
+        if delta.type == "text_delta" and isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
             return TextDelta(delta.text)
-        if isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
+        if delta.type == "thinking_delta" and isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
             return ReasoningDelta(delta.thinking)
-    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)) and isinstance(
-        event.content_block,
-        (ToolUseBlock, BetaToolUseBlock),
-    ):
-        return ToolCallReady(tool_call_from_block(event.content_block))
+    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)):
+        block = event.content_block
+        if block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
+            return ToolCallReady(tool_call_from_block(block))
     return None
 
 

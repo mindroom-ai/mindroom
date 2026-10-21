@@ -2,7 +2,7 @@
 
 It streams seeded Lorem Ipsum at a fixed rate and occasionally calls the shell tool, so a response replays
 exactly from the seed and the conversation's user messages.
-``synthetic_model.py`` serves the same behavior to the Agno-backed runtime until the owned runtime replaces it.
+``synthetic_model.py`` serves the same plan to the Agno-backed runtime until the owned runtime replaces it.
 """
 
 from __future__ import annotations
@@ -15,9 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 if TYPE_CHECKING:
@@ -25,17 +24,18 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Synthetic"
-_LOREM = (
+LOREM = (
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et "
     "dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex "
     "ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat "
     "nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim "
     "id est laborum. "
 )
-_SHELL_TOOL = "run_shell_command"
+SHELL_TOOL = "run_shell_command"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -69,7 +69,7 @@ class SyntheticSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class _ResponsePlan:
+class ResponsePlan:
     """One conversation's response, split around its shell call when it makes one."""
 
     body: str
@@ -78,31 +78,34 @@ class _ResponsePlan:
 
     @property
     def prefix(self) -> str:
+        """The text streamed before the shell call, or the whole response without one."""
         return self.body if self.split_at is None else self.body[: self.split_at]
 
     @property
     def suffix(self) -> str:
+        """The text the request after the shell result streams; empty without a call."""
         return "" if self.split_at is None else self.body[self.split_at :]
 
 
-def _plan(settings: SyntheticSettings, messages: Sequence[Message], *, shell_available: bool) -> _ResponsePlan:
-    user_history = "\0".join(message.get_content_string() for message in messages if message.role == "user")
-    digest = hashlib.sha256(f"{settings.seed}\0{user_history}".encode()).digest()
+def plan_response(settings: SyntheticSettings, user_history: Sequence[str], *, shell_available: bool) -> ResponsePlan:
+    """Return the response for the seed and the user messages so far; the plan is the same on every replay."""
+    digest = hashlib.sha256(f"{settings.seed}\0{'\0'.join(user_history)}".encode()).digest()
     randomizer = random.Random(int.from_bytes(digest))  # noqa: S311 - replayable synthetic behavior
     response_chars = randomizer.randint(settings.min_response_chars, settings.max_response_chars)
-    body = (_LOREM * ((response_chars // len(_LOREM)) + 1))[:response_chars]
+    body = (LOREM * ((response_chars // len(LOREM)) + 1))[:response_chars]
     if not shell_available or randomizer.random() >= settings.tool_call_probability:
-        return _ResponsePlan(body=body, split_at=None, tool_call_id=None)
-    return _ResponsePlan(
+        return ResponsePlan(body=body, split_at=None, tool_call_id=None)
+    return ResponsePlan(
         body=body,
         split_at=randomizer.randint(1, response_chars - 1),
         tool_call_id=f"synthetic-{digest.hex()[:16]}",
     )
 
 
-def _shell_call(tool_call_id: str) -> dict[str, Any]:
+def shell_call(tool_call_id: str) -> dict[str, Any]:
+    """Return the stored-shape tool call that runs ``echo hi`` through the shell tool."""
     arguments = json.dumps({"args": ["echo", "hi"]}, separators=(",", ":"))
-    return {"id": tool_call_id, "type": "function", "function": {"name": _SHELL_TOOL, "arguments": arguments}}
+    return {"id": tool_call_id, "type": "function", "function": {"name": SHELL_TOOL, "arguments": arguments}}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -115,8 +118,7 @@ class SyntheticProvider:
 
     def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Append one stored message per tool result."""
-        del messages
-        return list(results)
+        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.
@@ -124,8 +126,9 @@ class SyntheticProvider:
         After the shell call's result, the next request streams the rest of the same response.
         """
         settings = self.settings
-        shell_available = request.tool_choice != "none" and any(tool.name == _SHELL_TOOL for tool in request.tools)
-        plan = _plan(settings, request.messages, shell_available=shell_available)
+        shell_available = request.tool_choice != "none" and any(tool.name == SHELL_TOOL for tool in request.tools)
+        user_history = [message.get_content_string() for message in request.messages if message.role == "user"]
+        plan = plan_response(settings, user_history, shell_available=shell_available)
         last_message = request.messages[-1] if request.messages else None
         continuation = (
             plan.tool_call_id is not None
@@ -134,27 +137,25 @@ class SyntheticProvider:
             and last_message.tool_call_id == plan.tool_call_id
         )
         content = plan.suffix if continuation else plan.prefix
-        started = time.perf_counter()
+        started = time.monotonic()
         first_text_at: float | None = None
         for start in range(0, len(content), settings.chunk_chars):
             chunk = content[start : start + settings.chunk_chars]
             if settings.chars_per_second:
                 await asyncio.sleep(len(chunk) / settings.chars_per_second)
             if first_text_at is None:
-                first_text_at = time.perf_counter()
+                first_text_at = time.monotonic()
             yield TextDelta(chunk)
-        tool_calls = [] if continuation or plan.tool_call_id is None else [_shell_call(plan.tool_call_id)]
+        tool_calls = [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
         for call in tool_calls:
             yield ToolCallReady(call)
-        message = Message(
-            role="assistant",
+        message = finished_assistant_message(
+            self.identity,
             content=content or None,
-            tool_calls=tool_calls or None,
-            provider_data={"mindroom_model": {"id": self.identity.id, "provider": _PROVIDER}},
-            metrics=MessageMetrics(
-                duration=time.perf_counter() - started,
-                time_to_first_token=None if first_text_at is None else first_text_at - started,
-            ),
+            tool_calls=tool_calls,
+            usage=None,
+            started=started,
+            first_output_at=first_text_at,
         )
         yield TurnCompleted(message=message, stop_reason="tool_use" if tool_calls else "end")
 
@@ -170,4 +171,13 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Sy
     )
 
 
-__all__ = ["SyntheticProvider", "SyntheticSettings", "build_provider"]
+__all__ = [
+    "LOREM",
+    "SHELL_TOOL",
+    "ResponsePlan",
+    "SyntheticProvider",
+    "SyntheticSettings",
+    "build_provider",
+    "plan_response",
+    "shell_call",
+]

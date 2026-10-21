@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
+    NativeCompactionReplay,
     ReasoningDelta,
     StreamProgress,
     TextDelta,
@@ -19,7 +20,9 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.openai.adapter_common import SDKClients, assistant_message, with_overrides
+from mindroom.native_compaction import native_compaction_route
+from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
@@ -65,9 +68,32 @@ class ResponsesAdapter:
     settings: ResponsesSettings
     clients: SDKClients
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:  # noqa: ARG002
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
         """Responses takes one ``function_call_output`` per result, in order."""
-        return list(results)
+        return one_message_per_result(messages, results)
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str = "",
+        allow_authored: bool = False,
+    ) -> NativeCompactionReplay | None:
+        """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
+
+        Responses has no authored compaction policy MindRoom can replay, so ``allow_authored`` changes nothing;
+        a route without native compaction, or no threshold, runs without it.
+        """
+        del allow_authored
+        if threshold is None or not self.capabilities.native_compaction or self.identity.endpoint is None:
+            return None
+        route = native_compaction_route(
+            provider=self.identity.provider,
+            model_id=self.identity.id,
+            endpoint=self.identity.endpoint,
+            history_generation=history_generation,
+        )
+        return NativeCompactionReplay(route=route, threshold=threshold)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = responses_request_kwargs(
@@ -159,7 +185,7 @@ class ResponsesAdapter:
             first_token = time.monotonic()
             for event in _turn_deltas(parts):
                 yield event
-        message = assistant_message(
+        message = finished_assistant_message(
             self.identity,
             content=parts.content,
             reasoning=parts.reasoning,
@@ -167,7 +193,7 @@ class ResponsesAdapter:
             provider_data=parts.provider_data,
             usage=parts.usage,
             started=started,
-            first_token=first_token,
+            first_output_at=first_token,
         )
         if parts.usage is not None:
             yield UsageReported(message.metrics)

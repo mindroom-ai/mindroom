@@ -88,9 +88,18 @@ class NativeCompactionModel:
         endpoint = self.native_compaction_endpoint()
         if not endpoint:
             return
-        identity = [self.provider, self.id, endpoint, history_generation]
-        route = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        route = native_compaction_route(
+            provider=self.provider,
+            model_id=self.id,
+            endpoint=endpoint,
+            history_generation=history_generation,
+        )
         self.native_compaction = _NativeCompactionSettings(route=route, threshold=threshold)
+
+
+def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
+    """Return the replay route one model, endpoint, and history generation share."""
+    return hashlib.sha256(json.dumps([provider, model_id, endpoint, history_generation]).encode()).hexdigest()
 
 
 def common_native_endpoint(identities: Sequence[str]) -> str:

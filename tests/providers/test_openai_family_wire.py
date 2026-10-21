@@ -20,6 +20,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -522,6 +523,34 @@ async def test_native_compaction_replays_without_storage_and_records_its_route(t
     assert turn.message.provider_data["mindroom_response_stored"] is False
 
 
+def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path: Path) -> None:
+    """The Responses adapter answers the history planner like the Claude one: a route hash, or None without support."""
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(_completed()))
+    adapter = built.adapter
+    assert isinstance(adapter, ResponsesAdapter)
+
+    settings = adapter.native_compaction_settings(threshold=60_000, history_generation="gen-2")
+
+    assert settings == NativeCompactionReplay(
+        route=native_compaction_route(
+            provider="OpenAI",
+            model_id="gpt-6-astra",
+            endpoint="https://api.openai.com/v1",
+            history_generation="gen-2",
+        ),
+        threshold=60_000,
+    )
+    assert adapter.native_compaction_settings(threshold=None, allow_authored=True) is None
+    (tmp_path / "proxy").mkdir()
+    proxied = _Built(
+        tmp_path / "proxy",
+        {**_OPENAI_RESPONSES, "extra_kwargs": {"base_url": "https://proxy.example/v1"}},
+        _responses_reply(_completed()),
+    ).adapter
+    assert isinstance(proxied, ResponsesAdapter)
+    assert proxied.native_compaction_settings(threshold=60_000) is None
+
+
 # --- Request settings -----------------------------------------------------------------------------------------
 
 
@@ -540,6 +569,40 @@ async def test_request_overrides_reach_the_body(tmp_path: Path) -> None:
 
     body = built.body()
     assert (body["temperature"], body["max_completion_tokens"]) == (0.2, 64)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "configured", "sent"),
+    [
+        ({**_OPENAI_CHAT, "id": "gpt-4.1", "extra_kwargs": {"max_tokens": 10}}, "max_tokens", "max_completion_tokens"),
+        (
+            {
+                "provider": "openrouter",
+                "id": "z-ai/glm-5.3",
+                "api_key": "k",
+                "extra_kwargs": {"max_completion_tokens": 10},
+            },
+            "max_completion_tokens",
+            "max_tokens",
+        ),
+    ],
+    ids=["openai", "openrouter"],
+)
+async def test_output_limit_override_replaces_the_configured_limit_field(
+    tmp_path: Path,
+    config: dict[str, Any],
+    configured: str,
+    sent: str,
+) -> None:
+    """A request never carries both limit names: the override replaces whichever the config set."""
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(max_output_tokens=64)))
+
+    body = built.body()
+    assert body[sent] == 64
+    assert configured not in body
 
 
 @pytest.mark.asyncio

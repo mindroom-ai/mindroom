@@ -6,6 +6,9 @@ from __future__ import annotations
 # Gemini's MALFORMED_FUNCTION_CALL; the loop answers it with one guidance retry, and the media fallback
 # never strips media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
+# The ``ProviderError.code`` of a stream that failed after the attempt exposed output or a hosted tool ran: a retry
+# could duplicate output or rerun the tool, so the error is final and the media fallback never resends the request.
+INCOMPLETE_STREAM = "incomplete_stream"
 
 
 class ProviderError(Exception):
@@ -70,6 +73,7 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
 
 
 __all__ = [
+    "INCOMPLETE_STREAM",
     "MALFORMED_TOOL_CALL",
     "ContextWindowExceeded",
     "InvalidRequest",

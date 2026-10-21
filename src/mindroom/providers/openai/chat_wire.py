@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
+from mindroom.providers.assistant_turn import split_thinking
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -201,12 +202,9 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
     """Return the function definition OpenAI-family wires send, in the shape of Agno's ``Function.to_dict()``."""
-    definition: dict[str, Any] = {
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": deepcopy(dict(tool.parameters)),
-    }
+    definition: dict[str, Any] = {"name": tool.name, "parameters": deepcopy(dict(tool.parameters))}
     flags = {
+        "description": tool.description,
         "strict": tool.strict,
         "requires_confirmation": tool.requires_confirmation,
         "external_execution": tool.external_execution,
@@ -229,12 +227,13 @@ def _chat_tools(
     """Return tool definitions sorted by name, the order every cached prompt prefix depends on."""
     formatted: list[dict[str, Any]]
     if wire.dialect == "cerebras":
+        # Cerebras takes the function shape without Agno's approval flags or strict; None is left out.
         formatted = [
             {
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    **({} if tool.description is None else {"description": tool.description}),
                     "parameters": deepcopy(dict(tool.parameters)),
                 },
             }
@@ -577,16 +576,6 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
             target[key] = value
 
 
-def _extract_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a non-streamed reply; a missing opening tag means it starts the reply."""
-    if "</think>" not in content:
-        return None, content
-    end = content.find("</think>")
-    start = content.find("<think>")
-    reasoning = content[:end] if start == -1 else content[start + len("<think>") : end]
-    return reasoning.strip(), content[end + len("</think>") :].strip()
-
-
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Give id-less calls (local servers) a generated id, as Agno's loop did."""
     for call in calls:
@@ -741,7 +730,7 @@ def parse_chat_completion(completion: ChatCompletion, wire: ChatWire) -> ChatTur
     if wire.dialect != "openai":
         return parts
     if parts.content:
-        reasoning, parts.content = _extract_thinking(parts.content)
+        reasoning, parts.content = split_thinking(parts.content)
         parts.reasoning = reasoning or None
     message_extra = _extra(message)
     if isinstance(reasoning_field := _reasoning_field(message_extra), str):
