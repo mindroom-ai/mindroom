@@ -144,7 +144,7 @@ List items take and return column values keyed by each column's internal name, w
 A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
 A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
 Site addresses must be the site itself, without a page, list, or library path after it.
-Pages lose their images, embedded documents, and other web parts that are not text.
+Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
 Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
 
 ## Mail

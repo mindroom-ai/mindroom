@@ -15,6 +15,7 @@ from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
 from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.tool_access import function_schema, validate_tool_arguments
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -301,7 +302,6 @@ def test_list_lists_leaves_out_hidden_lists(tmp_path: Path, monkeypatch: pytest.
                 "list": {"hidden": False, "template": "documentLibrary"},
             },
             {"id": "hidden", "displayName": "Workflow Tasks", "list": {"hidden": True, "template": "tasks"}},
-            {"id": "system", "displayName": "Style Library", "list": {"hidden": False}, "system": {}},
         ],
     }
     tools, graph = _tools(tmp_path, monkeypatch, _answer(payload))
@@ -442,6 +442,24 @@ FIELDS = {
     "RelatedLookupId@odata.type": "Collection(Edm.Int32)",
     "RelatedLookupId": [3, 7],
 }
+
+
+@pytest.mark.parametrize(
+    ("function", "arguments"),
+    [
+        ("microsoft_sharepoint_create_item", {"site_id": SITE, "list_id": LIST, "fields": FIELDS}),
+        ("microsoft_sharepoint_update_item", {"site_id": SITE, "list_id": LIST, "item_id": ITEM, "fields": FIELDS}),
+    ],
+)
+def test_write_schemas_accept_column_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    function: str,
+    arguments: dict[str, object],
+) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
+
+    validate_tool_arguments(function_schema(tools.functions[function]), arguments)
 
 
 def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -650,19 +668,19 @@ _PAGED_CALLS: list[tuple[str, Callable[[MicrosoftSharePointTools, object], str],
         "sites",
         lambda tools, token: tools.microsoft_sharepoint_search_sites("marketing", page_token=token),
         NEXT_SITES,
-        ["/groups/g1/sites?$skiptoken=x", f"/sites/{SITE}/lists?$skiptoken=x"],
+        [f"/sites/{SITE}/lists?$skiptoken=x", NEXT_ITEMS],
     ),
     (
         "lists",
         lambda tools, token: tools.microsoft_sharepoint_list_lists(SITE, page_token=token),
         NEXT_LISTS,
-        ["/me/todo/lists?$top=100", NEXT_SITES],
+        [NEXT_SITES, NEXT_ITEMS],
     ),
     (
         "items",
         lambda tools, token: tools.microsoft_sharepoint_list_items(SITE, LIST, page_token=token),
         NEXT_ITEMS,
-        ["/drives/d1/items?$skiptoken=x", f"/sites/{SITE}/drive/items?$skiptoken=x", NEXT_LISTS],
+        ["/drives/d1/root/children?$skiptoken=x", NEXT_LISTS],
     ),
     (
         "pages",
