@@ -12,14 +12,13 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.knowledge.embedder.base import Embedder
 
 from mindroom.knowledge import collections, read_process, registry
 from mindroom.knowledge.collections import (
     CollectionSpace,
-    build_vector_db,
     candidate_collection_name,
     cleanup_superseded_collections,
+    open_collection,
 )
 from mindroom.knowledge.index_metadata import (
     load_published_index_state,
@@ -56,7 +55,7 @@ def publication(
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=paths)
-    space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key), Embedder)
+    space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key))
     collection = _publish(space, key, "original")
     state = state_for_publication(
         settings=key.indexing_settings,
@@ -73,8 +72,8 @@ def publication(
 
 def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: str) -> str:
     name = candidate_collection_name(space)
-    with closing(build_vector_db(space, name)) as vector_db:
-        collection = vector_db.client.create_collection(name)
+    with closing(open_collection(space, name)) as handle:
+        collection = handle.client.create_collection(name)
         collection.add(ids=[content], embeddings=[[1.0, 0.0]], documents=[content])
         save_published_index_state(
             registry.published_index_metadata_path(key),
@@ -86,7 +85,7 @@ def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: s
                 published_revision=None,
             ),
         )
-        cleanup_superseded_collections(space, vector_db=vector_db, preserved=frozenset({name}))
+        cleanup_superseded_collections(space, client=handle.client, preserved=frozenset({name}))
     return name
 
 
@@ -327,10 +326,10 @@ if len(sys.argv) > 1 and sys.argv[1] == "worker":
     class BlockedNative:
         def __init__(self, **kwargs): pass
         def close(self): pass
-        def search(self, **kwargs):
+        def collection(self):
             pid_path.write_text(str(os.getpid()))
             ctypes.PyDLL(None).pause()
-    read_worker._PublishedChromaDb = BlockedNative
+    read_worker.KnowledgeCollection = BlockedNative
     read_worker._main()
 elif len(sys.argv) > 1 and sys.argv[1] == "parent":
     from mindroom.knowledge import read_process

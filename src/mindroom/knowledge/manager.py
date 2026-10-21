@@ -32,6 +32,12 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
 )
+from mindroom.embeddings.batching import (
+    DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
+    DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
+    BatchPrefetchEmbedder,
+    plan_embedding_batches,
+)
 from mindroom.embeddings.errors import (
     classified_embedder_error,
     embedder_failure_is_transient,
@@ -48,7 +54,6 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
-from mindroom.knowledge.chroma_client import ChromaDb
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
     SOURCE_DIGEST_KEY,
@@ -57,22 +62,15 @@ from mindroom.knowledge.collections import (
     SOURCE_SIZE_KEY,
     VECTOR_VERIFY_BATCH,
     CollectionSpace,
-    build_knowledge,
-    build_vector_db,
+    KnowledgeChunk,
     candidate_collection_name,
     cleanup_superseded_collections,
-    collection_has_source_path,
     delete_collection,
     delete_source_path_vectors,
+    open_collection,
     paths_with_vectors,
-    require_chroma_vector_db,
-    reset_vector_db,
-)
-from mindroom.knowledge.embedding_batch import (
-    DEFAULT_MAX_EMBEDDING_BATCH_ITEMS,
-    DEFAULT_MAX_EMBEDDING_BATCH_PAYLOAD_BYTES,
-    BatchPrefetchEmbedder,
-    plan_embedding_batches,
+    reset_collection,
+    write_source_rows,
 )
 from mindroom.knowledge.file_listing import (
     git_tracked_relative_paths_from_checkout,
@@ -97,18 +95,17 @@ from mindroom.knowledge.indexing_config import (
 )
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
-from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge as Knowledge
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import MAX_READ_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 
-    from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
     from chromadb.api.types import Embeddings, Metadata
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.chroma_client import KnowledgeCollection
 
 logger = get_logger(__name__)
 
@@ -136,10 +133,10 @@ class _FallbackAwareJSONReader(JSONReader):
 class _InMemoryTextReader(TextReader):
     """Read the malformed JSON text already retained by its parse error.
 
-    Only ``read`` is overridden, because indexing goes through the synchronous
-    ``Knowledge.insert`` path. ``TextReader.async_read`` does not delegate to
-    ``read``, so anything switching this to ``Knowledge.ainsert`` must override
-    it too or it will re-read the source instead of serving the retained text.
+    Only ``read`` is overridden, because indexing reads synchronously on a
+    worker thread. ``TextReader.async_read`` does not delegate to ``read``, so
+    anything switching to it must override it too or it will re-read the
+    source instead of serving the retained text.
     """
 
     def __init__(self, source_text: str) -> None:
@@ -157,7 +154,6 @@ class _InMemoryTextReader(TextReader):
         return self.chunk_document(document)
 
 
-_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05)
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
@@ -220,9 +216,8 @@ class _CandidateRun:
     """One refresh's live view of the durable candidate it is advancing."""
 
     checkpoint: CandidateCheckpoint
-    knowledge: Knowledge
-    vector_db: ChromaDb
-    embedder: BatchPrefetchEmbedder | None
+    collection: KnowledgeCollection
+    embedder: BatchPrefetchEmbedder
     #: Revision the candidate's file signatures describe, when known.
     baseline_revision: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
@@ -246,8 +241,7 @@ class _OpenedCandidate:
     """One candidate collection made ready for a refresh to advance."""
 
     checkpoint: CandidateCheckpoint
-    knowledge: Knowledge
-    vector_db: ChromaDb
+    collection: KnowledgeCollection
     reused: dict[str, FileSignature] = field(default_factory=dict)
     resumed: bool = False
 
@@ -423,6 +417,36 @@ def _knowledge_source_snapshot(file_path: Path) -> Iterator[Path]:
         yield snapshot
 
 
+def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
+    """Turn the documents an Agno reader produced into owned chunks; reader output crosses into MindRoom only here."""
+    return [
+        KnowledgeChunk(text=document.content, name=document.name, metadata=dict(document.meta_data))
+        for document in documents
+    ]
+
+
+def _write_file_rows(
+    collection: KnowledgeCollection,
+    embedder: BatchPrefetchEmbedder,
+    *,
+    snapshot: Path,
+    reader: Reader,
+    relative_path: str,
+    source_metadata: Mapping[str, object],
+) -> int:
+    """Read one file snapshot, embed its chunks as documents, and replace the file's rows; return the row count."""
+    chunks = _knowledge_chunks(reader.read(snapshot, name=snapshot.name))
+    vectors = embedder.embed_documents([chunk.text for chunk in chunks])
+    write_source_rows(
+        collection,
+        relative_path=relative_path,
+        source_metadata=source_metadata,
+        chunks=chunks,
+        vectors=vectors,
+    )
+    return len(chunks)
+
+
 def _knowledge_source_signature(
     config: Config,
     base_id: str,
@@ -510,7 +534,8 @@ class KnowledgeManager:
     _base_storage_path: Path = field(init=False)
     _indexing_settings_path: Path = field(init=False)
     _collections: CollectionSpace = field(init=False, repr=False)
-    _knowledge: Knowledge = field(init=False)
+    #: The collection this manager last published or found published; None for a base without semantic search.
+    _published_collection: KnowledgeCollection | None = field(default=None, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _last_refresh_error: str | None = field(default=None, init=False)
     _last_file_index_error: str | None = field(default=None, init=False)
@@ -555,19 +580,10 @@ class KnowledgeManager:
             base_id=self.base_id,
             knowledge_path=self.knowledge_path,
             storage_path=self._base_storage_path,
-            # A factory, not an embedder: this runs for every base, including
-            # non-semantic ones that never open a collection, and a status read
-            # must construct no embedder at all. Deferring puts the cost only
-            # where a handle is really built -- for a cleanup sweep, once per
-            # collection it actually deletes, and nothing when it deletes none.
-            embedder_factory=lambda: BatchPrefetchEmbedder(
-                inner=create_configured_embedder(self.config, self.runtime_paths),
-            ),
         )
         persisted_state = load_published_index_state(self._indexing_settings_path)
         if not _semantic_indexing_enabled(self.config, self.base_id):
             self._persisted_collection_missing_on_init = False
-            self._knowledge = Knowledge()
             return
         self._persisted_collection_missing_on_init = self._persisted_collection_missing(persisted_state)
         collection_name = (
@@ -579,7 +595,7 @@ class KnowledgeManager:
             )
             else self._collections.default_collection
         )
-        self._knowledge = build_knowledge(self._collections, collection_name)
+        self._published_collection = open_collection(self._collections, collection_name)
 
     def _set_settings(
         self,
@@ -626,8 +642,7 @@ class KnowledgeManager:
             return True
 
     def _has_existing_index(self) -> bool:
-        vector_db = self._knowledge.vector_db
-        return isinstance(vector_db, ChromaDb) and vector_db.exists()
+        return self._published_collection is not None and self._published_collection.exists()
 
     def needs_full_reindex_on_create(self) -> bool:
         """Return whether persisted metadata forces a full rebuild for this base."""
@@ -671,40 +686,6 @@ class KnowledgeManager:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
-    def _has_vectors_for_source_path(
-        self,
-        relative_path: str,
-        *,
-        knowledge: Knowledge,
-    ) -> bool:
-        vector_db = knowledge.vector_db
-        if not isinstance(vector_db, ChromaDb):
-            return True
-        if not vector_db.exists():
-            return False
-
-        collection = vector_db.client.get_collection(name=vector_db.collection_name)
-        return collection_has_source_path(collection, relative_path)
-
-    async def _wait_for_source_vectors(
-        self,
-        relative_path: str,
-        *,
-        knowledge: Knowledge,
-    ) -> bool:
-        """Retry post-insert visibility checks to tolerate brief vector-store lag."""
-        for attempt, delay_seconds in enumerate(_POST_INDEX_VECTOR_VISIBILITY_RETRY_DELAYS_SECONDS):
-            if attempt > 0:
-                await asyncio.sleep(delay_seconds)
-            has_vectors = await asyncio.to_thread(
-                self._has_vectors_for_source_path,
-                relative_path,
-                knowledge=knowledge,
-            )
-            if has_vectors:
-                return True
-        return False
-
     def _chunking_strategy(self) -> SafeFixedSizeChunking:
         """Build the chunking strategy every text-like read of this base uses."""
         base_config = self.config.get_knowledge_base_config(self.base_id)
@@ -738,25 +719,25 @@ class KnowledgeManager:
 
         return self._configure_text_reader(deepcopy(reader))
 
-    async def _insert_with_malformed_json_fallback(
+    async def _write_with_malformed_json_fallback(
         self,
-        insert: Callable[[Reader], Awaitable[None]],
+        write: Callable[[Reader], Awaitable[int]],
         *,
         relative_path: str,
         reader: Reader,
-    ) -> None:
-        """Insert through the selected reader, falling back only for malformed source JSON."""
+    ) -> int:
+        """Write through the selected reader, falling back only for malformed source JSON; return the row count."""
 
-        async def _insert_with_retry(selected_reader: Reader) -> None:
-            await run_with_embedding_retry(
-                partial(insert, selected_reader),
+        async def _write_with_retry(selected_reader: Reader) -> int:
+            return await run_with_embedding_retry(
+                partial(write, selected_reader),
                 policy=_EMBEDDING_RETRY_POLICY,
                 sleep=_EMBEDDING_RETRY_SLEEP,
                 on_retry=self._record_embedding_retry,
             )
 
         try:
-            await _insert_with_retry(reader)
+            return await _write_with_retry(reader)
         except _MalformedJSONSourceError as error:
             logger.warning(
                 "Malformed JSON knowledge file; indexing as text",
@@ -766,19 +747,19 @@ class KnowledgeManager:
                 column=error.column,
             )
             fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
-            await _insert_with_retry(fallback_reader)
+            return await _write_with_retry(fallback_reader)
 
     async def _save_candidate_publish_metadata(
         self,
         *,
-        candidate_vector_db: ChromaDb,
+        candidate_collection: str,
         indexed_count: int,
         source_signature: str,
         published_revision: str | None,
     ) -> bool:
         state = state_for_publication(
             settings=self._indexing_settings,
-            collection=candidate_vector_db.collection_name,
+            collection=candidate_collection,
             indexed_count=indexed_count,
             source_signature=source_signature,
             published_revision=published_revision,
@@ -799,24 +780,22 @@ class KnowledgeManager:
     async def _publish_candidate_after_metadata_save(
         self,
         *,
-        candidate_vector_db: ChromaDb,
+        candidate: KnowledgeCollection,
         indexed_count: int,
         source_signature: str,
         published_revision: str | None,
         publish_state: _CandidatePublishState,
     ) -> None:
         publish_cancelled = await self._save_candidate_publish_metadata(
-            candidate_vector_db=candidate_vector_db,
+            candidate_collection=candidate.name,
             indexed_count=indexed_count,
             source_signature=source_signature,
             published_revision=published_revision,
         )
         publish_state.index_published = True
-        # Adopt the candidate as this manager's live vector database:
-        # `cleanup_superseded_collections` runs right after publish and is handed
-        # `self._knowledge.vector_db` as the Chroma client it lists with, so the
-        # adoption has to land before that call reads the attribute.
-        self._knowledge.vector_db = candidate_vector_db
+        # Adopt the candidate as this manager's published collection before a
+        # cancellation can surface, because the metadata already names it.
+        self._published_collection = candidate
         if publish_cancelled:
             _raise_cancelled()
 
@@ -824,8 +803,8 @@ class KnowledgeManager:
         self,
         resolved_path: Path,
         *,
-        upsert: bool,
-        knowledge: Knowledge,
+        collection: KnowledgeCollection,
+        embedder: BatchPrefetchEmbedder,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         """Index one file while the caller owns the operation lock, reading it once into a private snapshot."""
@@ -834,8 +813,8 @@ class KnowledgeManager:
             return await self._index_snapshot_locked(
                 resolved_path,
                 snapshot_dir / resolved_path.name,
-                upsert=upsert,
-                knowledge=knowledge,
+                collection=collection,
+                embedder=embedder,
                 indexed_signatures=indexed_signatures,
             )
         finally:
@@ -846,13 +825,13 @@ class KnowledgeManager:
         resolved_path: Path,
         snapshot: Path,
         *,
-        upsert: bool,
-        knowledge: Knowledge,
+        collection: KnowledgeCollection,
+        embedder: BatchPrefetchEmbedder,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
         relative_path = self._relative_path(resolved_path)
         source_mtime_ns, source_size, source_digest = await asyncio.to_thread(_file_signature, resolved_path, snapshot)
-        metadata = {
+        source_metadata = {
             SOURCE_PATH_KEY: relative_path,
             SOURCE_MTIME_NS_KEY: source_mtime_ns,
             SOURCE_SIZE_KEY: source_size,
@@ -870,29 +849,26 @@ class KnowledgeManager:
             )
             return False
 
-        async def _insert_once(selected_reader: Reader) -> None:
-            if upsert:
-                # Agno/Chroma upsert keys by content hash, so stale chunks from an older
-                # version of the same file can remain unless we clear by source metadata first.
-                await asyncio.to_thread(knowledge.remove_vectors_by_metadata, {SOURCE_PATH_KEY: relative_path})
-            # Knowledge.ainsert still reads and chunks the file synchronously and
-            # embeds chunk by chunk on the running event loop. Use the sync insert
-            # API via asyncio.to_thread so reading, embedding, and the vector
-            # database write all run on a worker thread and the loop stays
-            # responsive to Matrix sync, tool calls, and cache writes.
-            await asyncio.to_thread(
-                knowledge.insert,
-                path=str(snapshot),
-                metadata=metadata,
-                upsert=upsert,
+        async def _write_once(selected_reader: Reader) -> int:
+            # Reading, embedding, and the vector store write all run on a
+            # worker thread, so the loop stays responsive to Matrix sync, tool
+            # calls, and cache writes.
+            return await asyncio.to_thread(
+                _write_file_rows,
+                collection,
+                embedder,
+                snapshot=snapshot,
                 reader=selected_reader,
+                relative_path=relative_path,
+                source_metadata=source_metadata,
             )
 
         try:
-            # Remove-then-insert is idempotent, so a transient embedding fault
-            # costs one retry of this file instead of the whole refresh.
-            await self._insert_with_malformed_json_fallback(
-                _insert_once,
+            # A file's rows are replaced only after all of its chunks embedded,
+            # so a transient embedding fault costs one retry of this file
+            # instead of the whole refresh.
+            written = await self._write_with_malformed_json_fallback(
+                _write_once,
                 relative_path=relative_path,
                 reader=reader,
             )
@@ -906,11 +882,7 @@ class KnowledgeManager:
             logger.exception("Failed to index knowledge file", base_id=self.base_id, path=str(resolved_path))
             return False
 
-        has_vectors = await self._wait_for_source_vectors(
-            relative_path,
-            knowledge=knowledge,
-        )
-        if not has_vectors:
+        if not written:
             return self._handle_vectorless_file(
                 relative_path,
                 (source_mtime_ns, source_size, source_digest),
@@ -932,7 +904,7 @@ class KnowledgeManager:
         *,
         indexed_signatures: dict[str, FileSignature],
     ) -> bool:
-        """Record one insert that produced no vectors; success only for empty sources."""
+        """Record one file that produced no vectors; success only for empty sources."""
         source_size = signature[1]
         if source_size == 0:
             indexed_signatures[relative_path] = signature
@@ -1098,10 +1070,10 @@ class KnowledgeManager:
         self,
         files: list[Path],
         *,
-        knowledge: Knowledge,
+        collection: KnowledgeCollection,
+        embedder: BatchPrefetchEmbedder,
         indexed_signatures: dict[str, FileSignature],
         vanished_files: set[str],
-        embedder: BatchPrefetchEmbedder | None = None,
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
         on_batch_complete: Callable[[Sequence[Path]], Awaitable[None]] | None = None,
     ) -> int:
@@ -1117,14 +1089,14 @@ class KnowledgeManager:
 
         indexed_count = 0
         for batch in _iter_file_batches(files, _INDEX_FILES_PER_BATCH):
-            if embedder is not None:
-                try:
-                    await self._prefetch_batch_embeddings(embedder, batch)
-                except _PermanentEmbeddingError:
-                    return indexed_count
+            try:
+                await self._prefetch_batch_embeddings(embedder, batch)
+            except _PermanentEmbeddingError:
+                return indexed_count
             indexed_count += await self._index_file_batch(
                 batch,
-                knowledge=knowledge,
+                collection=collection,
+                embedder=embedder,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
                 on_file_result=on_file_result,
@@ -1136,10 +1108,9 @@ class KnowledgeManager:
                     detail=self._global_embedder_failure,
                 )
                 return indexed_count
-            if embedder is not None:
-                # Prefetched vectors are only useful for the batch that planned
-                # them; dropping them keeps peak memory independent of corpus size.
-                embedder.clear_cache()
+            # Prefetched vectors are only useful for the batch that planned
+            # them; dropping them keeps peak memory independent of corpus size.
+            embedder.clear_cache()
             if on_batch_complete is not None:
                 await on_batch_complete(batch)
         return indexed_count
@@ -1148,15 +1119,16 @@ class KnowledgeManager:
         self,
         file_path: Path,
         *,
-        knowledge: Knowledge,
+        collection: KnowledgeCollection,
+        embedder: BatchPrefetchEmbedder,
         indexed_signatures: dict[str, FileSignature],
         vanished_files: set[str],
     ) -> bool:
         try:
             return await self._index_file_locked(
                 file_path,
-                upsert=True,
-                knowledge=knowledge,
+                collection=collection,
+                embedder=embedder,
                 indexed_signatures=indexed_signatures,
             )
         except (FileNotFoundError, ValueError):
@@ -1179,7 +1151,8 @@ class KnowledgeManager:
         self,
         batch: Sequence[Path],
         *,
-        knowledge: Knowledge,
+        collection: KnowledgeCollection,
+        embedder: BatchPrefetchEmbedder,
         indexed_signatures: dict[str, FileSignature],
         vanished_files: set[str],
         on_file_result: Callable[[Path], Awaitable[None]] | None = None,
@@ -1191,7 +1164,8 @@ class KnowledgeManager:
                 return False
             indexed = await self._index_file_or_skip_vanished(
                 file_path,
-                knowledge=knowledge,
+                collection=collection,
+                embedder=embedder,
                 indexed_signatures=indexed_signatures,
                 vanished_files=vanished_files,
             )
@@ -1244,7 +1218,7 @@ class KnowledgeManager:
         missing: set[str] = set()
         for start in range(0, len(verifiable), VECTOR_VERIFY_BATCH):
             batch = verifiable[start : start + VECTOR_VERIFY_BATCH]
-            found = await asyncio.to_thread(paths_with_vectors, run.vector_db, batch)
+            found = await asyncio.to_thread(paths_with_vectors, run.collection, batch)
             missing.update(set(batch) - found)
             run.verified.update(found)
         return missing
@@ -1253,7 +1227,7 @@ class KnowledgeManager:
         self,
         *,
         published_collection: str,
-        candidate_vector_db: ChromaDb,
+        candidate: KnowledgeCollection,
         managed_paths: frozenset[str],
     ) -> dict[str, FileSignature]:
         """Copy stored chunks for currently-managed paths into the candidate.
@@ -1272,9 +1246,8 @@ class KnowledgeManager:
         Returns the signature published for each path that actually received
         rows, so a path the published index cannot serve is never claimed.
         """
-        client = candidate_vector_db.client
-        published = client.get_collection(name=published_collection)
-        candidate = client.get_collection(name=candidate_vector_db.collection_name)
+        published = candidate.client.get_collection(name=published_collection)
+        candidate_rows = candidate.collection()
         reused: dict[str, FileSignature] = {}
         offset = 0
         while True:
@@ -1303,7 +1276,7 @@ class KnowledgeManager:
                 reused[relative_path] = signature
                 kept.append(index)
             if kept:
-                candidate.add(
+                candidate_rows.add(
                     ids=[ids[index] for index in kept],
                     embeddings=[embeddings[index] for index in kept],
                     documents=[documents[index] for index in kept],
@@ -1338,7 +1311,7 @@ class KnowledgeManager:
     async def _seed_candidate_from_published(
         self,
         *,
-        candidate_vector_db: ChromaDb,
+        candidate: KnowledgeCollection,
         published_collection: str,
     ) -> dict[str, FileSignature]:
         """Start a fresh candidate from the published index instead of from zero.
@@ -1359,7 +1332,7 @@ class KnowledgeManager:
                 asyncio.to_thread(
                     self._copy_published_vectors,
                     published_collection=published_collection,
-                    candidate_vector_db=candidate_vector_db,
+                    candidate=candidate,
                     managed_paths=managed_paths,
                 ),
             )
@@ -1373,23 +1346,18 @@ class KnowledgeManager:
                 collection=published_collection,
                 exc_info=True,
             )
-            await asyncio.to_thread(reset_vector_db, candidate_vector_db)
+            await asyncio.to_thread(reset_collection, candidate)
             return {}
         logger.info(
             "Reused published knowledge vectors in a new candidate",
             base_id=self.base_id,
-            collection=candidate_vector_db.collection_name,
+            collection=candidate.name,
             reused_files=len(reused),
             managed_files=len(managed_paths),
         )
         return reused
 
-    def _candidate_holds_unclaimed_rows(
-        self,
-        checkpoint: CandidateCheckpoint,
-        *,
-        embedder: Embedder,
-    ) -> bool:
+    def _candidate_holds_unclaimed_rows(self, checkpoint: CandidateCheckpoint) -> bool:
         """Return whether an interrupted bulk copy is visible from candidate shape.
 
         The published-vector copy writes many paths before recording any claim,
@@ -1399,27 +1367,20 @@ class KnowledgeManager:
         immediately after its rows land, so its pre-existing unclaimed window is
         bounded by the in-flight file rather than the whole copied corpus.
         """
-        vector_db = build_vector_db(self._collections, checkpoint.collection, embedder=embedder)
-        with closing(vector_db):
-            if not vector_db.exists():
+        collection = open_collection(self._collections, checkpoint.collection)
+        with closing(collection):
+            if not collection.exists():
                 return False
-            collection = vector_db.client.get_collection(name=vector_db.collection_name)
-            has_rows = bool(collection.get(limit=1, include=[])["ids"])
+            has_rows = bool(collection.collection().get(limit=1, include=[])["ids"])
             return not checkpoint.completed and has_rows
 
     async def _inspect_candidate_shape(
         self,
         checkpoint: CandidateCheckpoint,
-        *,
-        embedder: Embedder,
     ) -> tuple[CandidateCheckpoint | None, bool]:
         """Return candidate shape, retiring an unreadable unpublished index."""
         try:
-            holds_unclaimed_rows = await asyncio.to_thread(
-                self._candidate_holds_unclaimed_rows,
-                checkpoint,
-                embedder=embedder,
-            )
+            holds_unclaimed_rows = await asyncio.to_thread(self._candidate_holds_unclaimed_rows, checkpoint)
         except InternalError as inspection_error:
             error_detail = str(inspection_error).lower()
             if not any(
@@ -1457,15 +1418,13 @@ class KnowledgeManager:
         self,
         checkpoint: CandidateCheckpoint,
         *,
-        embedder: BatchPrefetchEmbedder,
         published_collection: str | None,
     ) -> _OpenedCandidate:
         """Empty one candidate collection, seeding it when a copy source is given.
 
         Two orderings are load-bearing. The checkpoint names the collection
-        before ``Knowledge`` is built, because Agno creates a missing collection
-        on construction and a crash must never strand a collection nothing
-        references. And the copy's claims are recorded in one write after the
+        before the collection is created, because a crash must never strand a
+        collection nothing references. And the copy's claims are recorded in one write after the
         last row lands, never per page, because a file's chunks can span pages
         and a claim covering only some of them would publish a silently
         truncated file.
@@ -1480,13 +1439,12 @@ class KnowledgeManager:
             self._base_storage_path,
             replace(checkpoint, completed={}, failed={}),
         )
-        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
-        vector_db = require_chroma_vector_db(knowledge)
-        await asyncio.to_thread(reset_vector_db, vector_db)
+        collection = open_collection(self._collections, checkpoint.collection)
+        await asyncio.to_thread(reset_collection, collection)
         if published_collection is None:
-            return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db)
+            return _OpenedCandidate(checkpoint=checkpoint, collection=collection)
         reused = await self._seed_candidate_from_published(
-            candidate_vector_db=vector_db,
+            candidate=collection,
             published_collection=published_collection,
         )
         if reused:
@@ -1497,20 +1455,10 @@ class KnowledgeManager:
                     replace(checkpoint, completed=reused),
                 ),
             )
-        return _OpenedCandidate(checkpoint=checkpoint, knowledge=knowledge, vector_db=vector_db, reused=reused)
+        return _OpenedCandidate(checkpoint=checkpoint, collection=collection, reused=reused)
 
-    async def _resume_candidate_collection(
-        self,
-        checkpoint: CandidateCheckpoint,
-        *,
-        embedder: BatchPrefetchEmbedder,
-    ) -> _OpenedCandidate:
-        """Continue a candidate whose recorded work is still backed by its collection.
-
-        Probe before building ``Knowledge`` because Agno creates a missing
-        collection on construction, after which an existence check always
-        answers yes.
-        """
+    async def _resume_candidate_collection(self, checkpoint: CandidateCheckpoint) -> _OpenedCandidate:
+        """Continue a candidate whose recorded work is still backed by its collection."""
         if not await asyncio.to_thread(
             chroma_collection_exists,
             self._base_storage_path,
@@ -1523,12 +1471,10 @@ class KnowledgeManager:
             )
             # Rebuilt without a copy: whatever lost this collection may equally
             # have damaged the published one, and a full rebuild is the safe repair.
-            return await self._rebuild_candidate_collection(checkpoint, embedder=embedder, published_collection=None)
-        knowledge = build_knowledge(self._collections, checkpoint.collection, embedder=embedder)
+            return await self._rebuild_candidate_collection(checkpoint, published_collection=None)
         return _OpenedCandidate(
             checkpoint=checkpoint,
-            knowledge=knowledge,
-            vector_db=require_chroma_vector_db(knowledge),
+            collection=open_collection(self._collections, checkpoint.collection),
             resumed=True,
         )
 
@@ -1585,13 +1531,9 @@ class KnowledgeManager:
             await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
             checkpoint = None
 
-        embedder = BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths))
         candidate_holds_unclaimed_rows = False
         if checkpoint is not None:
-            checkpoint, candidate_holds_unclaimed_rows = await self._inspect_candidate_shape(
-                checkpoint,
-                embedder=embedder,
-            )
+            checkpoint, candidate_holds_unclaimed_rows = await self._inspect_candidate_shape(checkpoint)
 
         rebuild = checkpoint is None
         if checkpoint is None:
@@ -1613,7 +1555,6 @@ class KnowledgeManager:
             )
             opened = await self._rebuild_candidate_collection(
                 checkpoint,
-                embedder=embedder,
                 published_collection=reusable_published_collection,
             )
             baseline_revision = (
@@ -1622,15 +1563,14 @@ class KnowledgeManager:
                 else None
             )
         else:
-            opened = await self._resume_candidate_collection(checkpoint, embedder=embedder)
+            opened = await self._resume_candidate_collection(checkpoint)
             baseline_revision = checkpoint.target_revision
         checkpoint = opened.checkpoint
 
         run = _CandidateRun(
             checkpoint=checkpoint,
-            knowledge=opened.knowledge,
-            vector_db=opened.vector_db,
-            embedder=embedder,
+            collection=opened.collection,
+            embedder=BatchPrefetchEmbedder(inner=create_configured_embedder(self.config, self.runtime_paths)),
             baseline_revision=baseline_revision,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
@@ -1647,7 +1587,7 @@ class KnowledgeManager:
             await asyncio.to_thread(
                 cleanup_superseded_collections,
                 self._collections,
-                vector_db=self._knowledge.vector_db,
+                client=run.collection.client,
                 preserved=frozenset(preserved),
                 candidates_only=True,
             )
@@ -1728,7 +1668,7 @@ class KnowledgeManager:
         """Remove candidate vectors and checkpoint entries for gone or stale paths."""
         if not relative_paths:
             return
-        await asyncio.to_thread(delete_source_path_vectors, run.vector_db, relative_paths)
+        await asyncio.to_thread(delete_source_path_vectors, run.collection, relative_paths)
         for relative_path in relative_paths:
             run.completed.pop(relative_path, None)
             run.failed.pop(relative_path, None)
@@ -2037,10 +1977,10 @@ class KnowledgeManager:
 
                 progress.indexed_this_run += await self._reindex_files_locked(
                     list(plan.pending),
-                    knowledge=run.knowledge,
+                    collection=run.collection,
+                    embedder=run.embedder,
                     indexed_signatures=run.completed,
                     vanished_files=run.vanished,
-                    embedder=run.embedder,
                     on_file_result=_record_file,
                     on_batch_complete=_record_batch,
                 )
@@ -2092,12 +2032,11 @@ class KnowledgeManager:
 
     async def _publish_candidate(self, run: _CandidateRun, source_signature: str) -> None:
         """Publish the verified candidate and retire the state it supersedes."""
-        if run.embedder is not None:
-            run.embedder.clear_cache()
+        run.embedder.clear_cache()
         publish_state = _CandidatePublishState()
         try:
             await self._publish_candidate_after_metadata_save(
-                candidate_vector_db=run.vector_db,
+                candidate=run.collection,
                 indexed_count=len(run.completed),
                 source_signature=source_signature,
                 published_revision=run.baseline_revision,
@@ -2112,6 +2051,6 @@ class KnowledgeManager:
         await asyncio.to_thread(
             cleanup_superseded_collections,
             self._collections,
-            vector_db=self._knowledge.vector_db,
-            preserved=frozenset({run.vector_db.collection_name}),
+            client=run.collection.client,
+            preserved=frozenset({run.collection.name}),
         )

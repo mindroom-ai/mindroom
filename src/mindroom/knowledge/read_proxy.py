@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,14 +12,11 @@ from agno.knowledge.document import Document
 
 from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_process import read_chroma, read_chroma_async
-from mindroom.knowledge.read_protocol import ReadRequest
-from mindroom.logging_config import get_logger
+from mindroom.knowledge.read_protocol import ReadRequest, ReadResult
 
 if TYPE_CHECKING:
     from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
-
-logger = get_logger(__name__)
 
 
 def collection_exists(path: str, collection: str) -> bool:
@@ -50,11 +47,8 @@ def collection_exists(path: str, collection: str) -> bool:
         raise RuntimeError(message) from exc
 
 
-def _dict_filters(filters: dict[str, Any] | list[Any] | None) -> dict[str, Any] | None:
-    if isinstance(filters, list):
-        logger.warning("Filter expressions are not supported by Chroma; no filters applied")
-        return None
-    return filters
+def _documents(result: ReadResult) -> list[Document]:
+    return [Document(content=hit.content, name=hit.name, meta_data=dict(hit.meta_data)) for hit in result.hits]
 
 
 @dataclass
@@ -88,6 +82,7 @@ class ChromaReadProxy:
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
         """Embed under the caller's credentials, then query outside this process."""
+        del filters  # MindRoom searches never filter.
         embedding = self.embedder.embed([query], purpose="query")[0]
         result = read_chroma(
             ReadRequest(
@@ -96,13 +91,12 @@ class ChromaReadProxy:
                 query=query,
                 embedding=embedding,
                 limit=limit,
-                filters=_dict_filters(filters),
                 published_settings=self.published_settings.to_metadata()
                 if self.published_settings is not None
                 else None,
             ),
         )
-        return [Document(**asdict(document)) for document in result.documents]
+        return _documents(result)
 
     async def async_search(
         self,
@@ -111,6 +105,7 @@ class ChromaReadProxy:
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]:
         """Start native imports while the parent obtains the query embedding."""
+        del filters  # MindRoom searches never filter.
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]
@@ -120,11 +115,9 @@ class ChromaReadProxy:
                 query=query,
                 embedding=embedding,
                 limit=limit,
-                filters=_dict_filters(filters),
                 published_settings=self.published_settings.to_metadata()
                 if self.published_settings is not None
                 else None,
             )
 
-        result = await read_chroma_async(prepare_request)
-        return [Document(**asdict(document)) for document in result.documents]
+        return _documents(await read_chroma_async(prepare_request))

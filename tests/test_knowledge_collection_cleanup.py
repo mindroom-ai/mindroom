@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 
 import pytest
 
 from mindroom.knowledge.collections import (
     CollectionSpace,
-    build_vector_db,
     cleanup_superseded_collections,
     delete_collection,
+    open_collection,
 )
 
 if TYPE_CHECKING:
@@ -38,10 +37,9 @@ async def test_delete_collection_reclaims_only_unreferenced_segment_directories(
         base_id="docs",
         knowledge_path=tmp_path / "docs",
         storage_path=storage_path,
-        embedder_factory=MagicMock,
     )
-    live_vector_db = build_vector_db(space, space.default_collection)
-    client = live_vector_db.client
+    live_collection = open_collection(space, space.default_collection)
+    client = live_collection.client
     live_segment = _create_collection_segment(storage_path, client, space.default_collection)
     unrelated_directory = storage_path / "not-a-segment"
     unrelated_directory.mkdir()
@@ -66,7 +64,7 @@ async def test_delete_collection_reclaims_only_unreferenced_segment_directories(
     client.delete_collection(later_stale_name)
     cleanup_superseded_collections(
         space,
-        vector_db=live_vector_db,
+        client=client,
         preserved=frozenset({space.default_collection}),
         candidates_only=True,
     )

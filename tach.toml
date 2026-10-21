@@ -963,8 +963,6 @@ visibility = [
 path = "mindroom.knowledge.strict_knowledge"
 depends_on = ["mindroom.knowledge.agno_compat_knowledge", ]
 visibility = [
-    "mindroom.knowledge.collections",
-    "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
     "mindroom.knowledge.source_descriptions",
 ]
@@ -5830,12 +5828,11 @@ depends_on = [
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
     "mindroom.logging_config",
-    "mindroom.knowledge.strict_knowledge",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
-path = "mindroom.knowledge.embedding_batch"
+path = "mindroom.embeddings.batching"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
@@ -5910,10 +5907,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
+    "mindroom.embeddings.batching",
     "mindroom.knowledge.candidate_checkpoint",
-    "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.collections",
-    "mindroom.knowledge.embedding_batch",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.index_metadata",
@@ -5921,7 +5917,6 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
-    "mindroom.knowledge.strict_knowledge",
 ]
 
 [[modules]]
@@ -7313,7 +7308,6 @@ depends_on = [
     "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.read_process",
     "mindroom.knowledge.read_protocol",
-    "mindroom.logging_config",
 ]
 
 [[modules]]
@@ -8108,7 +8102,7 @@ visibility = ["mindroom.knowledge.strict_knowledge"]
 
 [[interfaces]]
 from = ["mindroom.knowledge.agno_compat_knowledge"]
-expose = ["search", "asearch", "insert_documents"]
+expose = ["search", "asearch"]
 
 
 [[modules]]

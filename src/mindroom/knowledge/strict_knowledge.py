@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from agno.knowledge.content import Content, ContentStatus
 from agno.knowledge.knowledge import Knowledge
 
 from mindroom.knowledge import agno_compat_knowledge
@@ -55,36 +54,3 @@ class StrictSearchKnowledge(Knowledge):
         """Async variant of ``search`` with agno's sync fallback preserved."""
         del search_type, user_id
         return await agno_compat_knowledge.asearch(self, query, limit=max_results or self.max_results, filters=filters)
-
-
-@dataclass
-class StrictInsertKnowledge(Knowledge):
-    """Knowledge whose vector insertion path propagates failures."""
-
-    def _handle_vector_db_insert(
-        self,
-        content: Content,
-        read_documents: list[Document],
-        upsert: bool,
-        prior_status: ContentStatus | None = None,
-    ) -> None:
-        """Mirror Agno's insertion path without its catch-log-and-return behavior.
-
-        MindRoom rebuilds candidate collections from scratch, so the re-ingest
-        branch Agno keys off ``prior_status`` never applies here.
-        """
-        del prior_status
-        agno_compat_knowledge.insert_documents(
-            self,
-            content,
-            read_documents,
-            upsert=upsert,
-            validate=_require_complete_embedding,
-        )
-
-
-def _require_complete_embedding(content: Content) -> None:
-    """Do not publish a candidate collection with missing embeddings."""
-    if content.status is not ContentStatus.COMPLETED:
-        msg = content.status_message or f"Knowledge content {content.id or content.name!r} was not fully embedded"
-        raise RuntimeError(msg)

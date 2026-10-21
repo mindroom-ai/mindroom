@@ -18,14 +18,14 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 from agno.knowledge.document.base import Document
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
-import mindroom.knowledge.collections as knowledge_collections_module
+import mindroom.knowledge.chroma_client as knowledge_chroma_client
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
@@ -33,6 +33,7 @@ import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.embeddings.batching import BatchPrefetchEmbedder, plan_embedding_batches
 from mindroom.embeddings.errors import (
     EmbedderRequestError,
     embedder_failure_is_transient,
@@ -51,6 +52,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_candidate_checkpoint,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collections import (
     CollectionSpace,
     _collection_name_for_base,
@@ -58,7 +60,6 @@ from mindroom.knowledge.collections import (
     candidate_collection_name,
     paths_with_vectors,
 )
-from mindroom.knowledge.embedding_batch import BatchPrefetchEmbedder, plan_embedding_batches
 from mindroom.knowledge.index_metadata import write_json_atomic
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
@@ -93,14 +94,6 @@ if TYPE_CHECKING:
 # --------------------------------------------------------------------------
 
 
-class _SupportsRead(Protocol):
-    """Reader surface the fake Knowledge needs to reproduce Agno's chunking."""
-
-    def read(self, source: Path, name: str) -> list[Document]:
-        """Return the documents Agno would embed for one file."""
-        ...
-
-
 @dataclass
 class _Record:
     identifier: str
@@ -120,6 +113,10 @@ def _next_record_id() -> str:
 class _FakeCollection:
     def __init__(self, name: str) -> None:
         self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     def get(
         self,
@@ -173,10 +170,31 @@ class _FakeCollection:
                 for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
             )
 
+    def upsert(
+        self,
+        *,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict[str, Any]],
+    ) -> None:
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.upserts.append(len(ids))
+            replaced = set(ids)
+            records = [
+                record for record in _FakeVectorDb.store.get(self._name, []) if record.identifier not in replaced
+            ]
+            records.extend(
+                _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
+                for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
+            )
+            _FakeVectorDb.store[self._name] = records
+
     def delete(self, *, where: dict[str, object]) -> None:
         validate_where_operands(where)
         key, condition = next(iter(where.items()))
         with _FakeVectorDb.lock:
+            _FakeVectorDb.deletes.append(where)
             _FakeVectorDb.store[self._name] = [
                 record
                 for record in _FakeVectorDb.store.get(self._name, [])
@@ -185,6 +203,8 @@ class _FakeCollection:
 
 
 class _FakeClient:
+    """In-memory stand-in for the persistent Chroma client one knowledge base opens."""
+
     def get_collection(self, name: str) -> _FakeCollection:
         with _FakeVectorDb.lock:
             if name not in _FakeVectorDb.store:
@@ -192,9 +212,28 @@ class _FakeClient:
                 raise NotFoundError(message)
         return _FakeCollection(name)
 
+    def create_collection(self, name: str, metadata: dict[str, object] | None = None) -> _FakeCollection:
+        _ = metadata
+        with _FakeVectorDb.lock:
+            _FakeVectorDb.store.setdefault(name, [])
+        return _FakeCollection(name)
+
+    def delete_collection(self, name: str) -> None:
+        with _FakeVectorDb.lock:
+            if name not in _FakeVectorDb.store:
+                message = f"Collection {name!r} does not exist"
+                raise NotFoundError(message)
+            del _FakeVectorDb.store[name]
+
     def list_collections(self) -> list[str]:
         with _FakeVectorDb.lock:
             return sorted(_FakeVectorDb.store)
+
+    def get_max_batch_size(self) -> int:
+        return 5461
+
+    def close(self) -> None:
+        """The in-memory fake has no external resources to release."""
 
 
 class _FakeVectorDb:
@@ -207,6 +246,10 @@ class _FakeVectorDb:
     max_writes: ClassVar[int] = 1_000_000
     #: Rows handed to each accepted or refused ``add``.
     writes: ClassVar[list[int]] = []
+    #: Rows handed to each indexing ``upsert``.
+    upserts: ClassVar[list[int]] = []
+    #: ``where`` filter of each row ``delete``.
+    deletes: ClassVar[list[dict[str, object]]] = []
     #: Rows one ``get`` may return before the store rejects the whole query,
     #: mirroring SQLite's bind-variable ceiling: Chroma binds one variable per
     #: *returned row*, so the limit is a property of the result, not of the
@@ -227,28 +270,12 @@ class _FakeVectorDb:
             )
             raise InternalError(message)
 
-    def __init__(self, *, collection: str, embedder: Embedder | None = None, **_: object) -> None:
+    def __init__(self, *, collection: str, **_: object) -> None:
         self.collection_name = collection
-        self.embedder = embedder
-        self.client = _FakeClient()
-
-    def close(self) -> None:
-        """The in-memory fake has no external resources to release."""
 
     def exists(self) -> bool:
         with self.lock:
             return self.collection_name in self.store
-
-    def create(self) -> None:
-        with self.lock:
-            self.store.setdefault(self.collection_name, [])
-
-    def delete(self) -> bool:
-        with self.lock:
-            if self.collection_name not in self.store:
-                return False
-            self.store.pop(self.collection_name)
-            return True
 
     def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
         _ = (query, filters)
@@ -273,8 +300,8 @@ class _FakeReadProxy(_FakeVectorDb):
         super().__init__(collection=collection_name, path=path, embedder=embedder)
 
 
-class _FakeKnowledge:
-    """Knowledge stand-in that embeds every chunk exactly like Agno's write path."""
+class _FakeSearchKnowledge:
+    """Published search handle over a fake read proxy."""
 
     def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
         self.vector_db = vector_db
@@ -282,59 +309,13 @@ class _FakeKnowledge:
         self.description: str | None = None
         self.max_results = 5
 
-    def insert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, Any],
-        upsert: bool,
-        reader: _SupportsRead | None = None,
-    ) -> None:
-        _ = upsert
-        assert self.vector_db is not None
-        source = Path(path)
-        documents = (
-            reader.read(source, name=source.name) if reader is not None else [Document(content=source.read_text())]
-        )
-        embedded: list[_Record] = []
-        for document in documents:
-            embedder = self.vector_db.embedder
-            assert embedder is not None
-            embedding, _usage = embedder.get_embedding_and_usage(document.content)
-            embedded.append(
-                _Record(
-                    identifier=_next_record_id(),
-                    content=document.content,
-                    embedding=embedding,
-                    metadata=dict(metadata),
-                ),
-            )
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.store.setdefault(self.vector_db.collection_name, []).extend(embedded)
-
-    def remove_vectors_by_metadata(self, metadata: dict[str, Any]) -> bool:
-        assert self.vector_db is not None
-        with _FakeVectorDb.lock:
-            records = _FakeVectorDb.store.get(self.vector_db.collection_name, [])
-            kept = [
-                record
-                for record in records
-                if not all(record.metadata.get(key) == value for key, value in metadata.items())
-            ]
-            _FakeVectorDb.store[self.vector_db.collection_name] = kept
-            return len(kept) != len(records)
-
     def search(self, query: str, max_results: int | None = None) -> list[Document]:
         assert self.vector_db is not None
         return self.vector_db.search(query=query, limit=max_results or self.max_results)
 
 
-def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
-    tmp_path: Path,
-    embedder: _RecordingEmbedder,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cleaning one source must not discard another source's completed insert."""
+def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cleaning one source must not discard another source's completed write."""
     cleanup_scanned = Event()
     release_cleanup = Event()
     insert_reached_store = Event()
@@ -359,7 +340,6 @@ def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
 
     monkeypatch.setattr(_FakeVectorDb, "lock", _SignalingLock())
     collection = "concurrent-cleanup"
-    vector_db = _FakeVectorDb(collection=collection, embedder=BatchPrefetchEmbedder(inner=embedder))
     _FakeVectorDb.store[collection] = _PausingRecordList(
         [
             _Record(
@@ -370,22 +350,20 @@ def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
             ),
         ],
     )
-    knowledge = _FakeKnowledge(vector_db)
-    inserted = tmp_path / "inserted.md"
-    inserted.write_text("new content", encoding="utf-8")
 
     cleanup_thread = Thread(
-        target=knowledge.remove_vectors_by_metadata,
-        args=({"source_path": "stale.md"},),
+        target=_FakeCollection(collection).delete,
+        kwargs={"where": {"source_path": "stale.md"}},
     )
     cleanup_thread.start()
     assert cleanup_scanned.wait(timeout=5)
 
     def _insert() -> None:
-        knowledge.insert(
-            path=str(inserted),
-            metadata={"source_path": inserted.name},
-            upsert=True,
+        _FakeCollection(collection).upsert(
+            ids=[_next_record_id()],
+            embeddings=[[1.0]],
+            documents=["new content"],
+            metadatas=[{"source_path": "inserted.md"}],
         )
 
     insert_thread = Thread(target=_insert)
@@ -398,16 +376,7 @@ def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(
     assert reached_store_before_cleanup
     assert not cleanup_thread.is_alive()
     assert not insert_thread.is_alive()
-    assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == [inserted.name]
-
-
-class _AutoCreatingFakeKnowledge(_FakeKnowledge):
-    """Knowledge that creates a missing collection on construction, like Agno's."""
-
-    def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
-        super().__init__(vector_db)
-        if vector_db is not None and not vector_db.exists():
-            vector_db.create()
+    assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == ["inserted.md"]
 
 
 class _RecordingNonBatchEmbedder:
@@ -525,7 +494,7 @@ def fake_vector_store(
     monkeypatch: pytest.MonkeyPatch,
     embedder: _RecordingEmbedder,
 ) -> Iterator[None]:
-    """Install the in-memory vector store, fake Knowledge and recording embedder."""
+    """Install the in-memory vector store and the recording embedder."""
     _FakeVectorDb.store = {}
     _FakeVectorDb.max_rows_per_get = None
     _FakeVectorDb.get_calls = 0
@@ -533,10 +502,9 @@ def fake_vector_store(
     _FakeVectorDb.queries = []
     _FakeVectorDb.max_writes = 1_000_000
     _FakeVectorDb.writes = []
-    monkeypatch.setattr(knowledge_manager_module, "ChromaDb", _FakeVectorDb)
-    monkeypatch.setattr(knowledge_collections_module, "ChromaDb", _FakeVectorDb)
-    monkeypatch.setattr(knowledge_manager_module, "Knowledge", _FakeKnowledge)
-    monkeypatch.setattr(knowledge_collections_module, "Knowledge", _FakeKnowledge)
+    _FakeVectorDb.upserts = []
+    _FakeVectorDb.deletes = []
+    monkeypatch.setattr(knowledge_chroma_client, "_persistent_client", lambda _path: _FakeClient())
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
     monkeypatch.setattr(knowledge_read_proxy, "ChromaReadProxy", _FakeReadProxy)
     monkeypatch.setattr(
@@ -544,7 +512,7 @@ def fake_vector_store(
         "collection_exists",
         lambda _path, collection: _FakeVectorDb(collection=collection).exists(),
     )
-    monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeKnowledge)
+    monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeSearchKnowledge)
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 
     async def _no_sleep(_seconds: float) -> None:
@@ -1006,17 +974,18 @@ async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
             settings=replace(manager._indexing_settings, embedder_model="old-model"),
         ),
     )
-    original_delete = _FakeVectorDb.delete
+    original_delete = _FakeClient.delete_collection
     attempts = 0
 
-    def _fail_once(self: _FakeVectorDb) -> bool:
+    def _fail_once(self: _FakeClient, name: str) -> None:
         nonlocal attempts
-        if self.collection_name == stale_candidate and attempts == 0:
+        if name == stale_candidate and attempts == 0:
             attempts += 1
-            return False
-        return original_delete(self)
+            message = "collection is locked"
+            raise RuntimeError(message)
+        original_delete(self, name)
 
-    monkeypatch.setattr(_FakeVectorDb, "delete", _fail_once)
+    monkeypatch.setattr(_FakeClient, "delete_collection", _fail_once)
 
     run = await manager._open_candidate_run()
 
@@ -1363,10 +1332,10 @@ def test_batch_prefetch_embedder_degrades_for_providers_without_batching() -> No
     assert adapter.embed_batch_into_cache(["one", "two"]) == 2
     assert inner.single_requests == ["one", "two"]
     # Prefetched texts are served from cache; misses still reach the provider.
-    assert adapter.get_embedding_and_usage("one")[0] == [3.0, 1.0]
+    assert adapter.embed_documents(["one"]) == [[3.0, 1.0]]
     assert inner.single_requests == ["one", "two"]
     adapter.clear_cache()
-    assert adapter.get_embedding("one") == [3.0, 1.0]
+    assert adapter.embed_documents(["one"]) == [[3.0, 1.0]]
     assert inner.single_requests == ["one", "two", "one"]
 
 
@@ -1385,7 +1354,7 @@ def test_batch_prefetch_embeds_chunks_as_documents() -> None:
     adapter = BatchPrefetchEmbedder(inner=inner)
 
     assert adapter.embed_batch_into_cache(["chunk"]) == 1
-    assert adapter.get_embedding_and_usage("chunk") == ([5.0, 1.0], None)
+    assert adapter.embed_documents(["chunk"]) == [[5.0, 1.0]]
 
 
 # --------------------------------------------------------------------------
@@ -1597,7 +1566,7 @@ async def test_missing_candidate_collection_restarts_that_candidate_cleanly(
 
     assert run.resumed is False
     assert run.completed == {}
-    assert run.vector_db.exists()
+    assert run.collection.exists()
 
 
 # --------------------------------------------------------------------------
@@ -1992,11 +1961,11 @@ async def test_unreadable_published_metadata_never_reuses_live_collection_checkp
 
     run = await _manager(config)._open_candidate_run()
 
-    assert run.vector_db.collection_name != published_collection
+    assert run.collection.name != published_collection
     assert _FakeVectorDb.store[published_collection] == published_records
     checkpoint = load_candidate_checkpoint(storage)
     assert checkpoint is not None
-    assert checkpoint.collection == run.vector_db.collection_name
+    assert checkpoint.collection == run.collection.name
 
 
 @pytest.mark.asyncio
@@ -2310,9 +2279,7 @@ def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
     assert adapter.embed_batch_into_cache(["alpha", "bb", "c"]) == 3
     assert adapter.supports_batching() is False, "a failed probe retires batching for the run"
     # Order preserved: each text maps to its own vector, keyed by content.
-    assert adapter.get_embedding("alpha") == [5.0, 1.0]
-    assert adapter.get_embedding("bb") == [2.0, 1.0]
-    assert adapter.get_embedding("c") == [1.0, 1.0]
+    assert adapter.embed_documents(["alpha", "bb", "c"]) == [[5.0, 1.0], [2.0, 1.0], [1.0, 1.0]]
 
     widening = _RecordingEmbedder()
     widening.supports_batch = False
@@ -2323,7 +2290,7 @@ def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
     # Validation guards the path Agno's writer uses, so a widened vector cannot
     # reach the collection even though prefetch treats its own faults as best effort.
     with pytest.raises(EmbedderRequestError, match="3-dimension vector, expected 2"):
-        adapter.get_embedding_and_usage("two")
+        adapter.embed_documents(["two"])
 
 
 def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
@@ -2335,7 +2302,7 @@ def test_empty_vector_is_rejected_by_the_batch_adapter() -> None:
 
     assert adapter.embed_batch_into_cache(["anything"]) == 0, "prefetch leaves it to the per-file path"
     with pytest.raises(EmbedderRequestError, match="empty vector"):
-        adapter.get_embedding("anything")
+        adapter.embed_documents(["anything"])
 
 
 @pytest.mark.asyncio
@@ -2786,10 +2753,7 @@ async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
 
 
 @pytest.mark.asyncio
-async def test_candidate_path_removal_is_batched(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_candidate_path_removal_is_batched(tmp_path: Path) -> None:
     """Dropping many paths must not cost one vector-store round trip each."""
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 40)
@@ -2812,29 +2776,17 @@ async def test_candidate_path_removal_is_batched(
     for index in range(39):
         (docs_path / f"doc{index:04d}.md").write_text(f"rewritten {index}", encoding="utf-8")
 
-    # Count every vector-store deletion route, so a per-path loop through
-    # remove_vectors_by_metadata is caught as readily as a per-path $in call.
-    deletes = {"count": 0}
-    original_delete = _FakeCollection.delete
-    original_remove = _FakeKnowledge.remove_vectors_by_metadata
-
-    def _counting_delete(self: _FakeCollection, *, where: dict[str, object]) -> None:
-        deletes["count"] += 1
-        original_delete(self, where=where)
-
-    def _counting_remove(self: _FakeKnowledge, metadata: dict[str, Any]) -> bool:
-        deletes["count"] += 1
-        return original_remove(self, metadata)
-
-    monkeypatch.setattr(_FakeCollection, "delete", _counting_delete)
-    monkeypatch.setattr(_FakeKnowledge, "remove_vectors_by_metadata", _counting_remove)
+    # Every row deletion goes through the collection, so a per-path loop is
+    # caught as readily as a per-path $in call.
+    _FakeVectorDb.deletes = []
 
     assert (await _manager(config).reindex_all()).indexed_count == 40
 
-    # 39 dropped paths must not cost 39 round trips; the upsert path still
+    # 39 dropped paths must not cost 39 round trips; the write path still
     # clears each file it rewrites, so allow one per re-indexed file plus a
     # small number of batched deletes.
-    assert deletes["count"] <= 45, f"one delete per dropped path instead of batched: {deletes['count']}"
+    deletes = len(_FakeVectorDb.deletes)
+    assert deletes <= 45, f"one delete per dropped path instead of batched: {deletes}"
     assert _published_state(config, runtime_paths) is not None
 
 
@@ -2875,8 +2827,8 @@ async def test_journal_compaction_bound_survives_restart(
         assert await original_index(
             manager,
             final_path,
-            upsert=True,
-            knowledge=run.knowledge,
+            collection=run.collection,
+            embedder=run.embedder,
             indexed_signatures=run.completed,
         )
         await manager._persist_candidate_batch(run, (final_path,))
@@ -2954,19 +2906,18 @@ async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
             completed={"doc0000.md": (1, 1, "digest")},
         ),
     )
-    original_delete = _FakeVectorDb.delete
+    original_delete = _FakeClient.delete_collection
     attempts = 0
 
-    def _fail_once(self: _FakeVectorDb) -> bool:
+    def _fail_once(self: _FakeClient, name: str) -> None:
         nonlocal attempts
-        if self.collection_name == orphan and attempts == 0:
+        if name == orphan and attempts == 0:
             attempts += 1
-            # How Agno actually reports a failed delete: it swallows the
-            # provider error and returns False rather than raising.
-            return False
-        return original_delete(self)
+            message = "collection is locked"
+            raise RuntimeError(message)
+        original_delete(self, name)
 
-    monkeypatch.setattr(_FakeVectorDb, "delete", _fail_once)
+    monkeypatch.setattr(_FakeClient, "delete_collection", _fail_once)
 
     first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3711,7 +3662,7 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
         self: KnowledgeManager,
         *,
         published_collection: str,
-        candidate_vector_db: _FakeVectorDb,
+        candidate: KnowledgeCollection,
         managed_paths: frozenset[str],
     ) -> dict[str, FileSignature]:
         copy_started.set()
@@ -3719,7 +3670,7 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
         return original_copy(
             self,
             published_collection=published_collection,
-            candidate_vector_db=candidate_vector_db,
+            candidate=candidate,
             managed_paths=managed_paths,
         )
 
@@ -3761,8 +3712,7 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Probe existence before Agno can auto-create a vanished collection."""
-    monkeypatch.setattr(knowledge_collections_module, "Knowledge", _AutoCreatingFakeKnowledge)
+    """A resume probes that its collection still exists instead of trusting the checkpoint's claims."""
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -3935,12 +3885,12 @@ async def test_a_transient_candidate_probe_failure_preserves_resumable_work(
 
 
 @pytest.mark.asyncio
-async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
+async def test_unclaimed_row_probe_constructs_no_embedder(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty-checkpoint probe must not construct a second configured embedder."""
+    """An empty-checkpoint probe reads rows without an embedder; only the run constructs one."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     config = _config(tmp_path, docs_path)
@@ -3951,7 +3901,7 @@ async def test_unclaimed_row_probe_reuses_the_refresh_embedder(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(collection=collection, settings=manager._indexing_settings),
     )
-    _FakeVectorDb(collection=collection, embedder=embedder).create()
+    _FakeVectorDb.store[collection] = []
     created: list[Embedder] = []
 
     def _record_factory(*_args: object, **_kwargs: object) -> Embedder:
@@ -4134,13 +4084,13 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
         self: KnowledgeManager,
         *,
         published_collection: str,
-        candidate_vector_db: _FakeVectorDb,
+        candidate: KnowledgeCollection,
         managed_paths: frozenset[str],
     ) -> dict[str, FileSignature]:
         reused = original_copy(
             self,
             published_collection=published_collection,
-            candidate_vector_db=candidate_vector_db,
+            candidate=candidate,
             managed_paths=managed_paths,
         )
         if cancel_copy:
@@ -4154,15 +4104,15 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
 
     (docs_path / names[0]).unlink()
     die_before_reset = True
-    original_reset = knowledge_manager_module.reset_vector_db
+    original_reset = knowledge_manager_module.reset_collection
 
-    def _maybe_die(vector_db: _FakeVectorDb) -> None:
+    def _maybe_die(collection: KnowledgeCollection) -> None:
         if die_before_reset:
             message = "host lost power before the collection was emptied"
             raise RuntimeError(message)
-        original_reset(vector_db)
+        original_reset(collection)
 
-    monkeypatch.setattr(knowledge_manager_module, "reset_vector_db", _maybe_die)
+    monkeypatch.setattr(knowledge_manager_module, "reset_collection", _maybe_die)
     with pytest.raises(RuntimeError):
         await _manager(config).reindex_all()
     die_before_reset = False
@@ -4318,11 +4268,10 @@ def _seed_chunked_paths(collection: str, paths: Sequence[str], chunks_per_path: 
     ]
 
 
-def _verification_collection() -> _FakeVectorDb:
+def _verification_collection() -> KnowledgeCollection:
     """Return a created, empty candidate collection to verify against."""
-    vector_db = _FakeVectorDb(collection="verification_target")
-    vector_db.create()
-    return vector_db
+    _FakeVectorDb.store["verification_target"] = []
+    return KnowledgeCollection(path="unused", name="verification_target")
 
 
 def test_vector_verification_splits_a_batch_the_store_cannot_answer() -> None:
@@ -4335,7 +4284,7 @@ def test_vector_verification_splits_a_batch_the_store_cannot_answer() -> None:
     """
     vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
 
     assert paths_with_vectors(vector_db, paths) == set(paths)
@@ -4355,7 +4304,7 @@ def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling() -> 
     there is, so the query has to stop asking for every row it matches.
     """
     vector_db = _verification_collection()
-    _seed_chunked_paths(vector_db.collection_name, ["huge.md"], chunks_per_path=500)
+    _seed_chunked_paths(vector_db.name, ["huge.md"], chunks_per_path=500)
     _FakeVectorDb.max_rows_per_get = 250
 
     assert paths_with_vectors(vector_db, ["huge.md"]) == {"huge.md"}
@@ -4365,7 +4314,7 @@ def test_vector_verification_still_reports_paths_without_vectors_after_splitting
     """Splitting must not turn an unverifiable path into a verified one."""
     vector_db = _verification_collection()
     present = [f"present{index:02d}.md" for index in range(6)]
-    _seed_chunked_paths(vector_db.collection_name, present, chunks_per_path=100)
+    _seed_chunked_paths(vector_db.name, present, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
     missing = ["missing0.md", "missing1.md"]
 
@@ -4383,7 +4332,7 @@ def test_vector_verification_uses_one_query_when_the_store_answers() -> None:
     """
     vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
 
     assert paths_with_vectors(vector_db, paths) == set(paths)
     assert _FakeVectorDb.get_calls == 1
@@ -4404,7 +4353,7 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone() -> Non
     # No rows are seeded: every ``get`` raises before reading the store, so
     # seeding would only suggest the contents mattered. ``create()`` in the
     # helper is what registers the collection for ``get_collection``.
-    _FakeVectorDb.vanished_on_get = {vector_db.collection_name}
+    _FakeVectorDb.vanished_on_get = {vector_db.name}
 
     with pytest.raises(NotFoundError):
         paths_with_vectors(vector_db, paths)
@@ -4415,7 +4364,7 @@ def test_vector_verification_does_not_split_when_the_collection_is_gone() -> Non
 def test_vector_verification_does_not_split_unrelated_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only SQLite's bind-variable failure may trigger recursive splitting."""
     vector_db = _verification_collection()
-    collection = vector_db.client.get_collection(vector_db.collection_name)
+    collection = vector_db.collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
     calls = 0
 
@@ -4444,7 +4393,7 @@ def test_vector_verification_records_that_it_had_to_split() -> None:
     """
     vector_db = _verification_collection()
     paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.collection_name, paths, chunks_per_path=100)
+    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
     _FakeVectorDb.max_rows_per_get = 250
 
     with capture_logs() as logs:
@@ -4471,7 +4420,7 @@ def test_vector_verification_answers_an_empty_batch_without_asking_the_store() -
     assert _FakeVectorDb.get_calls == 0
 
     created = _verification_collection()
-    collection = created.client.get_collection(created.collection_name)
+    collection = created.collection()
     assert _collection_paths_with_vectors(collection, []) == set()
     assert _FakeVectorDb.get_calls == 0
 
@@ -4489,7 +4438,6 @@ def test_collection_ownership_is_derived_from_identity_not_supplied() -> None:
         base_id="docs",
         knowledge_path=docs,
         storage_path=Path("/srv/state/docs"),
-        embedder_factory=lambda: pytest.fail("ownership must not need an embedder"),
     )
 
     assert space.default_collection == _collection_name_for_base("docs", docs)

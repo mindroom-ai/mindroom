@@ -8,7 +8,6 @@ from threading import Barrier, BoundedSemaphore
 from typing import TYPE_CHECKING, Never
 
 import pytest
-from agno.knowledge.embedder.base import Embedder
 from chromadb.api.client import Client
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
@@ -19,11 +18,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
 from mindroom.knowledge.collections import (
+    _COLLECTION_METADATA,
     CollectionSpace,
-    build_vector_db,
+    KnowledgeChunk,
     cleanup_superseded_collections,
     delete_collection,
-    require_chroma_vector_db,
+    open_collection,
+    reset_collection,
+    write_source_rows,
 )
 from mindroom.knowledge.index_metadata import PublishedIndexState, save_published_index_state
 from mindroom.knowledge.manager import KnowledgeManager
@@ -46,12 +48,11 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def space(tmp_path: Path) -> CollectionSpace:
-    """An isolated collection space with an embedder that cannot make requests."""
+    """An isolated collection space."""
     return CollectionSpace(
         base_id="docs",
         knowledge_path=tmp_path / "docs",
         storage_path=tmp_path / "chroma",
-        embedder_factory=Embedder,
     )
 
 
@@ -78,14 +79,11 @@ async def test_delete_collection_releases_owned_client(space: CollectionSpace, *
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("probe_fails", [False, True])
 async def test_delete_collection_failure_releases_owned_client(
     space: CollectionSpace,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    probe_fails: bool,
 ) -> None:
-    """Deletion rejection and a failing follow-up probe must leave no unowned client."""
+    """A rejected deletion reports failure, keeps the collection, and leaves no unowned client."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(space.storage_path))) as seed:
         seed.create_collection(space.default_collection)
 
@@ -94,8 +92,6 @@ async def test_delete_collection_failure_releases_owned_client(
         raise RuntimeError(message)
 
     monkeypatch.setattr(Client, "delete_collection", fail_operation)
-    if probe_fails:
-        monkeypatch.setattr(Client, "get_collection", fail_operation)
 
     assert await delete_collection(space, space.default_collection) is False
 
@@ -112,9 +108,7 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
     """Cleanup must preserve its borrowed reader and release temporary clients even on failure."""
     retained_name = f"{space.default_collection}_candidate_current"
     stale_candidate = f"{space.default_collection}_candidate_stale"
-    vector_db = build_vector_db(space, retained_name)
-    client = vector_db.client
-    assert isinstance(client, Client)
+    client = open_collection(space, retained_name).client
     try:
         retained = client.create_collection(retained_name)
         retained.add(ids=["document"], embeddings=[[1.0, 0.0]])
@@ -132,7 +126,7 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
 
             monkeypatch.setattr(Client, "delete_collection", fail_one_deletion)
 
-        cleanup_superseded_collections(space, vector_db=vector_db, preserved=frozenset({retained_name}))
+        cleanup_superseded_collections(space, client=client, preserved=frozenset({retained_name}))
 
         assert retained.query(query_embeddings=[[1.0, 0.0]], n_results=1)["ids"] == [["document"]]
     finally:
@@ -142,6 +136,150 @@ def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
     if deletion_fails:
         expected.add(space.default_collection)
     _assert_storage_released(space, expected)
+
+
+_SOURCE = {"source_path": "notes.md", "source_mtime_ns": 1, "source_size": 9, "source_digest": "digest"}
+
+
+def _chunks(*texts: str) -> list[KnowledgeChunk]:
+    return [
+        KnowledgeChunk(text=text, name="notes.md", metadata={"chunk": index, "chunk_size": len(text), "page": None})
+        for index, text in enumerate(texts, start=1)
+    ]
+
+
+def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> None:
+    """A write replaces its own file's rows, keeps other files', and stores what search results show."""
+    collection = open_collection(space, "rows")
+    try:
+        reset_collection(collection)
+        write_source_rows(
+            collection,
+            relative_path="other.md",
+            source_metadata={**_SOURCE, "source_path": "other.md"},
+            chunks=_chunks("other"),
+            vectors=[[0.0, 1.0]],
+        )
+        write_source_rows(
+            collection,
+            relative_path="notes.md",
+            source_metadata=_SOURCE,
+            chunks=_chunks("stale"),
+            vectors=[[1.0, 0.0]],
+        )
+        write_source_rows(
+            collection,
+            relative_path="notes.md",
+            source_metadata=_SOURCE,
+            chunks=_chunks("first", "null\x00byte"),
+            vectors=[[1.0, 0.0], [0.5, 0.5]],
+        )
+
+        stored = collection.collection().get(where={"source_path": "notes.md"}, include=["documents", "metadatas"])
+        assert collection.collection().metadata == _COLLECTION_METADATA
+        assert sorted(stored["documents"] or []) == ["first", "null\ufffdbyte"]
+        metadata = sorted(stored["metadatas"] or [], key=lambda row: row["chunk"])[0]
+        assert set(metadata) == {
+            "chunk",
+            "chunk_size",
+            "content_hash",
+            "content_id",
+            "linked_to",
+            "name",
+            "source_digest",
+            "source_mtime_ns",
+            "source_path",
+            "source_size",
+        }
+        assert (metadata["name"], metadata["linked_to"], metadata["chunk_size"]) == ("notes.md", "", 5)
+        assert collection.collection().get(where={"source_path": "other.md"}, include=[])["ids"]
+    finally:
+        collection.close()
+
+
+def test_write_source_rows_pages_by_the_stores_batch_limit(
+    space: CollectionSpace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file with more chunks than one Chroma write accepts is written in pages."""
+    collection = open_collection(space, "rows")
+    pages: list[int] = []
+    original_upsert = Collection.upsert
+
+    def _record_upsert(self: Collection, **kwargs: list[object]) -> None:
+        pages.append(len(kwargs["ids"]))
+        original_upsert(self, **kwargs)
+
+    try:
+        reset_collection(collection)
+        monkeypatch.setattr(type(collection.client), "get_max_batch_size", lambda _self: 2)
+        monkeypatch.setattr(Collection, "upsert", _record_upsert)
+        write_source_rows(
+            collection,
+            relative_path="notes.md",
+            source_metadata=_SOURCE,
+            chunks=_chunks("a", "b", "c", "d", "e"),
+            vectors=[[1.0, float(index)] for index in range(5)],
+        )
+
+        assert pages == [2, 2, 1]
+        assert collection.collection().count() == 5
+    finally:
+        collection.close()
+
+
+def test_write_source_rows_keeps_old_rows_when_vectors_are_missing(space: CollectionSpace) -> None:
+    """A write without one vector per chunk fails before it deletes the file's existing rows."""
+    collection = open_collection(space, "rows")
+    try:
+        reset_collection(collection)
+        write_source_rows(
+            collection,
+            relative_path="notes.md",
+            source_metadata=_SOURCE,
+            chunks=_chunks("kept"),
+            vectors=[[1.0, 0.0]],
+        )
+
+        with pytest.raises(ValueError, match="Expected 2 vectors"):
+            write_source_rows(
+                collection,
+                relative_path="notes.md",
+                source_metadata=_SOURCE,
+                chunks=_chunks("one", "two"),
+                vectors=[[1.0, 0.0]],
+            )
+
+        assert collection.collection().get(include=["documents"])["documents"] == ["kept"]
+    finally:
+        collection.close()
+
+
+def test_reset_collection_raises_when_the_old_collection_cannot_be_dropped(
+    space: CollectionSpace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed drop surfaces instead of leaving the old rows in a collection reported as emptied."""
+    collection = open_collection(space, "rows")
+    try:
+        reset_collection(collection)
+        write_source_rows(
+            collection,
+            relative_path="notes.md",
+            source_metadata=_SOURCE,
+            chunks=_chunks("old"),
+            vectors=[[1.0, 0.0]],
+        )
+
+        def fail_operation(self: Client, name: str, **kwargs: object) -> Never:  # noqa: ARG001
+            message = "collection operation failed"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(Client, "delete_collection", fail_operation)
+        with pytest.raises(RuntimeError, match="collection operation failed"):
+            reset_collection(collection)
+    finally:
+        collection.close()
 
 
 @contextmanager
@@ -158,12 +296,12 @@ def _candidate_manager(tmp_path: Path) -> Iterator[KnowledgeManager]:
         process_env={},
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    published = manager._published_collection
+    assert published is not None
     try:
         yield manager
     finally:
-        client = require_chroma_vector_db(manager._knowledge).client
-        assert isinstance(client, Client)
-        client.close()
+        published.close()
 
 
 @pytest.mark.parametrize(
@@ -174,9 +312,10 @@ def test_candidate_inspection_releases_owned_client(tmp_path: Path, candidate_st
     """Every candidate-shape result must release only the temporary inspection client."""
     with _candidate_manager(tmp_path) as manager:
         space = manager._collections
-        reader = require_chroma_vector_db(manager._knowledge).client
+        assert manager._published_collection is not None
+        reader = manager._published_collection.client
         candidate_name = f"{space.default_collection}_candidate_test"
-        expected_collections = {space.default_collection}
+        expected_collections: set[str] = set()
         if candidate_state != "missing":
             candidate = reader.create_collection(candidate_name)
             expected_collections.add(candidate_name)
@@ -188,8 +327,9 @@ def test_candidate_inspection_releases_owned_client(tmp_path: Path, candidate_st
             completed={"document.md": (1, 1, "digest")} if candidate_state == "claimed" else {},
         )
 
-        assert manager._candidate_holds_unclaimed_rows(checkpoint, embedder=Embedder()) is expected
-        assert reader.get_collection(space.default_collection).count() == 0
+        assert manager._candidate_holds_unclaimed_rows(checkpoint) is expected
+        # The manager's own client keeps working after the inspection client closed.
+        assert reader.count_collections() == len(expected_collections)
 
     _assert_storage_released(space, expected_collections)
 
@@ -198,7 +338,8 @@ def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkey
     """A failed candidate row lookup must propagate and release the inspection client."""
     with _candidate_manager(tmp_path) as manager:
         space = manager._collections
-        reader = require_chroma_vector_db(manager._knowledge).client
+        assert manager._published_collection is not None
+        reader = manager._published_collection.client
         candidate_name = f"{space.default_collection}_candidate_test"
         reader.create_collection(candidate_name)
         checkpoint = CandidateCheckpoint(collection=candidate_name, settings=manager._indexing_settings)
@@ -209,10 +350,10 @@ def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkey
 
         monkeypatch.setattr(Collection, "get", fail_get)
         with pytest.raises(RuntimeError, match="candidate row lookup failed"):
-            manager._candidate_holds_unclaimed_rows(checkpoint, embedder=Embedder())
-        assert reader.get_collection(space.default_collection).count() == 0
+            manager._candidate_holds_unclaimed_rows(checkpoint)
+        assert reader.count_collections() == 1
 
-    _assert_storage_released(space, {space.default_collection, candidate_name})
+    _assert_storage_released(space, {candidate_name})
 
 
 @pytest.fixture

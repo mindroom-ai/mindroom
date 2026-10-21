@@ -40,7 +40,7 @@ class _Embedder:
 
 @pytest.fixture
 def published_index(tmp_path: Path) -> Path:
-    """A real index with independently known vectors, filters and document fields."""
+    """A real index with independently known vectors, metadata and document fields."""
     with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
         collection = client.create_collection("published")
         collection.add(
@@ -88,7 +88,7 @@ def test_probe_does_not_open_native_client_in_parent(
         message = "Native Chroma opened in the application process"
         raise AssertionError(message)
 
-    monkeypatch.setattr(native_chroma, "ChromaDb", reject_parent_client)
+    monkeypatch.setattr(native_chroma, "_persistent_client", reject_parent_client)
     processes = capture_read_processes
     try:
         assert chroma_collection_exists(tmp_path, "published") is True
@@ -170,20 +170,17 @@ def test_collection_probe_reports_locked_metadata(published_index: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_search_preserves_document_fields_and_filters(published_index: Path) -> None:
-    """The process boundary must not drop IDs, vectors, scores or native filters."""
+async def test_search_returns_the_fields_the_search_tool_shows(published_index: Path) -> None:
+    """The process boundary keeps each hit's name, content, stored metadata, and distance, nearest first."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
-    documents = await proxy.async_search("alpha", limit=2, filters={"team": "a"})
-    assert len(documents) == 1
-    document = documents[0]
-    assert (document.id, document.name, document.content, document.content_id) == (
-        "a",
-        "Alpha",
-        "alpha document",
-        "source-a",
-    )
-    assert document.embedding == [1.0, 0.0]
-    assert document.meta_data == {"team": "a", "similarity_score": 0.0, "distances": 0.0}
+    documents = await proxy.async_search("alpha", limit=2)
+    assert [(document.name, document.content) for document in documents] == [
+        ("Alpha", "alpha document"),
+        ("Beta", "beta document"),
+    ]
+    assert documents[0].meta_data == {"team": "a", "distances": 0.0, "similarity_score": 0.0}
+    # The fixture collection uses Chroma's default squared-L2 distance.
+    assert documents[1].meta_data == {"team": "b", "distances": 2.0, "similarity_score": 2.0}
 
 
 @pytest.mark.asyncio
@@ -200,8 +197,8 @@ async def test_merged_search_covers_more_sources_than_reader_slots(published_ind
             for name in ("published", "second", "third", "fourth", "fifth")
         ],
     )
-    documents = await merged.async_search(query="alpha", limit=5, filters={"team": "a"})
-    assert [document.id for document in documents] == ["a", "second", "third", "fourth", "fifth"]
+    documents = await merged.async_search(query="alpha", limit=5)
+    assert [document.content for document in documents] == ["alpha document", "second", "third", "fourth", "fifth"]
 
 
 @pytest.mark.asyncio
@@ -299,7 +296,7 @@ async def test_async_embedding_overlaps_child_startup(
     finally:
         release_embedding.set()
         documents = await task
-    assert documents[0].id == "a"
+    assert documents[0].content == "alpha document"
     _assert_only_warm_reader_alive(capture_read_processes)
 
 
@@ -405,39 +402,29 @@ async def test_native_error_logs_redacted_child_diagnostics(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     """Preserve the failing operation and native explanation without URL credentials."""
-    proxy = ChromaReadProxy("published", str(published_index), _Embedder())
-    with pytest.raises(RuntimeError, match="ValueError"):
-        await proxy.async_search(
-            "alpha",
-            filters={"team": {"$invalid": "https://reader:synthetic-secret@example.test"}},
-        )
+    # Chroma names a missing collection in its error, so the name carries the URL credentials.
+    proxy = ChromaReadProxy("https://reader:synthetic-secret@example.test docs", str(published_index), _Embedder())
+    with pytest.raises(RuntimeError, match="NotFoundError"):
+        await proxy.async_search("alpha")
     error = capfd.readouterr().err
     assert "Traceback" in error
-    assert "ValueError" in error
-    assert "$invalid" in error
+    assert "NotFoundError" in error
+    assert "does not exist" in error
     assert "synthetic-secret" not in error
 
 
 @pytest.mark.asyncio
 async def test_concurrent_search_burst_preserves_results(published_index: Path) -> None:
-    """More searches than reader slots still return each requested document and filter."""
+    """More searches than reader slots still return each requested document."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
     results = await asyncio.gather(
-        *(proxy.async_search("alpha", limit=2, filters={"team": "a"}) for _ in range(8)),
+        *(proxy.async_search("alpha", limit=1) for _ in range(8)),
         return_exceptions=True,
     )
     for documents in results:
         assert not isinstance(documents, BaseException)
-        assert len(documents) == 1
-        document = documents[0]
-        assert (document.id, document.name, document.content, document.content_id) == (
-            "a",
-            "Alpha",
-            "alpha document",
-            "source-a",
-        )
-        assert document.embedding == [1.0, 0.0]
-        assert document.meta_data == {"team": "a", "similarity_score": 0.0, "distances": 0.0}
+        assert [(document.name, document.content) for document in documents] == [("Alpha", "alpha document")]
+        assert documents[0].meta_data == {"team": "a", "distances": 0.0, "similarity_score": 0.0}
 
 
 @pytest.mark.asyncio
@@ -453,20 +440,20 @@ async def test_next_read_uses_warm_reader_and_replaces_it(
     async def prepare_request() -> ReadRequest:
         return request
 
-    async def search() -> list[str | None]:
+    async def search() -> list[str]:
         result = (
             await read_process.read_chroma_async(prepare_request)
             if async_read
             else await asyncio.to_thread(read_chroma, request)
         )
-        return [document.id for document in result.documents]
+        return [hit.content for hit in result.hits]
 
-    assert await search() == ["a", "b"]
+    assert await search() == ["alpha document", "beta document"]
     assert len(capture_read_processes) == 2
     _assert_only_warm_reader_alive(capture_read_processes)
     warm = read_process._warm_reader
     assert warm is not None
-    assert await search() == ["a", "b"]
+    assert await search() == ["alpha document", "beta document"]
     assert len(capture_read_processes) == 3, "The warm child must serve the read instead of a new child"
     assert warm.returncode == 0
     _assert_only_warm_reader_alive(capture_read_processes)

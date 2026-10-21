@@ -1,42 +1,11 @@
-"""Tests for strict knowledge error propagation."""
+"""Tests for strict knowledge search error propagation."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
-from agno.knowledge.content import Content
 from agno.knowledge.document import Document
 
-from mindroom.knowledge.strict_knowledge import StrictInsertKnowledge, StrictSearchKnowledge
-
-
-class _FailingVectorDb:
-    def exists(self) -> bool:
-        return True
-
-    def upsert_available(self) -> bool:
-        return False
-
-    def insert(
-        self,
-        _content_hash: str,
-        *,
-        documents: list[Document],
-        filters: dict[str, Any] | None,
-    ) -> None:
-        del documents, filters
-        msg = "vector insertion failed"
-        raise RuntimeError(msg)
-
-
-def test_strict_insert_knowledge_propagates_vector_failure() -> None:
-    """Index callers receive the causal failure instead of a vectorless success."""
-    knowledge = StrictInsertKnowledge(vector_db=_FailingVectorDb())
-    content = Content(content_hash="hash")
-
-    with pytest.raises(RuntimeError, match="vector insertion failed"):
-        knowledge._handle_vector_db_insert(content, [Document(content="text")], upsert=False)
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 
 
 class _RecordingVectorDb:
@@ -98,27 +67,3 @@ async def test_strict_search_knowledge_sync_fallback_propagates_failure() -> Non
     knowledge = StrictSearchKnowledge(vector_db=SyncOnlyVectorDb())
     with pytest.raises(RuntimeError, match="vector search failed"):
         await knowledge.asearch("query")
-
-
-class _UnembeddingVectorDb:
-    """A store that embeds in-process but leaves every chunk without a vector."""
-
-    embedder = object()
-
-    def exists(self) -> bool:
-        return True
-
-    def upsert_available(self) -> bool:
-        return False
-
-    def insert(self, _content_hash: str, *, documents: list[Document], filters: object) -> None:
-        del documents, filters
-
-
-def test_strict_insert_knowledge_raises_when_chunks_were_not_embedded() -> None:
-    """A write the store accepted without embedding anything must not read as success."""
-    knowledge = StrictInsertKnowledge(vector_db=_UnembeddingVectorDb())
-    content = Content(content_hash="hash")
-
-    with pytest.raises(RuntimeError, match="No chunks could be embedded"):
-        knowledge._handle_vector_db_insert(content, [Document(content="text")], upsert=False)

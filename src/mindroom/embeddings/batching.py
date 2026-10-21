@@ -1,30 +1,25 @@
-"""Batch the embedding requests a semantic knowledge refresh issues.
+"""Batch the document embedding requests a semantic knowledge refresh issues.
 
-Agno embeds one chunk per provider request: ``ChromaDb._upsert`` calls
-``Document.embed`` in a loop, and ``Document.embed`` calls
-``Embedder.get_embedding_and_usage(text)``. A corpus of many small files is
-therefore one HTTP round trip per file, which is the dominant cost of a large
-build and far slower than the rate at which such corpora change.
+A refresh writes each file's chunks as one unit, and embedding them one
+request per chunk makes a corpus of many small files one HTTP round trip per
+file, which is the dominant cost of a large build and far slower than the rate
+at which such corpora change.
 
-Rather than reimplementing Agno's write path (and losing its id, metadata and
-Chroma batching semantics), this module puts a narrow adapter at the MindRoom
-boundary: ``BatchPrefetchEmbedder`` wraps the configured embedder and serves
+``BatchPrefetchEmbedder`` wraps the configured embedder and serves
 already-embedded chunk texts from a short-lived cache. The indexer reads and
 chunks a bounded batch of files first, embeds those chunk texts in as few
-provider requests as the item and payload limits allow, and only then hands the
-files to Agno, whose per-chunk embed calls become cache hits.
+provider requests as the item and payload limits allow, and only then writes
+the files, whose chunk embeddings become cache hits.
 
-Cache misses fall through to the wrapped embedder unchanged, so behavior is
-identical (only slower) for providers without batch support, for content that
-changed between planning and insertion, and for query-time embedding.
+Cache misses fall through to the wrapped embedder one text at a time, so
+behavior is identical (only slower) for providers without batch requests and
+for content that changed between planning and writing.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-from agno.knowledge.embedder.base import Embedder as AgnoEmbedder
+from typing import TYPE_CHECKING
 
 from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
@@ -81,10 +76,10 @@ def plan_embedding_batches(
 
 
 @dataclass
-class BatchPrefetchEmbedder(AgnoEmbedder):
-    """Agno embedder for the knowledge write path that serves prefetched chunk embeddings from a bounded cache."""
+class BatchPrefetchEmbedder:
+    """Document embedder for the knowledge write path that serves prefetched chunk embeddings from a bounded cache."""
 
-    inner: Embedder = field(kw_only=True)
+    inner: Embedder
     _cache: dict[str, list[float]] = field(default_factory=dict, init=False, repr=False)
     _batching_disabled: bool = field(default=False, init=False, repr=False)
     _observed_dimensions: int | None = field(default=None, init=False, repr=False)
@@ -197,37 +192,12 @@ class BatchPrefetchEmbedder(AgnoEmbedder):
         self._batching_disabled = True
         logger.warning("Knowledge embedder does not support batching; using one request per chunk", reason=reason)
 
-    def get_embedding(self, text: str) -> list[float]:
-        """Return a prefetched embedding, or embed ``text`` as a query."""
-        cached = self._cache.get(text)
-        if cached is not None:
-            return cached
-        return self._validated(self.inner.embed([text], purpose="query")[0])
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        """Return a prefetched embedding without usage, or delegate for a miss.
-
-        Prefetched hits report no usage payload: usage was already accounted
-        for by the batch request that produced the vector, and reporting it
-        again per chunk would double-count it.
-        """
-        cached = self._cache.get(text)
-        if cached is not None:
-            return cached, None
-        # Validated here too: this is the path Agno's writer uses, so skipping
-        # it would let an unusable vector reach the collection.
-        return self._validated(self.inner.embed([text], purpose="document")[0]), None
-
-    async def async_get_embedding(self, text: str) -> list[float]:
-        """Async variant of ``get_embedding``."""
-        cached = self._cache.get(text)
-        if cached is not None:
-            return cached
-        return self._validated((await self.inner.aembed([text], purpose="query"))[0])
-
-    async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
-        """Async variant of ``get_embedding_and_usage``."""
-        cached = self._cache.get(text)
-        if cached is not None:
-            return cached, None
-        return self._validated((await self.inner.aembed([text], purpose="document"))[0]), None
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        """Return one validated vector per chunk text, embedding each text the cache misses in its own request."""
+        vectors: list[list[float]] = []
+        for text in texts:
+            cached = self._cache.get(text)
+            if cached is None:
+                cached = self._validated(self.inner.embed([text], purpose="document")[0])
+            vectors.append(cached)
+        return vectors
