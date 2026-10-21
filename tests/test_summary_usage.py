@@ -201,7 +201,7 @@ async def test_summary_cost_counts_toward_api_requester(tmp_path: Path) -> None:
     # Through the production preparation path, which wires the summary's usage recorder.
     with (
         detached_requester_context(authority),
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.history.compaction.build_model_provider", return_value=model),
     ):
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),

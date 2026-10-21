@@ -2,7 +2,7 @@
 
 The golden's first turn calls ``compact_context`` and stores its run; the next reply compacts that run before it
 answers, with one non-streaming summary request. Here the run the first turn stores is seeded from the golden's own
-requests, and the production compaction path (summarizer loading through the provider registry, the summary input,
+requests, and the runtime's pre-reply compaction (summarizer loading through the provider registry, the summary input,
 and the summary call) sends the summary request to the recorder the prompt goldens were captured with.
 """
 
@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.history.compaction import compact_scope_history, load_summarizer, scope_usage_recorder
-from mindroom.history.runtime import resolve_entity_preparation_inputs
+from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
 from mindroom.history.storage import read_scope_state, set_force_compaction_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.messages import Message
@@ -82,27 +81,19 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     recorder = Recorder(responder=scenario.responder)
 
     with recorder.installed():
-        outcome = await compact_scope_history(
+        outcome = await _compact_before_reply(
+            None,
+            _reported,
             storage=storage,
             session=session,
             scope=scope,
             state=read_scope_state(session, scope),
-            summarizer=load_summarizer(
-                inputs.execution_plan,
-                inputs.history_settings,
-                config=turn.config,
-                runtime_paths=turn.runtime_paths,
-                session_id=session.session_id,
-                scope=scope,
-                on_usage=scope_usage_recorder(storage, session.session_id),
-            ),
-            available_history_budget=None,
+            resolved_inputs=inputs,
+            history_budget=None,
             before_tokens=0,
-            replay_window_tokens=None,
-            threshold_tokens=None,
-            progress=None,
-            complete=_reported,
             replay_model=None,
+            config=turn.config,
+            runtime_paths=turn.runtime_paths,
         )
 
     summary_request = golden["requests"][-1]

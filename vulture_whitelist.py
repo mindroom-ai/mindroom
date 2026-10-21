@@ -280,7 +280,6 @@ _.get_system_prompt_snippet  # Skills method Agno's Agent calls for the skills p
 _.tool_owners  # AgentBuild field the approval owner check reads once approvals resume on the owned loop (src/mindroom/agent_loop/build.py)
 _.configure_minimal  # MinimalAgent setup until minimal mode moves onto AgentBuild.surface (src/mindroom/agent_cli/minimal_agent.py)
 bind_actor_authority  # Agno actor binding until the job middleware carries the authority snapshot (src/mindroom/tool_jobs/authorization.py)
-load_summarizer  # The summarizer loader history/runtime.py calls once the F7 merge moves its loading here (src/mindroom/history/compaction.py)
 set_credentials  # unused function (src/mindroom/api/credentials.py)
 _.validate_root_space_alias_does_not_collide_with_managed_rooms  # unused method (src/mindroom/config/main.py)
 _.send_message  # unused method (src/mindroom/hooks/context.py)

@@ -2834,14 +2834,13 @@ depends_on = [
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.history.policy",
-    "mindroom.providers.agno_compat_provider_errors",
     "mindroom.history.replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
+    "mindroom.history.summary_call",
     "mindroom.history.types",
     "mindroom.logging_config",
     "mindroom.model_usage",
-    "mindroom.providers.model_loading",
     "mindroom.history.team_scope",
     "mindroom.timing",
 ]
@@ -7755,7 +7754,7 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.agno_compat_provider_errors"
 depends_on = ["mindroom.error_handling", "mindroom.providers.model_instance_checks"]
-visibility = ["mindroom.history.runtime", "mindroom.providers.stream_retry", "mindroom.providers.media_fallback"]
+visibility = ["mindroom.providers.stream_retry", "mindroom.providers.media_fallback"]
 
 [[modules]]
 path = "mindroom.history.replay"

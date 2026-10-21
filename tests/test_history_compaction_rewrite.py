@@ -18,9 +18,9 @@ from mindroom.constants import (
 )
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.compaction import (
-    SummaryModel,
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
+    _SummaryModel,
     compact_scope_history,
     summarize_runs,
 )
@@ -124,7 +124,7 @@ async def _rewrite_single_run(
             summary_model,
             summary_input_budget,
             fallback=(
-                SummaryModel(
+                _SummaryModel(
                     fallback_summary_model,
                     fallback_summary_model_name or "fallback-model",
                     fallback_summary_input_budget
@@ -688,7 +688,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -929,7 +929,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -988,7 +988,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -1061,7 +1061,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -1178,7 +1178,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -1234,7 +1234,7 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
     with (
         tool_runtime_context(runtime_context),
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(
@@ -1863,7 +1863,7 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
             _summarizer(
                 primary,
                 6_000,
-                fallback=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
+                fallback=_SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
                 timeout_seconds=30,
             ),
             None,
@@ -1898,7 +1898,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         ],
     )
     seed_session(storage, session)
-    fallback = SummaryModel(summary_model(model_id="fallback-model-id"), "fallback-model", 6_000)
+    fallback = _SummaryModel(summary_model(model_id="fallback-model-id"), "fallback-model", 6_000)
     summary_mock = AsyncMock(
         side_effect=[
             "first chunk summary",
@@ -2030,7 +2030,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
 
     with (
         patch(
-            "mindroom.providers.model_loading.get_model_instance",
+            "mindroom.history.compaction.build_model_provider",
             return_value=summary_model(),
         ),
         patch(

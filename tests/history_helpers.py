@@ -27,7 +27,7 @@ from mindroom.constants import (
 )
 from mindroom.history import summary_rows
 from mindroom.history.agno_compat_message_builder import apply_patch
-from mindroom.history.compaction import Summarizer, SummaryModel
+from mindroom.history.compaction import _Summarizer, _SummaryModel
 from mindroom.history.storage import (
     append_compaction_chunk,
     new_scope_session,
@@ -91,17 +91,17 @@ def _summarizer(
     input_budget_tokens: int = 16_000,
     *,
     name: str = "summary-model",
-    fallback: SummaryModel | None = None,
+    fallback: _SummaryModel | None = None,
     history_settings: ResolvedHistorySettings = _ALL_HISTORY_SETTINGS,
     prompt: str = COMPACTION_SUMMARY_PROMPT,
     timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     session_id: str = "session-1",
     scope: HistoryScope | None = None,
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None = None,
-) -> Summarizer:
+) -> _Summarizer:
     """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
-    return Summarizer(
-        model=SummaryModel(model or summary_model(), name, input_budget_tokens),
+    return _Summarizer(
+        model=_SummaryModel(model or summary_model(), name, input_budget_tokens),
         fallback=fallback,
         prompt=prompt,
         timeout_seconds=timeout_seconds,

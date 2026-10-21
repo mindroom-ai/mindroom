@@ -67,7 +67,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from typing import Any
 
-    from agno.metrics import MessageMetrics
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
@@ -77,6 +76,8 @@ if TYPE_CHECKING:
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
+    from mindroom.llm.provider import ModelIdentity
+    from mindroom.llm.usage import MessageMetrics
 
 logger = get_logger(__name__)
 
@@ -690,12 +691,12 @@ async def _summarize_run_locally(
 def _summary_usage_recorder(
     binding: _MidTurnCompaction,
     run_response: RunOutput | TeamRunOutput,
-) -> Callable[[Model, MessageMetrics], Awaitable[None]] | None:
+) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None:
     """Record each summary response under the reply's usage owner, else in the target's own session storage."""
     owner = get_helper_usage_owner()
     if owner is not None:
 
-        async def record_for_owner(model: Model, usage: MessageMetrics) -> None:
+        async def record_for_owner(model: ModelIdentity, usage: MessageMetrics) -> None:
             await run_session_storage_operation(
                 owner.storage_factory,
                 partial(

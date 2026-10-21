@@ -1,4 +1,4 @@
-"""Provider error interpretation for streaming and compaction failure notices.
+"""Provider error interpretation for streaming retries.
 
 Agno sometimes wraps SDK failures as generic ModelProviderError values or text.
 Keep cause-chain inspection and wording compatibility outside core retry policy.
@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from google.genai.errors import APIError as GoogleAPIError
-
-_TIMEOUT_PROVIDER_ERROR_FRAGMENT = "timed out"
 
 
 def _visible_causes(error: BaseException) -> Iterator[BaseException]:
@@ -109,8 +107,3 @@ def is_transient_stream_error(error: BaseException) -> bool:
     if error.status_code != 502:
         return error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
     return _has_typed_network_cause(error) or any(_is_transient_sdk_error(cause) for cause in _visible_causes(error))
-
-
-def is_provider_timeout(error: BaseException) -> bool:
-    """Recognize timeout text from providers that do not preserve typed errors."""
-    return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in str(error).casefold()
