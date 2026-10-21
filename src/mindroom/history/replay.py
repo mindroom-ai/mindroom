@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
@@ -28,11 +28,22 @@ if TYPE_CHECKING:
     from agno.team import Team
 
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.native_compaction import NativeCompactionModel
     from mindroom.session_storage.types import ConversationSession
 
 
 logger = get_logger(__name__)
+
+
+class PortableReplayEstimator(Protocol):
+    """A provider route that sizes explicitly replayed history the way its requests send it."""
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Return whether the estimate prices images by their visual cost instead of their transport bytes."""
+        ...
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        """Return the route's estimate of ``messages`` as one explicit replay, or None to size them canonically."""
+        ...
 
 
 class HistorySummaryBudgetError(RuntimeError):
@@ -52,7 +63,7 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = _summary_tokens(session)
@@ -69,7 +80,7 @@ def estimate_prompt_visible_history_tokens(
 def _route_tokens(
     messages: list[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> tuple[int, bool]:
     """Estimate messages as a route replays them, and report whether a native checkpoint replaced their prefix."""
@@ -89,7 +100,7 @@ def _route_tokens(
 def estimate_request_messages_tokens(
     messages: Sequence[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None = None,
 ) -> int:
     """Estimate one provider request's messages the way replay planning estimates history."""
@@ -99,7 +110,7 @@ def estimate_request_messages_tokens(
 def _estimate_messages_tokens(
     history_messages: list[Message],
     *,
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
     native_route: str | None,
 ) -> int:
     uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
@@ -235,7 +246,7 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     summary_tokens = _summary_tokens(session)
@@ -315,7 +326,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
-    replay_model: NativeCompactionModel | None = None,
+    replay_model: PortableReplayEstimator | None = None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0

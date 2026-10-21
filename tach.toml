@@ -5929,6 +5929,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials.sync",
     "mindroom.file_locks",
+    "mindroom.history.message_content",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
@@ -7746,6 +7747,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",
+    "mindroom.providers.openai",
     "mindroom.providers.openai_models",
     "mindroom.agno_participation",
 ]
