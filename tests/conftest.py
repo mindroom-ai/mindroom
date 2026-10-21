@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import warnings
@@ -3055,38 +3056,29 @@ def _refuse_connection(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError(message, request=request)
 
 
-def _offline_sdk_client_params(embedder: MindRoomOpenAIEmbedder) -> dict[str, Any]:
-    # Without retries, because the SDK would back off for seconds before reporting the refusal.
-    return {
-        **(embedder.client_params or {}),
-        "api_key": embedder.api_key,
-        "organization": embedder.organization,
-        "base_url": embedder.base_url,
-        "max_retries": 0,
-    }
-
-
 def _offline_sync_client(embedder: MindRoomOpenAIEmbedder) -> OpenAI:
     if embedder.openai_client is None:
-        embedder.openai_client = OpenAI(
-            **_offline_sdk_client_params(embedder),
+        # The production property lives on a base class, which the patch on this subclass leaves in place.
+        # Without retries, because the SDK would back off for seconds before reporting the refusal.
+        embedder.openai_client = super(MindRoomOpenAIEmbedder, embedder).client.with_options(
             http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
+            max_retries=0,
         )
     return embedder.openai_client
 
 
 def _offline_async_client(embedder: MindRoomOpenAIEmbedder) -> AsyncOpenAI:
     if embedder.async_client is None:
-        embedder.async_client = AsyncOpenAI(
-            **_offline_sdk_client_params(embedder),
+        embedder.async_client = super(MindRoomOpenAIEmbedder, embedder).aclient.with_options(
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
+            max_retries=0,
         )
     return embedder.async_client
 
 
 @pytest.fixture
 def real_embedder_clients() -> None:
-    """Keep the real OpenAI embedder SDK clients for tests that exercise how they are built."""
+    """Keep the OpenAI embedder SDK clients on their real transport, for tests that serve embeddings locally."""
 
 
 @pytest.fixture(autouse=True)
@@ -3096,8 +3088,10 @@ def _offline_openai_embedders(request: pytest.FixtureRequest, monkeypatch: pytes
     The default config pairs mem0 memory with the OpenAI embedder, so any test that searches memory
     or probes embedder health builds one. Its requests would go to `OPENAI_BASE_URL` or
     api.openai.com with the keyless placeholder key. Here an embedder without an injected SDK client
-    gets clients that fail every request the way an unreachable endpoint does, with the configured
-    key and base URL. Tests that need vectors inject a client or their own embedder.
+    builds its clients the production way, then moves them onto a transport that fails every request
+    the way an unreachable endpoint does. Those failures never reach httpcore, so the network guard
+    does not report them: a test that uses such an embedder sees a down endpoint, as it would in
+    production. Tests that need vectors inject a client or their own embedder.
     """
     if "real_embedder_clients" in request.fixturenames:
         return
@@ -3109,7 +3103,7 @@ _OLLAMA_DEFAULT_PORT = urlsplit(OLLAMA_HOST_DEFAULT).port
 
 
 def _dial_leaves_the_test(host: str, port: int) -> bool:
-    """Return whether dialing ``host:port`` reaches another machine or a real local Ollama."""
+    """Return whether to refuse dialing ``host:port``: any host off this machine, or Ollama's default port on it."""
     if host == "localhost" or host.endswith(".localhost"):
         on_this_machine = True
     else:
@@ -3119,24 +3113,70 @@ def _dial_leaves_the_test(host: str, port: int) -> bool:
             on_this_machine = False
         else:
             on_this_machine = address.is_loopback or address.is_unspecified
-    # Test servers listen on ephemeral ports, so only a real Ollama answers on its default port.
+    # Refused: every host off this machine, plus loopback port 11434, where a locally running Ollama listens.
+    # Test servers on other loopback ports stay reachable.
     return not on_this_machine or port == _OLLAMA_DEFAULT_PORT
 
 
-def _refuse_dial_off_the_test(host: str, port: int, connect_error: type[Exception], attempts: list[str]) -> None:
+@dataclass
+class _RefusedDial:
+    """One refused dial, the thread that made it, and whether a test failure has named it."""
+
+    address: str
+    thread: str
+    reported: bool = False
+
+
+def _refuse_dial_off_the_test(
+    host: str,
+    port: int,
+    connect_error: type[Exception],
+    dials: list[_RefusedDial],
+) -> None:
     if _dial_leaves_the_test(host, port):
-        attempts.append(f"{host}:{port}")
+        dials.append(_RefusedDial(f"{host}:{port}", threading.current_thread().name))
         message = f"network disabled in tests: {host}:{port}"
         raise connect_error(message)
+
+
+def _describe_dials(dials: Iterable[_RefusedDial]) -> str:
+    return ", ".join(sorted({f"{dial.address} (thread {dial.thread})" for dial in dials}))
+
+
+def _report_test_dials(dials: list[_RefusedDial], start: int, test_thread: str) -> str | None:
+    """Mark the dials recorded from index ``start`` on as reported, and return the failure for their test."""
+    made_during_test = dials[start:]
+    if not made_during_test:
+        return None
+    for dial in made_during_test:
+        dial.reported = True
+    message = f"test tried to reach the network: {_describe_dials(made_during_test)}"
+    if any(dial.thread != test_thread for dial in made_during_test):
+        message += (
+            f"; a dial from a thread other than the test's own ({test_thread})"
+            " may come from an earlier test's background work"
+        )
+    return message
+
+
+def _unreported_dials_failure(dials: list[_RefusedDial]) -> str | None:
+    """Return the failure for dials no test reported, which were made between tests or after the last one."""
+    unreported = [dial for dial in dials if not dial.reported]
+    if not unreported:
+        return None
+    return (
+        "background work tried to reach the network between tests or after the last test: "
+        f"{_describe_dials(unreported)}"
+    )
 
 
 def _refusing_sync_connect[R](
     connect_tcp: Callable[..., R],
     connect_error: type[Exception],
-    attempts: list[str],
+    dials: list[_RefusedDial],
 ) -> Callable[..., R]:
     def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
-        _refuse_dial_off_the_test(host, port, connect_error, attempts)
+        _refuse_dial_off_the_test(host, port, connect_error, dials)
         return connect_tcp(backend, host, port, *args, **kwargs)
 
     return refusing_connect_tcp
@@ -3145,51 +3185,55 @@ def _refusing_sync_connect[R](
 def _refusing_async_connect[R](
     connect_tcp: Callable[..., Awaitable[R]],
     connect_error: type[Exception],
-    attempts: list[str],
+    dials: list[_RefusedDial],
 ) -> Callable[..., Awaitable[R]]:
     async def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
-        _refuse_dial_off_the_test(host, port, connect_error, attempts)
+        _refuse_dial_off_the_test(host, port, connect_error, dials)
         return await connect_tcp(backend, host, port, *args, **kwargs)
 
     return refusing_connect_tcp
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _refused_network_attempts() -> Generator[list[str], None, None]:
-    """Refuse every HTTP client connection that would leave this machine, for the whole session.
+def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
+    """Refuse HTTP client dials off this machine or to Ollama's default local port, for the whole session.
 
     The patch outlives each test so that a background thread or task finishing after its test is still refused.
+    A dial no test reported, made between tests or after the last one, fails the session at teardown.
     """
-    attempts: list[str] = []
+    dials: list[_RefusedDial] = []
     with pytest.MonkeyPatch.context() as patcher:
         for core in (httpcore, httpcore2):
             patcher.setattr(
                 core.SyncBackend,
                 "connect_tcp",
-                _refusing_sync_connect(core.SyncBackend.connect_tcp, core.ConnectError, attempts),
+                _refusing_sync_connect(core.SyncBackend.connect_tcp, core.ConnectError, dials),
             )
             patcher.setattr(
                 core.AnyIOBackend,
                 "connect_tcp",
-                _refusing_async_connect(core.AnyIOBackend.connect_tcp, core.ConnectError, attempts),
+                _refusing_async_connect(core.AnyIOBackend.connect_tcp, core.ConnectError, dials),
             )
-        yield attempts
+        yield dials
+    failure = _unreported_dials_failure(dials)
+    if failure is not None:
+        pytest.fail(failure, pytrace=False)
 
 
 @pytest.fixture(autouse=True)
-def _fail_tests_that_reach_the_network(_refused_network_attempts: list[str]) -> Generator[None, None, None]:
-    """Fail a test whose HTTP client dialed another machine or a real local Ollama.
+def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None, None, None]:
+    """Fail a test whose HTTP client dialed a host off this machine or Ollama's default local port.
 
     The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
     is recorded and checked here. This covers clients built on httpx and httpx2, which include the
     model and embedder SDKs. Raw sockets, aiohttp and requests are not covered; tiktoken, for one,
     downloads its encodings through requests when its cache is cold.
     """
-    _refused_network_attempts.clear()
+    start = len(_refused_dials)
     yield
-    if _refused_network_attempts:
-        attempts = ", ".join(sorted(set(_refused_network_attempts)))
-        pytest.fail(f"test tried to reach the network: {attempts}", pytrace=False)
+    failure = _report_test_dials(_refused_dials, start, threading.current_thread().name)
+    if failure is not None:
+        pytest.fail(failure, pytrace=False)
 
 
 @pytest.fixture(autouse=True)
