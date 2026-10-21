@@ -93,6 +93,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
 | `tool_choice_forced` | A call of `get_weather` forced through `tool_choice`. |
 | `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined, sent without streaming. |
+| `search_grounding` | Google Search grounding (`search: true`) on `gemini-3.1-pro-preview`, on Vertex AI at the `global` location: the search tool goes out in place of the two offered function tools, and the streamed reply carries grounding metadata, which the parsed message keeps only in `citations`, plus tool-use prompt tokens in its usage. |
 
 Skipped where the route has nothing to pin:
 
@@ -106,6 +107,7 @@ Skipped where the route has nothing to pin:
 - `approval_gated_tools`: Claude routes, Gemini, Ollama, and Cerebras, whose request tool definitions omit Agno's approval flags (see their `tool_definitions` goldens).
 - `tool_choice_forced`: Claude routes, Ollama, and Cerebras, whose Agno adapters drop a caller's `tool_choice`.
 - `native_compaction`, `native_compaction_replay`: run only on `anthropic`, `vertexai_claude`, `openai_responses`, and `codex`, the routes with native compaction.
+- `search_grounding`: runs only on `gemini` and `gemini_vertexai`, the routes with Google Search grounding.
 
 ## Prompt goldens (`prompts/`)
 

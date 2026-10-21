@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from agno.models.base import Model
@@ -29,6 +29,8 @@ class SyntheticModel(Model):
     chunk_chars: int = 40
     chars_per_second: float = 80.0
     tool_call_probability: float = 0.2
+    # The validated settings every response reads; the fields above are only the constructor surface.
+    _settings: SyntheticSettings = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate the configured response generation settings through the owned settings type."""
@@ -155,16 +157,17 @@ class SyntheticModel(Model):
         return [] if continuation or plan.tool_call_id is None else [shell_call(plan.tool_call_id)]
 
     def _chunks(self, content: str) -> Iterator[str]:
-        for start in range(0, len(content), self.chunk_chars):
-            yield content[start : start + self.chunk_chars]
+        chunk_chars = self._settings.chunk_chars
+        for start in range(0, len(content), chunk_chars):
+            yield content[start : start + chunk_chars]
 
     def _sleep_sync(self, character_count: int) -> None:
-        if self.chars_per_second:
-            time.sleep(character_count / self.chars_per_second)
+        if chars_per_second := self._settings.chars_per_second:
+            time.sleep(character_count / chars_per_second)
 
     async def _sleep_async(self, character_count: int) -> None:
-        if self.chars_per_second:
-            await asyncio.sleep(character_count / self.chars_per_second)
+        if chars_per_second := self._settings.chars_per_second:
+            await asyncio.sleep(character_count / chars_per_second)
 
 
 __all__ = ["SyntheticModel"]

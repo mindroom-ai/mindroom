@@ -282,9 +282,13 @@ def _read_image(path: Path, provider: str) -> bytes:
 
 
 def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[StreamEvent]:
-    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text."""
+    """Read a reply that arrived whole: its ``<think>`` reasoning becomes a reasoning delta ahead of the text.
+
+    Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
+    """
     calls = [event for event in _read_chunk(reply, response) if isinstance(event, ToolCallReady)]
-    reply.reasoning, reply.content = split_thinking(reply.content)
+    if "<think>" in reply.content:
+        reply.reasoning, reply.content = split_thinking(reply.content)
     events: list[StreamEvent] = []
     if reply.reasoning:
         events.append(ReasoningDelta(reply.reasoning))

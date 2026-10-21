@@ -12,7 +12,14 @@ from typing import Any, cast
 import httpx
 
 from mindroom.llm.errors import ContextWindowExceeded, ProviderError, ProviderUnavailable
-from mindroom.providers.errors import classify_provider_error, is_context_window_error, transport_error
+from mindroom.providers.errors import (
+    OVERLOADED_ERROR_TYPE,
+    RATE_LIMIT_STATUSES,
+    TRANSIENT_STATUSES,
+    classify_provider_error,
+    is_context_window_error,
+    transport_error,
+)
 
 __all__ = [
     "missing_api_key_error",
@@ -22,8 +29,8 @@ __all__ = [
 ]
 
 # Error codes and types OpenAI-compatible servers put in mid-stream SSE error events for transient failures.
-_TRANSIENT_EVENT_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
-_TRANSIENT_ERROR_TYPES = frozenset({"overloaded", "overloaded_error", "server_error", "internal_server_error"})
+_TRANSIENT_EVENT_STATUSES = RATE_LIMIT_STATUSES | TRANSIENT_STATUSES
+_TRANSIENT_ERROR_TYPES = frozenset({"overloaded", OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error"})
 _RESPONSES_EVENT_STATUSES = {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}
 
 

@@ -5,7 +5,7 @@ to Anthropic-family upstreams (Anthropic, Vertex, Bedrock, and Azure), which onl
 breakpoints. Other OpenRouter model families cache implicitly or use different markers, so only requests whose
 model ID routes to Anthropic are marked.
 
-Breakpoint placement reuses :mod:`mindroom.providers.anthropic.prompt_cache`: the shared system prefix, the
+Breakpoint placement reuses :mod:`mindroom.providers.cache_ladder`: the shared system prefix, the
 newest cacheable part of the two newest cacheable messages, and the last tool definition, all with one TTL and
 at most four markers. This module only translates between the OpenAI message shape and those rules, on the
 complete ``chat.completions.create`` keyword arguments, and leaves any request that already carries authored
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from mindroom.providers.anthropic.prompt_cache import (
+from mindroom.providers.cache_ladder import (
     MAX_CACHE_MARKERS,
     MESSAGE_RUNG_COUNT,
     mark_last_tool,

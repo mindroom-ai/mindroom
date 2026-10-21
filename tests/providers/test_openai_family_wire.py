@@ -259,6 +259,36 @@ async def test_chat_completion_splits_think_tags_and_records_finish_reason(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("<think>\n\n</think>Pack a coat.", ("<think>\n\n</think>Pack a coat.", None)),
+        ("Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+    ],
+    ids=["empty-reasoning-kept", "no-opening-tag-split"],
+)
+async def test_chat_completion_splits_think_tags_as_agno_did(
+    tmp_path: Path,
+    content: str,
+    expected: tuple[str, str | None],
+) -> None:
+    """Agno's Chat split at a closing tag alone but kept a reply whose reasoning was empty unchanged."""
+    completion = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+        "usage": _USAGE,
+    }
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply(completion))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+
+    assert (turn.content, turn.message.reasoning_content) == expected
+
+
+@pytest.mark.asyncio
 async def test_chat_tool_calls_without_ids_get_generated_ids(tmp_path: Path) -> None:
     delta = {"tool_calls": [{"index": 0, "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}
     built = _Built(
@@ -307,14 +337,29 @@ async def test_http_errors_map_to_typed_provider_errors(
 
 
 @pytest.mark.asyncio
-async def test_mid_stream_overload_event_is_retryable(tmp_path: Path) -> None:
-    reply = _chat_reply({"data": {"error": {"message": "Overloaded", "type": "overloaded_error"}}})
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        ({"message": "Overloaded", "type": "overloaded_error"}, True),
+        ({"message": "Slow down", "code": 529}, True),
+        ({"message": "Timed out", "code": "408"}, True),
+        ({"message": "Bad input", "code": "400"}, False),
+    ],
+    ids=["overloaded-type", "rate-limit-status", "transient-status", "client-status"],
+)
+async def test_mid_stream_error_events_are_retryable_when_transient(
+    tmp_path: Path,
+    error: dict[str, Any],
+    retryable: bool,
+) -> None:
+    """An error event inside a committed stream is retried for the shared rate-limit and transient statuses."""
+    reply = _chat_reply({"data": {"error": error}})
     built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
 
-    with pytest.raises(ProviderUnavailable) as info:
+    with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert info.value.retryable
+    assert info.value.retryable is retryable
 
 
 @pytest.mark.asyncio

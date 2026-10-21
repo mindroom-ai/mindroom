@@ -8,6 +8,7 @@ import sys
 
 OWNED_PROVIDER_MODULES = (
     "mindroom.providers.assistant_turn",
+    "mindroom.providers.cache_ladder",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.remote_media",

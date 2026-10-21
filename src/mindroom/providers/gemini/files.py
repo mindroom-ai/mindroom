@@ -38,8 +38,9 @@ def _content_name(path: Path, mime_type: str) -> str:
 async def uploaded_file_uri(client: Client, path: Path, mime_type: str, *, provider: str) -> str:
     """Return the URI of the active upload of ``path``, uploading it unless the same content is already there.
 
-    SDK API and transport errors propagate for the adapter to normalize; an upload the Files API cannot
-    process, or a file that disappears before it is sent, raises ``InvalidRequest``.
+    SDK API and transport errors propagate for the adapter to normalize, so a timeout or reset during the upload
+    (aiohttp raises both as ``OSError``) stays retryable; an upload the Files API cannot process, or a file that
+    disappears before it is sent, raises ``InvalidRequest``.
     """
     from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
     from google.genai.types import FileState  # noqa: PLC0415 - provider SDK loads on first request
@@ -58,9 +59,9 @@ async def uploaded_file_uri(client: Client, path: Path, mime_type: str, *, provi
                 raise
             # A concurrent request uploaded the same content first.
             file = await client.aio.files.get(name=name)
-        except (KeyError, ValueError, OSError) as error:
+        except (KeyError, ValueError, FileNotFoundError) as error:
             # The SDK raises KeyError and ValueError when the upload session never returns an upload URL or
-            # never finalizes, and OSError when the file vanished after its name was computed.
+            # never finalizes, and FileNotFoundError when the file vanished after its name was computed.
             msg = f"The Gemini Files API upload of {path.name} did not complete"
             raise InvalidRequest(msg, provider=provider) from error
     while file.state == FileState.PROCESSING:

@@ -730,8 +730,7 @@ def parse_chat_completion(completion: ChatCompletion, wire: ChatWire) -> ChatTur
     if wire.dialect != "openai":
         return parts
     if parts.content:
-        reasoning, parts.content = split_thinking(parts.content)
-        parts.reasoning = reasoning or None
+        parts.reasoning, parts.content = split_thinking(parts.content)
     message_extra = _extra(message)
     if isinstance(reasoning_field := _reasoning_field(message_extra), str):
         parts.reasoning = reasoning_field

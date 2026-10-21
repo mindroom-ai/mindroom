@@ -2720,19 +2720,23 @@ depends_on = ["mindroom.llm", "mindroom.logging_config", "mindroom.providers.cla
 visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
-path = "mindroom.providers.anthropic.prompt_cache"
-depends_on = [
-    "mindroom.hooks.enrichment",
-    "mindroom.model_defaults",
-    "mindroom.providers.anthropic.repairs",
-    "mindroom.providers.claude_wire_blocks",
-    "mindroom.system_prompt",
-]
+path = "mindroom.providers.cache_ladder"
+depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks", "mindroom.system_prompt"]
 visibility = [
-    "mindroom.providers.anthropic.messages",
+    "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.claude_prompt_cache",
     "mindroom.providers.openai",
 ]
+
+[[modules]]
+path = "mindroom.providers.anthropic.prompt_cache"
+depends_on = [
+    "mindroom.model_defaults",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.cache_ladder",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.messages", "mindroom.providers.claude_prompt_cache"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.native_compaction"
@@ -5935,8 +5939,8 @@ depends_on = [
     "mindroom.native_compaction",
     "mindroom.prompts",
     "mindroom.providers.agno_compat_openai_responses_items",
-    "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.assistant_turn",
+    "mindroom.providers.cache_ladder",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",

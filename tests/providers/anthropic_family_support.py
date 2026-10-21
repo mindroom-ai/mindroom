@@ -31,18 +31,6 @@ FAMILIES = ("anthropic", "vertexai_claude", "bedrock_claude")
 _PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLOUD_ML_", "GOOGLE_")
 
 
-def expected_parsed(fixture: dict[str, Any]) -> dict[str, Any]:
-    """Return the golden's parsed reply as the owned message type stores it.
-
-    Agno's ``Message.citations`` was a non-persisted view of the citations inside ``content_blocks``; the owned
-    message has no such field (``mindroom.llm.messages``), so the key is dropped from the comparison while the
-    raw citations still compare inside ``provider_data.content_blocks``.
-    """
-    parsed = deepcopy(fixture["parsed"])
-    parsed["message"].pop("citations", None)
-    return parsed
-
-
 def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
     """Build the provider HTTP response a golden's ``response_raw`` describes."""
     if "sse" in response_raw:

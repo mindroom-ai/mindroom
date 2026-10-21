@@ -114,9 +114,12 @@ def _completed(events: list[StreamEvent]) -> TurnCompleted:
 
 def test_gemini_rejects_unknown_and_dropped_extra_kwargs(tmp_path: Path) -> None:
     """Agno-only Gemini features fail at build time with the accepted keys listed."""
-    config = ModelConfig(**_config(GEMINI, search=True))
+    config = ModelConfig(**_config(GEMINI, url_context=True))
 
-    with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'google': search\. Accepted keys: "):
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported extra_kwargs for provider 'google': url_context\. Accepted keys: ",
+    ):
         gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
 
 
@@ -216,6 +219,27 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
     assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert ("responseMimeType" in body["generationConfig"]) is json_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", [GEMINI, GEMINI_VERTEX], ids=["gemini", "vertexai"])
+async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[str, Any], tmp_path: Path) -> None:
+    """Search replaces the function tools and a decision drops native tools, so nothing is left to call.
+
+    The Agno path sent the same body: no tools, no function-calling config, and JSON output on both routes.
+    """
+    with without_provider_tools():
+        request, _ = await run_adapter(
+            _config(config, search=True),
+            _request(tools=[WEATHER], tool_choice="none"),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "{}"})),
+        )
+
+    body = request["body"]
+    assert "tools" not in body
+    assert "toolConfig" not in body
+    assert body["generationConfig"] == {"responseMimeType": "application/json"}
 
 
 @pytest.mark.parametrize(("tool_choice", "mode"), [("auto", "AUTO"), ("none", "NONE"), ("required", "ANY")])
@@ -446,6 +470,8 @@ class _MediaServer:
     processed_state: str = "ACTIVE"
     # Another request uploads the same content between this request's check and its upload.
     uploaded_concurrently: bool = False
+    # Raised by the transport while the upload sends the file's bytes.
+    upload_failure: Exception | None = None
     files: dict[str, dict[str, Any]] = field(default_factory=dict)
     uploads: list[str] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
@@ -464,6 +490,8 @@ class _MediaServer:
         if url == f"{_GEMINI_API}upload/v1beta/files":
             return self._start_upload(json.loads(request.content)["file"])
         if url == _UPLOAD_SESSION:
+            if self.upload_failure is not None:
+                raise self.upload_failure
             return self._finish_upload()
         if request.method == "GET" and url.startswith(f"{_GEMINI_API}v1beta/files/"):
             return self._file(f"files/{url.rsplit('/', 1)[1]}")
@@ -632,6 +660,57 @@ async def test_gemini_upload_the_files_api_cannot_process_is_an_invalid_request(
         await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
 
     assert not raised.value.retryable
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_file_that_vanishes_before_its_upload_is_an_invalid_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file deleted after its upload name was computed is unsendable media, which is never retried."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    content_name = gemini_files._content_name
+
+    def name_then_vanish(path: Path, mime_type: str) -> str:
+        name = content_name(path, mime_type)
+        path.unlink()
+        return name
+
+    monkeypatch.setattr(gemini_files, "_content_name", name_then_vanish)
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    server = _MediaServer()
+
+    with pytest.raises(InvalidRequest, match="did not complete") as raised:
+        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert isinstance(raised.value.__cause__, FileNotFoundError)
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError(), aiohttp.ClientOSError(104, "Connection reset by peer"), ConnectionResetError(104, "reset")],
+    ids=["aiohttp-total-timeout", "aiohttp-os-error", "connection-reset"],
+)
+async def test_gemini_upload_transport_failure_is_retryable(
+    failure: Exception,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout or reset while uploading is the provider's transient failure, not unsendable media."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    server = _MediaServer(upload_failure=failure)
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert raised.value.retryable
+    assert raised.value.__cause__ is failure
     assert server.model_requests() == []
 
 
@@ -1006,6 +1085,24 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     ]
     assert events[1] == TextDelta("Hi there")
     assert completed.message.metrics.input_tokens == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    ["<think>\n\n</think>Hi there", "Plan first.</think>Hi there"],
+    ids=["empty-reasoning", "no-opening-tag"],
+)
+async def test_ollama_keeps_think_tags_agno_did_not_split(content: str, tmp_path: Path) -> None:
+    """Agno's Ollama split only an opening ``<think>`` with reasoning inside; other replies stay as they came."""
+    reply = httpx.Response(200, json=_ollama_done(content=content))
+
+    _, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+
+    completed = _completed(events)
+    assert completed.message.content == content
+    assert completed.message.reasoning_content is None
+    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
 
 
 @pytest.mark.asyncio

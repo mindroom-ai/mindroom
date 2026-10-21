@@ -1,8 +1,8 @@
 """Behavior every provider family must share: tool definitions, the composed pipeline, stream activity, finality.
 
-Each family's bare adapter is built from a real model config over an httpx mock transport and wrapped in the
-production pipeline (``wrap_provider``: portable tool search, media fallback, retry with the idle limit, request
-logging), so what these tests prove is what the registry (B6) will run. The OpenAI family's idle-limit and
+Each family's bare adapter is built from a real model config over an httpx mock transport (the synthetic model
+needs none) and wrapped in the production pipeline (``wrap_provider``: portable tool search, media fallback, retry
+with the idle limit, request logging), so what these tests prove is what the registry (B6) will run. The OpenAI family's idle-limit and
 server-tool cases live in ``test_openai_family_wire.py``; the Claude tool tri-state in its behavior tests.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -28,8 +28,10 @@ from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, forget_learned_media_limits
 from mindroom.providers.pipeline.request_log import RequestLog
+from mindroom.providers.synthetic_adapter import SHELL_TOOL
+from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from tests.providers.anthropic_family_support import provider_for
-from tests.providers.gemini_ollama_support import build_adapter
+from tests.providers.gemini_ollama_support import build_adapter, runtime_paths_for
 from tests.providers.golden_support import PacedBytes
 
 if TYPE_CHECKING:
@@ -41,6 +43,12 @@ if TYPE_CHECKING:
 # A Claude id without native tool search, so every family takes the portable tool-search projection.
 _ANTHROPIC = {"provider": "anthropic", "id": "claude-3-7-sonnet-latest", "api_key": "test-key"}
 _GEMINI = {"provider": "google", "id": "gemini-3.8-flash", "api_key": "test-key"}
+# Vertex AI has no Files API, so every attachment is inlined or rejected before the request.
+_GEMINI_VERTEX = {
+    "provider": "google",
+    "id": "gemini-3.8-flash",
+    "extra_kwargs": {"vertexai": True, "project_id": "test-project", "location": "us-central1"},
+}
 _OLLAMA = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 # A proxied Responses endpoint has no native tool search, so this family too takes the portable projection.
@@ -273,6 +281,14 @@ def _chat_tools(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {tool["function"]["name"]: tool["function"] for tool in body["tools"]}
 
 
+def _gemini_tools(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {tool["name"]: tool for tool in body["tools"][0]["functionDeclarations"]}
+
+
+def _gemini_user_text(body: dict[str, Any]) -> str:
+    return body["contents"][-1]["parts"][0]["text"]
+
+
 FAMILIES = {
     "anthropic": _Family(
         _ANTHROPIC,
@@ -281,12 +297,8 @@ FAMILIES = {
         user_text=lambda body: body["messages"][-1]["content"][0]["text"],
         omitted_media="audio",
     ),
-    "gemini": _Family(
-        _GEMINI,
-        _gemini_reply,
-        lambda body: {tool["name"]: tool for tool in body["tools"][0]["functionDeclarations"]},
-        user_text=lambda body: body["contents"][-1]["parts"][0]["text"],
-    ),
+    "gemini": _Family(_GEMINI, _gemini_reply, _gemini_tools, user_text=_gemini_user_text),
+    "gemini_vertexai": _Family(_GEMINI_VERTEX, _gemini_reply, _gemini_tools, user_text=_gemini_user_text),
     "ollama": _Family(_OLLAMA, _ollama_reply, _chat_tools, omitted_media="audio"),
     "openai_chat": _Family(_OPENAI_CHAT, _chat_reply, _chat_tools, omitted_media="video"),
     "openai_responses": _Family(
@@ -395,9 +407,11 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
 
 
 def _error_reply(family: str) -> httpx.Response:
+    gemini = {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}}
     bodies = {
         "anthropic": {"type": "error", "error": {"type": "api_error", "message": _OVERLOADED}},
-        "gemini": {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}},
+        "gemini": gemini,
+        "gemini_vertexai": gemini,
         "ollama": {"error": _OVERLOADED},
     }
     return httpx.Response(503, json=bodies.get(family, {"error": {"message": _OVERLOADED}}))
@@ -417,9 +431,10 @@ def _media_message(spec: _Family, root: Path) -> Message:
 async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(family: str, tmp_path: Path) -> None:
     """One request through every stage: media noted, deferred tools hidden, a 503 retried, the usage logged.
 
-    Media the route omits is replaced by the fallback note up front; media the adapter cannot send (Gemini's
-    unreadable image) is removed with the same note after its rejection. The deferred tool leaves the tool list
-    and the request is reissued after the transient failure, with the request log recording every attempt.
+    Media the route omits is replaced by the fallback note up front; media the adapter cannot send (an unreadable
+    image on Gemini and on Vertex AI) is removed with the same note after its rejection. The deferred tool leaves
+    the tool list and the request is reissued after the transient failure, with the request log recording every
+    attempt.
     """
     spec = FAMILIES[family]
     wire = _Wire(_error_reply(family), spec.reply())
@@ -446,7 +461,8 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
     requests = [record for record in records if record.get("record") != "response"]
     (response,) = [record for record in records if record.get("record") == "response"]
-    assert len(requests) == (3 if family == "gemini" else 2)
+    # Gemini's rejected image is one more logged attempt, which never reaches the wire.
+    assert len(requests) == (3 if family.startswith("gemini") else 2)
     assert [tool["name"] for tool in requests[-1]["tools"]] == ["call_tool", "tool_search"]
     assert FALLBACK_MARKER in json.dumps(requests[-1]["messages"])
     assert response["usage"] == {
@@ -456,6 +472,43 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
         "cache_write_tokens": 0,
     }
     assert turn.usage.input_tokens == 40
+
+
+@pytest.mark.asyncio
+async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> None:
+    """The synthetic model has no wire, but every stage still applies to it as the registry composes it.
+
+    The deferred tool leaves the tool list, the shell call and the continuation after its result pass through
+    the media, retry, and logging stages, and each request is logged; a synthetic reply reports no usage, so,
+    as on the Agno path, no response record follows.
+    """
+    settings = {"min_response_chars": 200, "max_response_chars": 200, "chars_per_second": 0, "tool_call_probability": 1}
+    adapter = build_synthetic_provider(
+        ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs=settings),
+        runtime_paths_for(tmp_path),
+    )
+    log_dir = tmp_path / "logs"
+    provider = _pipeline(adapter, log_dir=log_dir, idle=_IDLE_LIMIT_SECONDS)
+    request = ModelRequest(
+        messages=[Message(role="user", content="Hi")],
+        tools=[_tool("call_tool"), _tool("lookup_order"), _tool(SHELL_TOOL), _tool("tool_search")],
+        deferred_tool_names=frozenset({"lookup_order"}),
+    )
+
+    calling = await complete(provider, request)
+    (call,) = calling.tool_calls
+    result = Message(role="tool", content="hi", tool_call_id=call["id"], tool_name=SHELL_TOOL)
+    answer = await complete(provider, replace(request, messages=[*request.messages, calling.message, result]))
+
+    assert (calling.stop_reason, call["function"]["name"], answer.stop_reason) == ("tool_use", SHELL_TOOL, "end")
+    assert len(calling.content + answer.content) == 200
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert [record.get("record") for record in records] == [None, None]
+    assert [[tool["name"] for tool in record["tools"]] for record in records] == [
+        ["call_tool", SHELL_TOOL, "tool_search"],
+    ] * 2
+    assert records[1]["messages"][-1]["tool_call_id"] == call["id"]
 
 
 # --- Stream activity and server tools ----------------------------------------------------------------------------

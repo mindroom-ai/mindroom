@@ -17,6 +17,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import httpx
+from pydantic import ValidationError
 
 from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
@@ -84,6 +85,8 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
+    # Google Search grounding, sent in place of the request's function tools.
+    search: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -163,7 +166,6 @@ class GeminiProvider:
         """
         import aiohttp  # noqa: PLC0415 - google-genai's production transport loads on first request
         from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
-        from pydantic import ValidationError  # noqa: PLC0415 - loaded with the SDK types it validates
 
         provider = self.identity.provider_name
         if isinstance(error, ProviderError):
@@ -233,8 +235,10 @@ class GeminiProvider:
         # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
         if thinking:
             config["thinking_config"] = thinking
-        declarations = function_declarations(request.tools)
-        tools = [*([declarations] if declarations is not None else []), *request.native_tools]
+        built_in_tools = [{"google_search": {}}] if settings.search else []
+        # Agno sent built-in tools instead of the function declarations, so a grounded model calls no function.
+        declarations = None if built_in_tools else function_declarations(request.tools)
+        tools = [*built_in_tools, *([declarations] if declarations is not None else []), *request.native_tools]
         if tools:
             config["tools"] = tools
         if (function_calling := tool_config(request.tool_choice)) is not None:

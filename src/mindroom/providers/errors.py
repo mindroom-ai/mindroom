@@ -16,14 +16,22 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 
-__all__ = ["CONTEXT_WINDOW_MARKERS", "classify_provider_error", "is_context_window_error", "transport_error"]
+__all__ = [
+    "CONTEXT_WINDOW_MARKERS",
+    "OVERLOADED_ERROR_TYPE",
+    "RATE_LIMIT_STATUSES",
+    "TRANSIENT_STATUSES",
+    "classify_provider_error",
+    "is_context_window_error",
+    "transport_error",
+]
 
-_RATE_LIMIT_STATUSES = frozenset({429, 529})
+RATE_LIMIT_STATUSES = frozenset({429, 529})
 # Statuses after which an unchanged request can succeed; 409 is OpenAI's transient conflict.
-_TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504})
+TRANSIENT_STATUSES = frozenset({408, 409, 500, 502, 503, 504})
 _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
-_OVERLOADED_MARKER = "overloaded_error"
+OVERLOADED_ERROR_TYPE = "overloaded_error"
 # Wording providers use when a request does not fit the model's context window (Agno's
 # ``ModelProviderError.CONTEXT_WINDOW_PATTERNS`` without its over-broad ``max_tokens``, plus the
 # payload-size wording OpenAI-compatible servers and Anthropic use).
@@ -67,14 +75,14 @@ def classify_provider_error(
     ``ProviderError``; context-window wording only counts on a client error, because a 5xx that mentions
     the context window is still the provider's failure to retry.
     """
-    if status_code in _RATE_LIMIT_STATUSES or _OVERLOADED_MARKER in message.casefold():
+    if status_code in RATE_LIMIT_STATUSES or OVERLOADED_ERROR_TYPE in message.casefold():
         return RateLimited(message, provider=provider, status_code=status_code, code=code)
     if (status_code is None or status_code in _HTTP_CLIENT_ERROR_RANGE) and is_context_window_error(
         message,
         code=code,
     ):
         return ContextWindowExceeded(message, provider=provider, status_code=status_code, code=code)
-    if status_code in _TRANSIENT_STATUSES:
+    if status_code in TRANSIENT_STATUSES:
         return ProviderUnavailable(message, provider=provider, status_code=status_code, code=code)
     if status_code in _INVALID_REQUEST_STATUSES:
         return InvalidRequest(message, provider=provider, status_code=status_code, code=code)

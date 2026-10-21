@@ -56,7 +56,7 @@ the client proxy is installed unconditionally — the ladder and defer tagging
 gate themselves per request, but a cache-disabled model with no deferred tools
 can still replay poisoned history.
 
-The ladder primitives themselves live in :mod:`mindroom.providers.anthropic.prompt_cache`,
+The ladder primitives themselves live in :mod:`mindroom.providers.cache_ladder`,
 which the owned Claude adapter and the OpenRouter Claude ladder share with this hook.
 """
 
@@ -79,13 +79,13 @@ from mindroom.providers.agno_compat_claude import (
     request_kwargs_with_supported_inline_media,
     request_kwargs_without_replayed_citations,
 )
-from mindroom.providers.anthropic.prompt_cache import (
+from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported
+from mindroom.providers.cache_ladder import (
     MAX_CACHE_MARKERS,
     MESSAGE_RUNG_COUNT,
     has_cache_marker,
     mark_last_tool,
     mark_message_cache_rungs,
-    native_tool_search_supported,
     prompt_cache_control,
     split_shared_system_prefix,
 )

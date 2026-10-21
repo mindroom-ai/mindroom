@@ -11,8 +11,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tests.providers.anthropic_family_support import FAMILIES, expected_parsed, run_golden
-from tests.providers.golden_support import FIXTURE_ROOT, expected_stop_reason, golden_id, golden_paths, load_golden
+from tests.providers.anthropic_family_support import FAMILIES, run_golden
+from tests.providers.golden_support import (
+    FIXTURE_ROOT,
+    expected_parsed,
+    expected_stop_reason,
+    golden_id,
+    golden_paths,
+    load_golden,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -35,7 +35,7 @@ from tests.providers.gemini_ollama_support import (
     replay,
     runtime_paths_for,
 )
-from tests.providers.golden_support import comparable_metrics, expected_stop_reason
+from tests.providers.golden_support import comparable_metrics, expected_parsed, expected_stop_reason
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,7 +59,7 @@ async def test_adapter_reproduces_golden(golden: Golden, tmp_path: Path, monkeyp
     result = await replay(golden, tmp_path)
 
     assert result.request == golden.data["request"]
-    assert result.parsed == golden.data["parsed"]
+    assert result.parsed == expected_parsed(golden.data)
     assert result.stop_reason == expected_stop_reason(golden.data)
 
 

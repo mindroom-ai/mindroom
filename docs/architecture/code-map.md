@@ -218,7 +218,8 @@ Matrix sync callback
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
 | `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
-| `providers/anthropic/prompt_cache.py` | The Claude prompt-cache ladder primitives (shared with the OpenRouter ladder and the Agno path) and their composition with deferred tool search and history repairs for one request body |
+| `providers/anthropic/prompt_cache.py` | The wire preparation of one Claude request body: history repairs, deferred tool search, tool choice, and the prompt-cache ladder |
+| `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker, the shared system prefix) shared by the Claude adapter, the OpenRouter Claude ladder, and the Agno path |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
@@ -229,7 +230,7 @@ Matrix sync callback
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, and OpenAI server-side tool search tagging |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search, media fallback, stream retry with the idle limit, and request logging |
-| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, decision-request config, and reply parsing (not wired yet) |
+| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing (not wired yet) |
 | `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API (not wired yet) |
 | `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls, and the response plan `synthetic_model.py` serves to the Agno path (not wired yet) |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |

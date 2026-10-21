@@ -514,6 +514,12 @@ class Reply:
     output_limit: bool = False
     # Claude usage iterations, which a request that compacted natively reports.
     claude_iterations: tuple[dict[str, Any], ...] = ()
+    # Gemini grounding metadata on the finished candidate, as Google Search grounding returns it.
+    gemini_grounding: dict[str, Any] | None = None
+    # Gemini prompt tokens spent on a native tool, such as the search results grounding adds.
+    tool_use_prompt_tokens: int = 0
+    # Gemini usage traffic type, which Vertex AI reports.
+    gemini_traffic_type: str | None = None
 
 
 def _pieces(text: str) -> list[str]:
@@ -860,20 +866,30 @@ def _gemini_usage(reply: Reply, *, final: bool) -> dict[str, Any]:
     usage: dict[str, Any] = {
         "promptTokenCount": reply.input_tokens,
         "candidatesTokenCount": output_tokens,
-        "totalTokenCount": reply.input_tokens + output_tokens + reply.reasoning_tokens,
+        "totalTokenCount": reply.input_tokens + output_tokens + reply.reasoning_tokens + reply.tool_use_prompt_tokens,
     }
     if reply.reasoning_tokens:
         usage["thoughtsTokenCount"] = reply.reasoning_tokens
     if reply.cached_tokens:
         usage["cachedContentTokenCount"] = reply.cached_tokens
+    if reply.tool_use_prompt_tokens:
+        usage["toolUsePromptTokenCount"] = reply.tool_use_prompt_tokens
+    if reply.gemini_traffic_type is not None:
+        usage["trafficType"] = reply.gemini_traffic_type
     return usage
 
 
 def _gemini_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     parts = _gemini_parts(reply)
     finish_reason = "MAX_TOKENS" if reply.output_limit else "STOP"
+    grounding = {} if reply.gemini_grounding is None else {"groundingMetadata": reply.gemini_grounding}
     if not stream:
-        candidate = {"content": {"role": "model", "parts": parts}, "finishReason": finish_reason, "index": 0}
+        candidate = {
+            "content": {"role": "model", "parts": parts},
+            "finishReason": finish_reason,
+            "index": 0,
+            **grounding,
+        }
         return _json_body(
             {
                 "candidates": [candidate],
@@ -887,7 +903,8 @@ def _gemini_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool)
         final = index == len(parts) - 1
         candidate: dict[str, Any] = {"content": {"role": "model", "parts": [part]}, "index": 0}
         if final:
-            candidate["finishReason"] = finish_reason
+            # Gemini sends grounding metadata with the finished candidate.
+            candidate.update({"finishReason": finish_reason, **grounding})
         chunks.append(
             {
                 "candidates": [candidate],
@@ -955,6 +972,8 @@ class Family:
     reasoning_kwargs: dict[str, Any] | None = None
     # model_config overrides for the prompt-cache scenario; None means no prompt-cache setting applies.
     prompt_cache_config: dict[str, Any] | None = None
+    # model_config overrides that turn on Google Search grounding; None means the route has none.
+    search_grounding_config: dict[str, Any] | None = None
     always_streams: bool = False
     # Whether Agno's adapter sends a caller's tool_choice; Claude, Ollama, and Cerebras drop it.
     forwards_tool_choice: bool = True
@@ -1105,6 +1124,7 @@ FAMILIES: tuple[Family, ...] = (
         "gemini",
         {"provider": "google", "id": "gemini-3.8-flash", "api_key": _KEY},
         reasoning_kwargs=_GEMINI_REASONING,
+        search_grounding_config={"id": "gemini-3.1-pro-preview", "extra_kwargs": {"search": True}},
     ),
     Family(
         "gemini_vertexai",
@@ -1115,6 +1135,11 @@ FAMILIES: tuple[Family, ...] = (
             "extra_kwargs": {"vertexai": True, "project_id": "parity-project", "location": "us-central1"},
         },
         reasoning_kwargs=_GEMINI_REASONING,
+        # Gemini Pro on the global Vertex AI endpoint with Google Search grounding.
+        search_grounding_config={
+            "id": "gemini-3.1-pro-preview",
+            "extra_kwargs": {"location": "global", "search": True},
+        },
     ),
     Family(
         "ollama",
@@ -1535,6 +1560,34 @@ _COMPACTION_ITERATIONS = (
     },
 )
 _ORDER_RESULT = '{"order_id": "A-1001", "status": "shipped"}'
+_GROUNDED_FORECAST = "Light rain is forecast for Paris tomorrow"
+_GROUNDED_PACKING = "pack a light rain jacket and comfortable shoes."
+_GROUNDED_ANSWER = f"{_GROUNDED_FORECAST}, so {_GROUNDED_PACKING}"
+_GROUNDING_REDIRECT = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
+_GROUNDING_METADATA = {
+    "webSearchQueries": ["Paris weather tomorrow", "what to pack for rain in Paris"],
+    "searchEntryPoint": {"renderedContent": '<div class="parity-search">Paris weather tomorrow</div>'},
+    "groundingChunks": [
+        {"web": {"uri": f"{_GROUNDING_REDIRECT}parity-forecast", "title": "weather.example"}},
+        {"web": {"uri": f"{_GROUNDING_REDIRECT}parity-packing", "title": "travel.example"}},
+    ],
+    "groundingSupports": [
+        {
+            "segment": {"endIndex": len(_GROUNDED_FORECAST), "text": _GROUNDED_FORECAST},
+            "groundingChunkIndices": [0],
+            "confidenceScores": [0.93],
+        },
+        {
+            "segment": {
+                "startIndex": len(_GROUNDED_ANSWER) - len(_GROUNDED_PACKING),
+                "endIndex": len(_GROUNDED_ANSWER),
+                "text": _GROUNDED_PACKING,
+            },
+            "groundingChunkIndices": [1],
+            "confidenceScores": [0.81],
+        },
+    ],
+}
 _WEATHER_RESULT = '{"city": "Paris", "forecast": "light rain", "high_c": 14}'
 _NOTES_RESULT = '[{"title": "Paris 2025", "text": "Bring the blue scarf."}]'
 
@@ -1839,6 +1892,23 @@ def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Cas
     if name == "tool_choice_forced":
         reply = Reply(calls=(_call(family, _WEATHER, omit_gemini_id=True),))
         return Case([_system(), _user(_PROMPT)], reply, tools=weather_tools, tool_choice=_forced_tool_choice(family))
+    if name == "search_grounding":
+        # Agno sends Google Search instead of the offered function tools; the reply cites the search results.
+        on_vertex = bool(family.model_config.get("extra_kwargs", {}).get("vertexai"))
+        reply = Reply(
+            text=_GROUNDED_ANSWER,
+            reasoning_tokens=9,
+            tool_use_prompt_tokens=96,
+            gemini_grounding=_GROUNDING_METADATA,
+            # Vertex AI reports the traffic type with its usage.
+            gemini_traffic_type="ON_DEMAND" if on_vertex else None,
+        )
+        return Case(
+            [_system(), _user(_PROMPT)],
+            reply,
+            tools=weather_tools,
+            model_config=family.search_grounding_config or {},
+        )
     if name == "tool_choice_none":
         # A participation decision or judgment: tools stay defined, selection is off, and the call does not stream.
         return Case(
@@ -1880,6 +1950,8 @@ def family_scenarios(family: Family) -> list[str]:
     names += ["structured_output", "structured_output_nested"]
     if family.prompt_cache_config is not None:
         names.append("prompt_cache")
+    if family.search_grounding_config is not None:
+        names.append("search_grounding")
     names.append("deferred_tool_search")
     if family.deferred_mode == "portable" or family.wire == "responses":
         names.append("deferred_tool_search_replay")
