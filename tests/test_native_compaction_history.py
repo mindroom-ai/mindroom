@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from agno.team import Team
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
@@ -31,12 +30,10 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.providers.openai.responses_wire import responses_request_kwargs
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
-    _agent,
     _completed_run,
     _completed_team_run,
     _make_config,
@@ -532,15 +529,14 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
     )
     config.teams["team"] = TeamConfig(agents=["test_agent"], display_name="Team", role="Coordinate work.")
-    member = _agent()
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
-    team = Team(id="team", model=model, members=[member])
+    leader = responses_adapter(tmp_path, store=False)
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
-    await prepare_bound_scope_history(
-        agents=[member],
-        team=team,
+
+    prepared = await prepare_bound_scope_history(
+        member_names=["test_agent"],
+        model=leader,
         team_name="team",
         config=config,
         runtime_paths=paths,
@@ -550,9 +546,11 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         static_prompt_tokens=100,
         non_prompt_tokens=0,
     )
-    assert model.native_compaction is not None
-    assert model.native_compaction.threshold == 120000
-    db.close()
+
+    expected = leader.native_compaction_settings(threshold=120000)
+    assert expected is not None
+    assert prepared.native_history is not None
+    assert prepared.native_history.native_compaction == expected
 
 
 @pytest.mark.parametrize(

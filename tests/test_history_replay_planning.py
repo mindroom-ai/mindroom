@@ -21,7 +21,6 @@ from mindroom.history.policy import (
 )
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
-    apply_replay_plan,
     estimate_prompt_visible_history_tokens,
     plan_replay_that_fits,
 )
@@ -46,7 +45,6 @@ from mindroom.token_budget import estimate_text_tokens
 from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
-    _agent,
     _completed_run,
     _make_config,
     _runtime_paths,
@@ -1601,7 +1599,6 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
     available_history_budget = estimate_text_tokens("budget")
-    agent = _agent()
     session = _session(
         "session-1",
         runs=[
@@ -1631,10 +1628,9 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
             history_settings=history_settings,
         ),
     )
-    apply_replay_plan(target=agent, replay_plan=replay_plan)
 
     assert replay_plan.mode == "disabled"
     # History stays on with zero raw runs so the saved summary still replays first.
-    assert agent.add_history_to_context is True
-    assert agent.num_history_runs == 0
-    assert agent.num_history_messages is None
+    assert replay_plan.add_history_to_context is True
+    assert replay_plan.num_history_runs == 0
+    assert replay_plan.num_history_messages is None

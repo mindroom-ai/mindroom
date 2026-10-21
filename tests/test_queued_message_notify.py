@@ -13,7 +13,6 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.agent import Agent as AgnoAgent
 from agno.media import Image
 from agno.models.message import Message
 from agno.models.response import ModelResponse
@@ -55,7 +54,7 @@ from mindroom.dispatch_source import (
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
@@ -89,7 +88,6 @@ from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
-from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from tests.access_schema_support import with_current_room_member_access
@@ -3279,44 +3277,6 @@ async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
     assert messages[-2].role == "user"
     assert messages[-2].images
     assert messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
-
-
-def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path) -> None:
-    """Team coordinator models should receive the same queued-message notice hook."""
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    model = _FakeModel()
-    agent = AgnoAgent(id="general", name="General", model="openai:test-model")
-
-    with (
-        open_bound_scope_session_context(
-            agents=[agent],
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
-        patch("mindroom.teams.Team", side_effect=lambda **kwargs: SimpleNamespace(model=kwargs["model"])),
-        queued_message_signal_context(_StaticQueuedState(pending=True)),
-    ):
-        assert scope_context is not None
-        team = _create_team_instance(
-            agents=[agent],
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            team_display_name="Queued Notice Team",
-            scope_context=scope_context,
-            execution_identity=None,
-            model_name="default",
-        )
-        messages = [Message(role="user", content="hello")]
-        team.model.format_function_call_results(
-            messages=messages,
-            function_call_results=[Message(role="tool", content="tool result")],
-        )
-        assert _notice_count(messages) == 1
 
 
 @pytest.mark.asyncio
