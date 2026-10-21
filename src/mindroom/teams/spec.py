@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
@@ -31,13 +33,14 @@ class TeamMember:
     """One member as the leader sees and runs it.
 
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
-    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``hooks`` and ``request_template``
-    apply to every run of this member.
+    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``hooks()`` builds the hooks of one run
+    or resume of this member, since a hook such as mid-turn compaction keeps state for the run it serves;
+    ``request_template`` applies to every run.
     """
 
     spec: AgentSpec
     role: str
-    hooks: LoopHooks = NO_HOOKS
+    hooks: Callable[[], LoopHooks] = lambda: NO_HOOKS
     request_template: ModelRequest = EMPTY_REQUEST
 
 

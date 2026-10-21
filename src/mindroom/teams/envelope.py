@@ -12,6 +12,7 @@ import asyncio
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -213,23 +214,54 @@ def _appended_context(existing: str, block: str) -> str:
     return f"{stripped}\n\n{block}" if stripped else block
 
 
-def _team_member(build: AgentBuild, system_enrichment: str) -> TeamMember:
+def _team_member(
+    build: AgentBuild,
+    system_enrichment: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+) -> TeamMember:
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
-    A member's tool-call policy, output-limit policy, and portable tool search are its own; it replays no history,
-    so it gets no compaction, and the leader owns the queued-message notices of the turn.
+    A member's tool-call policy, output-limit policy, portable tool search, and mid-turn compaction are its own; it
+    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of
+    the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
     """
-    capabilities = build.spec.model.capabilities
-    deferred = build.request_template.deferred_tool_names
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role or "",
-        hooks=LoopHooks(
-            answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
-            rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
-            tool_middleware=build.tool_middleware,
-        ),
+        hooks=partial(_member_hooks, build, config=config, runtime_paths=runtime_paths, model_name=model_name),
         request_template=build.request_template,
+    )
+
+
+def _member_hooks(build: AgentBuild, *, config: Config, runtime_paths: RuntimePaths, model_name: str) -> LoopHooks:
+    """Return the hooks of one member run; the compaction hook holds the run's own state, so each run gets a new one."""
+    capabilities = build.spec.model.capabilities
+    deferred = build.request_template.deferred_tool_names
+    return LoopHooks(
+        before_request=(
+            mid_turn_compaction_hook(
+                config=config,
+                runtime_paths=runtime_paths,
+                entity_name=build.spec.id,
+                scope_id=build.spec.id,
+                is_team=False,
+                model_name=model_name,
+                model=build.spec.model,
+                history_settings=build.history_settings,
+                store=None,
+                session=None,
+                scope=None,
+                native_compaction=None,
+                deferred_tool_names=deferred,
+                prompt_id=None,
+            ),
+        ),
+        answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
+        rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
+        tool_middleware=build.tool_middleware,
     )
 
 
@@ -295,7 +327,16 @@ def build_team_spec(
     )
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     leader_toolkits = () if jobs is None else (jobs.controls,)
-    team_members = tuple(_team_member(build, system_enrichment) for build in members.builds)
+    team_members = tuple(
+        _team_member(
+            build,
+            system_enrichment,
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name=members.model_names[build.spec.id],
+        )
+        for build in members.builds
+    )
     prepared = prepare_run_tools(
         AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
     )

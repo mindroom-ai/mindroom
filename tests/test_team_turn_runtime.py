@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -101,7 +102,7 @@ class _ProbeToolkit(Toolkit):
     scopes: ClassVar[list[str | None]] = []
 
     def __init__(self) -> None:
-        super().__init__(name="probe", tools=[self.touch, self.scope])
+        super().__init__(name="probe", tools=[self.touch, self.scope, self.dig])
 
     async def touch(self, label: str) -> str:
         """Record one call.
@@ -120,10 +121,14 @@ class _ProbeToolkit(Toolkit):
         type(self).scopes.append(key)
         return key or "no scope"
 
+    async def dig(self) -> str:
+        """Return one large result, so a member's tool loop outgrows its context window."""
+        return "r" * 4000
 
-@pytest.fixture
-def probe() -> Iterator[type[_ProbeToolkit]]:
-    """Register the probe toolkit for the test and restore the registries afterwards."""
+
+@contextmanager
+def registered_probe() -> Iterator[type[_ProbeToolkit]]:
+    """Register the probe toolkit and restore the registries afterwards."""
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
 
@@ -146,6 +151,13 @@ def probe() -> Iterator[type[_ProbeToolkit]]:
         TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
+
+
+@pytest.fixture
+def probe() -> Iterator[type[_ProbeToolkit]]:
+    """Register the probe toolkit for the test."""
+    with registered_probe() as toolkit:
+        yield toolkit
 
 
 @dataclass
@@ -188,10 +200,13 @@ def _team(
     helper: Sequence[Sequence[ScriptStep]] | None = None,
     mode: str = "coordinate",
     approval_rules: Sequence[ApprovalRuleConfig] = (),
+    context_window: int | None = None,
+    max_tool_calls_per_turn: int | None = None,
 ) -> _Team:
     """Build the ``squad`` team of a writer and a checker whose models are scripted providers.
 
-    ``helper`` scripts the ``helper`` agent, outside the team, that the writer may then delegate to.
+    ``helper`` scripts the ``helper`` agent, outside the team, that the writer may then delegate to. A
+    ``context_window`` turns on compaction with a ``summary`` model, which the test supplies.
     """
     authored = {
         "defaults": {"tools": []},
@@ -212,6 +227,13 @@ def _team(
     }
     if helper is not None:
         authored["agents"]["writer"]["delegate_to"] = ["helper"]
+    if max_tool_calls_per_turn is not None:
+        authored["teams"]["squad"]["max_tool_calls_per_turn"] = max_tool_calls_per_turn
+    if context_window is not None:
+        for model in authored["models"].values():
+            model["context_window"] = context_window
+        authored["models"]["summary"] = {"provider": "openai", "id": "summary-model", "context_window": 100_000}
+        authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
     with_current_room_member_access(config)
