@@ -10,9 +10,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.run.agent import RunOutput
-from agno.session.summary import SessionSummary
-
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
@@ -30,17 +27,19 @@ from mindroom.history.storage import (
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.summary_input import build_summary_input, messages_for_runs, minimum_summary_input_tokens
-from mindroom.history.summary_provider_compat import effective_summary_timeout_seconds
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     CompactionOutcome,
     HistoryScope,
     HistoryScopeState,
+    ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ScopeSummary,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
+from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
-from mindroom.providers.claude_prompt_cache import as_anthropic_claude
+from mindroom.providers.registry import build_model_provider, canonical_provider
 from mindroom.session_storage.agent_storage import runs_without
 from mindroom.timing import timed
 from mindroom.token_budget import (
@@ -58,17 +57,17 @@ from mindroom.tool_system.runtime_context import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from agno.db.base import BaseDb
-    from agno.metrics import MessageMetrics
-    from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.run.team import TeamRunOutput
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.history.replay import PortableReplayEstimator
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.history.summary_rows import Segment
-    from mindroom.native_compaction import NativeCompactionModel
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import MessageMetrics
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 
 logger = get_logger(__name__)
@@ -81,7 +80,7 @@ class SummaryModel:
     A fallback switch replaces the whole value, so later chunks cannot use the previous model's budget or identity.
     """
 
-    model: Model
+    model: ModelProvider
     name: str
     input_budget_tokens: int
 
@@ -98,10 +97,113 @@ class Summarizer:
     session_id: str
     scope: HistoryScope
     # Receives the usage of every summary response that reports it, including rejected ones.
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None
 
 
-def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, MessageMetrics], Awaitable[None]]:
+@timed("system_prompt_assembly.history_prepare.compaction_model_init")
+def _load_compaction_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
+    """Build the compaction model's provider with dedicated history-preparation timing."""
+    return build_model_provider(config, runtime_paths, model_name)
+
+
+def _compaction_fallback_is_distinct(
+    config: Config,
+    *,
+    primary_model_name: str,
+    fallback_model_name: str,
+) -> bool:
+    """Return whether the configured fallback targets a different serving model.
+
+    A fallback that names the primary alias, or a different alias resolving to
+    the same ``(provider, id)``, would resend the refused request to the same
+    model, so it is not loaded at all. Providers are compared through
+    ``canonical_provider``, the normalization model dispatch uses, so spelling
+    variants like ``vertexai-claude`` and ``vertexai_claude`` count as the same
+    serving model.
+    """
+    if fallback_model_name == primary_model_name:
+        is_distinct = False
+    else:
+        primary_config = config.models.get(primary_model_name)
+        fallback_config = config.models.get(fallback_model_name)
+        if primary_config is None or fallback_config is None:
+            return True
+        is_distinct = (canonical_provider(primary_config.provider), primary_config.id) != (
+            canonical_provider(fallback_config.provider),
+            fallback_config.id,
+        )
+    if not is_distinct:
+        logger.warning(
+            "Compaction fallback resolves to the primary serving model; continuing without a fallback",
+            compaction_model=primary_model_name,
+            fallback_model=fallback_model_name,
+        )
+    return is_distinct
+
+
+def load_summarizer(
+    execution_plan: ResolvedHistoryExecutionPlan,
+    history_settings: ResolvedHistorySettings,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    session_id: str,
+    scope: HistoryScope,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
+) -> Summarizer:
+    """Load the summary model and, when distinct and loadable, its safeguard fallback."""
+    assert execution_plan.summary_input_budget_tokens is not None
+    summary_model = SummaryModel(
+        model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
+        name=execution_plan.compaction_model_name,
+        input_budget_tokens=execution_plan.summary_input_budget_tokens,
+    )
+    fallback_model_name = execution_plan.compaction_fallback_model_name
+    fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
+    fallback_model: SummaryModel | None = None
+    if (
+        fallback_model_name is not None
+        and fallback_summary_input_budget is not None
+        and _compaction_fallback_is_distinct(
+            config,
+            primary_model_name=execution_plan.compaction_model_name,
+            fallback_model_name=fallback_model_name,
+        )
+    ):
+        # The fallback is an optional resilience knob: when its construction
+        # fails (missing SDK, credentials, client setup), compaction still
+        # runs on the healthy primary instead of aborting before any call.
+        try:
+            fallback_model = SummaryModel(
+                model=_load_compaction_model(config, runtime_paths, fallback_model_name),
+                name=fallback_model_name,
+                input_budget_tokens=fallback_summary_input_budget,
+            )
+        except Exception:
+            logger.warning(
+                "Compaction fallback model failed to load; continuing without a fallback",
+                session_id=session_id,
+                scope=scope.key,
+                compaction_model=execution_plan.compaction_model_name,
+                fallback_model=fallback_model_name,
+                exc_info=True,
+            )
+    return Summarizer(
+        model=summary_model,
+        fallback=fallback_model,
+        prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
+        timeout_seconds=execution_plan.compaction_timeout_seconds,
+        history_settings=history_settings,
+        session_id=session_id,
+        scope=scope,
+        on_usage=on_usage,
+    )
+
+
+def scope_usage_recorder(
+    storage: ConversationStore,
+    session_id: str,
+) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]]:
     """Record each summary response's usage in the scope's storage, under the reply's requester."""
     # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
     requester_context = get_tool_runtime_context() or get_detached_requester_context()
@@ -115,8 +217,8 @@ def scope_usage_recorder(storage: BaseDb, session_id: str) -> Callable[[Model, M
 
 @dataclass(frozen=True)
 class _SummaryChunk:
-    summary: SessionSummary
-    included_runs: list[RunOutput | TeamRunOutput]
+    summary: str
+    included_runs: list[AnyRunRecord]
     # The summarizer that served this chunk, which later chunks use: once a fallback served one, it serves the rest.
     summarizer: Summarizer
 
@@ -131,8 +233,8 @@ class _CompactionRewriteResult:
 
 async def _persist_cleared_force_state_if_needed(
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    session: ConversationSession,
     scope: HistoryScope,
     state: HistoryScopeState,
 ) -> None:
@@ -203,8 +305,8 @@ def _should_collect_compaction_hook_messages() -> bool:
 @timed("system_prompt_assembly.history_prepare.compaction")
 async def compact_scope_history(
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    session: ConversationSession,
     scope: HistoryScope,
     state: HistoryScopeState,
     summarizer: Summarizer,
@@ -214,7 +316,7 @@ async def compact_scope_history(
     threshold_tokens: int | None,
     progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    replay_model: NativeCompactionModel | None,
+    replay_model: PortableReplayEstimator | None,
 ) -> CompactionOutcome | None:
     """Compact one scope by appending summary rows that fold its oldest runs, chunk by chunk.
 
@@ -234,12 +336,12 @@ async def compact_scope_history(
         return None
 
     mode = "manual" if state.force_compact_before_next_run else "auto"
-    loaded_runs = list(session.runs or [])
+    loaded_runs = list(session.runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     compacted_messages: list[Message] = []
 
-    async def before_persist(included_runs: Sequence[RunOutput | TeamRunOutput]) -> None:
+    async def before_persist(included_runs: Sequence[AnyRunRecord]) -> None:
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
@@ -305,7 +407,7 @@ async def compact_scope_history(
         session_id=session.session_id,
         scope=scope.key,
         compacted_runs=rewrite_result.compacted_run_count,
-        model=_model_identifier(rewrite_result.served_by.model),
+        model=rewrite_result.served_by.model.identity.id,
     )
 
     async def report() -> CompactionOutcome:
@@ -341,13 +443,13 @@ async def compact_scope_history(
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
 async def _rewrite_working_session_for_compaction(
     *,
-    storage: BaseDb,
-    persisted_session: AgentSession | TeamSession,
-    working_session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    persisted_session: ConversationSession,
+    working_session: ConversationSession,
     scope: HistoryScope,
     summarizer: Summarizer,
-    runs: Sequence[RunOutput | TeamRunOutput],
-    before_persist: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]],
+    runs: Sequence[AnyRunRecord],
+    before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
 ) -> _CompactionRewriteResult | None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk, stopping when the conversation changes."""
@@ -381,7 +483,6 @@ async def _rewrite_working_session_for_compaction(
             break
         await before_persist(chunk.included_runs)
         compacted_run_ids = tuple(run.run_id for run in chunk.included_runs if run.run_id)
-        chunk_summary = SessionSummary(summary=chunk.summary.summary, updated_at=datetime.now(UTC))
         appended = await run_blocking_until_complete(
             partial(
                 append_compaction_chunk,
@@ -390,17 +491,17 @@ async def _rewrite_working_session_for_compaction(
                 scope=scope,
                 basis=basis,
                 included_run_ids=compacted_run_ids,
-                summary=chunk_summary,
-                summary_model=_model_identifier(chunk.summarizer.model.model),
+                summary=chunk.summary,
+                summary_model=chunk.summarizer.model.model.identity.id,
             ),
         )
         if not appended:
             _stop_for_changed_conversation(persisted_session.session_id, scope, compacted_run_count)
             break
         summarizer = chunk.summarizer
-        summary_text = chunk_summary.summary
-        working_session.summary = chunk_summary
-        working_session.runs = runs_without(working_session.runs or [], compacted_run_ids)
+        summary_text = chunk.summary
+        working_session.summary = ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC))
+        working_session.runs = runs_without(working_session.runs, compacted_run_ids)
         compacted_run_count += len(chunk.included_runs)
         remaining = remaining[len(chunk.included_runs) :]
         await after_persist(chunk, compacted_run_count, len(remaining))
@@ -408,7 +509,7 @@ async def _rewrite_working_session_for_compaction(
     if summary_text is None:
         return None
     strip_stale_anthropic_replay_fields(
-        [message for run in scope_visible_runs(working_session, scope) for message in run.messages or []],
+        [message for run in scope_visible_runs(working_session, scope) for message in run.messages],
     )
     return _CompactionRewriteResult(
         summary_text=summary_text,
@@ -440,7 +541,7 @@ def _stop_for_changed_conversation(session_id: str, scope: HistoryScope, compact
 async def summarize_runs(
     summarizer: Summarizer,
     previous_summary: str | None,
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
 ) -> tuple[str, Summarizer]:
     """Summarize runs into one cumulative summary without writing anything.
 
@@ -455,7 +556,7 @@ async def summarize_runs(
             msg = "No compactable content fit the summary input budget."
             raise RuntimeError(msg)
         summarizer = chunk.summarizer
-        summary = chunk.summary.summary
+        summary = chunk.summary
         remaining = remaining[len(chunk.included_runs) :]
     assert summary is not None
     return summary, summarizer
@@ -463,12 +564,12 @@ async def summarize_runs(
 
 async def compact_running_turn(
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
+    storage: ConversationStore,
+    session: ConversationSession,
     scope: HistoryScope,
     basis: FoldBasis,
     segment: Segment,
-    snapshots: Sequence[RunOutput | TeamRunOutput],
+    snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     summarizer: Summarizer,
     before_tokens: int,
@@ -490,7 +591,7 @@ async def compact_running_turn(
     await run_blocking_until_complete(partial(ensure_scope_session_row, storage, session, scope))
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
-    hook_runs = [*basis.runs, RunOutput(messages=list(folded_messages))]
+    hook_runs = [*basis.runs, RunRecord(run_id="", messages=list(folded_messages))]
     messages = (
         tuple(messages_for_runs(hook_runs, summarizer.history_settings)) if collect_compaction_hook_messages else ()
     )
@@ -513,7 +614,7 @@ async def compact_running_turn(
             scope=scope,
             basis=basis,
             summary=summary,
-            summary_model=_model_identifier(summarizer.model.model),
+            summary_model=summarizer.model.model.identity.id,
             segment=segment,
         )
         if not appended:
@@ -562,22 +663,23 @@ async def _report_committed(
     return await complete(outcome)
 
 
-def _compaction_sizing(summary_model: Model) -> tuple[Callable[[str], int], CompactionEstimateKind]:
+def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
-    conservative_fallback = as_anthropic_claude(summary_model) is not None
+    model_id = summary_model.identity.id
+    conservative_fallback = summary_model.capabilities.claude_family
     estimator = partial(
         estimate_compaction_input_tokens,
-        model_id=summary_model.id,
+        model_id=model_id,
         conservative_fallback=conservative_fallback,
     )
-    kind = compaction_estimate_kind(summary_model.id, conservative_fallback=conservative_fallback)
+    kind = compaction_estimate_kind(model_id, conservative_fallback=conservative_fallback)
     return estimator, kind
 
 
 async def _summarize_chunk(  # noqa: C901, PLR0915
     summarizer: Summarizer,
     previous_summary: str | None,
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
 ) -> _SummaryChunk | None:
     """Summarize the longest prefix of ``runs`` that fits one summary input; None when not even one run fits.
 
@@ -598,7 +700,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
     def build(
         max_input_tokens: int,
         estimator: Callable[[str], int],
-    ) -> Awaitable[tuple[str, list[RunOutput | TeamRunOutput]]]:
+    ) -> Awaitable[tuple[str, list[AnyRunRecord]]]:
         return asyncio.to_thread(
             build_summary_input,
             previous_summary=previous_summary,
@@ -632,10 +734,6 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
             "summary_input_estimate_kind": estimate_kind,
             "summary_input_budget_tokens": budget,
             "timeout_seconds": summarizer.timeout_seconds,
-            "effective_timeout_seconds": effective_summary_timeout_seconds(
-                summary_model.model,
-                timeout_seconds=summarizer.timeout_seconds,
-            ),
         }
         started = asyncio.get_running_loop().time()
         logger.info("Compaction summary chunk request", **attempt_fields)
@@ -645,7 +743,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_input=summary_input,
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
-                on_usage=partial(summarizer.on_usage, summary_model.model) if summarizer.on_usage is not None else None,
+                on_usage=(
+                    partial(summarizer.on_usage, summary_model.model.identity)
+                    if summarizer.on_usage is not None
+                    else None
+                ),
             )
         except Exception as exc:
             logger.warning(
@@ -725,11 +827,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
 
 
 def _runs_with_stable_ids(
-    runs: Sequence[RunOutput | TeamRunOutput],
+    runs: Sequence[AnyRunRecord],
     *,
     session_id: str,
     scope: HistoryScope,
-) -> list[RunOutput | TeamRunOutput]:
+) -> list[AnyRunRecord]:
     stable_runs = [run for run in runs if _has_stable_run_id(run)]
     if len(stable_runs) < len(runs):
         logger.warning(
@@ -741,12 +843,8 @@ def _runs_with_stable_ids(
     return stable_runs
 
 
-def _has_stable_run_id(run: RunOutput | TeamRunOutput) -> bool:
-    return isinstance(run.run_id, str) and bool(run.run_id)
-
-
-def _model_identifier(model: Model) -> str:
-    return model.id or model.__class__.__name__
+def _has_stable_run_id(run: AnyRunRecord) -> bool:
+    return bool(run.run_id)
 
 
 def _iso_utc_now() -> str:

@@ -1,7 +1,7 @@
 # History compaction
 
 This page records the assumptions and decisions behind portable history compaction before and during a reply, its summary rows, and seen-message tracking.
-User-facing behavior is in [Context Window](../configuration/history.md#context-window), Agno workarounds are in the [Agno compatibility inventory](agno-compatibility.md), and provider request workarounds are in `history/summary_provider_compat.py` and `history/claude_replay_compat.py`.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window), Agno workarounds are in the [Agno compatibility inventory](agno-compatibility.md), and the Claude replay workaround is in `history/claude_replay_compat.py`.
 When upgrading Agno or a provider SDK, run those modules' contract tests before removing a workaround.
 
 ## Assumptions
@@ -12,6 +12,10 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Decisions
 
+- A summary request goes out without streaming and with the provider's own retries, thinking, and prompt cache off, because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix.
+  It keeps the route's transport timeout instead of overriding it with `timeout_seconds`, because a shorter authored provider timeout must still apply; the summary call's own deadline cancels a slower request.
+- A summary counts as complete only when the provider reports that it ended on its own; a summary cut off by the output limit, a content filter, or a tool call is never stored.
+  A route that reports no stop reason cannot show a cut-off, so its summaries count as complete.
 - Compaction keeps every run in Agno's runs table and appends a summary row positioned after the newest run it covers, instead of moving runs into a second store, because keeping two stores consistent produced repeated bugs once summaries had to cover part of a running turn (see `docs/dev/2026-10-12-compaction-log-store-design.md`).
 - Edits and redactions cut the log from the earliest element holding the event; rows that only end earlier summaries (barriers) survive cuts, so retired summaries never replay again.
   Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.

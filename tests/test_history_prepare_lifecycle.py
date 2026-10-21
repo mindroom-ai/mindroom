@@ -1,5 +1,5 @@
 """Tests for the prepare-history lifecycle and forced/auto compaction."""
-# ruff: noqa: D103, TC002, TC003
+# ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
@@ -8,18 +8,12 @@ import inspect
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.media import Image
-from agno.metrics import MessageMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session.summary import SessionSummary
 
 from mindroom.config.models import CompactionOverrideConfig
-from mindroom.error_handling import ModelSafeguardRefusalError
 from mindroom.execution_preparation import (
     _prepare_bound_team_execution_context,
     prepare_agent_execution_context,
@@ -53,14 +47,22 @@ from mindroom.history.types import (
     HistoryScopeState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
+    ScopeSummary,
 )
+from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import (
-    FakeModel,
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
+
+if TYPE_CHECKING:
+    from mindroom.llm.runs import RunRecord, TeamRunRecord
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -105,7 +107,7 @@ async def test_prepare_history_for_run_detects_persisted_team_history(tmp_path: 
             "session-1",
             team_id="team-123",
             runs=[_completed_team_run("team-1", team_id="team-123")],
-            summary=SessionSummary(summary="team summary", updated_at=datetime.now(UTC)),
+            summary=ScopeSummary(text="team summary", updated_at=datetime.now(UTC)),
         )
         seed_session(scope_context.storage, session)
 
@@ -148,15 +150,12 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(
-                    summary="merged summary",
-                    updated_at=datetime.now(UTC),
-                ),
+                return_value="merged summary",
             ),
         ),
     ):
@@ -177,7 +176,7 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(tmp_pa
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
 
     state = read_scope_state(persisted, scope)
@@ -213,14 +212,14 @@ async def test_prepare_history_for_run_required_compaction_starts_lifecycle_befo
     seed_session(storage, session)
     lifecycle = RecordingCompactionLifecycle()
 
-    async def _summary_after_notice(*_args: object, **_kwargs: object) -> SessionSummary:
+    async def _summary_after_notice(*_args: object, **_kwargs: object) -> str:
         assert isinstance(lifecycle.events[0], CompactionLifecycleStart)
-        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+        return "merged summary"
 
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -318,7 +317,7 @@ async def test_prepare_history_for_run_compaction_failure_notice_redacts_credent
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=error)),
     ):
@@ -368,7 +367,7 @@ async def test_prepare_history_for_run_required_compaction_edits_failure_when_ca
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch("mindroom.history.runtime.compact_scope_history", new=AsyncMock(side_effect=asyncio.CancelledError)),
         pytest.raises(asyncio.CancelledError),
@@ -420,7 +419,7 @@ async def test_prepare_history_for_run_required_compaction_classifies_provider_t
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(side_effect=TimeoutError)),
     ):
@@ -502,15 +501,12 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(
-                    summary="thread summary",
-                    updated_at=datetime.now(UTC),
-                ),
+                return_value="thread summary",
             ),
         ),
     ):
@@ -535,7 +531,7 @@ async def test_prepare_history_for_run_keeps_thread_session_compaction_isolated(
     assert persisted_room.summary is None
     assert [run.run_id for run in persisted_room.runs] == ["room-1", "room-2", "room-3"]
     assert persisted_thread.summary is not None
-    assert persisted_thread.summary.summary == "thread summary"
+    assert persisted_thread.summary.text == "thread summary"
     assert persisted_thread.runs == []
     assert prepared.compaction_reply_outcome == "success"
     outcome = completed_outcome(lifecycle)
@@ -595,7 +591,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
 
     def _included_run_count(
         previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
+        compacted_runs: list[RunRecord | TeamRunRecord],
         budget: int,
     ) -> int:
         return len(
@@ -616,7 +612,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     after_first_session = _session(
         "session-1",
         runs=visible_runs[2:],
-        summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+        summary=ScopeSummary(text=first_summary_text, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
@@ -649,14 +645,14 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
 
     summary_mock = AsyncMock(
         side_effect=[
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
-            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
+            first_summary_text,
+            second_summary_text,
         ],
     )
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -682,7 +678,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == second_summary_text
+    assert persisted.summary.text == second_summary_text
     assert persisted.runs == []
     assert len(folded_run_ids(storage)) == 3
     assert summary_mock.await_count == 2
@@ -738,7 +734,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
 
     def _included_run_count(
         previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
+        compacted_runs: list[RunRecord | TeamRunRecord],
         budget: int,
     ) -> int:
         return len(
@@ -774,14 +770,14 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
 
     summary_mock = AsyncMock(
         side_effect=[
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
-            SessionSummary(summary=second_summary_text, updated_at=datetime.now(UTC)),
+            first_summary_text,
+            second_summary_text,
         ],
     )
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -805,7 +801,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == second_summary_text
+    assert persisted.summary.text == second_summary_text
     assert persisted.runs == []
     assert summary_mock.await_count == 2
     assert prepared.compaction_reply_outcome == "success"
@@ -868,11 +864,11 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_when_native_comp
         history_settings=_ALL_HISTORY_SETTINGS,
         execution_plan=execution_plan,
     )
-    summary_mock = AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC)))
+    summary_mock = AsyncMock(return_value="short summary")
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
     ):
@@ -967,7 +963,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     after_first_session = _session(
         "session-1",
         runs=visible_runs[9:],
-        summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+        summary=ScopeSummary(text=first_summary_text, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
@@ -996,17 +992,16 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         compaction_timeout_seconds=600.0,
     )
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
-        summary_text = first_summary_text if len(summary_inputs) == 1 else f"summary chunk {len(summary_inputs)}"
-        return SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))
+        return first_summary_text if len(summary_inputs) == 1 else f"summary chunk {len(summary_inputs)}"
 
     lifecycle = RecordingCompactionLifecycle()
 
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1127,7 +1122,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
 
     def _included_run_count(
         previous_summary: str | None,
-        compacted_runs: list[RunOutput | TeamRunOutput],
+        compacted_runs: list[RunRecord | TeamRunRecord],
         budget: int,
     ) -> int:
         return len(
@@ -1148,7 +1143,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     after_first_session = _session(
         "session-1",
         runs=visible_runs[2:],
-        summary=SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+        summary=ScopeSummary(text=first_summary_text, updated_at=datetime.now(UTC)),
     )
     replay_budget = estimate_prompt_visible_history_tokens(
         session=after_first_session,
@@ -1171,21 +1166,21 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         compaction_timeout_seconds=600.0,
     )
 
-    async def summarize(**_kwargs: object) -> SessionSummary:
+    async def summarize(**_kwargs: object) -> str:
         if summary_mock.await_count == 1:
-            return SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC))
+            return first_summary_text
         if second_chunk == "fails":
             msg = "summary failed"
             raise RuntimeError(msg)
-        storage.delete_runs(["run-3"])
-        return SessionSummary(summary="stale second summary", updated_at=datetime.now(UTC))
+        storage.delete_run_subtrees(["run-3"])
+        return "stale second summary"
 
     summary_mock = AsyncMock(side_effect=summarize)
 
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1211,7 +1206,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == first_summary_text
+    assert persisted.summary.text == first_summary_text
     assert [run.run_id for run in persisted.runs or []] == (["run-3"] if second_chunk == "fails" else [])
     assert summary_mock.await_count == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
@@ -1302,8 +1297,8 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     # fails hard on the fallback.
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusalError("provider-specific refusal wording"),
-            SessionSummary(summary=first_summary_text, updated_at=datetime.now(UTC)),
+            ModelSafeguardRefusal(provider="fake"),
+            first_summary_text,
             RuntimeError("summary failed"),
         ],
     )
@@ -1312,7 +1307,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            side_effect=lambda _config, _paths, name, **_kwargs: FakeModel(id=f"{name}-id", provider="fake"),
+            side_effect=lambda _config, _paths, name, **_kwargs: summary_model(model_id=f"{name}-id"),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1343,7 +1338,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == first_summary_text
+    assert persisted.summary.text == first_summary_text
     assert [run.run_id for run in persisted.runs or []] == ["run-2"]
 
 
@@ -1379,14 +1374,14 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
         compaction_fallback_summary_input_budget_tokens=16_000,
     )
 
-    def _load_model(_config: object, _paths: object, name: str = "default", **_kwargs: object) -> FakeModel:
+    def _load_model(_config: object, _paths: object, name: str = "default", **_kwargs: object) -> ScriptedSummaryModel:
         if name == "fallback-model":
             message = "fallback provider SDK unavailable"
             raise RuntimeError(message)
-        return FakeModel(id=f"{name}-id", provider="fake")
+        return summary_model(model_id=f"{name}-id")
 
     summary_mock = AsyncMock(
-        return_value=SessionSummary(summary="primary summary", updated_at=datetime.now(UTC)),
+        return_value="primary summary",
     )
     lifecycle = RecordingCompactionLifecycle()
 
@@ -1412,7 +1407,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     assert prepared.compaction_reply_outcome == "success"
     assert completed_outcome(lifecycle).summary_model == "summary-model"
     assert summary_mock.await_count == 1
-    assert summary_mock.await_args.kwargs["model"].id == "summary-model-id"
+    assert summary_mock.await_args.kwargs["model"].identity.id == "summary-model-id"
     fallback_warnings = [
         call
         for call in warning_mock.call_args_list
@@ -1424,7 +1419,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "primary summary"
+    assert persisted.summary.text == "primary summary"
     assert latest_summary_model(storage, scope) == "summary-model-id"
 
 
@@ -1474,12 +1469,12 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     seed_session(storage, session)
 
     summary_mock = AsyncMock(
-        return_value=SessionSummary(summary="all runs summary", updated_at=datetime.now(UTC)),
+        return_value="all runs summary",
     )
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1516,7 +1511,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "all runs summary"
+    assert persisted.summary.text == "all runs summary"
     assert persisted.runs == []
     assert summary_mock.await_count == 1
     assert first_prepared.compaction_reply_outcome == "success"
@@ -1673,7 +1668,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(tmp_
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
@@ -1730,18 +1725,18 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
 
     def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
         if race == "before_summary":
-            storage.delete_runs(["run-1"])
+            storage.delete_run_subtrees(["run-1"])
         return read_chunk_basis(*args, **kwargs)
 
-    async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> SessionSummary:
+    async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> str:
         if race == "during_summary":
-            storage.delete_runs(["run-1"])
-        return SessionSummary(summary="stale summary", updated_at=datetime.now(UTC))
+            storage.delete_run_subtrees(["run-1"])
+        return "stale summary"
 
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch("mindroom.history.compaction.read_chunk_basis", new=basis_after_a_redaction_cuts_a_run),
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_while_a_redaction_cuts_a_run),
@@ -1835,7 +1830,7 @@ def _reported_run(
     model: str = "fake-model",
     created_at: int = _SUMMARY_WRITTEN_AT + 1,
     images: list[Image] | None = None,
-) -> RunOutput:
+) -> RunRecord:
     """Return a completed run whose answer carries the request size its provider reported.
 
     By default the answer's request starts the second after any summary a test writes.
@@ -1896,11 +1891,11 @@ async def _prepare_with_reported_usage(
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="short summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="short summary"),
         ),
     ):
         prepared = await prepare_scope_history(

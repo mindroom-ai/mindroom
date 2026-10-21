@@ -6,24 +6,16 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.exceptions import ModelProviderError, ModelRateLimitError
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.summary import SessionSummary
-from agno.utils.models.claude import format_messages as format_claude_messages
 
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
 )
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.compaction import (
     SummaryModel,
@@ -47,7 +39,6 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
-    ScopeSummary,
 )
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -60,9 +51,12 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
+from mindroom.providers.anthropic.wire import format_claude_messages
+from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -70,12 +64,12 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
-    FakeModel,
     make_conversation_reader_mock,
     make_relation_lookup,
     prepare_history_for_run_for_test,
     seed_session,
 )
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     RecordingCompactionLifecycle,
@@ -93,22 +87,23 @@ from tests.history_helpers import (
     folded_run_ids,
     summary_rows_of,
 )
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-
     from mindroom.history.compaction import _CompactionRewriteResult, _SummaryChunk
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
 
 
 async def _rewrite_single_run(
     *,
-    storage: BaseDb,
-    working_session: AgentSession,
+    storage: ConversationStore,
+    working_session: ConversationSession,
     selected_run_ids: tuple[str, ...] = ("run-1",),
     summary_input_budget: int = 8_000,
-    summary_model: FakeModel | None = None,
-    fallback_summary_model: FakeModel | None = None,
+    summary_model: ModelProvider | None = None,
+    fallback_summary_model: ModelProvider | None = None,
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     served_models: list[str] | None = None,
@@ -169,9 +164,9 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
     working_session = _session("session-1", runs=runs)
     summary_inputs: list[str] = []
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
-        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+        return "merged summary"
 
     with (
         patch(
@@ -245,12 +240,12 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
     )
     summary_inputs: list[str] = []
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
             msg = f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"
             raise RuntimeError(msg)
-        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+        return "merged summary"
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
@@ -281,12 +276,12 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_p
     )
     summary_inputs: list[str] = []
 
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> SessionSummary:
+    async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
             msg = "renamed owned output-limit signal"
             raise CompactionSummaryOutputLimitError(msg)
-        return SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))
+        return "merged summary"
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
@@ -323,13 +318,13 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             ),
         ],
     )
-    primary = FakeModel(id="summary-model", provider="fake")
-    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    primary = summary_model()
+    fallback = summary_model(model_id="fallback-model-id")
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
-            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            ModelSafeguardRefusal(provider="fake"),
+            "first chunk summary",
+            "merged summary",
         ],
     )
     retry_sleep = AsyncMock()
@@ -365,7 +360,10 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     assert "RUN2-MARKER" in summary_inputs[2]
     retry_sleep.assert_not_awaited()
     # The second chunk rebuilds its input with the fallback's token estimator.
-    assert build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"] == fallback.id
+    assert (
+        build_summary_input_spy.call_args_list[-1].kwargs["token_estimator"].keywords["model_id"]
+        == fallback.identity.id
+    )
     assert folded_run_ids(storage) == ["run-1", "run-2"]
     assert summary_rows_of(storage, "agent:test_agent") == [
         StoredSummaryRow(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
@@ -378,7 +376,7 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
 
 
@@ -389,7 +387,7 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
     summary_mock = AsyncMock(
-        side_effect=ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+        side_effect=ModelSafeguardRefusal(provider="fake"),
     )
     retry_sleep = AsyncMock()
 
@@ -400,12 +398,12 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
         ) as persist_spy,
-        pytest.raises(ModelSafeguardRefusalError),
+        pytest.raises(ModelSafeguardRefusal),
     ):
         await _rewrite_single_run(
             storage=storage,
             working_session=working_session,
-            fallback_summary_model=FakeModel(id="fallback-model-id", provider="fake"),
+            fallback_summary_model=summary_model(model_id="fallback-model-id"),
             fallback_summary_model_name="fallback-model",
         )
 
@@ -421,15 +419,15 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
 @pytest.mark.parametrize(
     "error",
     [
-        ModelRateLimitError(message="rate limited", status_code=429),
-        ModelProviderError(message="request timed out while provider unavailable", status_code=503),
-        ModelRateLimitError(message="overloaded", status_code=529),
+        RateLimited("rate limited", provider="fake", status_code=429),
+        classify_provider_error("request timed out while provider unavailable", provider="fake", status_code=503),
+        RateLimited("overloaded", provider="fake", status_code=529),
     ],
 )
 @pytest.mark.asyncio
 async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_persist(
     tmp_path: Path,
-    error: ModelProviderError,
+    error: ProviderError,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -448,7 +446,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     summary_mock = AsyncMock(
         side_effect=[
             error,
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            "merged summary",
         ],
     )
     retry_sleep = AsyncMock()
@@ -476,13 +474,13 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
     ("error", "expected_attempts", "expected_delay"),
     [
         pytest.param(
-            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
+            ModelSafeguardRefusal(provider="fake"),
             1,
             False,
             id="unshrinkable-refusal",
         ),
         pytest.param(
-            ModelProviderError(message="service unavailable", status_code=503),
+            classify_provider_error("service unavailable", provider="fake", status_code=503),
             2,
             True,
             id="transient-provider-error",
@@ -492,7 +490,7 @@ async def test_rewrite_retries_transient_provider_error_with_same_input_and_one_
 @pytest.mark.asyncio
 async def test_rewrite_bounds_retry_attempts(
     tmp_path: Path,
-    error: ModelProviderError,
+    error: ProviderError,
     expected_attempts: int,
     expected_delay: bool,
 ) -> None:
@@ -528,7 +526,7 @@ async def test_rewrite_propagates_non_retryable_provider_error_without_persistin
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session("session-1", runs=[_completed_run("run-1")])
-    summary_mock = AsyncMock(side_effect=ModelProviderError(message="invalid request", status_code=400))
+    summary_mock = AsyncMock(side_effect=classify_provider_error("invalid request", provider="fake", status_code=400))
 
     with (
         patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock),
@@ -536,7 +534,7 @@ async def test_rewrite_propagates_non_retryable_provider_error_without_persistin
             "mindroom.history.compaction.append_compaction_chunk",
             wraps=append_compaction_chunk,
         ) as persist_spy,
-        pytest.raises(ModelProviderError, match="invalid request"),
+        pytest.raises(ProviderError, match="invalid request"),
     ):
         await _rewrite_single_run(storage=storage, working_session=working_session)
 
@@ -572,8 +570,8 @@ async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_
     working_session = _session("session-1", runs=[_completed_run("run-1")])
     summary_mock = AsyncMock(
         side_effect=[
-            ModelRateLimitError(message="rate limited", status_code=429),
-            SessionSummary(summary="must not run", updated_at=datetime.now(UTC)),
+            RateLimited("rate limited", provider="fake", status_code=429),
+            "must not run",
         ],
     )
     delay_started = asyncio.Event()
@@ -645,7 +643,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         registry_state.registry = registry
         persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
-        assert [run.run_id for run in persisted.runs or []] == ["run-1", "run-2"]
+        assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
         observed.append(
             (
                 ctx.event_name,
@@ -691,11 +689,11 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(t
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
     ):
         lifecycle = RecordingCompactionLifecycle()
@@ -797,7 +795,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         observed.append(
             (
                 ctx.event_name,
-                [run.run_id for run in persisted.runs or []],
+                [run.run_id for run in persisted.runs],
                 [str(message.content) for message in ctx.messages],
             ),
         )
@@ -809,7 +807,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         observed.append(
             (
                 ctx.event_name,
-                [run.run_id for run in persisted.runs or []],
+                [run.run_id for run in persisted.runs],
                 [str(message.content) for message in ctx.messages],
             ),
         )
@@ -834,7 +832,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
         patch("mindroom.history.compaction.append_compaction_chunk", new=append_chunk),
     ):
@@ -932,11 +930,11 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
         patch(
             "mindroom.history.compaction.messages_for_runs",
@@ -991,7 +989,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction._rewrite_working_session_for_compaction",
@@ -1013,7 +1011,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_when_rewri
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
     assert persisted.summary is None
-    assert len(persisted.runs or []) == 2
+    assert len(persisted.runs) == 2
     assert read_scope_state(persisted, scope).force_compact_before_next_run is False
     assert prepared.compaction_reply_outcome == "failed"
     assert observed == []
@@ -1064,11 +1062,11 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1181,11 +1179,11 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path) -> None:
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1237,11 +1235,11 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path) -> 
         tool_runtime_context(runtime_context),
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+            new=AsyncMock(return_value="merged summary"),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1398,7 +1396,7 @@ def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
     assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
-    formatted, _system = format_claude_messages(messages)
+    formatted = format_claude_messages(messages, append_trailing_user_message=False, enable_citations=True).messages
     assistant_turns = [message["content"] for message in formatted if message["role"] == "assistant"]
     assert assistant_turns == [replay_blocks, current_blocks]
     assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}
@@ -1558,7 +1556,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
     seed_session(storage, working_session)
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
+        new=AsyncMock(return_value=summary_text),
     ):
         rewrite_result = await _rewrite_working_session_for_compaction(
             storage=storage,
@@ -1589,8 +1587,8 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    unremovable_run = RunOutput(
-        run_id=None,
+    unremovable_run = RunRecord(
+        run_id="",
         agent_id="test_agent",
         status=RunStatus.completed,
         messages=[
@@ -1602,7 +1600,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value=SessionSummary(summary="summary", updated_at=datetime.now(UTC))),
+        new=AsyncMock(return_value="summary"),
     ) as mock_generate:
         outcome = await compact_scope_history(
             storage=storage,
@@ -1698,7 +1696,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value=SessionSummary(summary=summary_text, updated_at=datetime.now(UTC))),
+        new=AsyncMock(return_value=summary_text),
     ):
         outcome = await compact_scope_history(
             storage=storage,
@@ -1718,8 +1716,8 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
     assert outcome is not None
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
-    assert [run.run_id for run in persisted.runs or []] == [run.run_id for run in remaining_runs]
-    remaining_messages = [message for run in persisted.runs or [] for message in run.messages or []]
+    assert [run.run_id for run in persisted.runs] == [run.run_id for run in remaining_runs]
+    remaining_messages = [message for run in persisted.runs for message in run.messages or []]
     assert remaining_messages[1].provider_data == {"keep": "yes"}
     assert remaining_messages[1].reasoning_content is None
     assert remaining_messages[1].redacted_reasoning_content is None
@@ -1783,18 +1781,18 @@ async def test_compact_scope_history_emits_progress_after_persisted_chunks(tmp_p
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
-    replay_model = MindRoomOpenAIResponses(id="gpt-6-astra") if portable else None
+    replay_model = responses_adapter(tmp_path) if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = storage.load_session("session-1", "agent")
         assert persisted is not None
         assert persisted.summary is not None
-        assert [run.run_id for run in persisted.runs or []] == ["run-2"]
+        assert [run.run_id for run in persisted.runs] == ["run-2"]
         progress_events.append(event)
 
     with patch(
         "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
+        new=AsyncMock(return_value="merged summary"),
     ):
         outcome = await compact_scope_history(
             storage=storage,
@@ -1850,13 +1848,13 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
         )
         for index in (1, 2)
     ]
-    primary = FakeModel(id="summary-model", provider="fake")
-    fallback = FakeModel(id="fallback-model-id", provider="fake")
+    primary = summary_model()
+    fallback = summary_model(model_id="fallback-model-id")
     summary_mock = AsyncMock(
         side_effect=[
-            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
-            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            ModelSafeguardRefusal(provider="fake"),
+            "first chunk summary",
+            "merged summary",
         ],
     )
 
@@ -1900,12 +1898,12 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         ],
     )
     seed_session(storage, session)
-    fallback = SummaryModel(FakeModel(id="fallback-model-id", provider="fake"), "fallback-model", 6_000)
+    fallback = SummaryModel(summary_model(model_id="fallback-model-id"), "fallback-model", 6_000)
     summary_mock = AsyncMock(
         side_effect=[
-            SessionSummary(summary="first chunk summary", updated_at=datetime.now(UTC)),
-            ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE),
-            SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+            "first chunk summary",
+            ModelSafeguardRefusal(provider="fake"),
+            "merged summary",
         ],
     )
     appended: list[bool] = []
@@ -1954,7 +1952,7 @@ async def test_compact_scope_history_skips_unforced_history_that_fits(
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")]))
     session = storage.load_session("session-1", "agent")
     assert session is not None
-    summary_mock = AsyncMock(return_value=SessionSummary(summary="unused", updated_at=datetime.now(UTC)))
+    summary_mock = AsyncMock(return_value="unused")
 
     with patch("mindroom.history.compaction.generate_compaction_summary", new=summary_mock):
         outcome = await compact_scope_history(
@@ -2033,12 +2031,12 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_p
     with (
         patch(
             "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+            return_value=summary_model(),
         ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=ScopeSummary(text="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
     ):

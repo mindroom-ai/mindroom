@@ -64,15 +64,17 @@ from tests.conftest import (
     make_relation_lookup,
     seed_session,
 )
+from tests.fakes.summary_model import summary_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.metrics import MessageMetrics
     from agno.models.message import Message as AgnoMessage
 
     from mindroom.history.types import ScopeSummary
+    from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -85,7 +87,7 @@ _ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
 
 
 def _summarizer(
-    model: Model | None = None,
+    model: ModelProvider | None = None,
     input_budget_tokens: int = 16_000,
     *,
     name: str = "summary-model",
@@ -95,11 +97,11 @@ def _summarizer(
     timeout_seconds: float = DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     session_id: str = "session-1",
     scope: HistoryScope | None = None,
-    on_usage: Callable[[Model, MessageMetrics], Awaitable[None]] | None = None,
+    on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None = None,
 ) -> Summarizer:
     """Return a summarizer for the test agent's scope, by default with the production summary prompt."""
     return Summarizer(
-        model=SummaryModel(model or FakeModel(id="summary-model", provider="fake"), name, input_budget_tokens),
+        model=SummaryModel(model or summary_model(), name, input_budget_tokens),
         fallback=fallback,
         prompt=prompt,
         timeout_seconds=timeout_seconds,
