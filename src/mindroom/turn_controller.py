@@ -1789,7 +1789,7 @@ class TurnController:
             selection_handled_turn,
             target=response_target,
             response_text=(
-                f"You selected: {selection.selection_key} {selection.selected_value}\n\nProcessing your response..."
+                f"You selected: {selection.selection_key} {selection.selected_label}\n\nProcessing your response..."
             ),
             delivery_turn_id=source_event_id,
         )
