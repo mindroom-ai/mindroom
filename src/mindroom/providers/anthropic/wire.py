@@ -150,8 +150,8 @@ def supports_structured_outputs(model_id: str) -> bool:
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
-    """Map Claude's ``stop_reason`` onto the shared vocabulary; unknown reasons map to None."""
-    return None if raw is None else _STOP_REASONS.get(raw)
+    """Map Claude's ``stop_reason`` onto the shared vocabulary; a reason this map does not know is incomplete."""
+    return None if raw is None else _STOP_REASONS.get(raw, "incomplete")
 
 
 @dataclass(frozen=True, slots=True)

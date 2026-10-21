@@ -14,10 +14,11 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
-from mindroom.llm.errors import ContextWindowExceeded, ProviderError
+from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, ProviderError, RateLimited
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.logging_config import get_logger
+from mindroom.providers.errors import is_context_window_error
 from mindroom.timing import timed
 from mindroom.usage.storage import has_token_usage
 
@@ -30,21 +31,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-# Error wording that means the summary input was too large, from providers whose errors carry no typed signal.
-_SHRINKABLE_ERROR_FRAGMENTS = (
-    "context length",
-    "context_length_exceeded",
-    "too many tokens",
-    "max tokens",
-    "too large",
-    "too long",
-    "input size",
-    "input too large",
-    "maximum length",
-    "max length",
-    "request too large",
-    "reduce the length",
-)
 _TIMEOUT_ERROR_FRAGMENT = "timed out"
 # The outer retry policy owns retries, a one-off summary never reuses its prefix, and thinking would spend the output
 # budget the summary needs. The transport timeout stays the route's own, so a shorter authored provider timeout still
@@ -91,11 +77,13 @@ def is_summary_timeout(error: BaseException) -> bool:
 
 
 def _is_size_error(error: Exception) -> bool:
-    """Return whether an error's wording says the input was too large, or that a final request timed out."""
-    message = str(error).casefold()
-    return any(fragment in message for fragment in _SHRINKABLE_ERROR_FRAGMENTS) or (
-        is_summary_timeout(error) and not _is_transient(error)
-    )
+    """Return whether a rate limit says the input alone was too large, or a final request timed out.
+
+    A request above the account's tokens-per-minute limit fails as a rate limit worded "Request too large"; waiting
+    never lets it through, but a smaller input does.
+    """
+    oversized = isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.code)
+    return oversized or (is_summary_timeout(error) and not _is_transient(error))
 
 
 @dataclass(frozen=True)
@@ -231,6 +219,30 @@ def _detach_cancelled_compaction_request(
     )
 
 
+async def _request_summary(
+    model: ModelProvider,
+    request: ModelRequest,
+    provider_done: asyncio.Future[None],
+    on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
+) -> ModelTurn:
+    """Send the summary request, then persist the usage it reported, a refused response's included."""
+    try:
+        turn: ModelTurn | ModelSafeguardRefusal = await complete(model, request)
+    except ModelSafeguardRefusal as refusal:
+        turn = refusal
+    finally:
+        provider_done.set_result(None)
+    if on_usage is not None and has_token_usage(turn.usage.to_dict()):
+        try:
+            await on_usage(turn.usage)
+        except Exception as error:
+            msg = "Could not persist compaction summary usage"
+            raise _CompactionSummaryUsageError(msg) from error
+    if isinstance(turn, ModelSafeguardRefusal):
+        raise turn
+    return turn
+
+
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
 async def generate_compaction_summary(
     *,
@@ -247,22 +259,8 @@ async def generate_compaction_summary(
         stream=False,
         overrides=_SUMMARY_OVERRIDES,
     )
-
-    async def _request_summary() -> ModelTurn:
-        try:
-            turn = await complete(model, request)
-        finally:
-            provider_done.set_result(None)
-        if on_usage is not None and has_token_usage(turn.usage.to_dict()):
-            try:
-                await on_usage(turn.usage)
-            except Exception as error:
-                msg = "Could not persist compaction summary usage"
-                raise _CompactionSummaryUsageError(msg) from error
-        return turn
-
     response_task = asyncio.create_task(
-        _request_summary(),
+        _request_summary(model, request, provider_done, on_usage),
         name="compaction_summary_request",
     )
     try:

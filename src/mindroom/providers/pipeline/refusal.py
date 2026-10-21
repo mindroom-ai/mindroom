@@ -1,7 +1,8 @@
 """End a request the model's safeguards refused with a typed error instead of a finished turn.
 
 Adapters report a turn's usage before completing it, so the refused request's usage reaches the caller and the
-request log first. The error is final: no stage retries the request or resends it without its media.
+request log first; the error carries it too, for a caller that reads only the finished turn. The error is final: no
+stage retries the request or resends it without its media.
 """
 
 from __future__ import annotations
@@ -26,5 +27,5 @@ async def refusal_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIt
     async with closing_async_stream(events):
         async for event in events:
             if isinstance(event, TurnCompleted) and event.stop_reason == "refusal":
-                raise ModelSafeguardRefusal(provider=inner.identity.provider_name)
+                raise ModelSafeguardRefusal(provider=inner.identity.provider_name, usage=event.message.metrics)
             yield event

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from mindroom.llm.usage import MessageMetrics
+
 # The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
 # Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
 # never strips media for it.
@@ -82,10 +84,14 @@ class ModelOutputLimitError(RuntimeError):
 
 
 class ModelSafeguardRefusal(ProviderError):  # noqa: N818
-    """The model's safeguards stopped the response; final, so it is never retried or resent without media."""
+    """The model's safeguards stopped the response; final, so it is never retried or resent without media.
 
-    def __init__(self, *, provider: str) -> None:
+    ``usage`` is the refused response's usage, for a caller that reads only the finished turn, such as ``complete``.
+    """
+
+    def __init__(self, *, provider: str, usage: MessageMetrics | None = None) -> None:
         super().__init__(MODEL_SAFEGUARD_REFUSAL_MESSAGE, provider=provider, code=SAFEGUARD_REFUSAL)
+        self.usage = usage if usage is not None else MessageMetrics()
 
 
 __all__ = [

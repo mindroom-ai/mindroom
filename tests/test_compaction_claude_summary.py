@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.usage import MessageMetrics
 
 pytestmark = pytest.mark.asyncio
 
@@ -191,6 +192,7 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(route: str, stop
     [
         ("pause_turn", CompactionSummaryIncompleteError),
         ("tool_use", CompactionSummaryIncompleteError),
+        ("a_reason_claude_adds_later", CompactionSummaryIncompleteError),
         ("refusal", ModelSafeguardRefusal),
     ],
 )
@@ -210,3 +212,23 @@ async def test_summary_rejects_unfinished_or_refused_text(
     with pytest.raises(expected_error):
         await _summarize(_model(route, tmp_path, respond))
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("route", sorted(_ROUTES))
+async def test_a_refused_summary_still_records_its_usage(route: str, tmp_path: Path) -> None:
+    """The refused response was billed, so its usage counts before the refusal reaches the compaction."""
+    recorded: list[MessageMetrics] = []
+
+    async def on_usage(usage: MessageMetrics) -> None:
+        recorded.append(usage)
+
+    model = _model(route, tmp_path, lambda _request: _response(output_tokens=7, stop_reason="refusal"))
+    with pytest.raises(ModelSafeguardRefusal):
+        await generate_compaction_summary(
+            model=model,
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+            on_usage=on_usage,
+        )
+    assert [(usage.input_tokens, usage.output_tokens) for usage in recorded] == [(3000, 7)]
