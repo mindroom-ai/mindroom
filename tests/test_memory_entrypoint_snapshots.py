@@ -4,17 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from mindroom.memory import ConversationRef
 from mindroom.memory import _entrypoint_snapshots as snapshots
 
 MEMORY = Path("/workspace/MEMORY.md")
-
-
-@pytest.fixture(autouse=True)
-def _fresh_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(snapshots, "_snapshots", {})
 
 
 def _preamble(
@@ -29,7 +22,7 @@ def _preamble(
     """Return the preamble sent for a file whose inlined text is ``text``; the preamble names that text."""
     return snapshots.stable_entrypoint_preamble(
         agent,
-        ConversationRef(session, summary),
+        ConversationRef(session, (summary, None)),
         path,
         text,
         f"preamble of {text!r}",

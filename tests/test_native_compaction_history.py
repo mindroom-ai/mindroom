@@ -26,7 +26,11 @@ from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.policy import classify_compaction_decision
-from mindroom.history.replay import compaction_summary_message, estimate_prompt_visible_history_tokens
+from mindroom.history.replay import (
+    compaction_marker,
+    compaction_summary_message,
+    estimate_prompt_visible_history_tokens,
+)
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
@@ -1122,3 +1126,30 @@ def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]
         "checkpoint_tokens": checkpoint_estimated_tokens(items[:1]),
     }
     assert events == ([expected] if logged else [])
+
+
+def test_compaction_marker_names_the_newest_summary_and_native_checkpoint() -> None:
+    """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either."""
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    checkpoint = Message(
+        role="assistant",
+        provider_data={
+            "mindroom_native_compaction": {
+                "route": "route",
+                "threshold": None,
+                "items": [{"type": "compaction", "encrypted_content": "checkpoint"}],
+            },
+        },
+    )
+    # Every completed response records its route; only a compaction adds checkpoint items.
+    route_only = Message(role="assistant", provider_data={"mindroom_native_compaction": {"route": "route"}})
+    session = _session("session", runs=[_completed_run("plain")])
+    assert compaction_marker(session, scope) == (None, None)
+
+    session.runs = [
+        _completed_run("plain"),
+        _completed_run("compacted", messages=[Message(role="user", content="question"), checkpoint]),
+        _completed_run("later", messages=[Message(role="user", content="question"), route_only]),
+    ]
+    session.summary = SessionSummary(summary=" Text summary. ")
+    assert compaction_marker(session, scope) == ("Text summary.", checkpoint.id)

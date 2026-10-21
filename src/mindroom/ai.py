@@ -59,7 +59,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import bind_compaction_lifecycle, without_fold_records
-from mindroom.history.replay import apply_replay_plan, current_summary_text
+from mindroom.history.replay import apply_replay_plan, compaction_marker
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     ScopeSessionContext,
@@ -1027,6 +1027,19 @@ async def _close_agent_on_preparation_failure(
         raise
 
 
+def _install_system_context(
+    agent: Agent,
+    ctx: ResponseTurnContext,
+    base_context: str | None,
+    session_preamble: str,
+) -> None:
+    """Set the agent's system context to its base context, the memory preamble, and the turn's system enrichment."""
+    agent.additional_context = base_context
+    _append_additional_context(agent, session_preamble)
+    if ctx.system_enrichment_items:
+        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+
+
 def _standard_turn_enrichment(
     agent: Agent,
     ctx: ResponseTurnContext,
@@ -1036,9 +1049,7 @@ def _standard_turn_enrichment(
     """Put enrichment in the prompt and bind the turn for an agent whose shell can call its other tools."""
     if isinstance(agent, CliShellAgent):
         agent.response_context = ctx
-    _append_additional_context(agent, session_preamble)
-    if ctx.system_enrichment_items:
-        _append_additional_context(agent, _render_system_enrichment_context(ctx.system_enrichment_items))
+    _install_system_context(agent, ctx, agent.additional_context, session_preamble)
     return render_transient_context(
         (transient_memory, render_enrichment_block(list(ctx.transient_enrichment_items))),
     )
@@ -1073,12 +1084,13 @@ def _memory_conversation(
     """Name the conversation whose cached system prompt the turn's inlined MEMORY.md should keep unchanged.
 
     An authored persona recalls no memory, a minimal agent reads its memory on demand rather than in its system
-    prompt, and a replay limit moves the history after the system prompt every turn and can drop the agent's own
-    memory writes, so none of them has a cache to keep.
+    prompt, and a replay limit, configured or scheduled, moves the history after the system prompt every turn and can
+    drop the agent's own memory writes, so none of them has a cache to keep.
     """
     if (
         ctx.persona is not None
         or ctx.agent_mode == "minimal"
+        or ctx.scheduled_history_budget is not None
         or scope_context is None
         or scope_context.session_id is None
     ):
@@ -1087,7 +1099,8 @@ def _memory_conversation(
     if history_settings.policy.mode != "all" or history_settings.max_tool_calls_from_history is not None:
         return None
     session = scope_context.session
-    return ConversationRef(scope_context.session_id, current_summary_text(session) if session is not None else None)
+    compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)
+    return ConversationRef(scope_context.session_id, compaction)
 
 
 def _turn_enrichment(agent: Agent, ctx: ResponseTurnContext, prompt_parts: MemoryPromptParts) -> str:
@@ -1127,22 +1140,15 @@ async def _reload_memory_with_compaction(
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None,
     conversation: ConversationRef | None,
-    sent_preamble: str,
+    base_context: str | None,
 ) -> None:
-    """Send the current MEMORY.md with the compaction this turn's history preparation just made.
+    """Rebuild the agent's system context with the current MEMORY.md when this turn's history preparation compacted.
 
     That compaction already changes the request after the system prompt, so reloading here costs nothing, while
     waiting for the next turn would make it miss the cache on the whole compacted history.
     """
     compacted = _memory_conversation(ctx, config, scope_context)
-    context = agent.additional_context
-    if (
-        compacted is None
-        or compacted == conversation
-        or not sent_preamble
-        or not context
-        or sent_preamble not in context
-    ):
+    if compacted is None or compacted == conversation:
         return
     fresh = await conversation_entrypoint_preamble(
         ctx.entity_label,
@@ -1152,7 +1158,7 @@ async def _reload_memory_with_compaction(
         execution_identity,
         conversation=compacted,
     )
-    agent.additional_context = context.replace(sent_preamble, fresh, 1)
+    _install_system_context(agent, ctx, base_context, fresh)
 
 
 @timed("system_prompt_assembly")
@@ -1307,6 +1313,7 @@ async def _prepare_agent_and_prompt(
         shared_scope_storage=scope_context.storage if scope_context is not None else None,
         caller_owned_agent=reusable_agent,
     ):
+        base_context = agent.additional_context
         transient_turn_context = _turn_enrichment(agent, ctx, prompt_parts)
 
         prepared_execution = await prepare_agent_execution_context(
@@ -1345,30 +1352,28 @@ async def _prepare_agent_and_prompt(
             execution_identity,
             scope_context,
             memory_conversation,
-            prompt_parts.session_preamble,
+            base_context,
         )
         prepared_history = prepared_execution.prepared_history
         if prepared_execution.replay_plan is not None:
             apply_replay_plan(target=agent, replay_plan=prepared_execution.replay_plan)
-        unseen_event_ids = prepared_execution.unseen_event_ids
-        run_messages = prepared_execution.messages
 
         # Routine logs stay content-safe; detailed prompt text is emitted separately only at DEBUG.
         logger.info(
             "Preparing agent and prompt",
             agent=agent_name,
-            message_count=len(run_messages),
-            unseen_event_count=len(unseen_event_ids),
+            message_count=len(prepared_execution.messages),
+            unseen_event_count=len(prepared_execution.unseen_event_ids),
         )
         logger.debug(
             "Prepared agent full prompt",
             agent=agent_name,
-            full_prompt=render_prepared_messages_text(run_messages),
+            full_prompt=render_prepared_messages_text(prepared_execution.messages),
         )
         return _PreparedAgentRun(
             agent=agent,
-            messages=run_messages,
-            unseen_event_ids=unseen_event_ids,
+            messages=prepared_execution.messages,
+            unseen_event_ids=prepared_execution.unseen_event_ids,
             prepared_history=prepared_history,
             runtime_model_name=runtime_model.model_name,
         )

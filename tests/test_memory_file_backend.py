@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 import pytest
 
-import mindroom.memory._entrypoint_snapshots as entrypoint_snapshots
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -1586,10 +1585,8 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
 async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_added(
     storage_path: Path,
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it."""
-    monkeypatch.setattr(entrypoint_snapshots, "_snapshots", {})
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1608,16 +1605,16 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
         )
         return prompt_parts.session_preamble
 
-    first = await preamble(ConversationRef("thread", None))
+    first = await preamble(ConversationRef("thread", (None, None)))
     await add_agent_memory("Added fact.", "general", storage_path, config)
 
-    assert await preamble(ConversationRef("thread", None)) == first
+    assert await preamble(ConversationRef("thread", (None, None))) == first
     assert "Added fact." not in first
-    assert "Added fact." in await preamble(ConversationRef("other-thread", None))
+    assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
     assert "Added fact." in await preamble(None)
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    assert "Curated fact." not in await preamble(ConversationRef("thread", None))
+    assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
 
 
 @pytest.mark.asyncio

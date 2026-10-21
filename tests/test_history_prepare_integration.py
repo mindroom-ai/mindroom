@@ -16,7 +16,6 @@ from agno.run.agent import RunOutput
 from agno.session.summary import SessionSummary
 from defusedxml.ElementTree import fromstring
 
-import mindroom.memory._entrypoint_snapshots as entrypoint_snapshots
 from mindroom.agents import create_agent
 from mindroom.ai import _prepare_agent_and_prompt
 from mindroom.config.agent import AgentConfig
@@ -868,10 +867,8 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
 @pytest.mark.asyncio
 async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Added memory waits for a request whose history changes anyway, so the cached system prompt survives."""
-    monkeypatch.setattr(entrypoint_snapshots, "_snapshots", {})
     config, runtime_paths = _make_config(tmp_path)
     config.memory.backend = "file"
     memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"

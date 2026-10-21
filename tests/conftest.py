@@ -55,6 +55,7 @@ import mindroom.knowledge.read_process as knowledge_read_process_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -2994,6 +2995,12 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a router registered as the scheduled-task runner owner from leaking into later tests."""
     monkeypatch.setattr(scheduling_module, "_runner_owner", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
+    monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
 
 
 @pytest.fixture(autouse=True)

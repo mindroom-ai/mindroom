@@ -20,17 +20,21 @@ _IDLE_REFRESH_SECONDS = 3600.0
 
 @dataclass(frozen=True)
 class ConversationRef:
-    """The conversation a turn continues: its session, and its history summary when the turn started."""
+    """The conversation a turn continues, and what its history was last compacted into when the turn started.
+
+    ``compaction`` holds the conversation's text summary and newest native checkpoint; a change means a compaction
+    rewrote the replayed history.
+    """
 
     session_id: str
-    history_summary: str | None
+    compaction: tuple[str | None, str | None]
 
 
 @dataclass(frozen=True)
 class _Snapshot:
     preamble: str
     text: str
-    history_summary: str | None
+    compaction: tuple[str | None, str | None]
     used_at: float
 
 
@@ -54,8 +58,8 @@ def stable_entrypoint_preamble(
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
     ``fresh_text`` is the file's inlined text this turn.
-    A changed history summary means a compaction rewrote the replayed history; callers ask again with the new summary
-    for the request that carries it, whose cache misses after the system prompt anyway.
+    A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
+    anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
     Keying by the file keeps one requester's private memory out of another requester's turns.
     """
@@ -65,11 +69,11 @@ def stable_entrypoint_preamble(
     snapshot = _snapshots.get(key)
     if (
         snapshot is not None
-        and snapshot.history_summary == conversation.history_summary
+        and snapshot.compaction == conversation.compaction
         and _only_added_lines(snapshot.text, fresh_text)
     ):
         preamble, text = snapshot.preamble, snapshot.text
     else:
         preamble, text = fresh_preamble, fresh_text
-    _snapshots[key] = _Snapshot(preamble, text, conversation.history_summary, now)
+    _snapshots[key] = _Snapshot(preamble, text, conversation.compaction, now)
     return preamble
