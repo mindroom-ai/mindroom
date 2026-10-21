@@ -560,12 +560,12 @@ class OutlookMailTools(Toolkit):
         Before calling, tell the requester who will receive the reply and what it says. The reply goes to the
         original's reply_to addresses when it has them, and otherwise to its sender; with reply_all, its to and cc
         recipients also receive it. Read the message with outlook_mail_get_message first to name those recipients.
-        The reply is sent only when recipients are exactly the addresses it goes to; otherwise it fails with
-        recipients_mismatch, which lists them, and nothing is sent. The reply is saved in Sent Items.
+        When the reply would reach anyone recipients does not list, nothing is sent and it fails with
+        recipients_mismatch, which lists every address it would go to. The reply is saved in Sent Items.
 
         Args:
             message_id: The id of the message to answer, from outlook_mail_search.
-            recipients: Every email address the reply goes to, such as sam@contoso.com.
+            recipients: Every email address the reply may go to, such as sam@contoso.com.
             body: The reply text, as plain text.
             reply_all: Also reply to every other recipient of the original message.
 
@@ -587,15 +587,15 @@ class OutlookMailTools(Toolkit):
             draft = session.json("POST", path, json={"comment": text_to_html(body)})
             draft_path = f"/me/messages/{path_segment(draft.get('id'), 'draft id')}"
             actual = [*(draft.get("toRecipients") or []), *(draft.get("ccRecipients") or [])]
-            if _address_set(actual) != _address_set(_recipients(recipients, "recipients")):
+            if not _address_set(actual) <= _address_set(_recipients(recipients, "recipients")):
                 session.request("DELETE", draft_path)
                 raise MicrosoftGraphError(
                     code="recipients_mismatch",
-                    message="The reply goes to the recipients listed here, not the ones given; nothing was sent.",
+                    message="The reply would reach recipients the call did not name, all listed here; nothing was sent.",
                     recipients=_addresses(actual),
                 )
             session.request("POST", f"{draft_path}/send")
-            return {"message_id": message_id, "reply_all": reply_all, "sent": True}
+            return {"message_id": message_id, "reply_all": reply_all, "recipients": _addresses(actual), "sent": True}
 
         return self._call(operation, validate=validate)
 

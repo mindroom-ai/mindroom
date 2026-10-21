@@ -742,10 +742,10 @@ def test_reply_sends_the_body_as_an_escaped_comment(
     assert (create.method, unquote(create.url.path)) == ("POST", f"{MESSAGE_PATH}/{action}")
     assert _body(create) == {"comment": "Thanks &lt;team&gt; &amp; all<br>See you"}
     assert (send.method, unquote(send.url.path)) == ("POST", f"{DRAFT_PATH}/send")
-    assert result["sent"] is True
+    assert (result["sent"], result["recipients"]) == (True, ["Sam Example <sam@contoso.com>", "team@contoso.com"])
 
 
-def test_reply_to_other_recipients_than_named_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reply_to_a_recipient_not_named_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mail = _Graph()
     # Graph addresses the reply to the original's reply_to, an outside address the caller did not name.
     mail.write = _reply_draft(toRecipients=[{"emailAddress": {"address": "desk@outside.example"}}], ccRecipients=[])
@@ -761,9 +761,11 @@ def test_reply_to_other_recipients_than_named_is_refused(tmp_path: Path, monkeyp
     ]
     graph.requests.clear()
 
-    sent = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=["Desk@Outside.example"], body="Thanks"))
+    # Naming an address the draft leaves out, such as the requester's own, still sends it.
+    named = ["Desk@Outside.example", "sam@contoso.com"]
+    sent = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=named, body="Thanks"))
 
-    assert sent["sent"] is True
+    assert (sent["sent"], sent["recipients"]) == (True, ["desk@outside.example"])
     assert (graph.requests[-1].method, unquote(graph.requests[-1].url.path)) == ("POST", f"{DRAFT_PATH}/send")
 
 
