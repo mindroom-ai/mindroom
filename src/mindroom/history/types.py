@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
@@ -95,6 +98,14 @@ class ResolvedHistorySettings:
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
     system_message_role: str = "system"
+
+
+@dataclass(frozen=True)
+class ScopeSummary:
+    """A scope's latest compaction summary, which replays ahead of the scope's remaining runs."""
+
+    text: str
+    updated_at: datetime
 
 
 @dataclass(frozen=True)

@@ -438,3 +438,5 @@ _.end_time  # Stored tool-call timing field written by the owned agent loop when
 _.load_session  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
 _.save_session_fields  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
 _.list_updated_sessions  # Store method called by the owned background readers when they are wired (src/mindroom/session_storage/store.py)
+_.prompt_id  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
+_.loop_start_ids  # Request context read by mid-turn compaction when the owned agent loop lands (src/mindroom/history/request_messages.py)
