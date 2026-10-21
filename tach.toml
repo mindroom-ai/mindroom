@@ -2606,13 +2606,29 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.message_content",
-    "mindroom.history.replay",
+    "mindroom.history.summary_message",
     "mindroom.llm",
 ]
 
 [[modules]]
+path = "mindroom.history.summary_message"
+depends_on = []
+visibility = [
+    "mindroom.history.agno_compat_message_builder",
+    "mindroom.history.conversation_text",
+    "mindroom.history.mid_turn_compaction",
+    "mindroom.history.replay",
+    "mindroom.history.request_messages",
+]
+
+[[modules]]
 path = "mindroom.history.agno_compat_message_builder"
-depends_on = ["mindroom.history.message_content", "mindroom.history.legacy_summary_system_prompt", "mindroom.history.replay"]
+depends_on = [
+    "mindroom.history.message_content",
+    "mindroom.history.legacy_summary_system_prompt",
+    "mindroom.history.replay",
+    "mindroom.history.summary_message",
+]
 visibility = ["mindroom.agents", "mindroom.teams", "mindroom.history.mid_turn_compaction"]
 
 [[modules]]
@@ -7746,6 +7762,7 @@ path = "mindroom.history.replay"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.message_content",
+    "mindroom.history.summary_message",
     "mindroom.history.types",
     "mindroom.history.run_visibility",
     "mindroom.logging_config",
@@ -7761,8 +7778,6 @@ visibility = [
     "mindroom.history.agno_compat_message_builder",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
-    "mindroom.history.conversation_text",
-    "mindroom.history.request_messages",
 ]
 
 [[modules]]
@@ -7800,8 +7815,8 @@ depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.replay",
     "mindroom.history.run_visibility",
+    "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
@@ -9535,6 +9550,7 @@ depends_on = [
     "mindroom.history.prompt_tokens",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",
+    "mindroom.history.summary_message",
     "mindroom.history.summary_rows",
     "mindroom.history.runtime",
     "mindroom.history.session_context",

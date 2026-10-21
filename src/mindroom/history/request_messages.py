@@ -19,7 +19,7 @@ from mindroom.history.message_content import (
     is_viewed_image,
     retained_viewed_images,
 )
-from mindroom.history.replay import compaction_summary_fields, is_scope_summary, summary_follows
+from mindroom.history.summary_message import compaction_summary_fields, is_scope_summary, summary_follows
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 

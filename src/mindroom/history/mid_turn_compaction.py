@@ -35,11 +35,7 @@ from mindroom.history.prompt_tokens import deferred_wire_tool_names
 from mindroom.history.replay import (
     HistorySummaryBudgetError,
     compaction_summary_message,
-    compaction_summary_text,
     estimate_request_messages_tokens,
-    is_compaction_summary,
-    is_scope_summary,
-    mark_summary_follows,
 )
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.runtime import (
@@ -50,6 +46,12 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.session_context import resolve_target_history_scope
 from mindroom.history.storage import new_scope_session, read_fold_basis, record_summary_usage
+from mindroom.history.summary_message import (
+    compaction_summary_text,
+    is_compaction_summary,
+    is_scope_summary,
+    mark_summary_follows,
+)
 from mindroom.history.summary_rows import Segment, folded_tool_call_ids
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger

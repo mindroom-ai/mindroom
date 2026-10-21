@@ -17,8 +17,8 @@ from agno.session.summary import SessionSummary
 
 from mindroom import agents
 from mindroom.config.agent import AgentConfig
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey

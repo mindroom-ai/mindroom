@@ -26,13 +26,13 @@ from mindroom.execution_preparation import (
     _PreparedExecutionContext,
 )
 from mindroom.history.prompt_tokens import agent_static_token_estimator
-from mindroom.history.replay import is_compaction_summary
 from mindroom.history.session_context import open_resolved_scope_session_context, resolve_history_scope
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     update_scope_seen_event_ids,
 )
 from mindroom.history.summary_input import build_summary_input
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
