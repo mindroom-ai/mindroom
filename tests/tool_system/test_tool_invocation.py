@@ -26,8 +26,10 @@ from mindroom.tool_system.invocation import (
     ToolCallContext,
     ToolNext,
     ToolOutcome,
+    current_tool_call,
     execute_tool_call,
     parse_tool_arguments,
+    run_tool_call,
 )
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from tests.agno_parity import tool_argument_probes as probes
@@ -388,6 +390,38 @@ async def test_none_and_plain_results_are_read_as_text() -> None:
 
     assert (await _run(functions["nothing"], "{}")).content == "None"
     assert (await _run(functions["numbers"], "{}")).content == "{'a': 1}"
+
+
+@pytest.mark.asyncio
+async def test_runners_outside_the_loop_get_the_tools_own_value_and_its_exception() -> None:
+    """``run_tool_call`` returns what the tool returned, drained if it streamed, and lets its exception through."""
+
+    def numbers() -> dict[str, int]:
+        return {"a": 1}
+
+    def streams() -> Iterator[str]:
+        yield "a"
+        yield "b"
+
+    def fails() -> str:
+        msg = "boom"
+        raise ValueError(msg)
+
+    seen: list[str | None] = []
+
+    async def record(call: ToolCall, call_next: ToolNext) -> object:
+        current = current_tool_call()
+        seen.append(None if current is None else current.function.name)
+        return await call_next(call.arguments)
+
+    functions = _functions(numbers, streams, fails)
+
+    assert await run_tool_call(functions["numbers"], {}, _context(), middleware=(record,)) == {"a": 1}
+    assert await run_tool_call(functions["streams"], {}, _context()) == "ab"
+    with pytest.raises(ValueError, match="boom"):
+        await run_tool_call(functions["fails"], {}, _context())
+    assert seen == ["numbers"]
+    assert current_tool_call() is None
 
 
 @pytest.mark.asyncio

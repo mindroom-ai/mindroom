@@ -9,6 +9,7 @@ itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
+``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value.
 """
 
 from __future__ import annotations
@@ -99,7 +100,7 @@ _CURRENT_CALL: ContextVar[ToolCall | None] = ContextVar("mindroom_current_tool_c
 
 
 def current_tool_call() -> ToolCall | None:
-    """Return the tool call ``execute_tool_call`` is running in this task, with the arguments it was entered with."""
+    """Return the tool call ``run_tool_call`` is running in this task, with the arguments it was entered with."""
     return _CURRENT_CALL.get()
 
 
@@ -144,6 +145,28 @@ def parse_tool_arguments(
     return model_arguments(cleaned, function)
 
 
+async def run_tool_call(
+    function: ToolFunction,
+    arguments: Mapping[str, Any] | None,
+    context: ToolCallContext,
+    *,
+    middleware: Sequence[ToolMiddleware] = (),
+) -> object:
+    """Run one tool call through ``middleware`` to its entrypoint and return what it returned, drained if it streamed.
+
+    Runners outside the model loop that hand the tool's own value onward (background scripts, the MCP gateway,
+    scheduled calls) use this; an exception the call raises propagates.
+    Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
+    running from its stored arguments is as clean as a freshly parsed one.
+    """
+    call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
+    token = _CURRENT_CALL.set(call)
+    try:
+        return await _run_chain(call, middleware)
+    finally:
+        _CURRENT_CALL.reset(token)
+
+
 async def execute_tool_call(
     function: ToolFunction,
     arguments: Mapping[str, Any] | None,
@@ -151,22 +174,16 @@ async def execute_tool_call(
     *,
     middleware: Sequence[ToolMiddleware] = (),
 ) -> ToolOutcome:
-    """Run one tool call through ``middleware`` to its entrypoint and return what the model should read.
+    """Run one tool call as ``run_tool_call`` does and return what the model should read.
 
     Any exception other than cancellation becomes a failed outcome whose content is the exception's text.
-    Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
-    running from its stored arguments is as clean as a freshly parsed one.
     """
-    call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
-    token = _CURRENT_CALL.set(call)
     try:
-        value = tool_value(await _run_chain(call, middleware))
+        value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
     except asyncio.CancelledError:
         raise
     except Exception as error:
         return ToolOutcome(content=str(error), stop_after_call=function.stop_after_tool_call, is_error=True)
-    finally:
-        _CURRENT_CALL.reset(token)
     return ToolOutcome(
         content=value.content,
         images=value.images,
@@ -246,4 +263,5 @@ __all__ = [
     "current_tool_call",
     "execute_tool_call",
     "parse_tool_arguments",
+    "run_tool_call",
 ]

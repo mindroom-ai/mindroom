@@ -113,7 +113,7 @@ _.is_active  # plugin hooks inspect whether their registry snapshot is still liv
 _.embed_batch  # mem0 embedding adapter protocol (src/mindroom/memory/config.py)
 normalize_embeddings  # SentenceTransformer encode keyword in the local model protocol (src/mindroom/embeddings/sentence_transformers_embedder.py)
 _.generate_image  # Agno toolkit override (src/mindroom/custom_tools/gemini_media.py)
-_.cache_results  # disables Agno's tool result cache, which would skip hooks and approval (src/mindroom/mcp_gateway/tools.py, src/mindroom/scheduling/scheduled_tool_calls.py, src/mindroom/script_runs/broker.py, src/mindroom/tool_system/agent_tool_calls.py)
+_.cache_results  # disables Agno's tool result cache, which would skip hooks and approval (src/mindroom/scheduling/scheduled_tool_calls.py, src/mindroom/tool_system/agent_tool_calls.py)
 _.to_config_dict  # used by scripts/sync_config.py (src/mindroom/model_defaults.py)
 _.serialize_datetime  # unused method (src/mindroom/matrix/state.py)
 clear_auth_session  # unused function (src/mindroom/api/auth.py)

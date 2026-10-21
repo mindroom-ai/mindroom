@@ -1,12 +1,12 @@
 """MindRoom's tool-call policy around every tool call.
 
 Plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call
-recording, timing, and failure records. The owned loop runs it as a ``ToolMiddleware``
-(``build_tool_hook_middleware``). The runners that still dispatch Agno ``FunctionCall``s (tool jobs, scheduled tool
-calls, script runs, the MCP gateway, the CLI catalog, and the team job controls) prepend the same policy as an Agno
-tool hook (``build_tool_hook_bridge``); for them the hook-chain adapter in ``agno_compat_tool_hooks`` keeps a
-synchronous tool body off the event loop and under its completion owner. Both go when the last of those runners
-dispatches through ``execute_tool_call``.
+recording, timing, and failure records. The owned loop, script runs, and the MCP gateway run it as a
+``ToolMiddleware`` (``build_tool_hook_middleware``). The runners that still dispatch Agno ``FunctionCall``s (tool jobs,
+scheduled tool calls, voice calls, the CLI catalog, and the team job controls) prepend the same policy as an Agno tool
+hook (``build_tool_hook_bridge``); for them the hook-chain adapter in ``agno_compat_tool_hooks`` keeps a synchronous
+tool body off the event loop and under its completion owner. Both go when the last of those runners dispatches through
+``execute_tool_call``.
 """
 
 from __future__ import annotations
@@ -1117,13 +1117,25 @@ def build_tool_hook_middleware(
     dispatch_context: ToolDispatchContext | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
+    origin: BackgroundScriptToolOrigin | None = None,
+    approval_gate: _ToolApprovalGate | None = None,
 ) -> ToolMiddleware:
-    """Return the tool-call policy as the middleware the owned loop runs around every tool call.
+    """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
     The call reaches its entrypoint only through ``call_next``, so a plugin before-hook that declines it, a
-    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running.
+    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running. A background
+    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a declined call then
+    returns ``BackgroundToolApprovalDenied`` without running.
     """
-    bridge = build_tool_hook_bridge(hook_registry, agent_name, dispatch_context, config, runtime_paths)
+    bridge = build_tool_hook_bridge(
+        hook_registry,
+        agent_name,
+        dispatch_context,
+        config,
+        runtime_paths,
+        origin=origin,
+        approval_gate=approval_gate,
+    )
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         async def run(**arguments: Any) -> object:  # noqa: ANN401 - the hook chain passes arguments as kwargs
