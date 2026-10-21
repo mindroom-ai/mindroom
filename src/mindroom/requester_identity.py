@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 
@@ -46,8 +47,13 @@ def is_managed_entity_id(
 ) -> bool:
     """Return whether one Matrix user ID is a configured router, agent, or team account."""
     domain = runtime_matrix_domain(runtime_paths)
+    # One state read for all entities: an API request can run this check hundreds of times.
+    state = matrix_state_for_runtime(runtime_paths)
     for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
+        account = state.get_account(managed_account_key(entity_name))
+        persisted_user_id = (
+            MatrixID.from_username(account.username, account.domain or domain).full_id if account is not None else None
+        )
         generated_user_id = MatrixID.from_username(
             agent_username_localpart(entity_name, runtime_paths),
             domain,
