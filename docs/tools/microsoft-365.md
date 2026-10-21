@@ -184,7 +184,7 @@ The description of an online meeting cannot be replaced, because that would remo
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
 New and changed due dates take a calendar date and become midnight in the `time_zone` the agent passes, which should be the requester's zone and defaults to UTC.
-Listed tasks return the due date, time, and zone Graph reports; a due date is midnight in the zone of whoever set it, which Graph usually reports in UTC, so the agent converts it to the requester's zone before naming the day.
+Listed, created, and updated tasks return the due date, time, and zone Graph reports; a due date is midnight in the zone of whoever set it, which Graph usually reports in UTC, so the agent converts it to the requester's zone before naming the day.
 List and task listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Updating a task's notes replaces them completely.
 
