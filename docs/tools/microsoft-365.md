@@ -4,7 +4,7 @@ icon: fontawesome/brands/microsoft
 
 # Microsoft 365
 
-The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, and Teams through Microsoft Graph as the person who asked.
+The Microsoft 365 tools reach OneDrive, SharePoint, Outlook mail and calendars, Microsoft To Do, Teams, and OneNote through Microsoft Graph as the person who asked.
 Each requester connects their own Microsoft account, so agents see and change only what that person can.
 OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](../oauth-framework.md).
 
@@ -15,6 +15,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
+| `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
 
@@ -55,7 +56,7 @@ To use a different app for one tool, store its credentials in that tool's `<prov
 Set `MICROSOFT_TENANT_ID` to the directory (tenant) ID or a verified domain of your organization.
 It defaults to `organizations`, which accepts any work or school account, and an app registered for your organization only requires the tenant to be set.
 Setting it to your tenant ID or domain limits sign-in to that tenant's accounts.
-`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint or Teams.
+`consumers` or `common` admit personal Microsoft accounts, which reach OneDrive, Outlook mail and calendars, and Microsoft To Do but not SharePoint, Teams, or OneNote, whose `Notes.ReadWrite.All` personal accounts cannot grant.
 Changing the tenant makes existing connections ask their users to connect again.
 
 ## Configure
@@ -71,6 +72,7 @@ agents:
       - outlook_calendar
       - microsoft_todo
       - microsoft_teams
+      - microsoft_onenote
 ```
 
 | Option | Tool | Type | Default | Notes |
@@ -80,6 +82,7 @@ agents:
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
+| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 
@@ -210,6 +213,23 @@ A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
+## OneNote
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, by name, and which one is the default. |
+| `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
+| `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
+| `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
+| `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
+| `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
+
+Only the notebooks the requester owns are listed; notebooks other people share with the requester, and group or SharePoint site notebooks, are not.
+Sections inside section groups are not listed either.
+Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
+Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
+Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
+
 ## Approvals For Writes
 
 The tools run without approval unless you add [tool approval](../tool-approval.md) rules, which show a Matrix approval card before each change:
@@ -248,6 +268,10 @@ tool_approval:
     - match: microsoft_teams_reply_to_channel_message
       action: require_approval
     - match: microsoft_teams_send_chat_message
+      action: require_approval
+    - match: microsoft_onenote_create_page
+      action: require_approval
+    - match: microsoft_onenote_append_to_page
       action: require_approval
 ```
 
