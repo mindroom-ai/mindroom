@@ -1,0 +1,78 @@
+{
+  "description": "Helper agent run by mindroom.teams._select_team_mode on vertexai_claude claude-sonnet-5-5.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "project_id": "test-project",
+            "region": "us-east5"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "vertexai_claude"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.teams._select_team_mode"
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\nDetermine team mode\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"mode\", \"reasoning\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"mode\": {\n    \"description\": \"coordinate for delegation and synthesis, collaborate for all working on same task\",\n    \"enum\": [\n      \"coordinate\",\n      \"collaborate\"\n    ],\n    \"type\": \"string\"\n  },\n  \"reasoning\": {\n    \"description\": \"Brief explanation of why this mode was chosen\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Determine the best team collaboration mode for this task.\n\nTask: Plan the launch and draft the announcement.\nAgents: assistant, researcher\n\nTeam Modes (from Agno documentation):\n- \"coordinate\": Team leader delegates tasks to members and synthesizes their outputs.\n               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.\n- \"collaborate\": All team members are given the SAME task and work on it simultaneously.\n                The leader synthesizes all their outputs into a cohesive response.\n\nDecision Guidelines:\n- Use \"coordinate\" when agents need to do DIFFERENT subtasks (whether sequential or parallel)\n- Use \"collaborate\" when you want ALL agents working on the SAME problem for diverse perspectives\n\nExamples:\n- \"Email me then call me\" -> coordinate (different tasks: email agent sends email, phone agent makes call)\n- \"Get weather and news\" -> coordinate (different tasks: weather agent gets weather, news agent gets news)\n- \"Research this topic and analyze the data\" -> coordinate (different subtasks for each agent)\n- \"What do you think about X?\" -> collaborate (all agents provide their perspective on the same question)\n- \"Brainstorm solutions\" -> collaborate (all agents work on the same brainstorming task)\n\nReturn the mode and a one-sentence reason why.",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "VertexAI"
+      },
+      "response_format": {
+        "type": "json_object"
+      },
+      "stream": false,
+      "tool_choice": null,
+      "tools": []
+    }
+  ],
+  "scenario": "helper_team_mode_vertexai_claude"
+}

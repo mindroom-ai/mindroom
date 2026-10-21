@@ -1,0 +1,127 @@
+{
+  "description": "Helper agent run by mindroom.knowledge_graph.clients.MindRoomLLMClient.generate_response on cerebras qwen-3.8-27b.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "qwen-3.8-27b",
+          "provider": "cerebras"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.knowledge_graph.clients.MindRoomLLMClient.generate_response"
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "You extract entities from conversations.\n\nAny extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "<CURRENT MESSAGE>\nAlice booked the Berlin offsite.\n</CURRENT MESSAGE>\n\nRespond with a JSON object in the following format:\n\n{\"$defs\": {\"ExtractedEntity\": {\"properties\": {\"name\": {\"description\": \"Name of the extracted entity\", \"title\": \"Name\", \"type\": \"string\"}, \"entity_type_id\": {\"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\", \"title\": \"Entity Type Id\", \"type\": \"integer\"}, \"episode_indices\": {\"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\", \"items\": {\"type\": \"integer\"}, \"title\": \"Episode Indices\", \"type\": \"array\"}}, \"required\": [\"name\", \"entity_type_id\"], \"title\": \"ExtractedEntity\", \"type\": \"object\"}}, \"properties\": {\"extracted_entities\": {\"description\": \"List of extracted entities\", \"items\": {\"$ref\": \"#/$defs/ExtractedEntity\"}, \"title\": \"Extracted Entities\", \"type\": \"array\"}}, \"required\": [\"extracted_entities\"], \"title\": \"ExtractedEntities\", \"type\": \"object\"}",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "qwen-3.8-27b",
+        "provider": "Cerebras"
+      },
+      "response_format": {
+        "json_schema": {
+          "name": "ExtractedEntities",
+          "schema": {
+            "$defs": {
+              "ExtractedEntity": {
+                "properties": {
+                  "entity_type_id": {
+                    "description": "ID of the classified entity type. Must be one of the provided entity_type_id integers.",
+                    "title": "Entity Type Id",
+                    "type": "integer"
+                  },
+                  "episode_indices": {
+                    "description": "List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "title": "Episode Indices",
+                    "type": "array"
+                  },
+                  "name": {
+                    "description": "Name of the extracted entity",
+                    "title": "Name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "entity_type_id"
+                ],
+                "title": "ExtractedEntity",
+                "type": "object"
+              }
+            },
+            "properties": {
+              "extracted_entities": {
+                "description": "List of extracted entities",
+                "items": {
+                  "$ref": "#/$defs/ExtractedEntity"
+                },
+                "title": "Extracted Entities",
+                "type": "array"
+              }
+            },
+            "required": [
+              "extracted_entities"
+            ],
+            "title": "ExtractedEntities",
+            "type": "object"
+          }
+        },
+        "type": "json_schema"
+      },
+      "stream": false,
+      "tool_choice": null,
+      "tools": []
+    }
+  ],
+  "scenario": "helper_knowledge_graph_cerebras"
+}

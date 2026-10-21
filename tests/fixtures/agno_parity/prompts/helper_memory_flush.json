@@ -1,0 +1,75 @@
+{
+  "description": "Helper agent run by mindroom.memory.auto_flush._extract_memory_summary on anthropic claude-sonnet-5-5.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.memory.auto_flush._extract_memory_summary"
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\nExtract durable memory statements for long-term memory storage.\n</your_role>",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Extract only durable memories from this conversation excerpt.\nKeep only stable facts, explicit preferences, decisions, commitments, and action items.\nSkip chit-chat, temporary statements, and one-off tool output.\nIf nothing should be stored, output exactly: NO_REPLY\nOutput plain lines only, one memory per line, no commentary.\nExisting memory snippets (avoid duplicates):\n- The user lives in Berlin.\n\nConversation excerpt:\nuser: I prefer aisle seats on flights.\nassistant: Noted, aisle seats from now on.\n",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "response_format": null,
+      "stream": false,
+      "tool_choice": null,
+      "tools": []
+    }
+  ],
+  "scenario": "helper_memory_flush"
+}

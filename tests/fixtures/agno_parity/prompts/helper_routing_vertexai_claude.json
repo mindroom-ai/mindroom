@@ -1,0 +1,78 @@
+{
+  "description": "Helper agent run by mindroom.routing.suggest_responder on vertexai_claude claude-sonnet-5-5.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "project_id": "test-project",
+            "region": "us-east5"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "vertexai_claude"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.routing.suggest_responder"
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\nRoute messages to appropriate agents or teams\n</your_role>\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"entity_name\", \"reasoning\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"entity_name\": {\n    \"description\": \"The name of the agent or team that should respond\",\n    \"type\": \"string\"\n  },\n  \"reasoning\": {\n    \"description\": \"Brief explanation of why this agent or team was chosen\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Previous messages:\n@user:localhost: Can someone summarize the travel policy?\n@mindroom_assistant:localhost: Conference travel needs manager approval two weeks ahead.\n\nDecide which agent or team should respond to this message.\n\nAvailable agents and teams:\n\nassistant:\n  assistant\n  - Answer questions about the team handbook.\n  - Tools: scheduler\n\nresearcher:\n  researcher\n  - Research topics in depth.\n  - Tools: scheduler\n\nlaunch:\n  launch\n  - Plan and announce product launches.\n  - Team of agents: assistant, researcher\n  - Collaboration mode: coordinate\n\nMessage: \"Who can explain the travel policy?\"\n\nChoose the most appropriate agent or team based on their role, tools, and instructions.",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "VertexAI"
+      },
+      "response_format": {
+        "type": "json_object"
+      },
+      "stream": false,
+      "tool_choice": null,
+      "tools": []
+    }
+  ],
+  "scenario": "helper_routing_vertexai_claude"
+}

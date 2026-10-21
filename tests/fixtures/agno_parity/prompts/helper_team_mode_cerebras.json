@@ -1,0 +1,105 @@
+{
+  "description": "Helper agent run by mindroom.teams._select_team_mode on cerebras qwen-3.8-27b.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "qwen-3.8-27b",
+          "provider": "cerebras"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.teams._select_team_mode"
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\nDetermine team mode\n</your_role>",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Determine the best team collaboration mode for this task.\n\nTask: Plan the launch and draft the announcement.\nAgents: assistant, researcher\n\nTeam Modes (from Agno documentation):\n- \"coordinate\": Team leader delegates tasks to members and synthesizes their outputs.\n               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.\n- \"collaborate\": All team members are given the SAME task and work on it simultaneously.\n                The leader synthesizes all their outputs into a cohesive response.\n\nDecision Guidelines:\n- Use \"coordinate\" when agents need to do DIFFERENT subtasks (whether sequential or parallel)\n- Use \"collaborate\" when you want ALL agents working on the SAME problem for diverse perspectives\n\nExamples:\n- \"Email me then call me\" -> coordinate (different tasks: email agent sends email, phone agent makes call)\n- \"Get weather and news\" -> coordinate (different tasks: weather agent gets weather, news agent gets news)\n- \"Research this topic and analyze the data\" -> coordinate (different subtasks for each agent)\n- \"What do you think about X?\" -> collaborate (all agents provide their perspective on the same question)\n- \"Brainstorm solutions\" -> collaborate (all agents work on the same brainstorming task)\n\nReturn the mode and a one-sentence reason why.",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "qwen-3.8-27b",
+        "provider": "Cerebras"
+      },
+      "response_format": {
+        "json_schema": {
+          "name": "_TeamModeDecision",
+          "schema": {
+            "description": "AI decision for team collaboration mode.",
+            "properties": {
+              "mode": {
+                "description": "coordinate for delegation and synthesis, collaborate for all working on same task",
+                "enum": [
+                  "coordinate",
+                  "collaborate"
+                ],
+                "title": "Mode",
+                "type": "string"
+              },
+              "reasoning": {
+                "description": "Brief explanation of why this mode was chosen",
+                "title": "Reasoning",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "reasoning"
+            ],
+            "title": "_TeamModeDecision",
+            "type": "object"
+          }
+        },
+        "type": "json_schema"
+      },
+      "stream": false,
+      "tool_choice": null,
+      "tools": []
+    }
+  ],
+  "scenario": "helper_team_mode_cerebras"
+}

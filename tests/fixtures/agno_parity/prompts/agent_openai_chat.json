@@ -1,0 +1,1113 @@
+{
+  "description": "The representative agent on OpenAI Chat Completions, whose deferred toolkit uses portable tool search.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "context_files": [
+            "SOUL.md"
+          ],
+          "delegate_to": [
+            "researcher"
+          ],
+          "display_name": "Assistant",
+          "instructions": [
+            "Answer in at most three paragraphs.",
+            "Cite the handbook section you used.",
+            "When a policy is unclear:\n- say so\n- name who decides"
+          ],
+          "knowledge_bases": [
+            "handbook"
+          ],
+          "learning": false,
+          "memory_backend": "file",
+          "role": "Answer questions about the team handbook.",
+          "tools": [
+            "calculator",
+            "chat_ui",
+            {
+              "defer": true,
+              "name": "wikipedia"
+            }
+          ]
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "learning": false,
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_bases": {
+        "handbook": {
+          "description": "The team handbook and its policies.",
+          "path": "./handbook"
+        }
+      },
+      "models": {
+        "default": {
+          "api": "chat_completions",
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "gpt-6.1-sol",
+          "provider": "openai"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "knowledge": {
+      "description": "The team handbook and its policies.",
+      "name": "handbook"
+    },
+    "system_enrichment": [
+      {
+        "cache_policy": "stable",
+        "key": "team_calendar",
+        "minimal_required": false,
+        "persist": true,
+        "text": "The offsite is on Friday."
+      }
+    ],
+    "transient_enrichment": [
+      {
+        "cache_policy": "volatile",
+        "key": "weather",
+        "minimal_required": false,
+        "persist": true,
+        "text": "It is raining in Berlin."
+      }
+    ],
+    "turn": {
+      "api_server": "127.0.0.1:8765",
+      "entry_point": "mindroom.ai.stream_agent_response",
+      "prompt": "What is the travel policy for conferences?",
+      "requester_id": "@user:localhost",
+      "room_id": "!room:localhost",
+      "thread_history": [
+        "Our handbook moved to the new wiki last week."
+      ],
+      "thread_id": "$thread:localhost"
+    },
+    "workspace_files": {
+      "MEMORY.md": "# Memory\n\n- The user flies to Berlin every quarter.\n",
+      "SOUL.md": "You are calm and precise.\n",
+      "skills/expense-report/SKILL.md": "---\nname: expense-report\ndescription: File an expense report from receipts.\n---\n\nCollect the receipts, total them, and fill in the expense form.\n"
+    }
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).\nYou are powered by the Openai model: gpt-6.1-sol.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `chat_ui`, `wikipedia`, `scheduler`, `delegate`, `invite_router`, `dynamic_tools`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).## Personality Context\nEach section below is headed by the path of the file it was read from, inlined here automatically every turn. Do not re-read a file to recall what it says; open it to edit it, or when a marker says content was omitted.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Cite the handbook section you used.\n\nWhen a policy is unclear:\n- say so\n- name who decides\n\nWhen using skills, access them via the skill tools:\n- get_skill_instructions(...)\n- get_skill_reference(...)\n- get_skill_script(...)\nDo not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.\n\n\n## Deferred Tools\nThese toolkits are available, but the definitions of their functions are not included:\n<available-deferred-tools>\nwikipedia - Search and retrieve information from Wikipedia\n</available-deferred-tools>\nUse tool_search(query) to get the definitions of matching functions, or tool_search() with no query to list the deferred functions, then call one with call_tool(name, arguments), passing its arguments as a JSON object.\nSearch before concluding that a capability is unavailable.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\nget_skill_script only reads skill scripts; run a script with your shell tools if you have them.\n\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\nchat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\n\n[File memory entrypoint (agent)] Your curated long-term memory file `<TMP>/mindroom_data/agents/assistant/workspace/MEMORY.md` is inlined below automatically every turn. Do not re-read it to recall what it says; open it to edit it, or when a marker says lines were omitted.\n# Memory\n\n- The user flies to Berlin every quarter.\n\n<mindroom_system_context>\n<item key=\"team_calendar\" cache_policy=\"stable\">\nThe offsite is on Friday.\n</item>\n</mindroom_system_context>\n\n<skills_system>\n\n## What are Skills?\nSkills are packages of domain expertise that extend your capabilities. Each skill contains:\n- **Instructions**: Detailed guidance on when and how to apply the skill\n- **Scripts**: Executable code templates you can use or adapt\n- **References**: Supporting documentation (guides, cheatsheets, examples)\n\n## IMPORTANT: How to Use Skills\n**Skill names are NOT callable functions.** You cannot call a skill directly by its name.\nInstead, you MUST use the provided skill access tools:\n\n1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill\n2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation\n3. `get_skill_script(skill_name, script_path)` - Read scripts\n\n## Progressive Discovery Workflow\n1. **Browse**: Review the skill summaries below to understand what's available\n2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first\n3. **Reference**: Use `get_skill_reference` to access specific documentation as needed\n4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them\n\n**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when `<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.\n\nThis approach ensures you only load detailed instructions when actually needed.\n\n## Available Skills\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n  <scripts>none</scripts>\n</skill>\n\n</skills_system>\n<knowledge_base>\nYou have a knowledge base you can search using the search_knowledge_base tool. Search before answering questions—don't assume you know the answer. For ambiguous questions, search first rather than asking for clarification.\n</knowledge_base>",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[What is the travel policy for conferences?]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        },
+        {
+          "add_to_agent_memory": false,
+          "content": "<mindroom_transient_context>\n<mindroom_message_context>\n<item key=\"weather\" cache_policy=\"volatile\">\nIt is raining in Berlin.\n</item>\n</mindroom_message_context>\n</mindroom_transient_context>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "gpt-6.1-sol",
+        "provider": "OpenAI"
+      },
+      "response_format": null,
+      "stream": true,
+      "tool_choice": null,
+      "tools": [
+        {
+          "function": {
+            "description": "Add two numbers and return the result.",
+            "external_execution": false,
+            "name": "add",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+            "external_execution": false,
+            "name": "call_tool",
+            "parameters": {
+              "properties": {
+                "arguments": {
+                  "description": "The function's arguments as a JSON object.",
+                  "type": "object"
+                },
+                "name": {
+                  "description": "Exact function name from tool_search.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Cancel a scheduled task.",
+            "external_execution": false,
+            "name": "cancel_schedule",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_id"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+            "external_execution": true,
+            "name": "continue_subagent",
+            "parameters": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "subagent_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subagent_id",
+                "message"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Divide first number by second and return the result.",
+            "external_execution": false,
+            "name": "divide",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Edit an existing scheduled task by replacing its timing and content.",
+            "external_execution": false,
+            "name": "edit_schedule",
+            "parameters": {
+              "properties": {
+                "history_limit": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "request": {
+                  "type": "string"
+                },
+                "silent": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_id",
+                "request"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Raise first number to the power of the second number and return the result.",
+            "external_execution": false,
+            "name": "exponentiate",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+            "external_execution": false,
+            "name": "factorial",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "n": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Load the full instructions for a skill. Use this when you need to follow a skill's guidance.",
+            "name": "get_skill_instructions",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "skill_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill_name"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Load a reference document from a skill's references. Use this to access detailed documentation.",
+            "name": "get_skill_reference",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "reference_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skill_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill_name"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Read a script from a skill. This never runs the script; run it with your shell tool if you have one.",
+            "name": "get_skill_script",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "script_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "skill_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill_name"
+              ],
+              "type": "object"
+            },
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "approval_type": "mindroom_matrix_room_runtime",
+            "description": "Invite router to current Matrix room.",
+            "external_execution": false,
+            "name": "invite_router",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+            "external_execution": false,
+            "name": "is_prime",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "n": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "List all pending scheduled tasks in the current room/thread.",
+            "external_execution": false,
+            "name": "list_schedules",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Multiply two numbers and return the result.",
+            "external_execution": false,
+            "name": "multiply",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Show the user a side panel in MindRoom Chat: 'computer' or 'members'.\npanel='computer' opens the Computer panel: a live view of your own worker\nbrowser, the one browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have\nit your browser calls are blocked, and when they hand it back you get a\nmessage. Opening the panel does not navigate to a URL, send a prompt to\nChatGPT, or take control, and it never opens or controls the user's own\nbrowser. Your first worker browser call in a conversation (browser_control\nwith target='host', or any browser_mcp function) already shows the user this\npanel; call open_panel(panel='computer') only to show it again in a later\nreply, for example when the user should log in or after they closed it. One\nreply shows the panel once.\n\npanel='members' opens the Members panel, listing the people and agents in\nthis room.\n\nSuccess means the UI request was sent, not that the client opened a panel.",
+            "external_execution": false,
+            "name": "open_panel",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "panel": {
+                  "enum": [
+                    "members",
+                    "computer"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
+            "external_execution": false,
+            "name": "open_settings",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "section": {
+                  "enum": [
+                    "general",
+                    "account",
+                    "notifications",
+                    "devices",
+                    "emojis-stickers",
+                    "developer",
+                    "about"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Run the call a scheduled task stored, once, with the requester's approval.\nCall this when a scheduled task asks you to. It runs the stored call without\nanother approval card and returns the tool's result. If the requester approved\nany arguments, you may pass arguments_json to replace the stored arguments for\nthe same tool; otherwise omit it.",
+            "external_execution": false,
+            "name": "run_scheduled_call",
+            "parameters": {
+              "properties": {
+                "arguments_json": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task_id"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+            "external_execution": true,
+            "name": "run_subagent",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "agent_name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured model name from models; omitted or null uses normal model selection."
+                },
+                "task": {
+                  "description": "Self-contained task with relevant context, constraints, and expected output.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "task"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Schedule a task using natural language.\nThis uses the exact same scheduling backend as the `!schedule` command.",
+            "external_execution": false,
+            "name": "schedule",
+            "parameters": {
+              "properties": {
+                "history_limit": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "model": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "new_thread": {
+                  "type": "boolean"
+                },
+                "request": {
+                  "type": "string"
+                },
+                "silent": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "request",
+                "new_thread"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Schedule one of your approval-gated tool calls that the requester approves now.\nUse this when a gated action, such as sending an external message, must run at\na set time while the requester may be away. MindRoom stores the call and posts an\napproval card in this thread showing it and the send time. When the task fires,\nyou are asked to call `run_scheduled_call` with its task ID, which runs the stored\ncall once without another approval. Tell the requester to approve the card; do\nnot claim the call ran until `run_scheduled_call` reports its result.",
+            "external_execution": false,
+            "name": "schedule_tool_call",
+            "parameters": {
+              "properties": {
+                "arguments_json": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "execute_at": {
+                  "type": "string"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tool_name",
+                "arguments_json",
+                "execute_at",
+                "description"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search this agent's configured knowledge bases for information about a query.\nAvailable sources:\n- handbook: The team handbook and its policies.\nThis list only describes sources available through search_knowledge_base.",
+            "name": "search_knowledge_base",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "description": "The query to search for.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Show the user the Computer panel: a live view of your own worker browser.\nThat is the browser browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have it\nyour browser calls are blocked, and when they hand it back you get a message.\nOpening the panel does not navigate, send a prompt to ChatGPT, or take control,\nand it never opens or controls the user's own browser. Your first worker\nbrowser call in a conversation (browser_control with target='host', or any\nbrowser_mcp function) already shows the user this panel; call show_computer\nonly to show it again in a later reply, for example when the user should log\nin or after they closed it. One reply shows the panel once. Success means the\nrequest was sent, not that the client opened the panel.",
+            "external_execution": false,
+            "name": "show_computer",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Calculate the square root of a number and return the result.",
+            "external_execution": false,
+            "name": "square_root",
+            "parameters": {
+              "properties": {
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                },
+                "n": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Subtract second number from first and return the result.",
+            "external_execution": false,
+            "name": "subtract",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "type": "number"
+                },
+                "b": {
+                  "type": "number"
+                },
+                "mindroom_output_path": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false,
+            "strict": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
+            "external_execution": false,
+            "name": "tool_search",
+            "parameters": {
+              "properties": {
+                "max_results": {
+                  "description": "Maximum number of function definitions to return, at most 20.",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "scenario": "agent_openai_chat"
+}
