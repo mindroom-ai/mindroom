@@ -1,0 +1,148 @@
+"""Session data Agno 2 stored: run history in a JSON blob on the session row, and JSON columns encoded twice."""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import TYPE_CHECKING, Any, cast
+
+from mindroom.usage.storage import quote_identifier
+
+if TYPE_CHECKING:
+    import sqlite3
+
+    from mindroom.session_storage.schema import TableNames
+
+
+# LEGACY_COMPAT: Agno 2 session JSON columns encoded twice.
+# Legacy format: Agno 2 wrote `session_data`, `metadata`, and the `runs` blob as the JSON text of their JSON
+# (a JSON string holding the value); a row keeps that form until a later release rewrites the column.
+# Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote each column's JSON once.
+# Handling: Readers decode a column once and again when the first decode yields a string; owned writers
+# encode once, so a column the owned store rewrites is single-encoded from then on.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_store_opens and
+# tests/session_storage/test_store.py::test_double_encoded_session_columns_load_and_are_rewritten_once.
+def decode_session_json(raw_value: object) -> object:
+    """Strictly decode a single- or double-encoded JSON column value."""
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, (str, bytes, bytearray)):
+        raise TypeError
+    decoded = json.loads(raw_value)
+    return json.loads(decoded) if isinstance(decoded, str) else decoded
+
+
+# LEGACY_COMPAT: Agno 2 session history stored in JSON run blobs.
+# Legacy format: Agno 2 sessions stored run history in a single- or double-encoded JSON `runs` blob on the session
+# row, which Agno 3 merged into every read ahead of the run rows; the column exists only on files Agno 2 created.
+# Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote first-class run rows.
+# Handling: When a store opens a database whose sessions table still has the column and that has no summary-row
+# table yet, every blob entry with a string run id that has no row yet becomes a run row, the session's rows are
+# renumbered in the order Agno's merge read them, and the blob is cleared, all in one write transaction, so no read
+# has to merge a blob. Entries without a string run id are dropped, as no read could address them.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py.
+def has_blob_runs(connection: sqlite3.Connection, names: TableNames) -> bool:
+    """Return whether the database may still hold Agno 2 run blobs, from its schema alone."""
+    tables = {
+        name
+        for (name,) in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+            (names.sessions, names.summaries),
+        )
+    }
+    if names.sessions not in tables or names.summaries in tables:
+        return False
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(names.sessions)})")}
+    return "runs" in columns
+
+
+def move_blob_runs_to_rows(connection: sqlite3.Connection, names: TableNames) -> None:
+    """Turn the runs Agno 2 blobs hold into run rows, in the caller's write transaction."""
+    sessions, runs = quote_identifier(names.sessions), quote_identifier(names.runs)
+    blobs = connection.execute(f"SELECT session_id, runs FROM {sessions} WHERE runs IS NOT NULL").fetchall()  # noqa: S608
+    for session_id, blob in blobs:
+        stored = _ordered_run_ids(connection, names, session_id)
+        legacy = _legacy_entries(blob)
+        stored_ids = set(stored)
+        for run_id, entry in legacy.items():
+            if run_id not in stored_ids:
+                _insert_run_entry(connection, names, entry, session_id=session_id)
+        # Agno's merge read blob entries first, table copies substituted, then table-only rows.
+        order = [*legacy, *(run_id for run_id in stored if run_id not in legacy)]
+        connection.executemany(
+            f"UPDATE {runs} SET run_index = ? WHERE session_id = ? AND run_id = ?",  # noqa: S608
+            [(run_index, session_id, run_id) for run_index, run_id in enumerate(order)],
+        )
+        connection.execute(f"UPDATE {sessions} SET runs = NULL WHERE session_id = ?", (session_id,))  # noqa: S608
+
+
+def _ordered_run_ids(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[str]:
+    """Return one session's run rows in the order Agno read them, rows without an index first."""
+    return [
+        run_id
+        for (run_id,) in connection.execute(
+            f"SELECT run_id FROM {quote_identifier(names.runs)} WHERE session_id = ? "  # noqa: S608
+            "ORDER BY run_index, created_at, run_id",
+            (session_id,),
+        )
+    ]
+
+
+def _insert_run_entry(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    entry: dict[str, Any],
+    *,
+    session_id: str,
+) -> None:
+    """Write one blob entry as a run row without an index, with the columns Agno 3 derived from a run dict."""
+    if entry.get("agent_id") or entry.get("agent_name"):
+        run_type = "agent"
+    elif entry.get("team_id") or entry.get("team_name"):
+        run_type = "team"
+    else:
+        run_type = "workflow"
+    now = int(time.time())
+    connection.execute(
+        f"INSERT INTO {quote_identifier(names.runs)} (run_id, session_id, run_type, agent_id, team_id, workflow_id, "  # noqa: S608
+        "user_id, parent_run_id, status, run_index, run_data, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+        (
+            entry["run_id"],
+            session_id,
+            run_type,
+            entry.get("agent_id"),
+            entry.get("team_id"),
+            entry.get("workflow_id"),
+            entry.get("user_id"),
+            entry.get("parent_run_id"),
+            entry.get("status"),
+            json.dumps(entry),
+            entry.get("created_at") or now,
+            now,
+        ),
+    )
+
+
+def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
+    """Return the blob's run entries a read could address by id, keyed by run id in stored order."""
+    try:
+        decoded = decode_session_json(blob)
+    except (TypeError, ValueError):
+        return {}
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in decoded if isinstance(decoded, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        run = cast("dict[str, Any]", entry)
+        run_id = run.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            entries.setdefault(run_id, run)
+    return entries
+
+
+__all__ = [
+    "decode_session_json",
+    "has_blob_runs",
+    "move_blob_runs_to_rows",
+]

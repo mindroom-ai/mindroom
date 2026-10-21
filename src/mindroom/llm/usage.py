@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Token usage and timing metrics, with the dict shapes stored in runs, usage rows, and ``io.mindroom.ai_run``.
+"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, usage rows, and ``io.mindroom.ai_run``.
 
 ``to_dict`` omits None, zero integers, and empty containers exactly as Agno 3 did, because
 ``usage/storage.py``, the budget code, and MindRoom Chat read these keys.
@@ -267,6 +267,97 @@ class RunMetrics:
 
 
 @dataclass(slots=True, kw_only=True)
+class SessionMetrics:
+    """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    audio_input_tokens: int = 0
+    audio_output_tokens: int = 0
+    audio_total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost: float | None = None
+    details: dict[str, list[ModelMetrics]] | None = None
+    additional_metrics: dict[str, Any] | None = None
+
+    def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None = None) -> None:
+        """Add one run's usage, first taking back ``replacing``, what an earlier save of the same run added.
+
+        Without ``replacing`` this is Agno's ``SessionMetrics.accumulate_from_run``.
+        """
+        if replacing is not None:
+            self._accumulate(replacing, sign=-1)
+        self._accumulate(metrics, sign=1)
+
+    def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
+        for name in _TOKEN_FIELDS:
+            setattr(self, name, getattr(self, name) + sign * getattr(metrics, name))
+        if metrics.cost is not None:
+            self.cost = (self.cost or 0) + sign * metrics.cost
+        if metrics.additional_metrics is not None:
+            if self.additional_metrics is None:
+                self.additional_metrics = {}
+            _merge_numeric(self.additional_metrics, _scaled(metrics.additional_metrics, sign))
+        for model_type, entries in (metrics.details or {}).items():
+            if self.details is None:
+                self.details = {}
+            totals = self.details.setdefault(model_type, [])
+            for entry in entries:
+                _count_model(totals, _signed_model(entry, sign))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict shape."""
+        values = asdict(self)
+        if self.details is not None:
+            values["details"] = _details_to_dict(self.details)
+        return _compact(values)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SessionMetrics:
+        """Rebuild from a stored dict, ignoring keys this type does not model and a ``details`` that is not a mapping."""
+        values = _known(cls, data)
+        details = values.pop("details", None)
+        if isinstance(details, dict):
+            values["details"] = _details_from_dict(
+                {model_type: entries for model_type, entries in details.items() if isinstance(entries, list)},
+            )
+        return cls(**values)
+
+
+def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
+    signed = ModelMetrics(
+        cost=None if entry.cost is None else sign * entry.cost,
+        id=entry.id,
+        provider=entry.provider,
+        provider_metrics=None if entry.provider_metrics is None else _scaled(entry.provider_metrics, sign),
+    )
+    for name in _TOKEN_FIELDS:
+        setattr(signed, name, sign * getattr(entry, name))
+    return signed
+
+
+def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
+    """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy, as Agno did."""
+    for total in totals:
+        if (total.provider, total.id) == (entry.provider, entry.id):
+            total.accumulate(entry)
+            return
+    # The copy drops an empty ``provider_metrics``, as Agno's copy did.
+    totals.append(ModelMetrics.from_dict(entry.to_dict()))
+
+
+def _scaled(values: Mapping[str, Any], sign: int) -> dict[str, Any]:
+    """Return ``values`` with numbers multiplied by ``sign``; other values are kept as they are."""
+    return {
+        key: sign * value if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+        for key, value in values.items()
+    }
+
+
+@dataclass(slots=True, kw_only=True)
 class ToolCallMetrics:
     """Wall-clock timing of one tool call."""
 
@@ -288,5 +379,6 @@ __all__ = [
     "MessageMetrics",
     "ModelMetrics",
     "RunMetrics",
+    "SessionMetrics",
     "ToolCallMetrics",
 ]

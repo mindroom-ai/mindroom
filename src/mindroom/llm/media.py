@@ -248,8 +248,10 @@ def _is_text(mime_type: str | None) -> bool:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class File:
-    """A document; at least one of ``url``, ``filepath``, ``content``.
+    """A document, usually given by ``url``, ``filepath``, or ``content``.
 
+    Agno accepted a file identified by its id alone or by a provider-side ``external`` object, and stored
+    runs hold such files, so no source is required; the owned ``id`` always identifies it.
     ``mime_type`` is free text: the stored-row readers never rejected any value, and the provider
     adapters decide what each model accepts.
     """
@@ -265,12 +267,6 @@ class File:
     format: str | None = None
     name: str | None = None
     metadata: dict[str, Any] | None = None
-
-    def __post_init__(self) -> None:
-        """Reject files with no source."""
-        if self.url is None and self.filepath is None and self.content is None:
-            msg = "At least one of 'url', 'filepath', or 'content' must be provided"
-            raise ValueError(msg)
 
     def _encoded_content(self) -> str | None:
         if not self.content:

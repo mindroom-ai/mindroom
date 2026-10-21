@@ -23,6 +23,7 @@ from agno.media import Video as AgnoVideo
 from agno.metrics import MessageMetrics as AgnoMessageMetrics
 from agno.metrics import ModelMetrics as AgnoModelMetrics
 from agno.metrics import RunMetrics as AgnoRunMetrics
+from agno.metrics import SessionMetrics as AgnoSessionMetrics
 from agno.metrics import ToolCallMetrics as AgnoToolCallMetrics
 from agno.metrics import accumulate_model_metrics
 from agno.models.message import Message as AgnoMessage
@@ -44,7 +45,14 @@ from mindroom.llm.runs import (
     ToolExecution,
     run_record_from_dict,
 )
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, ToolCallMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, ToolCallMetrics
+from tests.llm.agno_dict_helpers import (
+    DROPPED_RUN_KEYS,
+    DROPPED_TOOL_EXECUTION_KEYS,
+    expected_requirement_dict,
+    expected_run_dict,
+    without,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -53,53 +61,6 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
 WAV_BYTES = b"RIFF\x00\x00\x00\x00WAVEfmt " + bytes(range(16))
 MP4_BYTES = b"\x00\x00\x00\x18ftypmp42" + bytes(range(24))
 PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
-
-# Keys Agno wrote that the owned ``ToolExecution`` does not model (Agno's user-input HITL variants).
-DROPPED_TOOL_EXECUTION_KEYS = frozenset(
-    {"requires_user_input", "user_input_schema", "user_feedback_schema", "answered", "approval_id"},
-)
-# Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
-DROPPED_RUN_KEYS = frozenset(
-    {
-        "content_type",
-        "input",
-        "session_state",
-        "model_provider_data",
-        "reasoning_content",
-        "images",
-        "videos",
-        "audio",
-        "files",
-        "response_audio",
-        "references",
-        "citations",
-        "followups",
-        "events",
-    },
-)
-
-
-def _without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
-    return {key: value for key, value in data.items() if key not in keys}
-
-
-def _expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, recursively over tools, requirements, and member runs."""
-    result = _without(data, DROPPED_RUN_KEYS)
-    if "tools" in result:
-        result["tools"] = [_without(tool, DROPPED_TOOL_EXECUTION_KEYS) for tool in result["tools"]]
-    if "requirements" in result:
-        result["requirements"] = [_expected_requirement_dict(item) for item in result["requirements"]]
-    if "member_responses" in result:
-        result["member_responses"] = [_expected_run_dict(member) for member in result["member_responses"]]
-    return result
-
-
-def _expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
-    result = dict(data)
-    result["tool_execution"] = _without(result["tool_execution"], DROPPED_TOOL_EXECUTION_KEYS)
-    return result
-
 
 # --- media -----------------------------------------------------------------------------------------------------
 
@@ -615,7 +576,7 @@ def agno_tool_execution() -> AgnoToolExecution:
 
 def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
     agno_dict = agno_tool_execution().to_dict()
-    expected = _without(agno_dict, DROPPED_TOOL_EXECUTION_KEYS)
+    expected = without(agno_dict, DROPPED_TOOL_EXECUTION_KEYS)
 
     owned = ToolExecution.from_dict(agno_dict).to_dict()
 
@@ -627,7 +588,7 @@ def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
     agno = AgnoToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
     owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={}, created_at=7)
 
-    assert owned.to_dict() == _without(agno.to_dict(), DROPPED_TOOL_EXECUTION_KEYS)
+    assert owned.to_dict() == without(agno.to_dict(), DROPPED_TOOL_EXECUTION_KEYS)
     assert ToolExecution.from_dict({"tool_name": "t"}).created_at > 0
 
 
@@ -650,7 +611,7 @@ def agno_requirement() -> AgnoRunRequirement:
 
 
 def test_run_requirement_round_trips_agno_dict() -> None:
-    expected = _expected_requirement_dict(agno_requirement().to_dict())
+    expected = expected_requirement_dict(agno_requirement().to_dict())
 
     assert RunRequirement.from_dict(expected).to_dict() == expected
 
@@ -667,7 +628,7 @@ def test_run_requirement_confirmation_updates_match_agno(decision: str) -> None:
         else:
             requirement.reject("Not approved by requester")
 
-    assert owned.to_dict() == _expected_requirement_dict(agno.to_dict())
+    assert owned.to_dict() == expected_requirement_dict(agno.to_dict())
     assert owned.is_resolved() is agno.is_resolved() is True
     assert owned.needs_confirmation is agno.needs_confirmation is False
 
@@ -687,7 +648,7 @@ def test_run_requirement_external_result_matches_agno() -> None:
     agno.set_external_execution_result("subagent said hi")
     owned.set_external_execution_result("subagent said hi")
 
-    assert owned.to_dict() == _expected_requirement_dict(agno.to_dict())
+    assert owned.to_dict() == expected_requirement_dict(agno.to_dict())
     assert owned.tool_execution.result == "subagent said hi"
     assert owned.is_resolved() is agno.is_resolved() is True
 
@@ -699,7 +660,7 @@ def test_run_requirement_from_dict_ignores_user_input_schemas() -> None:
         {"question": "q", "header": None, "multi_select": False, "selected_options": None},
     ]
 
-    assert RunRequirement.from_dict(stored).to_dict() == _expected_requirement_dict(agno_requirement().to_dict())
+    assert RunRequirement.from_dict(stored).to_dict() == expected_requirement_dict(agno_requirement().to_dict())
 
 
 # --- run records -----------------------------------------------------------------------------------------------
@@ -787,7 +748,7 @@ def agno_team_run() -> AgnoTeamRunOutput:
 
 def test_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     agno_dict = agno_paused_agent_run().to_dict()
-    expected = _expected_run_dict(agno_dict)
+    expected = expected_run_dict(agno_dict)
 
     owned = RunRecord.from_dict(agno_dict).to_dict()
 
@@ -816,7 +777,7 @@ def test_run_record_minimal_dict_matches_agno_minus_dropped_keys() -> None:
         created_at=1,
     )
 
-    assert owned.to_dict() == _expected_run_dict(agno.to_dict())
+    assert owned.to_dict() == expected_run_dict(agno.to_dict())
     assert owned.to_dict()["metrics"] == {}
     assert "tools" not in owned.to_dict()
     assert "requirements" not in owned.to_dict()
@@ -831,8 +792,8 @@ def test_run_record_writes_tools_requirements_and_metrics_exactly_when_set() -> 
 
     owned = RunRecord(run_id="r", agent_id="a", tools=[], requirements=[], created_at=1)
 
-    assert owned.to_dict() == _expected_run_dict(agno_dict)
-    assert RunRecord.from_dict(agno_dict).to_dict() == _expected_run_dict(agno_dict)
+    assert owned.to_dict() == expected_run_dict(agno_dict)
+    assert RunRecord.from_dict(agno_dict).to_dict() == expected_run_dict(agno_dict)
     assert RunRecord.from_dict(agno_dict).metrics is None
     absent = RunRecord(run_id="r", agent_id="a", created_at=1).to_dict()
     assert {"tools", "requirements", "metrics"}.isdisjoint(absent)
@@ -840,7 +801,7 @@ def test_run_record_writes_tools_requirements_and_metrics_exactly_when_set() -> 
 
 def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     agno_dict = agno_team_run().to_dict()
-    expected = _expected_run_dict(agno_dict)
+    expected = expected_run_dict(agno_dict)
 
     record = TeamRunRecord.from_dict(agno_dict)
 
@@ -870,7 +831,7 @@ def test_run_record_from_dict_discriminates_on_team_id() -> None:
     assert isinstance(record, TeamRunRecord)
     assert [type(member) for member in record.member_responses] == [RunRecord, TeamRunRecord]
     assert isinstance(run_record_from_dict(agno_member_run().to_dict()), RunRecord)
-    assert record.to_dict() == _expected_run_dict(outer_dict)
+    assert record.to_dict() == expected_run_dict(outer_dict)
     usage_only = AgnoRunOutput(
         run_id="u",
         model="m",
@@ -882,37 +843,108 @@ def test_run_record_from_dict_discriminates_on_team_id() -> None:
 
 
 def test_run_status_values_and_names_match_agno() -> None:
-    assert {status.value for status in RunStatus} == {"RUNNING", "COMPLETED", "PAUSED", "CANCELLED", "ERROR"}
+    assert [(status.name, status.value) for status in RunStatus] == [
+        (status.name, status.value) for status in AgnoRunStatus
+    ]
     for status in RunStatus:
-        agno_status = AgnoRunStatus(status.value)
-        assert agno_status.value == status == str(status)
         # ``.name`` is persisted as ``mindroom_original_status``, so the member names must match too.
-        assert agno_status.name == status.name
+        assert AgnoRunStatus(status.value).name == status.name == status.value.lower()
+        assert status == str(status)
+
+
+@pytest.mark.parametrize("status", ["PENDING", "REGENERATED"])
+def test_run_record_reads_every_status_agno_could_store(status: str) -> None:
+    agno_dict = AgnoRunOutput(
+        run_id="r",
+        agent_id="a",
+        status=AgnoRunStatus(status),
+        messages=[],
+        created_at=1,
+    ).to_dict()
+
+    assert RunRecord.from_dict(agno_dict).to_dict() == expected_run_dict(agno_dict)
+
+
+def test_run_requirement_reads_rows_agno_read_leniently() -> None:
+    """A requirement without a tool execution or with an unreadable timestamp still reads, as with Agno."""
+    stored = {"id": "req-9", "created_at": "not a timestamp", "confirmation": True}
+    agno = AgnoRunRequirement.from_dict(copy.deepcopy(stored))
+
+    owned = RunRequirement.from_dict(stored)
+
+    assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
+    assert owned.created_at.tzinfo is not None
+    agno_dict, owned_dict = expected_requirement_dict(agno.to_dict()), owned.to_dict()
+    for result in (agno_dict, owned_dict):
+        del result["created_at"], result["tool_execution"]["created_at"]
+    assert owned_dict == agno_dict
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"confirmation": False, "confirmation_note": "No."},
+        {"confirmation": True},
+        {"external_execution_result": "done"},
+        {"confirmation": False, "tool_execution": {"tool_name": "t", "requires_confirmation": True, "confirmed": True}},
+    ],
+    ids=["rejection", "approval", "external-result", "explicit-tool-decision-wins"],
+)
+def test_run_requirement_moves_a_decision_on_the_requirement_onto_its_tool_execution(stored: dict[str, Any]) -> None:
+    data = {
+        "id": "req-1",
+        "created_at": "2026-01-02T03:04:05+00:00",
+        "tool_execution": {"tool_name": "t", "requires_confirmation": True, "created_at": 3},
+        **stored,
+    }
+
+    owned = RunRequirement.from_dict(copy.deepcopy(data)).to_dict()
+
+    assert owned == expected_requirement_dict(AgnoRunRequirement.from_dict(copy.deepcopy(data)).to_dict())
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [{"id": "provider-file"}, {"id": "gemini-file", "external": {"uri": "gemini://f"}, "mime_type": "application/pdf"}],
+    ids=["id-only", "external-only"],
+)
+def test_message_reads_files_agno_accepted_without_a_source(stored: dict[str, Any]) -> None:
+    message = {"role": "user", "content": "see file", "files": [stored], "created_at": 1}
+    [agno_file] = AgnoMessage.from_dict(copy.deepcopy(message)).files or []
+
+    [owned_file] = Message.from_dict(message).files or []
+
+    assert owned_file.id == agno_file.id == stored["id"]
+    assert owned_file.to_dict() == {key: value for key, value in stored.items() if key != "external"}
 
 
 # --- stored fixtures -------------------------------------------------------------------------------------------
 
 FIXTURE_RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "runs"
 
-# Fixture file -> (reader, expected dict for one stored case). ``session_metrics.json`` has no owned type.
+# Fixture file -> (reader, expected dict for one stored case); every file under ``runs/`` has an entry.
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
-    "run_output": (run_record_from_dict, _expected_run_dict),
-    "team_run_output": (run_record_from_dict, _expected_run_dict),
+    "run_output": (run_record_from_dict, expected_run_dict),
+    "team_run_output": (run_record_from_dict, expected_run_dict),
     "message": (Message.from_dict, dict),
     "image": (Image.from_dict, dict),
     "audio": (Audio.from_dict, dict),
     "video": (Video.from_dict, dict),
     "file": (File.from_dict, dict),
-    "tool_execution": (ToolExecution.from_dict, lambda stored: _without(stored, DROPPED_TOOL_EXECUTION_KEYS)),
-    "run_requirement": (RunRequirement.from_dict, _expected_requirement_dict),
+    "tool_execution": (ToolExecution.from_dict, lambda stored: without(stored, DROPPED_TOOL_EXECUTION_KEYS)),
+    "run_requirement": (RunRequirement.from_dict, expected_requirement_dict),
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),
     "model_metrics": (ModelMetrics.from_dict, dict),
     "tool_call_metrics": (ToolCallMetrics.from_dict, dict),
+    "session_metrics": (SessionMetrics.from_dict, dict),
 }
 
 
-@pytest.mark.skipif(not FIXTURE_RUNS.is_dir(), reason="the Agno parity fixtures are not checked out")
+def test_every_stored_fixture_file_has_a_codec() -> None:
+    assert {path.stem for path in FIXTURE_RUNS.glob("*.json")} == FIXTURE_CODECS.keys()
+
+
 @pytest.mark.parametrize("fixture", sorted(FIXTURE_CODECS))
 def test_stored_fixture_dicts_round_trip_minus_dropped_keys(fixture: str) -> None:
     read, expected_for = FIXTURE_CODECS[fixture]
@@ -926,9 +958,80 @@ def test_stored_fixture_dicts_round_trip_minus_dropped_keys(fixture: str) -> Non
             assert type(value) is (TeamRunRecord if fixture == "team_run_output" else RunRecord), case
         written = value.to_dict()
         expected = expected_for(stored)
-        if written != expected:
+        if written != expected or list(written) != list(expected):
             mismatches[case] = sorted(
                 key for key in set(written) | set(expected) if written.get(key) != expected.get(key)
-            )
+            ) or ["<key order>"]
 
     assert mismatches == {}
+
+
+# --- session totals --------------------------------------------------------------------------------------------
+
+
+def _run_metrics_cases() -> list[dict[str, Any]]:
+    return [
+        agno_run_metrics().to_dict(),
+        AgnoRunMetrics(
+            input_tokens=10,
+            output_tokens=1,
+            cost=0.5,
+            details={
+                "model": [
+                    AgnoModelMetrics(id="claude-opus-5-5", provider="Anthropic", input_tokens=10, cost=0.5),
+                    AgnoModelMetrics(id="new-model", provider="P", input_tokens=1, provider_metrics={}),
+                ],
+                "memory_model": [],
+            },
+            additional_metrics={"eval_duration": 0.5, "label": "y", "flag": True},
+        ).to_dict(),
+        {},
+        *json.loads((FIXTURE_RUNS / "run_metrics.json").read_text()).values(),
+    ]
+
+
+def test_session_metrics_count_runs_as_agno_accumulated_them() -> None:
+    agno = AgnoSessionMetrics()
+    owned = SessionMetrics()
+    for case in _run_metrics_cases():
+        agno.accumulate_from_run(AgnoRunMetrics.from_dict(copy.deepcopy(case)))
+        owned.count_run(RunMetrics.from_dict(copy.deepcopy(case)))
+
+        assert owned.to_dict() == agno.to_dict()
+    assert SessionMetrics.from_dict(agno.to_dict()).to_dict() == agno.to_dict()
+
+
+def test_session_metrics_count_a_saved_again_run_once() -> None:
+    """A run saved when it paused and again when it finished adds only its final usage."""
+    paused = RunMetrics.from_dict(agno_run_metrics().to_dict())
+    finished = RunMetrics.from_dict(agno_run_metrics().to_dict())
+    finished.add(
+        MessageMetrics(input_tokens=7, output_tokens=3, total_tokens=10, cost=0.25),
+        model_id="m",
+        provider="P",
+    )
+    once = SessionMetrics()
+    once.count_run(finished)
+
+    twice = SessionMetrics()
+    twice.count_run(paused)
+    twice.count_run(finished, replacing=paused)
+
+    assert twice.input_tokens == finished.input_tokens
+    # Undoing a model entry that reported an empty ``provider_metrics`` leaves that empty dict, as Agno's merge would.
+    assert _without_empty_provider_metrics(twice.to_dict()) == _without_empty_provider_metrics(once.to_dict())
+
+
+def _without_empty_provider_metrics(totals: dict[str, Any]) -> dict[str, Any]:
+    details = {
+        model_type: [{key: value for key, value in entry.items() if value != {}} for entry in entries]
+        for model_type, entries in totals.get("details", {}).items()
+    }
+    return {**totals, "details": details}
+
+
+def test_session_metrics_from_dict_ignores_unreadable_details() -> None:
+    assert SessionMetrics.from_dict({"input_tokens": 3, "details": "garbage", "timer": 1}).to_dict() == {
+        "input_tokens": 3,
+    }
+    assert SessionMetrics.from_dict({"details": {"model": "garbage"}}).to_dict() == {}

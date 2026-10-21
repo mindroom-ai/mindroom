@@ -435,3 +435,6 @@ _.native_tools  # Request field read by the owned providers when they land (src/
 _.format_tool_results  # Protocol method called by the owned agent loop when it lands (src/mindroom/llm/provider.py)
 _.child_run_id  # Stored tool-execution field read by the owned team runtime when it lands (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
+_.load_session  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
+_.save_session_fields  # Store method called by the owned runtime when it is wired (src/mindroom/session_storage/store.py)
+_.list_updated_sessions  # Store method called by the owned background readers when they are wired (src/mindroom/session_storage/store.py)
