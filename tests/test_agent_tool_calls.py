@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from agno.agent import Agent  # noqa: TC002 - Agno resolves injected annotations at runtime
+from agno.agent import Agent
 from agno.learn import LearningMachine
 from agno.media import Image
 from agno.models.message import Message
@@ -24,7 +24,6 @@ from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall, ToolResult
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -52,7 +51,7 @@ async def _catalog(
     include: Callable[[Function], bool] | None = None,
     **kwargs: Any,  # noqa: ANN401
 ) -> agent_tool_calls.PreparedAgentToolCatalog:
-    agent = KnowledgeToolDescribingAgent(id="helper", model=OpenAIChat(), tools=tools, **kwargs)
+    agent = Agent(id="helper", model=OpenAIChat(), tools=tools, **kwargs)
     context = RunContext(run_id="run", session_id="session", session_state={})
     output = RunOutput(run_id="run", session_id="session", messages=[])
     session = AgentSession(session_id="session", agent_id="helper", session_data={})

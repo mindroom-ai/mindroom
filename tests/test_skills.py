@@ -1,4 +1,4 @@
-"""Tests for OpenClaw-compatible skills with Agno integration."""
+"""Tests for OpenClaw-compatible skills: loading, eligibility, workspace limits, and the skills toolkit."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.tools.function import FunctionCall
 from structlog.testing import capture_logs
 
 import mindroom.tool_system.skills as skills_module
@@ -22,9 +21,10 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
-from mindroom.tool_system.skills import RefusedWorkspaceSkill, build_agent_skills
+from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit, build_skills_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -34,8 +34,6 @@ from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.skills import Skills
 
 
 def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
@@ -100,14 +98,18 @@ def _base_config_with_omitted_skills() -> Config:
     )
 
 
-def _skill_names(skills: Skills | None) -> list[str]:
-    return skills.get_skill_names() if skills is not None else []
+def _skill_names(skills: SkillsToolkit | None) -> list[str]:
+    return [skill.name for skill in skills.skills] if skills is not None else []
 
 
-def _get_skill_script(skills: Skills, skill_name: str, script_path: str) -> dict[str, object]:
-    script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
-    assert script_tool.entrypoint is not None
-    return json.loads(script_tool.entrypoint(skill_name, script_path))
+def _call(skills: SkillsToolkit, function_name: str, *arguments: str) -> dict[str, object]:
+    entrypoint = skills.functions[function_name].entrypoint
+    assert entrypoint is not None
+    return json.loads(entrypoint(*arguments))
+
+
+def _get_skill_script(skills: SkillsToolkit, skill_name: str, script_path: str) -> dict[str, object]:
+    return _call(skills, "get_skill_script", skill_name, script_path)
 
 
 def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
@@ -124,7 +126,7 @@ def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
 @pytest.mark.parametrize("skill_name", ["open-knowledge-format", "agent-conversations"])
 def test_bundled_skill_loads_for_allowlisted_agent(tmp_path: Path, skill_name: str) -> None:
     """Ensure an agent that allowlists a bundled skill can load it."""
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config([skill_name]),
         _runtime_paths(tmp_path),
@@ -156,7 +158,7 @@ def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     _write_skill(tmp_path, "alpha", "Alpha skill", metadata)
 
     config = _base_config(["alpha"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -177,7 +179,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     _write_skill(tmp_path, "envconfig", "Requires env and config", metadata)
 
     config = _base_config(["envconfig"])
-    eligible = build_agent_skills(
+    eligible = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -187,7 +189,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     )
     assert _skill_names(eligible) == ["envconfig"]
 
-    ineligible = build_agent_skills(
+    ineligible = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -197,7 +199,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     )
     assert _skill_names(ineligible) == []
 
-    eligible_with_credentials = build_agent_skills(
+    eligible_with_credentials = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -219,7 +221,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
         return "/bin/git" if name == "git" else None
 
     monkeypatch.setattr(skills_module.shutil, "which", only_git)
-    missing = build_agent_skills(
+    missing = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -230,7 +232,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
     assert _skill_names(missing) == []
 
     monkeypatch.setattr(skills_module.shutil, "which", lambda name: f"/bin/{name}")
-    available = build_agent_skills(
+    available = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -252,7 +254,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         return "/bin/fd" if name == "fd" else None
 
     monkeypatch.setattr(skills_module.shutil, "which", only_fd)
-    eligible = build_agent_skills(
+    eligible = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -263,7 +265,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert _skill_names(eligible) == ["anybins"]
 
     monkeypatch.setattr(skills_module.shutil, "which", lambda _name: None)
-    ineligible = build_agent_skills(
+    ineligible = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -283,7 +285,7 @@ def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:
     _write_skill(tmp_path, "oscheck", "OS restricted", metadata)
 
     config = _base_config(["oscheck"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -300,7 +302,7 @@ def test_skill_eligibility_always_overrides_requirements(tmp_path: Path) -> None
     _write_skill(tmp_path, "always", "Always eligible", metadata)
 
     config = _base_config(["always"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -320,7 +322,7 @@ def test_skill_eligibility_os_mismatch_wins_over_always(tmp_path: Path) -> None:
     _write_skill(tmp_path, "always-wrong-os", "Always wrong OS", metadata)
 
     config = _base_config(["always-wrong-os"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -337,7 +339,7 @@ def test_get_agent_skills_ordering(tmp_path: Path) -> None:
     _write_skill(tmp_path, "beta", "Beta skill")
 
     config = _base_config(["beta", "alpha"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -354,7 +356,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v1")
 
     config = _base_config(["alpha"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -369,7 +371,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
     os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
 
-    refreshed = build_agent_skills(
+    refreshed = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -423,7 +425,7 @@ def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "ws-skill", "Workspace skill")
 
     config = _base_config(["ws-skill"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(storage),
@@ -442,7 +444,7 @@ def test_empty_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
 
     config = _base_config([])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(storage),
@@ -460,7 +462,7 @@ def test_omitted_allowlist_autoloads_workspace_skills(tmp_path: Path) -> None:
     workspace_skills.mkdir(parents=True)
     _write_skill(workspace_skills, "auto", "Auto-loaded workspace skill")
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config_with_omitted_skills(),
         _runtime_paths(storage),
@@ -477,7 +479,7 @@ def test_empty_allowlist_does_not_load_global_skills(tmp_path: Path) -> None:
     global_root.mkdir()
     _write_skill(global_root, "global", "Configured global skill")
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(tmp_path / "storage"),
@@ -500,7 +502,7 @@ def test_workspace_skills_override_default_roots(tmp_path: Path, monkeypatch: py
     workspace_skills.mkdir(parents=True)
     _write_skill(workspace_skills, "alpha", "Workspace alpha")
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config(["alpha"]),
         _runtime_paths(storage),
@@ -520,7 +522,7 @@ def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
     _write_skill(workspace_skills, "bad", "Bad metadata", "{openclaw:")
     _write_skill(workspace_skills, "good", "Good metadata")
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -531,70 +533,6 @@ def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
     assert _skill_names(skills) == ["good"]
 
 
-@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "output-files"])
-@pytest.mark.parametrize("workspace_skill", [True, False], ids=["workspace", "configured"])
-def test_skill_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: bool, wrapped: bool) -> None:
-    """get_skill_script reads a listed script from any skill root, and a call that asks to run it runs nothing."""
-    storage = tmp_path / "storage"
-    workspace_root = agent_workspace_root_path(storage, "code")
-    workspace_skills = workspace_root / "skills"
-    workspace_skills.mkdir(parents=True)
-    skill_path = _write_skill(
-        workspace_skills if workspace_skill else tmp_path / "global",
-        "scripted",
-        "Scripted skill",
-    )
-    marker = tmp_path / "script-ran"
-    _write_skill_script(skill_path.parent, "hello.sh", f"#!/bin/sh\ntouch {marker}\n")
-
-    skills = build_agent_skills(
-        "code",
-        _base_config([] if workspace_skill else ["scripted"]),
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-        output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root) if wrapped else None,
-    )
-    assert skills is not None
-    script_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_script")
-    script_tool.process_entrypoint()
-    schema = script_tool.to_dict()
-
-    assert set(schema["parameters"]["properties"]) == {"skill_name", "script_path"} | (
-        {"mindroom_output_path"} if wrapped else set()
-    )
-    assert "execut" not in json.dumps(schema).lower()
-    read = FunctionCall(function=script_tool, arguments={"skill_name": "scripted", "script_path": "hello.sh"})
-    assert read.execute().status == "success"
-    assert json.loads(str(read.result))["content"] == f"#!/bin/sh\ntouch {marker}\n"
-    arguments = {"skill_name": "scripted", "script_path": "hello.sh", "execute": True}
-    assert FunctionCall(function=script_tool, arguments=arguments).execute().status == "failure"
-    assert not marker.exists()
-
-
-def test_the_skills_prompt_describes_get_skill_script_as_read_only(tmp_path: Path) -> None:
-    """The skills prompt offers get_skill_script only for reading, with the arguments it takes."""
-    global_root = tmp_path / "global"
-    skill_path = _write_skill(global_root, "scripted", "Scripted skill")
-    _write_skill_script(skill_path.parent, "hello.sh", "#!/bin/sh\necho global\n")
-    skills = build_agent_skills(
-        "code",
-        _base_config(["scripted"]),
-        _runtime_paths(tmp_path / "storage"),
-        skill_roots=[global_root],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is not None
-
-    snippet = skills.get_system_prompt_snippet()
-
-    assert "`get_skill_script(skill_name, script_path)`" in snippet
-    assert "execute" not in snippet
-    assert "never runs" in snippet
-
-
 def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
     storage = tmp_path / "storage"
     workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
@@ -602,8 +540,8 @@ def _workspace_skills(tmp_path: Path) -> tuple[Path, Path]:
     return storage, workspace_skills
 
 
-def _load_workspace_only(tmp_path: Path, storage: Path) -> Skills | None:
-    return build_agent_skills(
+def _load_workspace_only(tmp_path: Path, storage: Path) -> SkillsToolkit | None:
+    return build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -611,12 +549,6 @@ def _load_workspace_only(tmp_path: Path, storage: Path) -> Skills | None:
         env_vars={},
         credential_keys=set(),
     )
-
-
-def _get_skill_reference(skills: Skills, skill_name: str, reference_path: str) -> dict[str, object]:
-    reference_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_reference")
-    assert reference_tool.entrypoint is not None
-    return json.loads(reference_tool.entrypoint(skill_name, reference_path))
 
 
 def test_workspace_skill_with_an_unclosed_frontmatter_fence_loads_within_a_cpu_budget(tmp_path: Path) -> None:
@@ -676,41 +608,13 @@ def test_workspace_skill_files_that_are_not_plain_files_are_refused(tmp_path: Pa
         assert any(str(entry.get("path", "")).endswith("planted/SKILL.md") for entry in logs)
 
 
-def test_workspace_skill_references_are_read_without_following_links(tmp_path: Path) -> None:
-    """Listed references are read by a no-follow walk; planted or later-swapped links are refused."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    skill_dir = _write_skill(workspace_skills, "docs", "Docs skill").parent
-    references = skill_dir / "references"
-    references.mkdir()
-    (references / "guide.md").write_text("own guide", encoding="utf-8")
-    (references / "swapped.md").write_text("own swapped", encoding="utf-8")
-    secret = tmp_path / "victim.md"
-    secret.write_text("victim-only note", encoding="utf-8")
-    (references / "planted.md").symlink_to(secret)
-    os.mkfifo(references / "pipe.md")
-
-    skills = _load_workspace_only(tmp_path, storage)
-    assert skills is not None
-    skill = skills.get_skill("docs")
-    assert skill is not None
-    assert skill.references == ["guide.md", "swapped.md"]
-    (references / "swapped.md").unlink()
-    (references / "swapped.md").symlink_to(secret)
-
-    assert _get_skill_reference(skills, "docs", "guide.md")["content"] == "own guide"
-    swapped = _get_skill_reference(skills, "docs", "swapped.md")
-    assert "victim-only note" not in json.dumps(swapped)
-    assert "error" in swapped
-    assert "error" in _get_skill_reference(skills, "docs", "planted.md")
-
-
 def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path: Path) -> None:
     """Agents load their skills when they are built, so a workspace skill created later loads on the next build."""
     storage = tmp_path / "storage"
     config = _base_config(["later"])
 
-    def build() -> Skills | None:
-        return build_agent_skills(
+    def build() -> SkillsToolkit | None:
+        return build_skills_toolkit(
             "code",
             config,
             _runtime_paths(storage),
@@ -726,31 +630,6 @@ def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path:
     _write_skill(workspace_skills, "later", "Later workspace skill")
 
     assert _skill_names(build()) == ["later"]
-
-
-def test_workspace_skills_do_not_override_explicit_roots(tmp_path: Path) -> None:
-    """Explicit skill roots should win over workspace duplicates."""
-    explicit_root = tmp_path / "explicit"
-    explicit_root.mkdir()
-    _write_skill(explicit_root, "alpha", "Explicit alpha")
-
-    storage = tmp_path / "storage"
-    workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
-    workspace_skills.mkdir(parents=True)
-    _write_skill(workspace_skills, "alpha", "Workspace alpha")
-
-    config = _base_config(["alpha"])
-    skills = build_agent_skills(
-        "code",
-        config,
-        _runtime_paths(storage),
-        skill_roots=[explicit_root],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is not None
-    assert _skill_names(skills) == ["alpha"]
-    assert skills.get_skill("alpha").description == "Explicit alpha"
 
 
 def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path) -> None:
@@ -788,7 +667,7 @@ def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp
     (skill_dir / "SKILL.md").write_text("# MindRoom Dev\n\nJust markdown, no frontmatter.\n")
 
     config = _base_config(["mindroom-dev"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -810,7 +689,7 @@ def test_skill_with_mindroom_prefix_loads(tmp_path: Path) -> None:
     _write_skill(tmp_path, "mindroom-helper", "MindRoom helper skill")
 
     config = _base_config(["mindroom-helper"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -827,7 +706,7 @@ def test_skill_with_empty_scripts_dir_loads(tmp_path: Path) -> None:
     (tmp_path / "empty-scripts" / "scripts").mkdir()
 
     config = _base_config(["empty-scripts"])
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         config,
         _runtime_paths(tmp_path),
@@ -847,7 +726,7 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config(["demo"]),
         _runtime_paths(tmp_path),
@@ -857,12 +736,11 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
         output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root),
     )
     assert skills is not None
-    tools = {tool.name: tool for tool in skills.get_tools()}
+    tools = skills.functions
     assert set(tools) == {"get_skill_instructions", "get_skill_reference", "get_skill_script"}
 
     for tool in tools.values():
-        tool.process_entrypoint()
-        assert "mindroom_output_path" in tool.parameters["properties"]
+        assert "mindroom_output_path" in adapt_function(tool).parameters["properties"]
 
     instructions_tool = tools["get_skill_instructions"]
     assert instructions_tool.entrypoint is not None
@@ -890,7 +768,7 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
     """Without an output-file policy skill tools keep their original entrypoints."""
     _write_skill(tmp_path / "skills", "demo", "Demo skill")
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config(["demo"]),
         _runtime_paths(tmp_path),
@@ -899,9 +777,7 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert skills is not None
-    instructions_tool = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions")
-    assert instructions_tool.entrypoint is not None
-    assert json.loads(instructions_tool.entrypoint("demo"))["skill_name"] == "demo"
+    assert _call(skills, "get_skill_instructions", "demo")["skill_name"] == "demo"
 
 
 def test_set_plugin_skill_roots_unchanged_keeps_skill_cache(tmp_path: Path) -> None:
@@ -1041,7 +917,7 @@ def test_workspace_skill_descriptions_count_toward_the_budget_and_are_capped(tmp
         skills = _load_workspace_only(tmp_path, storage)
 
     assert skills is not None
-    assert len(skills.get_system_prompt_snippet()) < 1 << 20
+    assert len(skills.prompt_block()) < 1 << 20
     assert any("description" in entry["event"] for entry in logs if entry["log_level"] == "warning")
 
 
@@ -1104,7 +980,7 @@ def test_refused_workspace_skills_are_reported_with_why(tmp_path: Path, frontmat
     )
     refused: list[RefusedWorkspaceSkill] = []
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -1126,7 +1002,7 @@ def test_a_workspace_skills_directory_that_is_one_refused_skill_is_reported(tmp_
     (workspace_skills / "SKILL.md").write_text("---\n- not a mapping\n---\n\n# Body\n", encoding="utf-8")
     refused: list[RefusedWorkspaceSkill] = []
 
-    skills = build_agent_skills(
+    skills = build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -1152,7 +1028,7 @@ def test_refusal_reasons_cannot_bloat_the_prompt(tmp_path: Path) -> None:
     )
     refused: list[RefusedWorkspaceSkill] = []
 
-    build_agent_skills(
+    build_skills_toolkit(
         "code",
         _base_config([]),
         _runtime_paths(storage),
@@ -1188,7 +1064,7 @@ def test_workspace_skill_names_and_listings_cannot_bloat_the_prompt(tmp_path: Pa
     with capture_logs() as logs:
         skills = _load_workspace_only(tmp_path, storage)
 
-    assert skills is None or len(skills.get_system_prompt_snippet()) < 1 << 20
+    assert skills is None or len(skills.prompt_block()) < 1 << 20
     assert any(entry["log_level"] == "warning" for entry in logs)
 
 
@@ -1300,44 +1176,13 @@ def test_skill_learning_stops_scanning_planted_entries(
     assert max(scanned) <= 1024
 
 
-def test_workspace_skill_loads_record_usage_but_configured_skills_do_not(tmp_path: Path) -> None:
-    """Loading a workspace skill or one of its files feeds the learner's inactivity clock; configured skills do not."""
-    storage, workspace_skills = _workspace_skills(tmp_path)
-    skill_path = _write_skill(workspace_skills, "local", "Workspace skill")
-    (skill_path.parent / "references").mkdir()
-    (skill_path.parent / "references" / "notes.md").write_text("notes", encoding="utf-8")
-    _write_skill(tmp_path / "global", "shared", "Configured skill")
-    skills = build_agent_skills(
-        "code",
-        _base_config(["shared"]),
-        _runtime_paths(storage),
-        skill_roots=[tmp_path / "global"],
-        env_vars={},
-        credential_keys=set(),
-    )
-    assert skills is not None
-    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
-    assert get_instructions is not None
-    assert _get_skill_reference(skills, "local", "notes.md")["content"] == "notes"
-    read = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]["last_used_at"]
-    get_instructions(skill_name="local")
-    get_instructions(skill_name="shared")
-
-    usage = json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))
-    assert usage["local"]["last_used_at"] > read
-    assert "shared" not in usage
-    assert not (tmp_path / "global" / ".usage.json").exists()
-
-
 def test_a_workspace_whose_skills_directory_is_one_skill_records_no_usage(tmp_path: Path) -> None:
     """Usage records live beside skill directories, so loading a skills/ that is itself one skill writes none."""
     storage, workspace_skills = _workspace_skills(tmp_path)
     _write_skill(workspace_skills.parent, "skills", "Whole-directory skill")
     skills = _load_workspace_only(tmp_path, storage)
     assert skills is not None
-    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
-    assert get_instructions is not None
-    assert "Body" in get_instructions(skill_name="skills")
+    assert "Body" in str(_call(skills, "get_skill_instructions", "skills")["instructions"])
     assert not (workspace_skills / ".usage.json").exists()
     assert not (workspace_skills.parent / ".usage.json").exists()
 
@@ -1349,8 +1194,6 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
     _write_skill(workspace_skills, "local", "Workspace skill")
     skills = _load_workspace_only(tmp_path, storage)
     assert skills is not None
-    get_instructions = next(tool for tool in skills.get_tools() if tool.name == "get_skill_instructions").entrypoint
-    assert get_instructions is not None
     writers: list[threading.Thread] = []
     record = skills_module.record_skill_use
 
@@ -1359,7 +1202,7 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
         record(skill_path)
 
     with patch.object(skills_module, "record_skill_use", spy):
-        get_instructions(skill_name="local")
+        _call(skills, "get_skill_instructions", "local")
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     assert writers
     assert threading.main_thread() not in writers

@@ -15,9 +15,6 @@ import httpx
 import numpy as np
 import ollama
 import pytest
-from agno.agent import Agent
-from agno.agent._default_tools import create_knowledge_search_tool
-from agno.knowledge.knowledge import Knowledge
 from openai import AsyncOpenAI, OpenAI
 
 import mindroom.embeddings.sentence_transformers_embedder as local_embedder
@@ -42,15 +39,16 @@ from mindroom.knowledge.search import (
     _format_search_hits,
     knowledge_search_tool_description,
 )
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.providers.openai.chat_wire import function_definition
+from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from tests.agno_parity.knowledge_vectors import parity_vector
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from agno.tools.function import Function
     from chromadb.api.models.Collection import Collection
 
     from mindroom.constants import RuntimePaths
@@ -303,26 +301,21 @@ def _expected_search_output(search: dict[str, Any]) -> list[dict[str, Any]] | st
     return _with_approximate_distances(search["documents"]) if "documents" in search else search["text"]
 
 
-async def _owned_tool_output(knowledge: AgentKnowledge, query: str) -> str:
-    """Run the owned ``search_knowledge_base`` tool the way a tool call reaches it."""
-    function = knowledge.search_function()
-    assert function.entrypoint is not None
-    return await function.entrypoint(query=query)
-
-
-async def _agno_tool_output(knowledge: StrictSearchKnowledge, query: str) -> str:
-    """Run Agno's own ``search_knowledge_base`` tool over the handle an Agno agent receives."""
-    function = create_knowledge_search_tool(Agent(knowledge=knowledge, search_knowledge=True), async_mode=True)
-    assert function.entrypoint is not None
-    return await function.entrypoint(query=query)
+async def _search_tool_output(knowledge: AgentKnowledge, query: str) -> str:
+    """Run the adapted ``search_knowledge_base`` tool the way the loop runs a tool call."""
+    function = adapt_function(knowledge.search_function())
+    context = ToolCallContext(run_id="run", session_id="session")
+    outcome = await execute_tool_call(function, {"query": query}, context)
+    assert not outcome.is_error
+    return outcome.content
 
 
 @pytest.mark.asyncio
 async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: _ParityEmbedder) -> None:
-    """The owned search tool and Agno's tool over the owned handle both return what Agno's search returned.
+    """The adapted search tool returns what Agno's tool over Agno's search returned.
 
     Documents keep their values and layout, merged bases interleave, an empty base reports no documents, and a
-    failed query embedding reports the error type. Agno's key order varies between processes; the owned one does not.
+    failed query embedding reports the error type. Agno's key order varied between processes; the owned one does not.
     """
     config, runtime_paths = _golden_config(tmp_path)
     await _refresh_golden_bases(config, runtime_paths)
@@ -340,43 +333,27 @@ async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: 
         failing = search.get("text", "").startswith("Error")
         handle = resolve_agent_knowledge_access(search["agent"], config, runtime_paths).knowledge
         assert handle is not None
-        owned = await _owned_tool_output(handle.agent_knowledge, search["query"])
-        agno = await _agno_tool_output(handle, search["query"])
+        owned = await _search_tool_output(handle, search["query"])
         if "documents" in search:
             assert all(list(document) == ["name", "meta_data", "content"] for document in json.loads(owned))
             assert _normalized_search_documents(owned) == _expected_search_output(search)
-            assert _normalized_search_documents(agno) == _expected_search_output(search)
         else:
-            assert owned == agno == search["text"]
-
-
-def _agno_generated_search_tool(knowledge: StrictSearchKnowledge, *, memory_search_available: bool) -> Function:
-    """Return Agno's generated ``search_knowledge_base`` tool with the description MindRoom gives it."""
-    function = create_knowledge_search_tool(Agent(knowledge=knowledge, search_knowledge=True), async_mode=True)
-    function.description = knowledge_search_tool_description(
-        knowledge.agent_knowledge.source_descriptions(),
-        memory_search_available=memory_search_available,
-    )
-    return function
+            assert owned == search["text"]
 
 
 @pytest.mark.parametrize("memory_search_available", [False, True])
-def test_search_function_schema_is_agnos(memory_search_available: bool) -> None:
-    """The owned search tool is the Agno function Agno generates, so providers receive the same schema."""
+def test_search_function_definition_is_the_golden_tool(memory_search_available: bool) -> None:
+    """The adapted search tool's definition is the ``search_knowledge_base`` entry the prompt goldens recorded."""
     source = KnowledgeSource(
         description=KnowledgeSourceDescription(base_id="handbook", description="The team handbook and its policies."),
         index=cast("ChromaReadProxy", object()),
     )
     knowledge = AgentKnowledge(sources=(source,))
-    owned = knowledge.search_function(memory_search_available=memory_search_available)
-    agno = _agno_generated_search_tool(
-        StrictSearchKnowledge(knowledge),
-        memory_search_available=memory_search_available,
-    )
-    owned.process_entrypoint()
-    agno.process_entrypoint()
 
-    assert owned.to_dict() == agno.to_dict()
+    definition = function_definition(
+        adapt_function(knowledge.search_function(memory_search_available=memory_search_available)).definition(),
+    )
+
     prompt_golden = json.loads((GOLDEN_DIR.parent / "prompts" / "agent_openai_chat.json").read_text(encoding="utf-8"))
     [golden_tool] = [
         tool["function"]
@@ -384,16 +361,18 @@ def test_search_function_schema_is_agnos(memory_search_available: bool) -> None:
         for tool in request["tools"]
         if tool["function"]["name"] == KNOWLEDGE_SEARCH_TOOL_NAME
     ][:1]
+    expected_description = knowledge_search_tool_description(
+        (source.description,),
+        memory_search_available=memory_search_available,
+    )
+    assert definition == {**golden_tool, "description": expected_description}
     if not memory_search_available:
-        assert owned.description == golden_tool["description"]
-    assert owned.parameters["properties"] == golden_tool["parameters"]["properties"]
-    assert owned.parameters["required"] == golden_tool["parameters"]["required"]
+        assert definition == golden_tool
 
 
 def test_prompt_block_is_the_one_in_every_prompt_golden() -> None:
     """The owned prompt block is the ``<knowledge_base>`` block every knowledge-enabled prompt golden carries."""
     block = AgentKnowledge(sources=()).prompt_block()
-    assert block == Knowledge().build_context()
     carrying = [
         path.name
         for path in sorted((GOLDEN_DIR.parent / "prompts").glob("*.json"))

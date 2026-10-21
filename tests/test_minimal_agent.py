@@ -11,6 +11,7 @@ from typing import Literal
 from uuid import uuid4
 
 import pytest
+from agno.agent import Agent
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.session import AgentSession
@@ -25,7 +26,6 @@ from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.config.agent import AgentConfig
@@ -804,7 +804,7 @@ async def test_minimal_rejects_loaded_toolkit_omitted_by_native_connection(
     async def unavailable(*_args, **_kwargs):
         return []
 
-    monkeypatch.setattr(KnowledgeToolDescribingAgent, "aget_tools", unavailable)
+    monkeypatch.setattr(Agent, "aget_tools", unavailable)
     with pytest.raises(RuntimeError, match=r"unavailable.*failed connection"):
         await agent.aget_execution_tools(
             RunOutput(run_id="run"),

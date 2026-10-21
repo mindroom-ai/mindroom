@@ -20,7 +20,6 @@ from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, CliShellAgent, _cli_callable
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
@@ -348,7 +347,7 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
 
     eligible = channel == "matrix" and api_running and response_turn
     assert isinstance(agent, CliShellAgent) is eligible
-    assert isinstance(agent, KnowledgeToolDescribingAgent)
+    assert isinstance(agent, Agent)
     assert (STANDARD_CLI_NOTE in agent.instructions) is eligible
 
 

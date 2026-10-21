@@ -270,7 +270,7 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
-    documents = knowledge.search(query_marker, max_results=5)
+    documents = knowledge.search(query_marker, 5)
 
     assert any(query_marker in document.content for document in documents)
     assert any(document.meta_data.get("source_path") == "memory/notes.md" for document in documents)
@@ -358,10 +358,10 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     beta_knowledge = resolve_agent_knowledge_access("beta", config, runtime_paths).knowledge
     assert alpha_knowledge is not None
     assert beta_knowledge is not None
-    alpha_own = alpha_knowledge.search(alpha_marker, max_results=5)
-    beta_own = beta_knowledge.search(beta_marker, max_results=5)
-    alpha_cross = alpha_knowledge.search(beta_marker, max_results=5)
-    beta_cross = beta_knowledge.search(alpha_marker, max_results=5)
+    alpha_own = alpha_knowledge.search(alpha_marker, 5)
+    beta_own = beta_knowledge.search(beta_marker, 5)
+    alpha_cross = alpha_knowledge.search(beta_marker, 5)
+    beta_cross = beta_knowledge.search(alpha_marker, 5)
 
     assert any(alpha_marker in document.content for document in alpha_own)
     assert any(beta_marker in document.content for document in beta_own)
@@ -465,7 +465,7 @@ async def test_narrowed_agent_knowledge_searches_only_the_named_bases(
     )
 
     knowledge = resolution.knowledge
-    documents = knowledge.agent_knowledge.search("anything", 10) if knowledge is not None else []
+    documents = knowledge.search("anything", 10) if knowledge is not None else []
     searched = {document.content.removeprefix("result from ") for document in documents}
     assert {
         "file memory" if base_id.startswith("file_memory_") else base_id for base_id in searched
@@ -1031,7 +1031,7 @@ async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: P
 
     assert knowledge is not None
     assert second_knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["ready index"]
     scheduler.schedule_refresh.assert_not_called()
     assert len(_VectorDb.collections) == 1
 
@@ -1064,14 +1064,14 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
             refresh_scheduler=scheduler,
         ).knowledge
         assert knowledge is not None
-        assert [document.content for document in knowledge.search("shared", max_results=5)] == ["shared local old"]
+        assert [document.content for document in knowledge.search("shared", 5)] == ["shared local old"]
 
         for _attempt in range(500):
             await asyncio.sleep(0.01)
             refreshed = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
-            if refreshed is not None and [
-                document.content for document in refreshed.search("shared", max_results=5)
-            ] == ["shared local new"]:
+            if refreshed is not None and [document.content for document in refreshed.search("shared", 5)] == [
+                "shared local new",
+            ]:
                 break
         else:
             pytest.fail("background on-access refresh did not publish the edited local source")
@@ -1126,7 +1126,7 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     refreshed_knowledge = _resolution.knowledge
 
     assert refreshed_knowledge is not None
-    assert [document.content for document in refreshed_knowledge.search("shared", max_results=5)] == [
+    assert [document.content for document in refreshed_knowledge.search("shared", 5)] == [
         "shared local new",
     ]
     assert unavailable == {}
@@ -1376,7 +1376,7 @@ async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_activ
     knowledge = _resolution.knowledge
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("active", max_results=5)] == ["active refresh old"]
+    assert [document.content for document in knowledge.search("active", 5)] == ["active refresh old"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     assert unavailable_details == {
         "docs": KnowledgeAvailabilityDetail(
@@ -1424,7 +1424,7 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
 
     assert knowledge is not None
     assert second_knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["ready index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     scheduler.schedule_refresh.assert_called_once()
     assert scheduler.schedule_refresh.call_args.args == ("docs",)
@@ -1458,7 +1458,7 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     knowledge = _resolution.knowledge
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["ready index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["ready index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     scheduler.is_refreshing.assert_called_once()
     scheduler.schedule_refresh.assert_not_called()
@@ -1476,7 +1476,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     initial_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert initial_knowledge is not None
-    assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
+    assert {document.content for document in initial_knowledge.search("anything", 5)} == {
         "deleted secret",
         "kept public",
     }
@@ -1501,7 +1501,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     stale_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
 
     assert stale_knowledge is not None
-    assert {document.content for document in stale_knowledge.search("anything", max_results=5)} == {
+    assert {document.content for document in stale_knowledge.search("anything", 5)} == {
         "deleted secret",
         "kept public",
     }
@@ -1520,7 +1520,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     initial_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert initial_knowledge is not None
-    assert {document.content for document in initial_knowledge.search("anything", max_results=5)} == {
+    assert {document.content for document in initial_knowledge.search("anything", 5)} == {
         "replaced secret",
         "kept public",
     }
@@ -1542,7 +1542,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
     pending_knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert pending_knowledge is not None
-    assert {document.content for document in pending_knowledge.search("anything", max_results=5)} == {
+    assert {document.content for document in pending_knowledge.search("anything", 5)} == {
         "replaced secret",
         "kept public",
     }
@@ -1556,7 +1556,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "replacement content"
     assert filtered_knowledge is not None
-    assert {document.content for document in filtered_knowledge.search("anything", max_results=5)} == {
+    assert {document.content for document in filtered_knowledge.search("anything", 5)} == {
         "replaced secret",
         "kept public",
     }
@@ -3398,7 +3398,7 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     knowledge = _resolution.knowledge
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("git", max_results=5)] == ["git index"]
+    assert [document.content for document in knowledge.search("git", 5)] == ["git index"]
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
     scheduler.schedule_refresh.assert_called_once()
 
@@ -3585,13 +3585,13 @@ async def test_existing_published_index_is_used_while_refresh_runs(
 
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["old index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["old index"]
 
     release.set()
     await refresh_task
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["new index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["new index"]
 
 
 @pytest.mark.asyncio
@@ -3646,7 +3646,7 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
     assert state.collection not in cancelled_candidate_collections
     knowledge = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("cancel", max_results=5)] == ["cancel stable"]
+    assert [document.content for document in knowledge.search("cancel", 5)] == ["cancel stable"]
 
 
 @pytest.mark.asyncio
@@ -4376,7 +4376,7 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == ["stable index"]
+    assert [document.content for document in knowledge.search("index", 5)] == ["stable index"]
 
 
 @pytest.mark.asyncio
@@ -4415,7 +4415,7 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
 
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("index", max_results=5)] == [
+    assert [document.content for document in knowledge.search("index", 5)] == [
         "stable metadata index",
     ]
 
@@ -4461,7 +4461,7 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
     assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("good", max_results=5)] == ["last good"]
+    assert [document.content for document in knowledge.search("good", 5)] == ["last good"]
 
 
 @pytest.mark.asyncio
@@ -5419,7 +5419,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     before_delete = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert before_delete is not None
-    assert [document.content for document in before_delete.search("delete", max_results=5)] == ["delete me now"]
+    assert [document.content for document in before_delete.search("delete", 5)] == ["delete me now"]
 
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
@@ -5440,7 +5440,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     assert response.status_code == 200
     assert after_delete is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in after_delete.search("delete", max_results=5)] == ["delete me now"]
+    assert [document.content for document in after_delete.search("delete", 5)] == ["delete me now"]
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5479,8 +5479,8 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     assert response.status_code == 200
     assert knowledge is not None
     assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert [document.content for document in knowledge.search("old upload", max_results=5)] == ["old upload"]
-    assert [document.content for document in knowledge.search("new upload", max_results=5)] == ["old upload"]
+    assert [document.content for document in knowledge.search("old upload", 5)] == ["old upload"]
+    assert [document.content for document in knowledge.search("new upload", 5)] == ["old upload"]
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5526,7 +5526,7 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     assert unavailable == {}
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
     assert not (docs_path / "new.md").exists()
-    assert [document.content for document in knowledge.search("existing upload", max_results=5)] == [
+    assert [document.content for document in knowledge.search("existing upload", 5)] == [
         "existing upload",
     ]
     scheduler.schedule_refresh.assert_not_called()
@@ -7769,8 +7769,8 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
     assert key_a != key_b
     assert knowledge_a is not None
     assert knowledge_b is not None
-    assert [document.content for document in knowledge_a.search("private", max_results=5)] == ["alice private note"]
-    assert [document.content for document in knowledge_b.search("private", max_results=5)] == ["bob private note"]
+    assert [document.content for document in knowledge_a.search("private", 5)] == ["alice private note"]
+    assert [document.content for document in knowledge_b.search("private", 5)] == ["bob private note"]
 
 
 @pytest.mark.asyncio
@@ -7837,7 +7837,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     knowledge = _resolution.knowledge
 
     assert knowledge is not None
-    assert [document.content for document in knowledge.search("private", max_results=5)] == ["alice private old"]
+    assert [document.content for document in knowledge.search("private", 5)] == ["alice private old"]
     assert unavailable == {base_id: KnowledgeAvailability.STALE}
     assert unavailable_details == {
         base_id: KnowledgeAvailabilityDetail(

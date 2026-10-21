@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.agent import Agent
 from agno.knowledge.knowledge import Knowledge
 from agno.metrics import ModelMetrics, RunMetrics
 from agno.models.anthropic import Claude
@@ -21,7 +22,6 @@ from agno.run.base import RunStatus
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -37,7 +37,6 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
@@ -114,10 +113,10 @@ class FakeAgnoAgent:
         return SimpleNamespace(content=self._prompt)
 
 
-def _ready_knowledge() -> StrictSearchKnowledge:
+def _ready_knowledge() -> AgentKnowledge:
     """Return an agent's knowledge handle over one published index."""
     source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=object())
-    return StrictSearchKnowledge(AgentKnowledge(sources=(source,)))
+    return AgentKnowledge(sources=(source,))
 
 
 def _config() -> Config:
@@ -2243,8 +2242,8 @@ async def test_build_call_tools_hides_agno_added_knowledge_function_needing_appr
     """Call approval policy reaches knowledge functions Agno adds after agent construction."""
     knowledge = Knowledge(name="docs")
 
-    def create_knowledge_agent(*_args: object, **kwargs: object) -> KnowledgeToolDescribingAgent:
-        agent = KnowledgeToolDescribingAgent(
+    def create_knowledge_agent(*_args: object, **kwargs: object) -> Agent:
+        agent = Agent(
             name="Helper",
             id=AGENT,
             model=Claude(id="claude-sonnet-5"),

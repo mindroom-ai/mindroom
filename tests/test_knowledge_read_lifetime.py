@@ -27,7 +27,6 @@ from mindroom.knowledge.index_metadata import (
 )
 from mindroom.knowledge.read_proxy import ChromaReadProxy, collection_exists
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import _config
 
@@ -290,8 +289,8 @@ def test_knowledge_initialization_follows_refresh(
     space, key, proxy = publication
     _publish(space, key, "replacement")
     source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=proxy)
-    knowledge = StrictSearchKnowledge(AgentKnowledge(sources=(source,)))
-    assert [document.content for document in knowledge.search("alpha")] == ["replacement"]
+    knowledge = AgentKnowledge(sources=(source,))
+    assert [hit.content for hit in knowledge.search("alpha")] == ["replacement"]
 
 
 def test_registry_initialization_accepts_superseded_state_snapshot(

@@ -66,7 +66,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
+from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
@@ -145,8 +145,8 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
 
 def _knowledge_indexes(knowledge: object) -> list[object]:
     """Return the published index readers behind the knowledge handle an agent received."""
-    assert isinstance(knowledge, StrictSearchKnowledge)
-    return [source.index for source in knowledge.agent_knowledge.sources]
+    assert isinstance(knowledge, AgentKnowledge)
+    return [source.index for source in knowledge.sources]
 
 
 def _knowledge_lookup(

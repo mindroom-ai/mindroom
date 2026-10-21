@@ -13,7 +13,6 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.knowledge.utils import knowledge_runtime_identity
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -55,7 +54,8 @@ def mock_agent_user() -> AgentMatrixUser:
 class TestAgentBot(AgentBotTestBase):
     """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
 
-    def test_knowledge_for_agent_returns_none_when_unassigned(
+    @pytest.mark.asyncio
+    async def test_knowledge_for_agent_returns_none_when_unassigned(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -70,9 +70,12 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
-        assert bot._knowledge_access_support.for_agent("calculator") is None
+        resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
 
-    def test_knowledge_for_agent_uses_assigned_base_manager(
+        assert resolution.knowledge is None
+
+    @pytest.mark.asyncio
+    async def test_knowledge_for_agent_uses_assigned_base_manager(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -106,14 +109,16 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
-            knowledge = bot._knowledge_access_support.for_agent("calculator")
+            resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
+        knowledge = resolution.knowledge
 
-        assert isinstance(knowledge, StrictSearchKnowledge)
-        [source] = knowledge.agent_knowledge.sources
+        assert isinstance(knowledge, AgentKnowledge)
+        [source] = knowledge.sources
         assert source.index is expected_reader
         assert source.description == KnowledgeSourceDescription(base_id="research", description="Lab notes.")
 
-    def test_knowledge_for_agent_merges_multiple_assigned_bases(
+    @pytest.mark.asyncio
+    async def test_knowledge_for_agent_merges_multiple_assigned_bases(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -153,11 +158,12 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):
-            combined_knowledge = bot._knowledge_access_support.for_agent("calculator")
+            resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
+        combined_knowledge = resolution.knowledge
         assert combined_knowledge is not None
 
-        docs = combined_knowledge.search("knowledge query", max_results=4)
-        assert [doc.content for doc in docs] == [
+        hits = combined_knowledge.search("knowledge query", 4)
+        assert [hit.content for hit in hits] == [
             "research content 1",
             "legal content 1",
             "research content 2",
@@ -179,9 +185,9 @@ class TestAgentBot(AgentBotTestBase):
     def test_merged_knowledge_runtime_identity_tracks_underlying_handles(self) -> None:
         """Fresh merged views over unchanged indexes keep the same runtime identity."""
         indexes = [_StubIndex(hits=[]), _StubIndex(hits=[])]
-        first = StrictSearchKnowledge(_knowledge(*indexes))
-        second = StrictSearchKnowledge(_knowledge(*indexes))
-        changed = StrictSearchKnowledge(_knowledge(indexes[0], _StubIndex(hits=[])))
+        first = _knowledge(*indexes)
+        second = _knowledge(*indexes)
+        changed = _knowledge(indexes[0], _StubIndex(hits=[]))
 
         assert knowledge_runtime_identity(first) == knowledge_runtime_identity(second)
         assert knowledge_runtime_identity(first) != knowledge_runtime_identity(changed)
@@ -225,27 +231,3 @@ class TestAgentBot(AgentBotTestBase):
 
         with pytest.raises(RuntimeError, match="first boom"):
             await knowledge.asearch("knowledge query", 3)
-
-    def test_strict_knowledge_handle_propagates_search_failure(self) -> None:
-        """The Knowledge handle agents query raises instead of agno's swallow-to-[].
-
-        agno's ``Knowledge.search`` catches every vector-db exception and
-        returns an empty list, so the agent-facing ``search_knowledge_base``
-        tool would report "No documents found" during an embedder outage.
-        MindRoom read handles must keep the failure loud through the same
-        ``retrieve -> search`` chain the generated tool uses.
-        """
-        knowledge = StrictSearchKnowledge(_knowledge(_FailingStubIndex("first boom")))
-
-        with pytest.raises(RuntimeError, match="first boom"):
-            knowledge.search(query="knowledge query")
-        with pytest.raises(RuntimeError, match="first boom"):
-            knowledge.retrieve(query="knowledge query")
-
-    @pytest.mark.asyncio
-    async def test_strict_knowledge_handle_propagates_async_search_failure(self) -> None:
-        """The async search path agents use raises instead of returning []."""
-        knowledge = StrictSearchKnowledge(_knowledge(_FailingStubIndex("first boom")))
-
-        with pytest.raises(RuntimeError, match="first boom"):
-            await knowledge.asearch(query="knowledge query")
