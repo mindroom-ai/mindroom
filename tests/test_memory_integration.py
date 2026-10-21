@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.delegation.personas import inline_persona
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -225,7 +226,7 @@ class TestMemoryIntegration:
 
 @pytest.mark.parametrize("history_limit", [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}])
 def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(history_limit: dict[str, int]) -> None:
-    """A minimal agent reads memory on demand, and a replay limit, configured or scheduled, shifts the history."""
+    """A persona recalls no memory, a minimal agent reads it on demand, and a replay limit shifts the history."""
     session = AgentSession(session_id="thread", summary=SessionSummary(summary=" Earlier work. "))
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
@@ -245,3 +246,5 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
     assert _memory_conversation(ctx, limited, scope_context) is None
     scheduled = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"))
     assert _memory_conversation(scheduled, config, scope_context) is None
+    persona = replace(ctx, persona=inline_persona("You are a reviewer.", None, None, None))
+    assert _memory_conversation(persona, config, scope_context) is None

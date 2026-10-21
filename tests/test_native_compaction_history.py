@@ -59,6 +59,8 @@ from tests.history_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.run.agent import RunOutput
+
 
 @pytest.mark.parametrize("representation", ["bytes", "path", "data_url", "content_block"])
 def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_bytes(
@@ -1130,26 +1132,23 @@ def test_provider_compaction_logs_once_per_checkpoint(items: list[dict[str, Any]
 
 def test_compaction_marker_names_the_newest_summary_and_native_checkpoint() -> None:
     """A provider compaction changes the marker as a text compaction does, so inlined memory reloads after either."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model.configure_native_compaction(threshold=1024)
+
+    def answer(items: list[dict[str, Any]]) -> Message:
+        response = ModelResponse(content="Answer")
+        record_native_checkpoint(response, items, model.native_compaction)
+        return Message(role="assistant", content=response.content, provider_data=response.provider_data)
+
+    def run(run_id: str, reply: Message) -> RunOutput:
+        return _completed_run(run_id, messages=[Message(role="user", content="question"), reply])
+
+    first, second = (answer([{"type": "compaction", "encrypted_content": name}]) for name in ("first", "second"))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    checkpoint = Message(
-        role="assistant",
-        provider_data={
-            "mindroom_native_compaction": {
-                "route": "route",
-                "threshold": None,
-                "items": [{"type": "compaction", "encrypted_content": "checkpoint"}],
-            },
-        },
-    )
-    # Every completed response records its route; only a compaction adds checkpoint items.
-    route_only = Message(role="assistant", provider_data={"mindroom_native_compaction": {"route": "route"}})
-    session = _session("session", runs=[_completed_run("plain")])
+    session = _session("session", runs=[run("plain", answer([]))])
     assert compaction_marker(session, scope) == (None, None)
 
-    session.runs = [
-        _completed_run("plain"),
-        _completed_run("compacted", messages=[Message(role="user", content="question"), checkpoint]),
-        _completed_run("later", messages=[Message(role="user", content="question"), route_only]),
-    ]
+    # Every completed response records its route; only a compaction adds checkpoint items.
+    session.runs = [run("first", first), run("second", second), run("later", answer([]))]
     session.summary = SessionSummary(summary=" Text summary. ")
-    assert compaction_marker(session, scope) == ("Text summary.", checkpoint.id)
+    assert compaction_marker(session, scope) == ("Text summary.", second.id)
