@@ -5426,6 +5426,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.agent_loop.prompt"
+depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.agent_loop.structured"
+depends_on = []
+
+[[modules]]
+path = "mindroom.agent_loop.helper"
+depends_on = ["mindroom.agent_loop.structured", "mindroom.llm", "mindroom.logging_config"]
+
+[[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
@@ -7326,9 +7338,12 @@ expose = [
     "SKILL_FILENAME",
     "SKILL_FUNCTION_NAMES",
     "SKILL_READ_FUNCTION_NAMES",
+    "Skill",
     "SkillMarkdownError",
+    "SkillsToolkit",
     "agent_workspace_skills_root",
     "build_agent_skills",
+    "build_skills_toolkit",
     "clear_skill_cache",
     "get_plugin_skill_roots",
     "get_skill_snapshot",
