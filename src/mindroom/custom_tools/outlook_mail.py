@@ -75,6 +75,8 @@ _ATTACHMENT_TYPES = {
     "microsoft.graph.referenceAttachment": "reference",
 }
 _EMAIL = re.compile(r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+")
+# The `Name <address>` form read results show for a named address.
+_NAMED_EMAIL = re.compile(r"(?P<name>[^<>\x00-\x1f\x7f]*)<(?P<address>[^<>]*)>")
 _MAX_EMAIL_CHARS = 254
 # Most filesystems cap one name at 255 bytes.
 _MAX_FILENAME_BYTES = 200
@@ -159,11 +161,14 @@ def _recipients(value: object, field_name: str) -> list[dict[str, dict[str, str]
         if not isinstance(raw, str):
             msg = f"{field_name} must be a list of email addresses."
             raise _invalid(msg)
-        address = raw.strip()
+        text = raw.strip()
+        named = _NAMED_EMAIL.fullmatch(text)
+        name, address = (named["name"].strip(), named["address"].strip()) if named else ("", text)
         if len(address) > _MAX_EMAIL_CHARS or not _EMAIL.fullmatch(address):
             msg = f"{field_name} has an invalid email address: {raw[:100]!r}."
             raise _invalid(msg)
-        recipients.append({"emailAddress": {"address": address}})
+        email = {"name": name, "address": address} if name else {"address": address}
+        recipients.append({"emailAddress": email})
     return recipients
 
 

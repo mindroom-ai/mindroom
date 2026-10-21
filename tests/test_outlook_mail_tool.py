@@ -624,6 +624,11 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
         (["sam smith@contoso.com"], None),
         (["sam@contoso.com\x00"], None),
         (["x" * 250 + "@contoso.com"], None),
+        (["Sam Example <not-an-email>"], None),
+        (["Sam Example <sam@contoso.com> extra"], None),
+        (["Sam Example <a@b@contoso.com>"], None),
+        (["Sam Example <" + "x" * 250 + "@contoso.com>"], None),
+        (["Sam\x00Example <sam@contoso.com>"], None),
         ("sam@contoso.com", None),
         ([1], None),
         (["sam@contoso.com"], ["bad"]),
@@ -644,6 +649,34 @@ def test_invalid_recipients_are_refused_before_any_request(
     ):
         assert _payload(result)["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("recipient", "email_address"),
+    [
+        ("sam@contoso.com", {"address": "sam@contoso.com"}),
+        ("Sam Example <sam@contoso.com>", {"name": "Sam Example", "address": "sam@contoso.com"}),
+        (" Sam Example  < sam@contoso.com > ", {"name": "Sam Example", "address": "sam@contoso.com"}),
+        ("<sam@contoso.com>", {"address": "sam@contoso.com"}),
+    ],
+)
+def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recipient: str,
+    email_address: dict[str, str],
+) -> None:
+    mail = _Graph()
+    mail.write = httpx.Response(201, json=_message(isDraft=True))
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    assert _payload(tools.outlook_mail_send([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
+    assert _payload(tools.outlook_mail_create_draft([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
+
+    sent, draft = (_body(request) for request in graph.requests)
+    for message in (sent["message"], draft):
+        assert message["toRecipients"] == [{"emailAddress": email_address}]
+        assert message["ccRecipients"] == [{"emailAddress": email_address}]
 
 
 @pytest.mark.parametrize(("subject", "body"), [(None, "b"), ("s", None), ("s", 3)])
