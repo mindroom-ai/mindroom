@@ -493,7 +493,7 @@ class OutlookMailTools(Toolkit):
         outlook_mail_send_draft, or the requester can open its web_link to edit it first.
 
         Args:
-            to: Recipient email addresses, such as sam@contoso.com.
+            to: Recipient email addresses, such as sam@contoso.com or Sam Example <sam@contoso.com>.
             subject: The subject line.
             body: The message text, sent as plain text.
             cc: Email addresses to copy.
@@ -541,7 +541,7 @@ class OutlookMailTools(Toolkit):
         OneDrive and put a link in the body. The sent message is saved in Sent Items.
 
         Args:
-            to: Recipient email addresses, such as sam@contoso.com.
+            to: Recipient email addresses, such as sam@contoso.com or Sam Example <sam@contoso.com>.
             subject: The subject line.
             body: The message text, sent as plain text.
             cc: Email addresses to copy.

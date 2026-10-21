@@ -219,6 +219,9 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     assert "untrusted" in _description(tools, "outlook_mail_get_message")
     assert "read the draft with outlook_mail_get_message" in _description(tools, "outlook_mail_send_draft")
     assert "goes to the original's reply_to addresses when it has them" in _description(tools, "outlook_mail_reply")
+    for name in ("outlook_mail_send", "outlook_mail_create_draft"):
+        to = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]["to"]
+        assert "Sam Example <sam@contoso.com>" in to["description"], name
 
 
 def test_search_without_a_query_lists_the_newest_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
