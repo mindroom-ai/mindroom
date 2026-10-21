@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "tools"
 SCHEMAS_PATH = FIXTURE_DIR / "schemas.json"
+ALL_ENABLED_SCHEMAS_PATH = FIXTURE_DIR / "schemas_all_enabled.json"
 ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 
 AGENT_NAME = "golden"
@@ -98,7 +99,8 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "oxylabs": {"username": _KEY, "password": _KEY},
     "scrapegraph": {"api_key": _KEY},
     "searxng": {"host": _URL},
-    "slack": {"token": _KEY},
+    # Its search_messages function exists only with a user token.
+    "slack": {"token": _KEY, "user_token": _KEY},
     "spotify": {"access_token": _KEY},
     "sql": {"db_url": "sqlite://"},
     "tavily": {"api_key": _KEY},
@@ -126,7 +128,34 @@ OFFLINE_CLIENTS = {
     "neo4j": "agno.tools.neo4j.GraphDatabase",
 }
 # Registered tools that no offline capture can build, with the reason.
-UNBUILDABLE = {"composio": "its functions come from the Composio action catalog, which only the service returns"}
+UNBUILDABLE = {
+    "apify": "its functions come from Apify Actor builds, which only the service returns",
+    "composio": "its functions come from the Composio action catalog, which only the service returns",
+}
+# Overrides beyond the `all` and `enable_*` switches that a tool needs before it registers every function it can.
+EXTRA_ENABLING_OVERRIDES: dict[str, dict[str, object]] = {
+    # custom_scrape_website exists only with a query to run.
+    "agentql": {"agentql_query": "{ title }"},
+    "google_drive": {"download_file": True},
+    "usage_stats": {"admin_scope": True},
+}
+# Declared function names (`ToolMetadata.function_names`) that no configuration registers, by tool.
+NEVER_REGISTERED_FUNCTIONS = {
+    # Methods of async variants, which Agno registers under the name of their sync function.
+    "brandfetch": ("asearch_by_brand", "asearch_by_identifier"),
+    "browserbase": ("aclose_session", "aget_page_content", "anavigate_to", "ascreenshot"),
+    # Helper methods and attributes that the toolkit never registers as functions.
+    "discord": ("get_tool_config", "get_tool_description", "get_tool_name"),
+    "duckdb": ("get_table_name_from_path",),
+    "fal": ("on_queue_update",),
+    "moviepy_video_tools": ("create_caption_clips", "parse_srt", "split_text_into_lines"),
+    "newspaper": ("get_article_data",),
+    "sql": ("run_sql",),
+    "zoom": ("instructions",),
+    # Registered only beside a knowledge base object, which the text `knowledge` config field cannot hold.
+    "website": ("add_website_to_knowledge",),
+    "wikipedia": ("search_wikipedia_and_update_knowledge_base",),
+}
 
 _KEPT_ENV = ("PATH", "LANG", "LC_ALL", "TMPDIR")
 # The update_awareness instructions name the running MindRoom version, which changes with every commit.
@@ -186,8 +215,25 @@ def missing_dependencies(tool_name: str) -> str | None:
     return None if installed else ", ".join(dependencies)
 
 
-def build_toolkit(tool_name: str, config: Config, runtime_paths: RuntimePaths) -> Toolkit:
-    """Build one registered tool as agent construction does, with its default configuration."""
+def all_enabled_overrides(tool_name: str) -> dict[str, object]:
+    """Return the authored overrides that switch on every function one registered tool can turn on."""
+    metadata = TOOL_METADATA[tool_name]
+    overrides: dict[str, object] = {
+        field.name: True
+        for field in (*(metadata.config_fields or ()), *(metadata.agent_override_fields or ()))
+        if field.type == "boolean" and (field.name == "all" or field.name.startswith("enable_"))
+    }
+    overrides.update(EXTRA_ENABLING_OVERRIDES.get(tool_name, {}))
+    return dict(sorted(overrides.items()))
+
+
+def build_toolkit(
+    tool_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_config_overrides: dict[str, object] | None = None,
+) -> Toolkit:
+    """Build one registered tool as agent construction does, with its default configuration or authored overrides."""
     deferred_toolkits = ()
     if tool_name == "dynamic_tools":
         # Tool search exists only beside a deferred toolkit, and its own functions do not depend on which one.
@@ -201,6 +247,7 @@ def build_toolkit(tool_name: str, config: Config, runtime_paths: RuntimePaths) -
             runtime_paths=runtime_paths,
             worker_tools=[],
             runtime_overrides=None,
+            tool_config_overrides=tool_config_overrides,
             execution_identity=None,
             deferred_toolkits=deferred_toolkits,
         )
@@ -250,20 +297,36 @@ def tool_schema(toolkit: Toolkit) -> dict[str, object]:
     return json.loads(json.dumps(entry).replace(_MINDROOM_VERSION, _MINDROOM_VERSION_PLACEHOLDER))
 
 
-def capture_tool_schemas(root: Path) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
-    """Return the golden entry of every buildable registered tool, and why each other tool was skipped."""
-    schemas: dict[str, dict[str, object]] = {}
-    skipped: dict[str, str] = {}
+def all_enabled_tool_schema(tool_name: str, config: Config, runtime_paths: RuntimePaths) -> dict[str, object]:
+    """Return the all-enabled golden entry of one registered tool: its overrides, then its schema with them."""
+    overrides = all_enabled_overrides(tool_name)
+    return {"overrides": overrides, **tool_schema(build_toolkit(tool_name, config, runtime_paths, overrides))}
+
+
+@dataclass(frozen=True)
+class ToolSchemaCapture:
+    """The golden entries of every buildable registered tool, and why each other tool was skipped."""
+
+    schemas: dict[str, dict[str, object]]
+    all_enabled_schemas: dict[str, dict[str, object]]
+    skipped: dict[str, str]
+
+
+def capture_tool_schemas(root: Path) -> ToolSchemaCapture:
+    """Build every registered tool with its default configuration and, when it has switches, with all of them on."""
+    capture = ToolSchemaCapture(schemas={}, all_enabled_schemas={}, skipped={})
     with isolated_process(root):
         config, runtime_paths = golden_runtime(root)
         for tool_name in sorted(BUILTIN_TOOL_METADATA):
             if tool_name in UNBUILDABLE:
-                skipped[tool_name] = UNBUILDABLE[tool_name]
+                capture.skipped[tool_name] = UNBUILDABLE[tool_name]
             elif (dependencies := missing_dependencies(tool_name)) is not None:
-                skipped[tool_name] = f"missing optional dependencies: {dependencies}"
+                capture.skipped[tool_name] = f"missing optional dependencies: {dependencies}"
             else:
-                schemas[tool_name] = tool_schema(build_toolkit(tool_name, config, runtime_paths))
-    return schemas, skipped
+                capture.schemas[tool_name] = tool_schema(build_toolkit(tool_name, config, runtime_paths))
+                if all_enabled_overrides(tool_name):
+                    capture.all_enabled_schemas[tool_name] = all_enabled_tool_schema(tool_name, config, runtime_paths)
+    return capture
 
 
 @dataclass(frozen=True)
@@ -396,19 +459,21 @@ def capture_argument_cases() -> dict[str, dict[str, object]]:
     return asyncio.run(capture_all())
 
 
-def write_golden(path: Path, value: object) -> None:
-    """Write one fixture as pretty JSON with sorted keys."""
+def write_golden(path: Path, value: object, *, sort_keys: bool) -> None:
+    """Write one fixture as pretty JSON, with its keys sorted or in the order they were built."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(value, indent=2, sort_keys=sort_keys, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    """Rewrite both tool fixtures and report the tools left out."""
+    """Rewrite the tool fixtures and report the tools left out."""
     with tempfile.TemporaryDirectory(prefix="tool-golden-") as root:
-        schemas, skipped = capture_tool_schemas(Path(root).resolve())
-    write_golden(SCHEMAS_PATH, schemas)
-    write_golden(ARGUMENTS_PATH, capture_argument_cases())
-    for tool_name, reason in skipped.items():
+        capture = capture_tool_schemas(Path(root).resolve())
+    # Schemas keep the key order providers receive, such as parameters in signature order.
+    write_golden(SCHEMAS_PATH, capture.schemas, sort_keys=False)
+    write_golden(ALL_ENABLED_SCHEMAS_PATH, capture.all_enabled_schemas, sort_keys=False)
+    write_golden(ARGUMENTS_PATH, capture_argument_cases(), sort_keys=True)
+    for tool_name, reason in capture.skipped.items():
         sys.stdout.write(f"skipped {tool_name}: {reason}\n")
 
 

@@ -28,7 +28,13 @@ pytestmark = [
 ]
 
 SCHEMAS = json.loads(capture_tools.SCHEMAS_PATH.read_text(encoding="utf-8"))
+ALL_ENABLED_SCHEMAS = json.loads(capture_tools.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
 ARGUMENTS = json.loads(capture_tools.ARGUMENTS_PATH.read_text(encoding="utf-8"))
+
+
+def assert_same_json(actual: object, golden: object) -> None:
+    """Compare values and key order, because providers receive schemas as serialized bytes."""
+    assert json.dumps(actual, indent=2) == json.dumps(golden, indent=2)
 
 
 @pytest.fixture(scope="module")
@@ -54,13 +60,29 @@ def test_tool_schema_matches_golden(tool_name: str, golden_runtime: tuple[Path, 
         if (missing := capture_tools.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")
         toolkit = capture_tools.build_toolkit(tool_name, config, runtime_paths)
-        assert capture_tools.tool_schema(toolkit) == SCHEMAS[tool_name]
+        assert_same_json(capture_tools.tool_schema(toolkit), SCHEMAS[tool_name])
+
+
+@pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
+def test_all_enabled_tool_schema_matches_golden(
+    tool_name: str,
+    golden_runtime: tuple[Path, Config, RuntimePaths],
+) -> None:
+    """Each registered tool with every function switched on still reaches the model with its golden definition."""
+    root, config, runtime_paths = golden_runtime
+    with capture_tools.isolated_process(root):
+        if (missing := capture_tools.missing_dependencies(tool_name)) is not None:
+            pytest.skip(f"{tool_name} needs {missing}")
+        assert_same_json(
+            capture_tools.all_enabled_tool_schema(tool_name, config, runtime_paths),
+            ALL_ENABLED_SCHEMAS[tool_name],
+        )
 
 
 def test_schema_golden_covers_every_buildable_registered_tool(
     golden_runtime: tuple[Path, Config, RuntimePaths],
 ) -> None:
-    """A registered tool is missing from the golden only when it cannot be built here."""
+    """A registered tool is missing from the goldens only when it cannot be built here."""
     root, _config, _runtime_paths = golden_runtime
     with capture_tools.isolated_process(root):
         uncovered = {
@@ -72,6 +94,26 @@ def test_schema_golden_covers_every_buildable_registered_tool(
         }
     assert uncovered == set()
     assert set(SCHEMAS) <= set(BUILTIN_TOOL_METADATA)
+    assert set(ALL_ENABLED_SCHEMAS) == {
+        tool_name for tool_name in SCHEMAS if capture_tools.all_enabled_overrides(tool_name)
+    }
+
+
+@pytest.mark.usefixtures("golden_runtime")
+def test_schema_goldens_cover_every_declared_function() -> None:
+    """Every function a tool declares is in its default or all-enabled golden, unless no configuration registers it."""
+    unregistered = {}
+    for tool_name, entry in SCHEMAS.items():
+        captured = {
+            function["name"]
+            for golden in (entry, ALL_ENABLED_SCHEMAS.get(tool_name, {"functions": []}))
+            for function in golden["functions"]
+        }
+        if missing := set(BUILTIN_TOOL_METADATA[tool_name].function_names) - captured:
+            unregistered[tool_name] = missing
+    assert unregistered == {
+        tool_name: set(function_names) for tool_name, function_names in capture_tools.NEVER_REGISTERED_FUNCTIONS.items()
+    }
 
 
 def test_argument_golden_holds_every_case() -> None:

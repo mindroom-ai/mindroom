@@ -4,8 +4,10 @@ These fixtures pin what Agno 3.0.9 plus MindRoom's patches produce, so the owned
 
 ## Tools
 
-`.venv/bin/python -m tests.agno_parity.capture_tools` writes `tools/schemas.json` and `tools/arguments.json`, and `tests/agno_parity/test_tool_goldens_current.py` checks the current code against both.
-Both files are pretty JSON with sorted keys.
+`.venv/bin/python -m tests.agno_parity.capture_tools` writes `tools/schemas.json`, `tools/schemas_all_enabled.json`, and `tools/arguments.json`, and `tests/agno_parity/test_tool_goldens_current.py` checks the current code against all three.
+All three are pretty JSON.
+The schema files list tools in sorted order and keep every other key in the order providers receive it, such as `parameters` as `type`, `properties`, `required`, with properties in signature order; the test compares serialized bytes, so a reordered key fails parity.
+`arguments.json` has sorted keys and is compared by value.
 
 ### `tools/schemas.json`
 
@@ -13,7 +15,7 @@ The file maps each built-in tool registration name to `{"instructions", "add_ins
 `instructions` and `add_instructions` are the toolkit's own values; Agno adds `instructions` to the system prompt only when `add_instructions` is true, and no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
 Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, `stop_after_tool_call`, and `show_result` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors.
-The provider payload `Function.to_dict()` is the same entry without `stop_after_tool_call`, `show_result`, and null values.
+The provider payload `Function.to_dict()` is the same entry, in the same key order, without `stop_after_tool_call`, `show_result`, and null values.
 
 Each tool is built by `build_agent_toolkit` with its default configuration, for one agent of a config shaped like `mindroom config init` output.
 File memory gives that agent a workspace, so output-file wrapping adds `mindroom_output_path`, and the agent delegates and uses the knowledge graph, so the `delegate` and `knowledge_graph` tools exist.
@@ -27,13 +29,21 @@ Normalization: the running MindRoom version in the `update_awareness` instructio
 
 Not captured:
 
-- `apify`, because its optional dependency `apify-client` is not installable on this platform (aarch64).
+- `apify`, because its functions come from Apify Actor builds, which only the service returns.
 - `composio`, because its functions come from the Composio action catalog, which only the service returns.
 
 Agno behavior the golden pins as it is:
 
 - `gemini`'s `generate_image` has no description and exposes only `mindroom_output_path`, because Agno cannot resolve its `Agent` annotation and falls back to an empty schema.
 - `openclaw_compat` builds a toolkit without functions.
+
+### `tools/schemas_all_enabled.json`
+
+The file maps each captured tool that has function switches to `{"overrides", "instructions", "add_instructions", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
+`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `google_drive`'s `download_file`, `usage_stats`'s `admin_scope`); the dummy Slack credentials include a user token so `search_messages` registers.
+Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
+
+Every name in a tool's `ToolMetadata.function_names` appears in one of the two files, except the names in `NEVER_REGISTERED_FUNCTIONS`: async method names that Agno registers under their sync name, helper methods, and the knowledge-base functions of `website` and `wikipedia`, which need a knowledge base object that config cannot supply.
 
 ### `tools/arguments.json`
 
