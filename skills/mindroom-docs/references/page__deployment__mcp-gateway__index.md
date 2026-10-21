@@ -29,7 +29,8 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 
 First configure strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`), so the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) accepts your gateway's users.
 The gateway stays disabled without it, even though users can open the portal from MindRoom Chat.
-Then enable the gateway, optionally naming a private agent that each user's selection starts with:
+When more than one user signs in through the upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)); it names the private agent each user's selection starts with.
+Then enable the gateway:
 
 ```bash
 MINDROOM_CONNECTIONS_AGENT=personal
