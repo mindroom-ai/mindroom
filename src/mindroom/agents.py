@@ -45,6 +45,7 @@ from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
+from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
 from mindroom.session_storage import agent_storage
 from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
@@ -2114,14 +2115,15 @@ def create_agent(
         tool_count=len(tool_assembly.tools),
     )
 
+    tool_owners = _tool_owners(tool_assembly.tools)
     return AgentBuild(
         spec=spec,
         prompt=prompt,
         request_template=ModelRequest(messages=(), deferred_tool_names=tool_assembly.deferred_wire_tool_names),
         history_settings=entity_view.history_settings,
         store=store,
-        tool_owners=_tool_owners(tool_assembly.tools),
-        tool_middleware=tool_assembly.tool_middleware,
+        tool_owners=tool_owners,
+        tool_middleware=bind_live_tools(prepared.functions, tool_owners, tool_assembly.tool_middleware),
         surface=AgentSurface(
             mode=agent_mode,
             cli_shell=cli_shell,

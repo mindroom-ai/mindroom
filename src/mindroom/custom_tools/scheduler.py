@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from agno.agent import Agent  # noqa: TC002 - Agno reads tool annotations at runtime
-from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
 from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
@@ -105,7 +103,6 @@ class SchedulerTools(Toolkit):
         arguments_json: str,
         execute_at: str,
         description: str,
-        agent: Agent | None = None,
     ) -> str:
         """Schedule one of your approval-gated tool calls that the requester approves now.
 
@@ -123,16 +120,15 @@ class SchedulerTools(Toolkit):
                 e.g. "2026-10-04T09:00:00-04:00".
             description: Short description of the scheduled action; if the requester
                 approves any arguments, it tells you what the call should do when it runs.
-            agent: Supplied by MindRoom; never pass it.
 
         Returns:
             The scheduling result message.
 
         """
         context = get_tool_runtime_context()
-        if context is None or context.room is None or agent is None:
+        if context is None or context.room is None:
             return "❌ Scheduler tool is unavailable in this context."
-        prepared = prepare_scheduled_call(agent, tool_name, arguments_json)
+        prepared = prepare_scheduled_call(tool_name, arguments_json)
         if isinstance(prepared, str):
             raise RuntimeError(prepared)  # noqa: TRY004 - a scheduler failure, reported like the others
         live, arguments = prepared
@@ -157,8 +153,6 @@ class SchedulerTools(Toolkit):
         self,
         task_id: str,
         arguments_json: str | None = None,
-        agent: Agent | None = None,
-        run_context: RunContext | None = None,
     ) -> object:
         """Run the call a scheduled task stored, once, with the requester's approval.
 
@@ -171,8 +165,6 @@ class SchedulerTools(Toolkit):
             task_id: The scheduled task's ID from its message.
             arguments_json: Optional replacement arguments as a JSON object string,
                 only when the requester approved any arguments.
-            agent: Supplied by MindRoom; never pass it.
-            run_context: Supplied by MindRoom; never pass it.
 
         Returns:
             The tool's result, or why the call did not run.
@@ -181,7 +173,7 @@ class SchedulerTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return "❌ Scheduler tool is unavailable in this context."
-        return await run_scheduled_call(context, agent, run_context, task_id, arguments_json)
+        return await run_scheduled_call(context, task_id, arguments_json)
 
     async def edit_schedule(
         self,

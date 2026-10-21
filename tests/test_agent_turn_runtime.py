@@ -829,7 +829,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     ]
     assert hooks.answer_tool_calls is None
     assert hooks.rewrite_tool_calls is None
-    assert len(hooks.tool_middleware) == 1
+    assert [middleware.__name__ for middleware in hooks.tool_middleware] == ["bind_live_functions", "middleware"]
     assert len(hooks.after_tool_batch) == 1
     assert len(hooks.on_resume_entry) == 1
     assert hooks.on_loop_end is not None
