@@ -1,0 +1,426 @@
+{
+  "family": "openai_responses",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api": "responses",
+      "api_key": "parity-test-key",
+      "extra_kwargs": {
+        "reasoning_effort": "medium"
+      },
+      "id": "gpt-6-astra",
+      "provider": "openai"
+    },
+    "portable_replay": true,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "OpenAI Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": true,
+        "mindroom_response_output": [
+          {
+            "encrypted_content": "parity-encrypted-reasoning",
+            "id": "rs_parity",
+            "summary": [
+              {
+                "text": "Check the forecast first.",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning"
+          },
+          {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "mindroom_response_stored": true,
+        "response_id": "resp_parity"
+      },
+      "reasoning_content": "Check the forecast first.",
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "call_id": "call_parity_weather",
+          "function": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "name": "get_weather"
+          },
+          "id": "fc_parity_weather",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "reasoning_tokens": 5,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "developer"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-6-astra",
+      "reasoning": {
+        "effort": "medium"
+      },
+      "store": true,
+      "stream": true,
+      "tools": [
+        {
+          "description": "Return the forecast for one city.",
+          "external_execution": false,
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        },
+        {
+          "description": "Search the user's travel notes.",
+          "external_execution": false,
+          "name": "search_notes",
+          "parameters": {
+            "properties": {
+              "limit": {
+                "description": "Maximum results.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Search text.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.openai.com/v1/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "id": "rs_parity",
+            "summary": [],
+            "type": "reasoning"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "item_id": "rs_parity",
+          "output_index": 0,
+          "part": {
+            "text": "",
+            "type": "summary_text"
+          },
+          "sequence_number": 2,
+          "summary_index": 0,
+          "type": "response.reasoning_summary_part.added"
+        },
+        "event": "response.reasoning_summary_part.added"
+      },
+      {
+        "data": {
+          "delta": "Check the forecast first.",
+          "item_id": "rs_parity",
+          "output_index": 0,
+          "sequence_number": 3,
+          "summary_index": 0,
+          "type": "response.reasoning_summary_text.delta"
+        },
+        "event": "response.reasoning_summary_text.delta"
+      },
+      {
+        "data": {
+          "item_id": "rs_parity",
+          "output_index": 0,
+          "sequence_number": 4,
+          "summary_index": 0,
+          "text": "Check the forecast first.",
+          "type": "response.reasoning_summary_text.done"
+        },
+        "event": "response.reasoning_summary_text.done"
+      },
+      {
+        "data": {
+          "item_id": "rs_parity",
+          "output_index": 0,
+          "part": {
+            "text": "Check the forecast first.",
+            "type": "summary_text"
+          },
+          "sequence_number": 5,
+          "summary_index": 0,
+          "type": "response.reasoning_summary_part.done"
+        },
+        "event": "response.reasoning_summary_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "encrypted_content": "parity-encrypted-reasoning",
+            "id": "rs_parity",
+            "summary": [
+              {
+                "text": "Check the forecast first.",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning"
+          },
+          "output_index": 0,
+          "sequence_number": 6,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "in_progress",
+            "type": "function_call"
+          },
+          "output_index": 1,
+          "sequence_number": 7,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "delta": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+          "item_id": "fc_parity_weather",
+          "output_index": 1,
+          "sequence_number": 8,
+          "type": "response.function_call_arguments.delta"
+        },
+        "event": "response.function_call_arguments.delta"
+      },
+      {
+        "data": {
+          "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+          "item_id": "fc_parity_weather",
+          "output_index": 1,
+          "sequence_number": 9,
+          "type": "response.function_call_arguments.done"
+        },
+        "event": "response.function_call_arguments.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "completed",
+            "type": "function_call"
+          },
+          "output_index": 1,
+          "sequence_number": 10,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "encrypted_content": "parity-encrypted-reasoning",
+                "id": "rs_parity",
+                "summary": [
+                  {
+                    "text": "Check the forecast first.",
+                    "type": "summary_text"
+                  }
+                ],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+                "call_id": "call_parity_weather",
+                "id": "fc_parity_weather",
+                "name": "get_weather",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 5
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 11,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "reasoning_tool_call"
+}

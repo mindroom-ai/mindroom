@@ -1,0 +1,180 @@
+{
+  "family": "deepseek",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "deepseek-flash",
+      "provider": "deepseek"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "from_history": false,
+      "provider_data": {
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "deepseek-flash",
+          "provider": "DeepSeek"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "deepseek-flash",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "thinking": {
+        "type": "enabled"
+      }
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.deepseek.com/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Pack a light rain jacket"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": " and comfortable shoes."
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "deepseek-flash",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "plain_turn"
+}

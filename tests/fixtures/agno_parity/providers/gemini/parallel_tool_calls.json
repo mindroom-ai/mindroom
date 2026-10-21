@@ -1,0 +1,264 @@
+{
+  "family": "gemini",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "gemini-3.8-flash",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.8-flash",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "name": "get_weather"
+          },
+          "id": "parity_weather",
+          "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"query\": \"Paris packing list\"}",
+            "name": "search_notes"
+          },
+          "id": "parity_notes",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What should I pack for Paris tomorrow?"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {},
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          }
+        ],
+        "role": "user"
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Return the forecast for one city.",
+              "name": "get_weather",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "type": "STRING"
+                  },
+                  "unit": {
+                    "description": "Temperature unit.",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ],
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "OBJECT"
+              }
+            },
+            {
+              "description": "Search the user's travel notes.",
+              "name": "search_notes",
+              "parameters": {
+                "properties": {
+                  "limit": {
+                    "description": "Maximum results.",
+                    "type": "INTEGER"
+                  },
+                  "query": {
+                    "description": "Search text.",
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "OBJECT"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "functionCall": {
+                      "args": {
+                        "city": "Paris",
+                        "unit": "celsius"
+                      },
+                      "id": "parity_weather",
+                      "name": "get_weather"
+                    },
+                    "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
+                  }
+                ],
+                "role": "model"
+              },
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 1,
+            "promptTokenCount": 42,
+            "totalTokenCount": 43
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "functionCall": {
+                      "args": {
+                        "query": "Paris packing list"
+                      },
+                      "id": "parity_notes",
+                      "name": "search_notes"
+                    }
+                  }
+                ],
+                "role": "model"
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
+        }
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "parallel_tool_calls"
+}

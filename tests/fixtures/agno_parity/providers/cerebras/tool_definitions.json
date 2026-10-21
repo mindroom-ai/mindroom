@@ -1,0 +1,270 @@
+{
+  "family": "cerebras",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "gpt-oss-120b",
+      "provider": "cerebras"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-oss-120b",
+          "provider": "Cerebras"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "name": "get_weather"
+          },
+          "id": "call_parity_weather",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-oss-120b",
+      "stream": true,
+      "tools": [
+        {
+          "function": {
+            "description": "Return the forecast for one city.",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "City name.",
+                  "type": "string"
+                },
+                "unit": {
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search the user's travel notes.",
+            "name": "search_notes",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "description": "Maximum results.",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Search text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.cerebras.ai/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+                      "name": "get_weather"
+                    },
+                    "id": "call_parity_weather",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "tool_calls",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
+          },
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "tool_definitions"
+}

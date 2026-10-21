@@ -1,0 +1,436 @@
+{
+  "family": "gemini_vertexai",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "Parse the scheduling request into a workflow.",
+        "role": "system"
+      },
+      {
+        "content": "Every weekday at 5:30 UTC, tell me what to pack for Paris.",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "location": "us-central1",
+        "project_id": "parity-project",
+        "vertexai": true
+      },
+      "id": "gemini-3.8-flash",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": {
+      "json_schema": {
+        "$defs": {
+          "CronSchedule": {
+            "description": "Standard cron-like schedule definition.",
+            "properties": {
+              "day": {
+                "default": "*",
+                "description": "1-31, *, or comma-separated",
+                "title": "Day",
+                "type": "string"
+              },
+              "hour": {
+                "default": "*",
+                "description": "0-23, *, */2, or comma-separated",
+                "title": "Hour",
+                "type": "string"
+              },
+              "minute": {
+                "default": "*",
+                "description": "0-59, *, */5, or comma-separated",
+                "title": "Minute",
+                "type": "string"
+              },
+              "month": {
+                "default": "*",
+                "description": "1-12, *, or comma-separated",
+                "title": "Month",
+                "type": "string"
+              },
+              "weekday": {
+                "default": "*",
+                "description": "0-6 (0=Sunday), *, or comma-separated",
+                "title": "Weekday",
+                "type": "string"
+              }
+            },
+            "title": "CronSchedule",
+            "type": "object"
+          }
+        },
+        "description": "Structured representation of a scheduled task or workflow.",
+        "properties": {
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Created By"
+          },
+          "cron_schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CronSchedule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "execute_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Execute At"
+          },
+          "history_limit": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+            "title": "History Limit"
+          },
+          "is_conditional": {
+            "default": false,
+            "title": "Is Conditional",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Configured model alias for this scheduled run only",
+            "title": "Model"
+          },
+          "new_thread": {
+            "default": false,
+            "title": "New Thread",
+            "type": "boolean"
+          },
+          "pre_approved_call": {
+            "default": false,
+            "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+            "title": "Pre Approved Call",
+            "type": "boolean"
+          },
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Room Id"
+          },
+          "schedule_type": {
+            "enum": [
+              "once",
+              "cron"
+            ],
+            "title": "Schedule Type",
+            "type": "string"
+          },
+          "silent": {
+            "default": false,
+            "title": "Silent",
+            "type": "boolean"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thread Id"
+          }
+        },
+        "required": [
+          "schedule_type",
+          "message",
+          "description"
+        ],
+        "title": "ScheduledWorkflow",
+        "type": "object"
+      },
+      "model": "mindroom.scheduling.tasks:ScheduledWorkflow",
+      "type": "pydantic"
+    },
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.8-flash",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Every weekday at 5:30 UTC, tell me what to pack for Paris."
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {
+        "responseMimeType": "application/json",
+        "responseSchema": {
+          "description": "Structured representation of a scheduled task or workflow.",
+          "properties": {
+            "created_by": {
+              "nullable": true,
+              "title": "Created By",
+              "type": "STRING"
+            },
+            "cron_schedule": {
+              "description": "Standard cron-like schedule definition.",
+              "nullable": true,
+              "properties": {
+                "day": {
+                  "default": "*",
+                  "description": "1-31, *, or comma-separated",
+                  "title": "Day",
+                  "type": "STRING"
+                },
+                "hour": {
+                  "default": "*",
+                  "description": "0-23, *, */2, or comma-separated",
+                  "title": "Hour",
+                  "type": "STRING"
+                },
+                "minute": {
+                  "default": "*",
+                  "description": "0-59, *, */5, or comma-separated",
+                  "title": "Minute",
+                  "type": "STRING"
+                },
+                "month": {
+                  "default": "*",
+                  "description": "1-12, *, or comma-separated",
+                  "title": "Month",
+                  "type": "STRING"
+                },
+                "weekday": {
+                  "default": "*",
+                  "description": "0-6 (0=Sunday), *, or comma-separated",
+                  "title": "Weekday",
+                  "type": "STRING"
+                }
+              },
+              "property_ordering": [
+                "minute",
+                "hour",
+                "day",
+                "month",
+                "weekday"
+              ],
+              "title": "CronSchedule",
+              "type": "OBJECT"
+            },
+            "description": {
+              "title": "Description",
+              "type": "STRING"
+            },
+            "execute_at": {
+              "format": "date-time",
+              "nullable": true,
+              "title": "Execute At",
+              "type": "STRING"
+            },
+            "history_limit": {
+              "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
+              "minimum": 0.0,
+              "nullable": true,
+              "title": "History Limit",
+              "type": "INTEGER"
+            },
+            "is_conditional": {
+              "default": false,
+              "title": "Is Conditional",
+              "type": "BOOLEAN"
+            },
+            "message": {
+              "title": "Message",
+              "type": "STRING"
+            },
+            "model": {
+              "description": "Configured model alias for this scheduled run only",
+              "nullable": true,
+              "title": "Model",
+              "type": "STRING"
+            },
+            "new_thread": {
+              "default": false,
+              "title": "New Thread",
+              "type": "BOOLEAN"
+            },
+            "pre_approved_call": {
+              "default": false,
+              "description": "Whether the requester approved this one-time task's tool call while scheduling it",
+              "title": "Pre Approved Call",
+              "type": "BOOLEAN"
+            },
+            "room_id": {
+              "nullable": true,
+              "title": "Room Id",
+              "type": "STRING"
+            },
+            "schedule_type": {
+              "enum": [
+                "once",
+                "cron"
+              ],
+              "title": "Schedule Type",
+              "type": "STRING"
+            },
+            "silent": {
+              "default": false,
+              "title": "Silent",
+              "type": "BOOLEAN"
+            },
+            "thread_id": {
+              "nullable": true,
+              "title": "Thread Id",
+              "type": "STRING"
+            }
+          },
+          "property_ordering": [
+            "schedule_type",
+            "is_conditional",
+            "execute_at",
+            "cron_schedule",
+            "message",
+            "description",
+            "history_limit",
+            "model",
+            "created_by",
+            "thread_id",
+            "room_id",
+            "new_thread",
+            "silent",
+            "pre_approved_call"
+          ],
+          "required": [
+            "schedule_type",
+            "message",
+            "description"
+          ],
+          "title": "ScheduledWorkflow",
+          "type": "OBJECT"
+        }
+      },
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "Parse the scheduling request into a workflow."
+          }
+        ],
+        "role": "user"
+      }
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:generateContent"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "text": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\":"
+              },
+              {
+                "text": " 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}"
+              }
+            ],
+            "role": "model"
+          },
+          "finishReason": "STOP",
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-3.8-flash",
+      "responseId": "parity-response",
+      "usageMetadata": {
+        "candidatesTokenCount": 12,
+        "promptTokenCount": 42,
+        "totalTokenCount": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "structured_output_nested"
+}

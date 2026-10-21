@@ -1,0 +1,484 @@
+{
+  "family": "openai_responses",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "native",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api": "responses",
+      "api_key": "parity-test-key",
+      "id": "gpt-6-astra",
+      "provider": "openai"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Look up one order by id.",
+        "external_execution": false,
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "external_execution": false,
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "OpenAI Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_stored": true,
+        "response_id": "resp_parity",
+        "tool_search_items": [
+          {
+            "arguments": {
+              "queries": [
+                "order"
+              ]
+            },
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "ts_parity",
+            "status": "completed",
+            "type": "tool_search_call"
+          },
+          {
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "tso_parity",
+            "status": "completed",
+            "tools": [
+              {
+                "name": "lookup_order",
+                "parameters": {
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ],
+            "type": "tool_search_output"
+          }
+        ]
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "call_id": "call_parity_order",
+          "function": {
+            "arguments": "{\"order_id\": \"A-1001\"}",
+            "name": "lookup_order"
+          },
+          "id": "fc_parity_order",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "input": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "developer"
+        },
+        {
+          "content": "Where is order A-1001?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-6-astra",
+      "reasoning": {},
+      "store": true,
+      "stream": true,
+      "tools": [
+        {
+          "type": "tool_search"
+        },
+        {
+          "description": "Return the forecast for one city.",
+          "external_execution": false,
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        },
+        {
+          "defer_loading": true,
+          "description": "Look up one order by id.",
+          "external_execution": false,
+          "name": "lookup_order",
+          "parameters": {
+            "properties": {
+              "order_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        },
+        {
+          "defer_loading": true,
+          "description": "Email the invoice for one order.",
+          "external_execution": false,
+          "name": "send_invoice",
+          "parameters": {
+            "properties": {
+              "order_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.openai.com/v1/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": {
+              "queries": [
+                "order"
+              ]
+            },
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "ts_parity",
+            "status": "completed",
+            "type": "tool_search_call"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": {
+              "queries": [
+                "order"
+              ]
+            },
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "ts_parity",
+            "status": "completed",
+            "type": "tool_search_call"
+          },
+          "output_index": 0,
+          "sequence_number": 2,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "item": {
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "tso_parity",
+            "status": "completed",
+            "tools": [
+              {
+                "name": "lookup_order",
+                "parameters": {
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ],
+            "type": "tool_search_output"
+          },
+          "output_index": 1,
+          "sequence_number": 3,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "item": {
+            "call_id": "tsc_parity",
+            "execution": "server",
+            "id": "tso_parity",
+            "status": "completed",
+            "tools": [
+              {
+                "name": "lookup_order",
+                "parameters": {
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ],
+            "type": "tool_search_output"
+          },
+          "output_index": 1,
+          "sequence_number": 4,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "",
+            "call_id": "call_parity_order",
+            "id": "fc_parity_order",
+            "name": "lookup_order",
+            "status": "in_progress",
+            "type": "function_call"
+          },
+          "output_index": 2,
+          "sequence_number": 5,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "delta": "{\"order_id\": \"A-1001\"}",
+          "item_id": "fc_parity_order",
+          "output_index": 2,
+          "sequence_number": 6,
+          "type": "response.function_call_arguments.delta"
+        },
+        "event": "response.function_call_arguments.delta"
+      },
+      {
+        "data": {
+          "arguments": "{\"order_id\": \"A-1001\"}",
+          "item_id": "fc_parity_order",
+          "output_index": 2,
+          "sequence_number": 7,
+          "type": "response.function_call_arguments.done"
+        },
+        "event": "response.function_call_arguments.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "{\"order_id\": \"A-1001\"}",
+            "call_id": "call_parity_order",
+            "id": "fc_parity_order",
+            "name": "lookup_order",
+            "status": "completed",
+            "type": "function_call"
+          },
+          "output_index": 2,
+          "sequence_number": 8,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "arguments": {
+                  "queries": [
+                    "order"
+                  ]
+                },
+                "call_id": "tsc_parity",
+                "execution": "server",
+                "id": "ts_parity",
+                "status": "completed",
+                "type": "tool_search_call"
+              },
+              {
+                "call_id": "tsc_parity",
+                "execution": "server",
+                "id": "tso_parity",
+                "status": "completed",
+                "tools": [
+                  {
+                    "name": "lookup_order",
+                    "parameters": {
+                      "type": "object"
+                    },
+                    "type": "function"
+                  }
+                ],
+                "type": "tool_search_output"
+              },
+              {
+                "arguments": "{\"order_id\": \"A-1001\"}",
+                "call_id": "call_parity_order",
+                "id": "fc_parity_order",
+                "name": "lookup_order",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 9,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search"
+}

@@ -1,0 +1,254 @@
+{
+  "family": "vertexai_claude",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What does my packing note say?",
+        "files": [
+          {
+            "content": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg==",
+            "filename": "packing.txt",
+            "id": "parity-note",
+            "mime_type": "text/plain"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "project_id": "parity-project",
+        "region": "us-east5"
+      },
+      "id": "claude-sonnet-5-5",
+      "provider": "vertexai_claude"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [
+          {
+            "cited_text": "Packing list: umbrella, scarf, walking shoes.",
+            "document_index": 0,
+            "document_title": "packing.txt",
+            "end_char_index": 45,
+            "file_id": null,
+            "start_char_index": 0,
+            "type": "char_location"
+          }
+        ],
+        "urls": []
+      },
+      "content": "Your list says to bring an umbrella.",
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "citations": [
+              {
+                "cited_text": "Packing list: umbrella, scarf, walking shoes.",
+                "document_index": 0,
+                "document_title": "packing.txt",
+                "end_char_index": 45,
+                "start_char_index": 0,
+                "type": "char_location"
+              }
+            ],
+            "text": "Your list says to bring an umbrella.",
+            "type": "text"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "VertexAI"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "end_turn"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "end_turn"
+  },
+  "request": {
+    "body": {
+      "anthropic_version": "vertex-2023-10-16",
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "content": [
+            {
+              "text": "What does my packing note say?",
+              "type": "text"
+            },
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "citations": {
+                "enabled": true
+              },
+              "source": {
+                "data": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg==",
+                "media_type": "text/plain",
+                "type": "text"
+              },
+              "type": "document"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "stream": true,
+      "system": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:streamRawPredict"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "citations": [],
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "citation": {
+              "cited_text": "Packing list: umbrella, scarf, walking shoes.",
+              "document_index": 0,
+              "document_title": "packing.txt",
+              "end_char_index": 45,
+              "start_char_index": 0,
+              "type": "char_location"
+            },
+            "type": "citations_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "Your list says to bring",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": " an umbrella.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "claude_citations"
+}

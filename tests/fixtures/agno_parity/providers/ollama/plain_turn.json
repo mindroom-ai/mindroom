@@ -1,0 +1,118 @@
+{
+  "family": "ollama",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "host": "http://localhost:11434",
+      "id": "qwen3.8:27b",
+      "provider": "ollama"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "qwen3.8:27b",
+          "provider": "Ollama"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "qwen3.8:27b",
+      "stream": true,
+      "tools": []
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://localhost:11434/api/chat"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/x-ndjson"
+    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": "Pack a light rain jacket",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": " and comfortable shoes.",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "plain_turn"
+}
