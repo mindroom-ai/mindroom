@@ -5391,8 +5391,11 @@ visibility = [
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.hooks",
+    "mindroom.llm_request_logging",
+    "mindroom.providers.model_http_client",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.execution_authority",
+    "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
@@ -8182,6 +8185,15 @@ visibility = ["mindroom.providers.model_loading"]
 path = "mindroom.providers.ollama_model"
 depends_on = ["mindroom.providers.tool_policy"]
 visibility = ["mindroom.providers.model_loading"]
+
+[[modules]]
+path = "mindroom.tool_system.agno_compat_tool_hooks"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_tool_hooks"]
+expose = ["install_patch"]
 
 [[modules]]
 path = "mindroom.custom_tools.matrix_message_idempotency"

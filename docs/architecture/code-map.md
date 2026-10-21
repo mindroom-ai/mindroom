@@ -374,6 +374,7 @@ Matrix sync callback
 | `tool_system/tool_function.py` | `ToolFunction`, the only tool shape the owned loop sees: finished schema, loop flags, entrypoint, injected parameter names |
 | `tool_system/agno_toolkits.py` | Adapts Agno toolkits and functions to `ToolFunction` once, and builds the Agno-shaped call-time arguments (run context, actor stand-in, media) their entrypoints expect |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments and runs one call through middleware to its outcome: injection, synchronous offload, generator draining, error text |
+| `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py` for the runners that still dispatch Agno `FunctionCall`s; dispatch, approval, and cancellation ownership stay with the tool runtime |
 | `agent_loop/build.py` | `AgentBuild`, what `create_agent` produces for the loop, and `prompt_for_turn`, its system message with one turn's context appended |
 | `agent_loop/prompt.py` | `PromptSpec` and `render_system_message`: an agent's system message from its prompt inputs, in the layout Agno 3.0.9 sent |
 | `agent_loop/structured.py` | Structured-output response formats and JSON prompt per provider capability, and lenient parsing of answers into the schema |
