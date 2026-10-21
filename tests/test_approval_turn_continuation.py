@@ -3,30 +3,28 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.base import RunStatus
-from agno.tools.calculator import CalculatorTools
 
-from mindroom.agents import create_agent
+from mindroom import agents
 from mindroom.ai import ai_response
 from mindroom.approval.execution import (
     _collect_agent_continuation,
     _continuation_turn_context,
     _stream_continuation_turn,
 )
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.provider import ToolCallReady
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.message_target import MessageTarget
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -34,9 +32,7 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResumedAttempt,
-    paused_attempt_from_response,
 )
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
@@ -46,71 +42,93 @@ from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDi
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from agno.models.message import Message
-
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.events import RunEvent
+    from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _continue_call(call_id: str) -> ModelResponse:
+def _continue_call(call_id: str) -> list[ScriptStep]:
     """Return a next-turn switch to the current model, which ends the step and continues the same turn."""
-    return _call("switch_thread_model", call_id, model_name="default", when="next-turn")
+    return calls(tool_call("switch_thread_model", call_id, model_name="default", when="next-turn"))
 
 
-def _deferred_call(call_id: str, function_name: str, **arguments: object) -> ModelResponse:
+def _deferred_call(call_id: str, function_name: str, **arguments: object) -> list[ScriptStep]:
     """Return a call of a deferred function through the call_tool wrapper the provider sees."""
-    return _call("call_tool", call_id, name=function_name, arguments=arguments)
+    return calls(tool_call("call_tool", call_id, name=function_name, arguments=arguments))
 
 
-def _call(function_name: str, call_id: str, **arguments: object) -> ModelResponse:
-    return ModelResponse(
-        tool_calls=[
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": function_name, "arguments": json.dumps(arguments)},
-            },
-        ],
-    )
+def _call(function_name: str, call_id: str, **arguments: object) -> list[ScriptStep]:
+    return calls(tool_call(function_name, call_id, **arguments))
+
+
+def _failing(message: str) -> list[ScriptStep]:
+    """Return a turn whose provider request fails."""
+
+    async def fail() -> None:
+        raise ProviderError(message, provider="Synthetic")
+
+    return [Await(fail)]
 
 
 @dataclass
-class _ScriptedModel(SyntheticModel):
-    """Replace only provider requests, checking the real schema on each call."""
+class _CheckedModel(ScriptedModel):
+    """Replay the scripted turns, checking that each requested call names a tool the request offered."""
 
-    responses: list[ModelResponse | RuntimeError] = field(default_factory=list)
-    requests: list[list[Message]] = field(default_factory=list)
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        offered = {tool.name for tool in request.tools}
+        async for event in super().stream(request):
+            if isinstance(event, ToolCallReady):
+                assert event.call["function"]["name"] in offered, (event.call, sorted(offered))
+            yield event
 
-    async def ainvoke(
-        self,
-        messages: list[Message],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None = None,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        self.requests.append(deepcopy(messages))
-        response = self.responses.pop(0)
-        if isinstance(response, RuntimeError):
-            raise response
-        names = {tool["function"]["name"] for tool in tools or ()}
-        for call in response.tool_calls or ():
-            assert call["function"]["name"] in names
-        return response
 
-    async def ainvoke_stream(
-        self,
-        messages: list[Message],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None = None,
-        **kwargs: object,
-    ) -> AsyncIterator[ModelResponse]:
-        yield await self.ainvoke(messages, tools=tools, **kwargs)
+def _identity(session_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=session_id,
+    )
+
+
+async def _paused_turn(
+    config: Config,
+    paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+    prompt: str,
+    *,
+    show_tool_calls: bool = True,
+) -> PausedAttempt:
+    """Run one reply of ``general`` as the response runner does and return the pause it suspended on."""
+    ctx = make_turn_context(
+        "general",
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await ai_response(
+            ctx,
+            prompt=prompt,
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+            show_tool_calls=show_tool_calls,
+            supports_native_tool_approval=True,
+        )
+    return raised.value.paused
 
 
 @pytest.mark.asyncio
@@ -135,11 +153,8 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
         ),
         paths,
     )
-    responses = [_deferred_call("sum", "add", a=2, b=3)]
-    monkeypatch.setattr(
-        "mindroom.agents._load_agent_model_instance",
-        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
-    )
+    model = _CheckedModel([_deferred_call("sum", "add", a=2, b=3)])
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
             make_turn_context("general", session_id="deferred-approval"),
@@ -150,7 +165,7 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
             supports_native_tool_approval=True,
         )
     paused = raised.value.paused
-    assert not responses
+    assert not model.turns
     assert [(entry.tool_name, entry.tool_args) for entry in paused.tools] == [("add", {"a": 2, "b": 3})]
     assert [entry.tool_name for entry in paused.tool_trace] == ["add"]
     assert "call_tool" not in paused.response_text
@@ -192,6 +207,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         Config.model_validate(
             {
                 "defaults": {"tools": []},
+                "memory": {"backend": "none"},
                 "agents": {
                     "general": {
                         "display_name": "General",
@@ -217,52 +233,40 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         ),
         paths,
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="approval-session",
-    )
-    responses: list[ModelResponse | RuntimeError] = [
+    identity = _identity("approval-session")
+    turns: list[list[ScriptStep]] = [
         _call("add", "approved", a=2, b=3),
         _continue_call("continue"),
         *(
             [_continue_call(f"continue-{index}") for index in range(4)]
             if outcome == "limit"
-            else [
-                _deferred_call("sleeper", "sleep", seconds=0),
-                ModelResponse(content="Finished the calculation and wait."),
-            ]
+            else [_deferred_call("sleeper", "sleep", seconds=0), answer("Finished the calculation and wait.")]
         ),
     ]
     if outcome == "error":
-        responses[2:] = [RuntimeError("Provider continuation failed")]
+        turns[2:] = [_failing("Provider continuation failed")]
     if outcome == "pause_limit":
-        responses[3:] = [_continue_call(f"continue-again-{index}") for index in range(4)]
+        turns[3:] = [_continue_call(f"continue-again-{index}") for index in range(4)]
     if outcome == "immediate_pause":
-        responses[1:1] = [_call("add", "approved-again", a=4, b=5)]
+        turns[1:1] = [_call("add", "approved-again", a=4, b=5)]
     if switch_when:
-        responses.insert(1, _call("switch_thread_model", "switcher", model_name="alternate", when=switch_when))
-    requests: list[list[Message]] = []
+        turns.insert(1, _call("switch_thread_model", "switcher", model_name="alternate", when=switch_when))
+    model = _CheckedModel(turns)
     models: list[str] = []
 
-    def load_model(
+    def build_model(
         _config: Config,
         _paths: RuntimePaths,
         model_name: str,
         _execution_identity: ToolExecutionIdentity | None = None,
-        **_kwargs: object,
-    ) -> _ScriptedModel:
-        if outcome == "preparation_error" and len(requests) == 2:
+    ) -> ScriptedModel:
+        if outcome == "preparation_error" and len(model.requests) == 2:
             msg = "Model preparation failed"
             raise RuntimeError(msg)
         models.append(model_name)
-        return _ScriptedModel(id="synthetic", responses=responses, requests=requests)
+        return model
 
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    monkeypatch.setattr(agents, "_build_agent_model_provider", build_model)
     executed: list[str] = []
     original_add = CalculatorTools.add
     original_sleep = SleepTools.sleep
@@ -279,26 +283,9 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
 
     monkeypatch.setattr(CalculatorTools, "add", add)
     monkeypatch.setattr(SleepTools, "sleep", sleep)
-    storage = create_session_storage("general", config, paths, identity)
-    actor = create_agent(
-        "general",
-        config,
-        paths,
-        identity,
-        history_storage=storage,
-        supports_native_tool_approval=True,
-    )
     prompt = "Calculate the sum, wait, and finish."
-    paused = await actor.arun(prompt, session_id=identity.session_id, user_id=identity.requester_id)
-    assert paused.status == RunStatus.paused
+    paused = await _paused_turn(config, paths, identity, prompt, show_tool_calls=show_tool_calls)
     assert executed == []
-    captured = paused_attempt_from_response(
-        paused,
-        fallback_session_id=identity.session_id,
-        fallback_run_id=paused.run_id,
-        toolkit_owners=toolkit_owners_for_agents([actor]),
-    )
-    assert captured is not None
     continuation = approval_continuation(
         approval_id="approval-example",
         run_id=paused.run_id,
@@ -358,10 +345,11 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         )
 
     if outcome in {"error", "preparation_error"}:
+        # The fresh attempt's provider failure becomes the reply's error text, which the continuation raises.
         with pytest.raises(RuntimeError):
             await resume()
         assert executed == ["add"]
-        assert len(responses) == (2 if outcome == "preparation_error" else 0)
+        assert len(model.turns) == (2 if outcome == "preparation_error" else 0)
         return
     result = await resume()
     if outcome == "immediate_pause":
@@ -377,7 +365,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         assert "need confirmation" not in result.response_text
         assert len(run_ids) == 4
         assert executed == ["add"]
-        assert not responses
+        assert not model.turns
         return
     assert len(run_ids) == (2 if switch_when else 1)
     assert run_ids[0] != paused.run_id
@@ -414,7 +402,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         assert "need confirmation" not in result.response_text
         assert len(run_ids) == 4
         assert executed == ["add", "sleep"]
-        assert not responses
+        assert not model.turns
         return
     assert isinstance(result, CompletedApprovalRun)
     assert result.metadata_content[AI_RUN_METADATA_KEY]["run_id"] == run_ids[-1]
@@ -423,11 +411,27 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     assert "need confirmation" not in result.response_text
     assert executed == ["add", "sleep"]
     assert models[-1] == ("alternate" if switch_when == "after-toolcall" else "default")
-    assert not responses
-    assert any(message.role == "tool" and message.tool_call_id == "approved" for message in requests[-1])
-    assert any(message.role == "tool" and message.tool_call_id == "continue" for message in requests[-1])
+    assert not model.turns
+    last = model.requests[-1].messages
+    assert any(message.role == "tool" and message.tool_call_id == "approved" for message in last)
+    assert any(message.role == "tool" and message.tool_call_id == "continue" for message in last)
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
+
+
+def _finished(
+    *,
+    run_id: str = "run-saved",
+    status: RunStatus = RunStatus.completed,
+    content: str | None = None,
+    tools: list[ToolExecution] | None = None,
+) -> RunFinished:
+    return RunFinished(RunRecord(run_id=run_id, session_id="session", status=status, content=content, tools=tools))
+
+
+async def _events(*items: RunEvent) -> AsyncIterator[RunEvent]:
+    for item in items:
+        yield item
 
 
 @pytest.mark.asyncio
@@ -435,6 +439,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
 @pytest.mark.parametrize("boundary", ["restored", "new"])
 async def test_approval_settlement_preserves_tool_boundary(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     show_tool_calls: bool,
     boundary: str,
@@ -442,18 +447,16 @@ async def test_approval_settlement_preserves_tool_boundary(
     """Terminal-only approval text must cross the real driver handoff with its pending separator."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
-        Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}}),
+        Config.model_validate(
+            {
+                "agents": {"general": {"display_name": "General", "tools": []}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+            },
+        ),
         paths,
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session",
-    )
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: _CheckedModel([]))
+    identity = _identity("session")
     continuation = approval_continuation(
         approval_id="approval-boundary",
         run_id="run-saved",
@@ -476,15 +479,10 @@ async def test_approval_settlement_preserves_tool_boundary(
         ),
         track_hidden_tools=True,
     )
+    events = [ToolStarted(tool), ToolCompleted(tool)] if boundary == "new" else []
+    events.append(_finished(content="After approval.", tools=[tool]))
 
-    async def events() -> AsyncIterator[object]:
-        if boundary == "new":
-            yield ToolCallStartedEvent(tool=tool)
-            yield ToolCallCompletedEvent(tool=tool)
-        yield RunCompletedEvent(content="After approval.")
-        yield RunOutput(run_id="run-saved", session_id="session", status=RunStatus.completed, tools=[tool])
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
+    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
     trace: list[ToolTraceEntry] = []
     result = await _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
@@ -520,15 +518,7 @@ async def test_approval_settlement_uses_typed_status(
     """Display metadata cannot grant or deny completion of an approved response."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session",
-    )
+    identity = _identity("session")
     continuation = approval_continuation(
         approval_id="approval-status",
         run_id="run-saved",
@@ -544,10 +534,10 @@ async def test_approval_settlement_uses_typed_status(
         on_completed: Callable[[CompletedAttempt], None],
         run_metadata_collector: dict[str, Any],
         **_kwargs: object,
-    ) -> AsyncIterator[RunContentEvent]:
+    ) -> AsyncIterator[ContentDelta]:
         if wire_status is not None:
             run_metadata_collector[AI_RUN_METADATA_KEY] = {"status": wire_status}
-        yield RunContentEvent(content="Terminal response")
+        yield ContentDelta("Terminal response")
         on_completed(CompletedAttempt(status=status))
 
     monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
@@ -588,19 +578,16 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
         ),
     )
     presentation = CollectedStreamPresentation(show_tool_calls=False)
+    parent_tools = [tool]
+    events: list[RunEvent] = []
+    if source == "child":
+        events.append(ToolCompleted(tool, parent_run_id="parent"))
+    elif source == "projected_child":
+        events.append(ToolCompleted(replace(tool, tool_call_id="delegate:old-continue")))
+        parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
+    events.append(_finished(run_id="parent", content="Final parent answer.", tools=parent_tools))
 
-    async def events() -> AsyncIterator[object]:
-        parent_tools = [tool]
-        if source == "child":
-            yield ToolCallCompletedEvent(run_id="child", parent_run_id="parent", tool=tool)
-        elif source == "projected_child":
-            projected = replace(tool, tool_call_id="delegate:old-continue")
-            yield ToolCallCompletedEvent(run_id="parent", tool=projected)
-            parent_tools = [ToolExecution(tool_call_id="delegate", tool_name="run_subagent", result="Child finished.")]
-        yield RunCompletedEvent(run_id="parent", content="Final parent answer.")
-        yield RunOutput(run_id="parent", tools=parent_tools, status=RunStatus.completed, content="Final parent answer.")
-
-    collected = await _collect_agent_continuation(events(), presentation, progress=None)
+    collected = await _collect_agent_continuation(_events(*events), presentation, progress=None)
 
     assert presentation.final_text() == ""
     assert collected.terminal_content == "Final parent answer."
@@ -624,6 +611,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         Config.model_validate(
             {
                 "defaults": {"tools": []},
+                "memory": {"backend": "none"},
                 "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
                 "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
                 "tool_approval": {
@@ -637,44 +625,21 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         ),
         paths,
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="progress-session",
+    identity = _identity("progress-session")
+    model = _CheckedModel(
+        [
+            _call("add", "approved", a=2, b=3),
+            *(
+                [_call("multiply", "gated", a=5, b=2)]
+                if outcome == "pause"
+                else [_call("subtract", "second", a=5, b=1), answer("Both results are ready.")]
+            ),
+        ],
     )
-    responses: list[ModelResponse | RuntimeError] = [
-        _call("add", "approved", a=2, b=3),
-        *(
-            [_call("multiply", "gated", a=5, b=2)]
-            if outcome == "pause"
-            else [_call("subtract", "second", a=5, b=1), ModelResponse(content="Both results are ready.")]
-        ),
-    ]
-    monkeypatch.setattr(
-        "mindroom.agents._load_agent_model_instance",
-        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
-    )
-    storage = create_session_storage("general", config, paths, identity)
-    actor = create_agent(
-        "general",
-        config,
-        paths,
-        identity,
-        history_storage=storage,
-        supports_native_tool_approval=True,
-    )
-    paused = await actor.arun(
-        "Add, then keep going.",
-        session_id=identity.session_id,
-        user_id=identity.requester_id,
-    )
-    assert paused.status == RunStatus.paused
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+    paused = await _paused_turn(config, paths, identity, "Add, then keep going.")
     saved = CollectedStreamPresentation(show_tool_calls=True, response_text="Adding first.")
-    saved.start_tool((paused.tools or [])[0])
+    saved.start_tool(paused.tools[0])
     continuation = approval_continuation(
         approval_id="approval-progress",
         run_id=paused.run_id,
@@ -721,9 +686,11 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     assert resumed[0] == "Adding first.\n\n🔧 `add` [1]\n\n"
     assert all("🔧 `add` [1] ⏳" not in content for content in resumed)
     if outcome == "pause":
+        # The gated call is announced as it is planned, so the pending marker reaches the room before the pause.
         assert isinstance(result, PausedAttempt)
-        assert resumed == ["Adding first.\n\n🔧 `add` [1]\n\n"]
-        assert "🔧 `multiply` [2] ⏳" in result.response_text
+        assert "🔧 `multiply` [2] ⏳" in resumed[1]
+        assert len(resumed) == 2
+        assert result.response_text == resumed[-1]
         return
     assert isinstance(result, CompletedApprovalRun)
     assert "🔧 `subtract` [2] ⏳" in resumed[1]
@@ -739,15 +706,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     """A fresh model attempt after approval streams its text, then hands its pause back with that presentation."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = Config.model_validate({"agents": {"general": {"display_name": "General", "tools": []}}})
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session",
-    )
+    identity = _identity("session")
     continuation = approval_continuation(
         approval_id="approval-fresh-pause",
         run_id="run-saved",
@@ -760,8 +719,8 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     gated = ToolExecution(tool_call_id="call-2", tool_name="publish_report", tool_args={})
 
     async def stream(_ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[object]:
-        yield RunContentEvent(content=" Next, publishing.")
-        yield ToolCallStartedEvent(tool=gated)
+        yield ContentDelta(" Next, publishing.")
+        yield ToolStarted(gated)
         raise ResponsePausedForApproval(
             PausedAttempt(session_id="session", run_id="run-fresh", tools=(gated,), toolkit_owners={}),
         )
