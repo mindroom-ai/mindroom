@@ -14,6 +14,8 @@ from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
+from mindroom.providers.openai.responses_wire import ResponsesWire, responses_request_kwargs
+from mindroom.providers.openai.settings import ResponsesSettings
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _make_config
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _NATIVE = NativeCompactionReplay(route="test-route", threshold=2000)
+_RESPONSES_WIRE = ResponsesWire(route="openai", provider_name="openai", store=True, explicit_breakpoint=False)
 
 
 def probe() -> str:
@@ -36,10 +39,10 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
     monkeypatch: pytest.MonkeyPatch,
     summary_fails: bool,
 ) -> None:
-    """Once the provider's compaction left a request over the window, later requests of the run no longer ask for it.
+    """Once the provider's compaction left a request over the window, later requests of the run run without it.
 
-    The route's stored checkpoints still replay (the threshold goes, the route stays); a failed fallback changes
-    nothing, so the provider keeps compacting.
+    On the Responses wire that means no ``context_management`` and the route's own storage setting again; a failed
+    fallback changes nothing, so the provider keeps compacting.
     """
     config, runtime_paths = _make_config(
         tmp_path,
@@ -88,9 +91,28 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
     assert record.content == "done"
     first, second = model.requests
     assert first.native_compaction == _NATIVE
+    first_body = _responses_body(first)
+    assert first_body["context_management"] == [{"type": "compaction", "compact_threshold": 2000}]
+    assert first_body["store"] is False
+    second_body = _responses_body(second)
     if summary_fails:
         assert second.native_compaction == _NATIVE
+        assert second_body["context_management"] == first_body["context_management"]
+        assert second_body["store"] is False
         assert not any(is_compaction_summary(message) for message in second.messages)
     else:
-        assert second.native_compaction == NativeCompactionReplay(route="test-route", threshold=None)
+        assert second.native_compaction is None
+        assert "context_management" not in second_body
+        assert second_body["store"] is True
         assert is_compaction_summary(second.messages[-1])
+
+
+def _responses_body(request: ModelRequest) -> dict[str, object]:
+    """Return the request body the Responses wire sends for ``request`` on a route that stores responses."""
+    kwargs = responses_request_kwargs(
+        model_id="test-model",
+        request=request,
+        settings=ResponsesSettings(),
+        wire=_RESPONSES_WIRE,
+    )
+    return kwargs["extra_body"]

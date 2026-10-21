@@ -245,13 +245,13 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
 
 
 def _stop_native_compaction(binding: _MidTurnCompaction, state: LoopState) -> None:
-    """Stop asking the provider to compact for the rest of this run; the route's stored checkpoints still replay.
+    """Turn the provider's compaction off for the rest of this run; the fold replaced the checkpoints it replayed.
 
-    Later requests of the run are then sized as text requests, so the hook keeps compacting them itself.
+    Later requests of the run carry no native settings, so each route sends them as plain requests (Responses with
+    its storage setting restored), and the hook sizes and compacts them as text itself.
     """
-    assert binding.native_compaction is not None
-    binding.native_compaction = replace(binding.native_compaction, threshold=None)
-    state.request_template = replace(state.request_template, native_compaction=binding.native_compaction)
+    binding.native_compaction = None
+    state.request_template = replace(state.request_template, native_compaction=None)
 
 
 async def _summarize(
@@ -382,7 +382,7 @@ def _policy(binding: _MidTurnCompaction) -> _Policy | None:
         inputs=inputs,
         limit=context_budget_after_reserve(plan.replay_window_tokens, plan.reserve_tokens),
         fit_limit=context_budget_after_reserve(model_window or plan.replay_window_tokens, plan.reserve_tokens),
-        native_route=native.route if native is not None and native.threshold is not None else None,
+        native_route=native.route if native is not None else None,
     )
 
 
