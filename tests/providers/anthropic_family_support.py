@@ -2,9 +2,9 @@
 
 The goldens under ``tests/fixtures/agno_parity/providers/{anthropic,vertexai_claude,bedrock_claude}`` pin the
 request Agno 3.0.9 plus MindRoom's patches sent and the message they parsed; ``README.md`` beside them
-documents the format and normalization this module mirrors. Two pipeline stages that are not the adapter's
-(the loop's portable tool-search projection and the media-fallback note) have minimal stand-ins here so the
-request bodies compare whole.
+documents the format and normalization this module mirrors. Three pipeline stages that are not the adapter's
+(the loop's portable tool-search projection, its tool-job wait parameter, and the media-fallback note) have
+minimal stand-ins here so the request bodies compare whole.
 """
 
 from __future__ import annotations
@@ -62,6 +62,32 @@ _PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLOUD_ML_", "GOOGLE_")
 # The marker and prompt the media-fallback wrapper (a sibling pipeline stage) puts on a message that lost media.
 _FALLBACK_MARKER = "[Inline media unavailable for this model]"
 _CALL_TOOL_NAME = "call_tool"
+# Every golden input key this harness turns into the owned request; ``portable_replay`` selects explicit history
+# replay on Responses routes, which Claude routes always use.
+_HANDLED_INPUT_KEYS = frozenset(
+    {
+        "deferred_tool_search",
+        "messages",
+        "model_config",
+        "native_compaction",
+        "portable_replay",
+        "provider_tools_disabled",
+        "response_format",
+        "stream",
+        "tool_choice",
+        "tool_jobs",
+        "tools",
+    },
+)
+# The optional waiting budget a turn that can start tool jobs adds to each managed function's schema.
+_BACKGROUND_AFTER_SCHEMA = {
+    "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+    "description": (
+        "Seconds to wait for this call before it continues in the background, without cancelling it. "
+        "Omit or pass null to wait until completion or a newer message you answer; "
+        "zero continues in the background at once and returns a job handle."
+    ),
+}
 
 
 def fixture_paths() -> list[Path]:
@@ -246,18 +272,55 @@ def without_omitted_media(messages: Sequence[Message], omitted: frozenset[MediaK
     return stripped
 
 
+def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
+    """Return the definition of one ``Function.to_dict()`` dict, keeping each field it omitted as None."""
+    return ToolSpec(
+        name=tool["name"],
+        description=tool.get("description"),
+        parameters=tool.get("parameters") or {},
+        strict=tool.get("strict"),
+        requires_confirmation=tool.get("requires_confirmation"),
+        external_execution=tool.get("external_execution"),
+        approval_type=tool.get("approval_type"),
+    )
+
+
+def with_background_after(tools: Sequence[ToolSpec], managed: frozenset[str]) -> list[ToolSpec]:
+    """Stand in for the loop's tool-job projection: each managed function gains the optional wait parameter."""
+    projected: list[ToolSpec] = []
+    for tool in tools:
+        if tool.name not in managed:
+            projected.append(tool)
+            continue
+        parameters = deepcopy(dict(tool.parameters))
+        parameters.setdefault("properties", {})["background_after"] = deepcopy(_BACKGROUND_AFTER_SCHEMA)
+        projected.append(replace(tool, parameters=parameters))
+    return projected
+
+
 def request_from_input(case_input: dict[str, Any], provider: ClaudeProvider) -> ModelRequest:
-    """Turn a golden's input into the owned request the loop would hand the adapter."""
+    """Turn a golden's input into the owned request the loop would hand the adapter.
+
+    A decision request the capture sent inside ``without_provider_tools()`` is expressed by its ``tool_choice``
+    of ``"none"`` alone, and a native-compaction input becomes the replay settings history planning asks the
+    adapter for.
+    """
+    unhandled = set(case_input) - _HANDLED_INPUT_KEYS
+    assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
     messages = [Message.from_dict(deepcopy(message)) for message in case_input["messages"]]
-    tools = [
-        ToolSpec(
-            name=tool["name"],
-            description=tool.get("description") or "",
-            parameters=tool.get("parameters") or {},
-            strict=bool(tool.get("strict", False)),
+    tools = [tool_spec_from_dict(tool) for tool in case_input["tools"]]
+    if (tool_jobs := case_input.get("tool_jobs")) is not None:
+        tools = with_background_after(tools, frozenset(tool_jobs["managed"]))
+    if case_input.get("provider_tools_disabled"):
+        assert case_input["tool_choice"] == "none", "decision requests disable tool selection through tool_choice"
+    native_compaction = None
+    if (native := case_input.get("native_compaction")) is not None:
+        native_compaction = provider.native_compaction_settings(
+            threshold=native["threshold"],
+            history_generation=native["history_generation"],
+            allow_authored=True,
         )
-        for tool in case_input["tools"]
-    ]
+        assert native_compaction is not None, "the golden's route supports native compaction"
     deferred_tool_names: frozenset[str] = frozenset()
     deferred = case_input["deferred_tool_search"]
     if deferred is not None:
@@ -272,7 +335,9 @@ def request_from_input(case_input: dict[str, Any], provider: ClaudeProvider) -> 
         tools=tools,
         tool_choice=case_input["tool_choice"],
         response_format=_response_format(case_input["response_format"]),
+        stream=case_input["stream"],
         deferred_tool_names=deferred_tool_names,
+        native_compaction=native_compaction,
     )
 
 

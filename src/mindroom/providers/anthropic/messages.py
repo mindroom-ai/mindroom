@@ -3,8 +3,8 @@
 One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
 fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
 resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. Structured output requests, which no caller streams, are sent without streaming as
-before. The only state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
+finished message once. A request with ``stream=False`` is sent as one non-streaming call instead. The only
+state an adapter keeps is the ambient Google credentials a Vertex route discovers once.
 """
 
 from __future__ import annotations
@@ -232,8 +232,8 @@ class ClaudeProvider:
         """Send one request and yield its events; the SDK's message stream accumulates the final message.
 
         ``message_start`` reports the input and cache usage as a partial ``UsageReported`` so a stream that
-        stops early still settles what Anthropic bills. A structured-output request is sent without streaming,
-        as every caller drains it whole.
+        stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
+        streaming and yields its usage and finished turn once the response arrives.
         """
         started = time.monotonic()
         messages = await inline_url_media(request.messages, self.http_client)
@@ -243,7 +243,7 @@ class ClaudeProvider:
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None
         try:
-            if request.response_format is not None:
+            if not request.stream:
                 response = await (
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
@@ -358,13 +358,16 @@ class ClaudeProvider:
         *,
         strict_tools: bool,
     ) -> dict[str, Any]:
-        """Return the request parameters beside ``messages``, ``system``, and ``tools``, with the betas they need."""
+        """Return the request parameters beside ``messages``, ``system``, and ``tools``, with the betas they need.
+
+        Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
+        """
         params = self._with_sampling_in_extra_body(self._authored_params(request))
         extra_body = params.get("extra_body") or {}
         context_management = extra_body.get("context_management", params.get("context_management")) or {}
         reject_paused_compaction(context_management)
         betas = list(self.settings.betas or [])
-        if output_format is not None or strict_tools:
+        if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or uses_compaction_edit(context_management):
             betas.append(COMPACTION_BETA)
@@ -391,7 +394,8 @@ class ClaudeProvider:
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
             enable_citations=output_format is None,
         )
-        strict_allowed = self.route == "anthropic"
+        # Vertex rejects the tool-level strict field.
+        strict_allowed = self.route != "vertexai_claude"
         tools = [
             *format_claude_tools(request.tools, strict_allowed=strict_allowed),
             *(dict(tool) for tool in request.native_tools),
@@ -422,7 +426,8 @@ class ClaudeProvider:
         return _PreparedRequest(
             client=self._client(overrides.timeout_seconds, overrides.sdk_max_retries),
             kwargs=body,
-            beta=bool(body.get("betas")) or "context_management" in body,
+            # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
+            beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=request_uses_native_checkpoint(projected, route),
         )
 
@@ -505,18 +510,21 @@ class ClaudeProvider:
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:
-    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed."""
+    """Return the output a stream event carries: a text or thinking delta, or a tool call whose block closed.
+
+    The SDK builds a delta or block of a type it does not know as the first model of its union, keeping the
+    unknown ``type``, so the type decides.
+    """
     if isinstance(event, (RawContentBlockDeltaEvent, BetaRawContentBlockDeltaEvent)):
         delta = event.delta
-        if isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
+        if delta.type == "text_delta" and isinstance(delta, (AnthropicTextDelta, BetaTextDelta)):
             return TextDelta(delta.text)
-        if isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
+        if delta.type == "thinking_delta" and isinstance(delta, (AnthropicThinkingDelta, BetaThinkingDelta)):
             return ReasoningDelta(delta.thinking)
-    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)) and isinstance(
-        event.content_block,
-        (ToolUseBlock, BetaToolUseBlock),
-    ):
-        return ToolCallReady(tool_call_from_block(event.content_block))
+    elif isinstance(event, (ParsedContentBlockStopEvent, ParsedBetaContentBlockStopEvent)):
+        block = event.content_block
+        if block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
+            return ToolCallReady(tool_call_from_block(block))
     return None
 
 
