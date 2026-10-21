@@ -19,6 +19,7 @@ __all__ = [
     "GRAPH_ME_URL",
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_people_oauth_provider",
     "microsoft_teams_oauth_provider",
     "microsoft_todo_oauth_provider",
     "microsoft_token_url",
@@ -179,4 +180,14 @@ def microsoft_teams_oauth_provider() -> OAuthProvider:
             "ChatMessage.Send",
         ),
         status_capabilities=("read and send Teams channel and chat messages",),
+    )
+
+
+def microsoft_people_oauth_provider() -> OAuthProvider:
+    """Return the organization directory provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_people",
+        display_name="Microsoft 365 People",
+        scopes=("User.Read.All",),
+        status_capabilities=("look up people, their managers, and their direct reports in the directory",),
     )

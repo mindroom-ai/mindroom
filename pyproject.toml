@@ -311,6 +311,7 @@ mem0 = [
 ]
 memory = []
 microsoft_files = []
+microsoft_people = []
 microsoft_teams = []
 microsoft_todo = []
 modelslabs = [

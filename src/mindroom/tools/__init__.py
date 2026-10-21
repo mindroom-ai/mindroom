@@ -101,6 +101,7 @@ from mindroom.tools.matrix_room import matrix_room_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
 from mindroom.tools.microsoft_files import microsoft_files_tools
+from mindroom.tools.microsoft_people import microsoft_people_tools
 from mindroom.tools.microsoft_teams import microsoft_teams_tools
 from mindroom.tools.microsoft_todo import microsoft_todo_tools
 from mindroom.tools.modelslabs import modelslabs_tools
@@ -245,6 +246,7 @@ __all__ = [
     "matrix_voice_message_tools",
     "mem0_tools",
     "microsoft_files_tools",
+    "microsoft_people_tools",
     "microsoft_teams_tools",
     "microsoft_todo_tools",
     "modelslabs_tools",
