@@ -67,7 +67,7 @@ _TIME_ZONE = re.compile(r"[A-Za-z][A-Za-z0-9 ._+/()-]{0,63}")
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CHUNK_BYTES = 1024 * 1024
 _OFFSET = re.compile(r"[0-9]{1,10}")
-_USER_PREFIX = re.compile(r"^/users/[^/]+")
+_USER_PREFIX = re.compile(r"^/users(/[^/]+|\('[^/]+'\))(?=/|$)", re.IGNORECASE)
 _STATUS_ERRORS = {
     403: ("forbidden", "The connected Microsoft account has no permission for this."),
     404: ("not_found", "Microsoft Graph found nothing there, or the connected account cannot see it."),
@@ -121,9 +121,10 @@ def next_page_token(payload: Mapping[str, Any]) -> str | None:
 def page_path(page_token: object, collection: str) -> str:
     """Return the Graph path a page token continues, refusing anything outside the caller's own collection.
 
-    `collection` is a regular expression the token's path must match in full. Graph may phrase a next link
-    differently from the first request: a leading `/users/{id}` is matched as the `/me` it stands for, and
-    `collection` names any other form, such as a drive path instead of `/me/drive`.
+    `collection` is a regular expression the token's path must match in full, ignoring case as Graph does.
+    Graph may phrase a next link differently from the first request: a leading `/users/{id}` or `/users('{id}')`
+    is matched as the `/me` it stands for, and `collection` names any other form, such as a drive path instead of
+    `/me/drive`.
     The token must also carry a query and no `..`; httpx sends a path's percent escapes unchanged and Graph may
     decode `%2e` to a dot, so the path may hold none.
     """
@@ -133,7 +134,7 @@ def page_path(page_token: object, collection: str) -> str:
         not query
         or not path.startswith("/")
         or path.startswith("//")
-        or not re.fullmatch(collection, _USER_PREFIX.sub("/me", path, count=1))
+        or not re.fullmatch(collection, _USER_PREFIX.sub("/me", path, count=1), re.IGNORECASE)
         or ".." in path
         or "%2e" in path.lower()
         or any(character in "#\\ " or ord(character) < 32 for character in token)

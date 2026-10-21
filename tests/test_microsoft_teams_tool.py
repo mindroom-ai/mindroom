@@ -414,6 +414,12 @@ _PAGED_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, object], str], str,
         NEXT_CHANNELS,
     ),
     (
+        "user_key_chats",
+        lambda tools, token: tools.microsoft_teams_list_chats(page_token=token),
+        "/users('alex@contoso.com')/chats?$skiptoken=chats2",
+        NEXT_CHANNELS,
+    ),
+    (
         "chat_messages",
         lambda tools, token: tools.microsoft_teams_list_chat_messages(CHAT, page_token=token),
         NEXT_CHAT_MESSAGES,
