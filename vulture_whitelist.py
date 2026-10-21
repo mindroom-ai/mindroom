@@ -414,4 +414,5 @@ _.child_run_id  # Stored tool-execution field read by the owned team runtime whe
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
 _.native_compaction_settings  # Claude adapter method the history replay planner calls once it is wired (src/mindroom/providers/anthropic/messages.py)
 _.delete_run_subtrees  # Store method the runtime cutover calls in place of Agno's delete_runs (src/mindroom/session_storage/store.py)
+_.save_run  # Store method the runtime cutover calls for a run saved with its usage outside persist_to (src/mindroom/session_storage/store.py)
 _.loop_start_ids  # Loop state read by mid-turn compaction when the owned agent loop lands (src/mindroom/agent_loop/model_loop.py)
