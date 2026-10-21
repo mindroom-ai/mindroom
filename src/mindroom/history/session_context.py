@@ -55,17 +55,6 @@ class BoundTeamScopeContext:
     scope: HistoryScope
 
 
-def resolve_history_scope(agent: Agent) -> HistoryScope | None:
-    """Return the persisted history scope addressed by one live Agno agent, which the team path still runs."""
-    team_id = agent.team_id
-    if isinstance(team_id, str) and team_id:
-        return HistoryScope(kind="team", scope_id=team_id)
-    agent_id = agent.id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None
-
-
 def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
     """Return the canonical storage owner for one bound team run."""
     candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]

@@ -417,4 +417,3 @@ _.save_run  # Store method the runtime cutover calls for a run saved with its us
 _.minimal_required  # EnrichmentItem field minimal mode's renderer reads once F3 renders it from the build surface (src/mindroom/hooks/types.py)
 agent_static_token_estimator  # Static-token estimator over an Agno agent; the team path and its tests use it until S4 and F7 (src/mindroom/history/prompt_tokens.py)
 install_request_preparation  # Agno request hook the team path's mid-turn compaction tests still install until S4 and F7 (src/mindroom/agno_compat_model_hooks.py)
-resolve_history_scope  # Scope of an Agno agent; the team tests' scope fixtures use it until S4 (src/mindroom/history/session_context.py)
