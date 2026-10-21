@@ -18,7 +18,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, response_runner
+from mindroom import agents, ai, ai_runtime, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -27,6 +27,11 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.history.run_visibility import (
+    QUEUED_MESSAGE_NOTICE_MARKER_KEY,
+    is_queued_notice_message,
+    queued_notice_marker,
+)
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import CompactionOutcome, HistoryScope
@@ -50,6 +55,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolFileAccess
@@ -701,6 +707,92 @@ async def test_a_queued_message_is_announced_after_a_tool_batch(
     notice = reply.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     assert reply.model.requests[1].messages[-1].content == notice
     assert all(message.content != notice for message in reply.model.requests[0].messages)
+
+
+def _notice_markers(messages: Sequence[Message]) -> list[bool | str | None]:
+    return [queued_notice_marker(message) for message in messages if is_queued_notice_message(message)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finalizes_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    streaming: bool,
+) -> None:
+    """The stored run carries the notice the model saw until the outer boundary marks it as persisted."""
+    del probe
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("final answer")])
+
+    with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
+        result = _text(await _stream(reply)) if streaming else await _respond(reply)
+        assert _notice_markers(_stored(reply).messages) == [True]
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert result.startswith("final answer")
+    assert _notice_markers(_stored(reply).messages) == ["persisted"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reply_drops_its_live_notice_at_the_response_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """An error-only reply keeps no notice in its stored run once the boundary finalizes it."""
+    del probe
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="a")), [_raising(RateLimited("slow down", provider="openai"))]],
+    )
+
+    with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
+        await _respond(reply)
+        stored = _stored(reply)
+        assert stored.status == RunStatus.error
+        assert _notice_markers(stored.messages) == [True]
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert _notice_markers(_stored(reply).messages) == []
+
+
+@pytest.mark.asyncio
+async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Loading the conversation turns a prior reply's live notice into the persisted one before the request."""
+    del probe
+    reply = _reply(tmp_path, monkeypatch, [answer("final answer")])
+    crash_left = Message(
+        role="user",
+        content="A newer message is waiting.",
+        provider_data={
+            QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
+            "mindroom_queued_message_notice_response_turn_id": "prior",
+        },
+    )
+    seed_session(
+        reply.storage,
+        ConversationSession(
+            session_id=SESSION_ID,
+            kind="agent",
+            owner_id="assistant",
+            runs=[RunRecord(run_id="run-0", agent_id="assistant", status=RunStatus.completed, messages=[crash_left])],
+            created_at=1,
+            updated_at=1,
+        ),
+    )
+
+    assert await _respond(reply) == "final answer"
+
+    assert _notice_markers(_stored(reply, "run-0").messages) == ["persisted"]
+    assert [_notice_markers([message]) for message in reply.model.requests[0].messages if message.from_history] == [
+        ["persisted"],
+    ]
 
 
 @pytest.mark.asyncio
