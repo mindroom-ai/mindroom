@@ -498,6 +498,39 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path: Path) -> None:
+    """A run resumed in a new context keeps its run id, so its numbering continues where the record's left off.
+
+    The record drops an event whose id it already holds; restarting the count would lose the resumed leg's output
+    whenever its last chunk lands on an index the earlier leg flushed at.
+    """
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
+    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(ContentDelta("first leg"))
+        await observe_child_event(ToolStarted(gated))
+    done = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, result="ok")
+    async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        await observe_child_event(ContentDelta("final answer"))
+        await observe_child_event(ToolCompleted(done))
+
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [(event["event_id"], event["data"]["content"]) for event in events if event["kind"] == "output"] == [
+        ("run:child-run:stream:1", "first leg"),
+        ("run:child-run:stream:2", "final answer"),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "cancelled", "denied"])
 async def test_finish_child_record_settles_non_success_outcome_idempotently(
     status: str,

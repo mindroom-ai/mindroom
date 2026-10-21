@@ -34,17 +34,18 @@ if TYPE_CHECKING:
 
 @dataclass
 class _ChildAuditBinding:
-    """One live child stream's record owner, buffered visible content, and its count of observed events.
+    """One live child stream's record owner, buffered visible content, and its count of numbered events.
 
     The loop's events carry no index, so the binding numbers them as they arrive; the number identifies an event
-    whose tool call has no id of its own.
+    whose tool call has no id of its own. The count starts past the highest index the record already holds for the
+    run, so a run resumed in a later context never repeats the ids of an earlier leg, which the record would drop.
     """
 
     child: DelegationChild
     owner: DelegationRecordOwner
     locator: DelegationRecordLocator
+    observed: int
     pending_content: list[tuple[int, str]] = field(default_factory=list)
-    observed: int = 0
 
 
 _CHILD_AUDIT: ContextVar[_ChildAuditBinding | None] = ContextVar(
@@ -95,10 +96,14 @@ async def child_audit_context(
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[None]:
     """Bind one child stream so the shared event observer can audit exact events."""
+    owner = DelegationRecordOwner(config, runtime_paths)
+    locator = _record_locator(child)
+    handle = await owner.reopen(locator)
     binding = _ChildAuditBinding(
         child=child,
-        owner=DelegationRecordOwner(config, runtime_paths),
-        locator=_record_locator(child),
+        owner=owner,
+        locator=locator,
+        observed=await owner.highest_event_index(handle, _stream_prefix(child.run_id)),
     )
     token = _CHILD_AUDIT.set(binding)
     try:
@@ -323,8 +328,13 @@ def _tool_event_id(
     if tool.tool_call_id:
         return f"run:{run_id}:tool:{tool.tool_call_id}:{phase}"
     if event_index is not None:
-        return f"run:{run_id}:stream:{event_index}"
+        return f"{_stream_prefix(run_id)}{event_index}"
     return None
+
+
+def _stream_prefix(run_id: str) -> str:
+    """Return the id prefix of this run's events that are numbered by the binding rather than by a tool call."""
+    return f"run:{run_id}:stream:"
 
 
 def _tool_has_result(tool: ToolExecution) -> bool:
@@ -388,8 +398,7 @@ async def _flush_pending_content(
         return
     chunks = binding.pending_content.copy()
     binding.pending_content.clear()
-    run_id = binding.child.run_id
-    event_id = f"run:{run_id}:stream:{chunks[-1][0]}"
+    event_id = f"{_stream_prefix(binding.child.run_id)}{chunks[-1][0]}"
     content = "".join(text for _, text in chunks)
     await binding.owner.append_event(
         handle,
