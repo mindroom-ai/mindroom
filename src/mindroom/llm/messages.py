@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The conversation message exchanged with models and stored in runs.
 
 Field names are Agno 3's, so stored ``run_data`` messages and summary-row segments decode without

@@ -1,7 +1,8 @@
 """Dict codecs of ``mindroom.llm`` reproduce the shapes Agno 3.0.9 wrote.
 
-Every dict here comes from a real Agno object built in the test, so the owned readers and writers
-are proven against Agno's own ``to_dict``; the stored data they must keep decoding was written that way.
+Every dict here comes from a real Agno object built in the test or from the stored-run fixtures under
+``tests/fixtures/agno_parity/runs``, so the owned readers and writers are proven against Agno's own
+``to_dict``; the stored data they must keep decoding was written that way.
 Keys the owned records deliberately drop are listed once per type and removed before comparing.
 """
 # ruff: noqa: D103
@@ -9,9 +10,10 @@ Keys the owned records deliberately drop are listed once per type and removed be
 from __future__ import annotations
 
 import copy
+import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.media import Audio as AgnoAudio
@@ -43,6 +45,9 @@ from mindroom.llm.runs import (
     run_record_from_dict,
 )
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, ToolCallMetrics
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
 WAV_BYTES = b"RIFF\x00\x00\x00\x00WAVEfmt " + bytes(range(16))
@@ -802,11 +807,35 @@ def test_run_record_minimal_dict_matches_agno_minus_dropped_keys() -> None:
         created_at=1,
     )
 
-    owned = RunRecord(run_id="r", agent_id="a", session_id="s", status=RunStatus.COMPLETED, created_at=1)
+    owned = RunRecord(
+        run_id="r",
+        agent_id="a",
+        session_id="s",
+        status=RunStatus.completed,
+        metrics=RunMetrics(),
+        created_at=1,
+    )
 
     assert owned.to_dict() == _expected_run_dict(agno.to_dict())
+    assert owned.to_dict()["metrics"] == {}
     assert "tools" not in owned.to_dict()
     assert "requirements" not in owned.to_dict()
+
+
+def test_run_record_writes_tools_requirements_and_metrics_exactly_when_set() -> None:
+    # Agno's loop left ``tools = []`` on runs without tool calls and ``requirements = []`` after resolving a
+    # pause; MindRoom's interrupted-turn records never set ``metrics``. Each key must survive as stored.
+    agno_dict = AgnoRunOutput(run_id="r", agent_id="a", messages=[], tools=[], requirements=[], created_at=1).to_dict()
+    assert (agno_dict["tools"], agno_dict["requirements"]) == ([], [])
+    assert "metrics" not in agno_dict
+
+    owned = RunRecord(run_id="r", agent_id="a", tools=[], requirements=[], created_at=1)
+
+    assert owned.to_dict() == _expected_run_dict(agno_dict)
+    assert RunRecord.from_dict(agno_dict).to_dict() == _expected_run_dict(agno_dict)
+    assert RunRecord.from_dict(agno_dict).metrics is None
+    absent = RunRecord(run_id="r", agent_id="a", created_at=1).to_dict()
+    assert {"tools", "requirements", "metrics"}.isdisjoint(absent)
 
 
 def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
@@ -852,7 +881,54 @@ def test_run_record_from_dict_discriminates_on_team_id() -> None:
     assert isinstance(run_record_from_dict(usage_only), RunRecord)
 
 
-def test_run_status_values_match_agno() -> None:
+def test_run_status_values_and_names_match_agno() -> None:
     assert {status.value for status in RunStatus} == {"RUNNING", "COMPLETED", "PAUSED", "CANCELLED", "ERROR"}
     for status in RunStatus:
-        assert AgnoRunStatus(status.value).value == status == str(status)
+        agno_status = AgnoRunStatus(status.value)
+        assert agno_status.value == status == str(status)
+        # ``.name`` is persisted as ``mindroom_original_status``, so the member names must match too.
+        assert agno_status.name == status.name
+
+
+# --- stored fixtures -------------------------------------------------------------------------------------------
+
+FIXTURE_RUNS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "runs"
+
+# Fixture file -> (reader, expected dict for one stored case). ``session_metrics.json`` has no owned type.
+FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
+    "run_output": (run_record_from_dict, _expected_run_dict),
+    "team_run_output": (run_record_from_dict, _expected_run_dict),
+    "message": (Message.from_dict, dict),
+    "image": (Image.from_dict, dict),
+    "audio": (Audio.from_dict, dict),
+    "video": (Video.from_dict, dict),
+    "file": (File.from_dict, dict),
+    "tool_execution": (ToolExecution.from_dict, lambda stored: _without(stored, DROPPED_TOOL_EXECUTION_KEYS)),
+    "run_requirement": (RunRequirement.from_dict, _expected_requirement_dict),
+    "message_metrics": (MessageMetrics.from_dict, dict),
+    "run_metrics": (RunMetrics.from_dict, dict),
+    "model_metrics": (ModelMetrics.from_dict, dict),
+    "tool_call_metrics": (ToolCallMetrics.from_dict, dict),
+}
+
+
+@pytest.mark.skipif(not FIXTURE_RUNS.is_dir(), reason="the Agno parity fixtures are not checked out")
+@pytest.mark.parametrize("fixture", sorted(FIXTURE_CODECS))
+def test_stored_fixture_dicts_round_trip_minus_dropped_keys(fixture: str) -> None:
+    read, expected_for = FIXTURE_CODECS[fixture]
+    cases: dict[str, dict[str, Any]] = json.loads((FIXTURE_RUNS / f"{fixture}.json").read_text())
+    assert cases
+
+    mismatches: dict[str, list[str]] = {}
+    for case, stored in cases.items():
+        value = read(stored)
+        if fixture in {"run_output", "team_run_output"}:
+            assert type(value) is (TeamRunRecord if fixture == "team_run_output" else RunRecord), case
+        written = value.to_dict()
+        expected = expected_for(stored)
+        if written != expected:
+            mismatches[case] = sorted(
+                key for key in set(written) | set(expected) if written.get(key) != expected.get(key)
+            )
+
+    assert mismatches == {}

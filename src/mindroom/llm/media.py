@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Media attached to messages, with dict codecs that match the stored Agno 3 shapes.
 
 Every kind keeps Agno's scalar field names so stored runs, summary-row segments, tool-job payloads,

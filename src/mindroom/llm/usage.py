@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Token usage and timing metrics, with the dict shapes stored in runs, usage rows, and ``io.mindroom.ai_run``.
 
 ``to_dict`` omits None, zero integers, and empty containers exactly as Agno 3 did, because

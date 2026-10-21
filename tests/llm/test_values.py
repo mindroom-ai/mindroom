@@ -33,7 +33,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -215,11 +215,12 @@ def test_run_requirement_positional_tool_execution_and_defaults() -> None:
 def test_run_record_defaults_and_status() -> None:
     record = RunRecord(run_id="r", agent_id="a")
 
-    assert record.status is RunStatus.RUNNING
-    assert (record.messages, record.tools, record.requirements) == ([], [], [])
-    assert record.metrics == RunMetrics()
+    assert record.status is RunStatus.running
+    assert record.messages == []
+    assert (record.tools, record.requirements, record.metrics) == (None, None, None)
     assert record.to_dict()["status"] == "RUNNING"
-    assert RunStatus("PAUSED") is RunStatus.PAUSED
+    assert RunStatus("PAUSED") is RunStatus.paused
+    assert RunStatus.cancelled.name == "cancelled"
     with pytest.raises(ValueError, match="REGENERATED"):
         RunStatus("REGENERATED")
 
@@ -341,7 +342,7 @@ def test_provider_error_fields_and_retryable_defaults() -> None:
 
 def test_run_events_are_frozen_values() -> None:
     tool = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
-    record = RunRecord(run_id="r", agent_id="a", status=RunStatus.COMPLETED)
+    record = RunRecord(run_id="r", agent_id="a", status=RunStatus.completed)
     events = [
         ContentDelta("hi"),
         ReasoningDelta("why"),

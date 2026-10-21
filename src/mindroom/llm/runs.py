@@ -1,3 +1,4 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Run records, tool executions, and pause requirements, with the dict shapes stored in run rows.
 
 Keys and ``RunStatus`` strings are Agno 3's, so existing run rows, summary-row segments, and
@@ -29,13 +30,17 @@ def _now() -> int:
 
 
 class RunStatus(StrEnum):
-    """Lifecycle state of a run; the values are the stored ``status`` strings."""
+    """Lifecycle state of a run; the values are the stored ``status`` strings.
 
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    PAUSED = "PAUSED"
-    CANCELLED = "CANCELLED"
-    ERROR = "ERROR"
+    The members keep Agno's lower-case names because ``.name`` is persisted too
+    (``mindroom_original_status`` in run metadata holds ``"cancelled"``, not ``"CANCELLED"``).
+    """
+
+    running = "RUNNING"
+    completed = "COMPLETED"
+    paused = "PAUSED"
+    cancelled = "CANCELLED"
+    error = "ERROR"
 
 
 @dataclass(kw_only=True)
@@ -192,18 +197,21 @@ class _RunRecordCommon:
     session_id: str | None = None
     parent_run_id: str | None = None
     user_id: str | None = None
-    status: RunStatus = RunStatus.RUNNING
+    status: RunStatus = RunStatus.running
     content: str | dict[str, Any] | None = None
     model: str | None = None
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
-    tools: list[ToolExecution] = field(default_factory=list)
-    requirements: list[RunRequirement] = field(default_factory=list)
-    metrics: RunMetrics = field(default_factory=RunMetrics)
+    tools: list[ToolExecution] | None = None
+    requirements: list[RunRequirement] | None = None
+    metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
 
     def _common_dict(self) -> dict[str, Any]:
+        # ``tools``, ``requirements``, and ``metrics`` are written exactly when set, ``[]`` and ``{}``
+        # included, as Agno did: its loop left ``tools = []`` on runs without tool calls, and MindRoom's
+        # interrupted-turn records carry no ``metrics`` at all.
         values: dict[str, Any] = {
             "run_id": self.run_id,
             "session_id": self.session_id,
@@ -217,11 +225,12 @@ class _RunRecordCommon:
         result = {key: value for key, value in values.items() if value is not None}
         result["created_at"] = self.created_at
         result["status"] = self.status.value
-        result["metrics"] = self.metrics.to_dict()
+        if self.metrics is not None:
+            result["metrics"] = self.metrics.to_dict()
         result["messages"] = [message.to_dict() for message in self.messages]
-        if self.tools:
+        if self.tools is not None:
             result["tools"] = [tool.to_dict() for tool in self.tools]
-        if self.requirements:
+        if self.requirements is not None:
             result["requirements"] = [requirement.to_dict() for requirement in self.requirements]
         return result
 
@@ -236,20 +245,24 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     # Last legacy release: every release pinned to agno 3.0.9, up to the last one before the release that
     # removes Agno (not yet tagged when this reader was written); replaced by these codecs in that release.
     # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
-    # Coverage: tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys
+    # Coverage: tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys,
+    #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
+    tools = data.get("tools")
+    requirements = data.get("requirements")
+    metrics = data.get("metrics")
     values: dict[str, Any] = {
         "run_id": data["run_id"],
         "session_id": data.get("session_id"),
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
-        "status": RunStatus(data.get("status", RunStatus.RUNNING.value)),
+        "status": RunStatus(data.get("status", RunStatus.running.value)),
         "content": data.get("content"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),
         "messages": [Message.from_dict(message) for message in data.get("messages") or []],
-        "tools": [ToolExecution.from_dict(tool) for tool in data.get("tools") or []],
-        "requirements": [RunRequirement.from_dict(item) for item in data.get("requirements") or []],
-        "metrics": RunMetrics.from_dict(data.get("metrics") or {}),
+        "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
+        "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
+        "metrics": None if metrics is None else RunMetrics.from_dict(metrics),
         "metadata": data.get("metadata"),
     }
     if "created_at" in data:
