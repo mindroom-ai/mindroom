@@ -14,8 +14,9 @@ from mindroom.history.summary_call import (
     CompactionSummaryIncompleteError,
     CompactionSummaryOutputLimitError,
     generate_compaction_summary,
+    is_summary_timeout,
 )
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import TRANSPORT_TIMEOUT, ProviderError, ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
@@ -189,6 +190,25 @@ async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors
             timeout_seconds=10,
         )
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("route", ["chat", "responses"])
+async def test_a_summary_whose_transport_times_out_fails_as_a_timeout(route: _Route, tmp_path: Path) -> None:
+    """The SDK's timeout error keeps the transport timeout's code, so compaction reports a timeout."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        msg = "The read operation timed out"
+        raise httpx.ReadTimeout(msg, request=request)
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await generate_compaction_summary(
+            model=_model(route, tmp_path, respond),
+            summary_input="Conversation",
+            summary_prompt="Summarize",
+            timeout_seconds=10,
+        )
+    assert raised.value.code == TRANSPORT_TIMEOUT
+    assert is_summary_timeout(raised.value)
 
 
 async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) -> None:

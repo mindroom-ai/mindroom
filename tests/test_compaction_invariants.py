@@ -736,7 +736,7 @@ def test_retry_policy_does_not_retry_a_final_provider_error() -> None:
 
 
 def test_retry_policy_shrinks_on_typed_size_errors_not_on_wording() -> None:
-    """Only typed size signals and a final timeout shrink the input; wording outside a typed error never does."""
+    """Only typed size signals and a final timeout shrink the input; wording outside a provider error never does."""
     policy = DEFAULT_SUMMARY_RETRY_POLICY
 
     def retry_budget(error: Exception) -> int | None:
@@ -745,8 +745,9 @@ def test_retry_policy_shrinks_on_typed_size_errors_not_on_wording() -> None:
     assert retry_budget(classify_provider_error("context_length_exceeded", provider="fake", status_code=400)) == 8_000
     tokens_per_minute = "Request too large for summary-model on tokens per min (TPM): Limit 30000, Requested 50000."
     assert retry_budget(classify_provider_error(tokens_per_minute, provider="fake", status_code=429)) == 8_000
-    timed_out = RuntimeError(f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s")
-    assert retry_budget(timed_out) == 8_000
+    assert retry_budget(ProviderError("upstream request timed out", provider="fake")) == 8_000
+    untyped_timeout = RuntimeError(f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s")
+    assert retry_budget(untyped_timeout) is None
     # A provider failure that mentions the context window is still the provider's to retry, not a size problem.
     assert retry_budget(classify_provider_error("context window", provider="fake", status_code=503)) == 16_000
     assert retry_budget(RuntimeError("context_length_exceeded")) is None

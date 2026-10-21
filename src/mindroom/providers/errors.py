@@ -8,7 +8,10 @@ does not fit the context window is ``ContextWindowExceeded``, and the invalid-re
 
 from __future__ import annotations
 
+import httpx
+
 from mindroom.llm.errors import (
+    TRANSPORT_TIMEOUT,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -52,6 +55,8 @@ CONTEXT_WINDOW_MARKERS = (
     "exceeds the model",
 )
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
+# A timeout as the HTTP client raises it, or as aiohttp and the socket layer raise it.
+_TRANSPORT_TIMEOUTS = (httpx.TimeoutException, TimeoutError)
 
 
 def is_context_window_error(message: str, *, code: str | None = None) -> bool:
@@ -90,5 +95,11 @@ def classify_provider_error(
 
 
 def transport_error(error: Exception, *, provider: str) -> ProviderUnavailable:
-    """Return the retryable error for a network or transport failure before a response completed."""
-    return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code="connection_error")
+    """Return the retryable error for a network or transport failure before a response completed.
+
+    A timeout carries ``TRANSPORT_TIMEOUT``, also when an SDK re-raised it as its own error, as the OpenAI and
+    Anthropic SDKs raise ``APITimeoutError`` from the HTTP client's timeout.
+    """
+    timed_out = isinstance(error, _TRANSPORT_TIMEOUTS) or isinstance(error.__cause__, _TRANSPORT_TIMEOUTS)
+    code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
+    return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)

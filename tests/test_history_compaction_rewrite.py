@@ -243,7 +243,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
             msg = f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"
-            raise RuntimeError(msg)
+            raise TimeoutError(msg)
         return "merged summary"
 
     with patch(

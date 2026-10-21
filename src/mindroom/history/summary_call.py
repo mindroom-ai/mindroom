@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.cancellation import request_task_cancel
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
-from mindroom.llm.errors import ContextWindowExceeded, ModelSafeguardRefusal, ProviderError, RateLimited
+from mindroom.llm.errors import (
+    TRANSPORT_TIMEOUT,
+    ContextWindowExceeded,
+    ModelSafeguardRefusal,
+    ProviderError,
+    RateLimited,
+)
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.logging_config import get_logger
@@ -31,7 +37,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-_TIMEOUT_ERROR_FRAGMENT = "timed out"
+# A provider that times out on its own side says so only in the text of its HTTP error or stream error event, such as
+# a gateway's "upstream request timed out": no status or code marks it, so provider errors are matched by wording.
+_PROVIDER_TIMEOUT_FRAGMENT = "timed out"
 # The outer retry policy owns retries, a one-off summary never reuses its prefix, and thinking would spend the output
 # budget the summary needs. The transport timeout stays the route's own, so a shorter authored provider timeout still
 # applies; the summary call's wall deadline bounds every request.
@@ -72,8 +80,12 @@ def _is_transient(error: Exception) -> bool:
 
 
 def is_summary_timeout(error: BaseException) -> bool:
-    """Return whether a compaction failure was a timeout: a typed one, or a provider error whose wording says so."""
-    return isinstance(error, TimeoutError) or _TIMEOUT_ERROR_FRAGMENT in str(error).casefold()
+    """Return whether a compaction failure was a timeout: the deadline, a transport timeout, or a provider-side one."""
+    if isinstance(error, TimeoutError):
+        return True
+    if not isinstance(error, ProviderError):
+        return False
+    return error.code == TRANSPORT_TIMEOUT or _PROVIDER_TIMEOUT_FRAGMENT in str(error).casefold()
 
 
 def _is_size_error(error: Exception) -> bool:

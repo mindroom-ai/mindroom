@@ -11,6 +11,9 @@ MALFORMED_TOOL_CALL = "malformed_tool_call"
 # The ``ProviderError.code`` of a stream that failed after the attempt exposed output or a hosted tool ran: a retry
 # could duplicate output or rerun the tool, so the error is final and the media fallback never resends the request.
 INCOMPLETE_STREAM = "incomplete_stream"
+# The ``ProviderError.code`` of a transport failure that timed out, such as an HTTP connect or read timeout, so callers
+# that report timeouts need not read the error's text; other transport failures carry ``connection_error``.
+TRANSPORT_TIMEOUT = "timeout"
 # The ``ProviderError.code`` of a response the model's safeguards refused: neither a retry nor a resend without the
 # request's media can change the answer.
 SAFEGUARD_REFUSAL = "refusal"
@@ -99,6 +102,7 @@ __all__ = [
     "MALFORMED_TOOL_CALL",
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
     "SAFEGUARD_REFUSAL",
+    "TRANSPORT_TIMEOUT",
     "ContextWindowExceeded",
     "InvalidRequest",
     "ModelOutputLimitError",

@@ -8,7 +8,14 @@ from typing import Any
 import httpx
 import pytest
 
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import (
+    TRANSPORT_TIMEOUT,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
 from mindroom.providers.errors import classify_provider_error, is_context_window_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
@@ -68,6 +75,22 @@ def test_transport_failures_are_retryable_connection_errors() -> None:
         "connection refused",
     )
     assert str(transport_error(httpx.ReadError(""), provider="Test")) == "ReadError"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(httpx.ReadTimeout(""), id="http-read"),
+        pytest.param(httpx.PoolTimeout(""), id="http-pool"),
+        pytest.param(TimeoutError(), id="socket"),
+    ],
+)
+def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
+    """A timeout before any response is retryable and says it timed out by its code, whatever its text."""
+    error = transport_error(failure, provider="Test")
+
+    assert type(error) is ProviderUnavailable
+    assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
