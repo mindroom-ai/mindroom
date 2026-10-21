@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 import pytest
 from agno.agent import Agent
 from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, RunStatus
 from agno.tools.calculator import CalculatorTools
@@ -30,7 +29,6 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent, _WorkflowRun
-from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
 from mindroom.history.session_context import (
@@ -40,6 +38,8 @@ from mindroom.history.session_context import (
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.llm import usage as llm_usage
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.provider import UsageReported
 from mindroom.llm.runs import RunRecord
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
@@ -62,7 +62,7 @@ from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.fakes.scripted_model import usage as owned_usage
 from tests.history_helpers import (
     RecordingModel,
@@ -78,6 +78,8 @@ from tests.response_runner_helpers import _bot
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
     from pathlib import Path
+
+    from agno.models.message import Message
 
     from mindroom.session_storage.store import ConversationStore
 
@@ -575,17 +577,8 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             execution_identity=identity,
             create_session_if_missing=True,
         )
-    model = _HelperModel(
-        id="helper-model",
-        provider="test-provider",
-        responses=[
-            ModelResponse(
-                content="Sample output.",
-                response_usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
-            ),
-        ],
-    )
-    monkeypatch.setattr("mindroom.providers.model_loading.get_model_instance", lambda *_args, **_kwargs: model)
+    model = ScriptedModel([answer("Sample output.", owned_usage(20, 2))])
+    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: model)
     with open_scope() as scope_context, helper_usage_context(scope_context):
         assert scope_context is not None
         storage = scope_context.storage
@@ -636,49 +629,29 @@ async def test_workflow_first_turn_uses_actual_caller_store(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("details", ["complete", "partial", "absent"])
-@pytest.mark.parametrize("status", [RunStatus.completed, RunStatus.error])
-@pytest.mark.parametrize("response_id", ["paid-attempt", None])
-async def test_workflow_retains_paid_status_without_inventing_request_detail(
+@pytest.mark.parametrize("ending", ["completed", "error", "cancelled"])
+async def test_workflow_participant_usage_counts_however_its_run_ends(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    details: str,
-    status: RunStatus,
-    response_id: str | None,
+    ending: str,
 ) -> None:
-    """Repeated final outputs upsert once; incomplete request details never become a combined request."""
+    """A room-agent participant's paid requests count once, also when its run fails or is stopped mid-request."""
     config, paths, _storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
-    messages = [
-        Message(
-            role="assistant",
-            content="First sample.",
-            metrics=MessageMetrics(input_tokens=10, output_tokens=1, total_tokens=11),
-        ),
-        Message(
-            role="assistant",
-            content="Second sample.",
-            metrics=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
-        ),
-    ]
-    response = RunOutput(
-        run_id=response_id,
-        session_id="synthetic-session",
-        user_id="@untrusted:localhost",
-        parent_run_id="synthetic-parent",
-        model="helper-model",
-        model_provider="test-provider",
-        content="Sample output.",
-        status=status,
-        metrics=RunMetrics(input_tokens=30, output_tokens=3, total_tokens=33),
-        messages=messages if details == "complete" else messages[:1] if details == "partial" else None,
+    requested = asyncio.Event()
+
+    async def interrupt() -> None:
+        requested.set()
+        if ending == "error":
+            msg = "provider auth failed"
+            raise ProviderError(msg, provider="Synthetic")
+        await asyncio.Event().wait()
+
+    turn = (
+        answer("Sample output.", owned_usage(30, 3))
+        if ending == "completed"
+        else [UsageReported(owned_usage(30, 3), final=ending == "error"), Await(interrupt)]
     )
-    actor = Agent()
-
-    async def outputs(*_args: object, **_kwargs: object) -> AsyncIterator[RunOutput]:
-        yield response
-        yield response
-
-    monkeypatch.setattr(actor, "arun", outputs)
+    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args: ScriptedModel([turn]))
     open_scope = partial(
         open_resolved_scope_session_context,
         agent_name="test_agent",
@@ -689,19 +662,30 @@ async def test_workflow_retains_paid_status_without_inventing_request_detail(
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
     with open_scope() as scope_context, helper_usage_context(scope_context):
-        if status == RunStatus.error:
-            with pytest.raises(DynamicWorkflowExecutionError, match="Sample output"):
-                await _arun_agent(context, actor, "Sample task.")
+        participant = asyncio.create_task(
+            _aexecute_participant(
+                context,
+                {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
+                "Sample task.",
+                _WorkflowRun("sample-workflow"),
+            ),
+        )
+        if ending == "completed":
+            assert (await participant).content == "Sample output."
+        elif ending == "error":
+            with pytest.raises(ProviderError, match="provider auth failed"):
+                await participant
         else:
-            assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
+            await requested.wait()
+            participant.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await participant
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 33
     assert sum(row.run_count for row in report.model_breakdown) == 0
     assert report.user_breakdown[0].user_id == "@user:localhost"
     assert report.request_breakdown is not None
-    assert [row.totals.total_tokens for row in report.request_breakdown] == ([11, 22] if details == "complete" else [])
-    assert report.request_coverage is not None
-    assert report.request_coverage.unavailable_sources == (0 if details == "complete" else 1)
+    assert [row.totals.total_tokens for row in report.request_breakdown] == [33]
 
 
 @pytest.mark.asyncio
@@ -751,39 +735,6 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         with context.storage.transaction(write=True) as connection:
             connection.execute(f"DELETE FROM {sessions} WHERE session_id = ?", ("session",))  # noqa: S608
         assert _usage_rows(context.storage) == []
-
-
-@pytest.mark.asyncio
-async def test_persisted_participant_usage_is_not_added_again(tmp_path: Path) -> None:
-    """A participant with its own DB already contributes an ordinary run snapshot."""
-    config, paths, storage, scope, context = _forced_compaction_context(tmp_path, session=_session("session"))
-    model = _HelperModel(
-        id="helper-model",
-        provider="test-provider",
-        responses=[
-            ModelResponse(
-                content="Sample output.",
-                response_usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
-            ),
-        ],
-    )
-    actor = Agent(id="test_agent", db=storage, model=model, telemetry=False)
-    open_scope = partial(
-        open_resolved_scope_session_context,
-        agent_name="test_agent",
-        scope=scope,
-        session_id="session",
-        config=config,
-        runtime_paths=paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-    )
-    with open_scope() as scope_context, helper_usage_context(scope_context):
-        assert await _arun_agent(context, actor, "Sample task.") == "Sample output."
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 22
-    assert sum(row.run_count for row in report.model_breakdown) == 1
-    assert report.request_breakdown is not None
-    assert {row.kind for row in report.request_breakdown} == {"run"}
 
 
 @pytest.mark.asyncio

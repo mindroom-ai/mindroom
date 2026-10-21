@@ -23,9 +23,7 @@ GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json"))
 # The owner of each golden whose entry point does not run on the owned path yet.
 PENDING = {
     "agent_minimal_mode": "F3 renders minimal mode's bootstrap prompt and Bash facade from the build's surface",
-    "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
     "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
-    "skill_review_fork": "F6 runs the skill review fork on the owned loop from the captured final request",
 }
 TEAM = [name for name in GOLDENS if name.startswith("team_")]
 RECORDED = [name for name in GOLDENS if name not in PENDING and name not in TEAM]

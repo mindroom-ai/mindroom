@@ -14,7 +14,6 @@ from agno.run.agent import RunOutput
 
 from mindroom.agno_compat_model_hooks import install_request_preparation
 from mindroom.providers.synthetic_model import SyntheticModel
-from mindroom.tool_call_budget import install_model_call_cap
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -106,20 +105,3 @@ async def test_installing_request_preparation_twice_runs_it_once_per_request() -
     await Agent(name="Prober", model=model, tools=[probe], telemetry=False).arun("Do the task")
 
     assert len(calls) == 3
-
-
-@pytest.mark.asyncio
-async def test_tool_call_cap_installed_later_refuses_before_preparation() -> None:
-    model = _TwoBatchModel()
-    calls: list[int] = []
-
-    async def prepare(*_args: object) -> None:
-        calls.append(1)
-
-    install_request_preparation(model, marker="_test_preparation", prepare=prepare)
-    install_model_call_cap(model, entity_name="prober")
-    agent = Agent(name="Prober", model=model, tools=[probe], tool_call_limit=0, telemetry=False)
-
-    await agent.arun("Do the task")
-
-    assert len(model.received) == len(calls)

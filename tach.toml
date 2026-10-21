@@ -1538,6 +1538,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.dynamic_workflow"
 depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.agent_loop.build",
     "mindroom.agents",
     "mindroom.authorization",
     "mindroom.credentials.manager",
@@ -1551,6 +1553,7 @@ depends_on = [
     "mindroom.dynamic_workflows",
     "mindroom.entity_resolution",
     "mindroom.helper_usage",
+    "mindroom.llm",
     "mindroom.response_turn",
     "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
@@ -8322,7 +8325,6 @@ visibility = [
     "mindroom.providers.stream_retry",
     "mindroom.providers.claude_prompt_cache",
     "mindroom.providers.portable_tool_search",
-    "mindroom.tool_call_budget",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
     "mindroom.tool_jobs.notices",
@@ -8334,7 +8336,6 @@ from = ["mindroom.agno_compat_model_hooks"]
 expose = [
     "install_message_projection",
     "install_tool_result_callback",
-    "install_response_request_gate",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
     "temporary_async_invocation_hooks",
@@ -8345,15 +8346,6 @@ expose = [
     "install_tool_call_rewrite",
 ]
 
-
-[[modules]]
-path = "mindroom.tool_call_budget"
-depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.logging_config"]
-visibility = ["mindroom.agents", "mindroom.teams", "mindroom.custom_tools.dynamic_workflow", "mindroom.skill_learning.reviewer"]
-
-[[interfaces]]
-from = ["mindroom.tool_call_budget"]
-expose = ["install_model_call_cap"]
 
 
 [[modules]]
@@ -9329,15 +9321,17 @@ visibility = [
 [[modules]]
 path = "mindroom.skill_learning.reviewer"
 depends_on = [
+    "mindroom.agent_loop",
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
-    "mindroom.agno_compat_model_hooks",
     "mindroom.helper_usage",
-    "mindroom.providers.model_loading",
+    "mindroom.llm",
     "mindroom.model_usage",
+    "mindroom.providers.registry",
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
-    "mindroom.tool_call_budget",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 

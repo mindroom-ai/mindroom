@@ -1112,9 +1112,9 @@ async def test_the_skill_review_capture_keeps_the_final_request(
 
     assert capture.latest is not None
     assert (capture.latest.run_id, capture.latest.model_name) == ("run-1", "default")
-    assert capture.latest.messages[-1].role == "assistant"
-    assert capture.latest.messages[-1].content == "Final answer."
-    assert {"remember", "touch"} <= {tool.name for tool in capture.latest.tools}
+    final = capture.latest.request.messages[-1]
+    assert (final.role, final.content) == ("assistant", "Final answer.")
+    assert {"remember", "touch"} <= {tool.name for tool in capture.latest.request.tools}
 
 
 def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
