@@ -3,8 +3,8 @@
 Each golden pins one provider request and its parsed reply as MindRoom sends and reads them today.
 The model comes from ``get_model_instance`` with every hook production installs, the global
 run-message patches are active, and the request goes through Agno's ``aresponse_stream`` (or
-``aresponse`` for structured output) entry point the run loop uses, so every MindRoom
-provider patch shapes the request and the parse.
+``aresponse`` for structured output, summaries, and decisions) entry point the run loop uses, so every
+MindRoom provider patch shapes the request and the parse.
 A transport-level stub answers the single provider request with the canned ``response_raw``.
 
 Regenerate after a deliberate change with ``.venv/bin/python -m tests.agno_parity.capture_providers``.
@@ -21,12 +21,14 @@ import json
 import os
 import re
 import tempfile
-from contextlib import aclosing, contextmanager
+from contextlib import aclosing, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
+from unittest.mock import patch
 
 import httpx
 from agno.agent import Agent
@@ -40,6 +42,7 @@ from google.genai import _api_client as genai_api_client
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, Field
 
+from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -49,10 +52,13 @@ from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.providers.model_loading import get_model_instance
 from mindroom.providers.openai_tool_search import install_openai_deferred_tool_search
 from mindroom.providers.portable_tool_search import install_portable_deferred_tool_search, resolve_call_tool_calls
+from mindroom.providers.tool_policy import without_provider_tools
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_storage import agno_compat_run_messages
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
+from mindroom.tool_jobs import agno_compat_execution
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -316,7 +322,46 @@ def build_model(case_input: dict[str, Any], root: Path) -> Model:
             install_openai_deferred_tool_search(model, deferred_tool_names=names)
     if case_input["portable_replay"] is not None:
         model.configure_portable_replay(enabled=case_input["portable_replay"])
+    if (native := case_input.get("native_compaction")) is not None:
+        # History planning enables a native trigger together with its authored replay.
+        model.configure_native_compaction(
+            threshold=native["threshold"],
+            history_generation=native["history_generation"],
+            allow_authored=True,
+        )
+    if "tool_jobs" in case_input:
+        install_tool_job_execution(model)
     return model
+
+
+@contextmanager
+def managed_tool_calls(tool_jobs: dict[str, Any] | None) -> Iterator[None]:
+    """Run the request as a turn whose calls can become tool jobs, with the fixture's functions as managed calls.
+
+    Job eligibility is per-turn state: a background job runtime, execution resources, and each function's
+    assembled toolkit, which ``Function.from_dict`` cannot carry. The harness supplies those answers, so the
+    schema projection ``install_tool_job_execution`` adds runs unchanged.
+    """
+    if tool_jobs is None:
+        yield
+        return
+    managed = frozenset(tool_jobs["managed"])
+
+    def wait_mode(function: Function, *, depth: int) -> str:
+        del depth
+        return "managed" if function.name in managed else "native"
+
+    with (
+        patch.object(
+            agno_compat_execution,
+            "get_tool_runtime_context",
+            return_value=SimpleNamespace(runtime_paths=None),
+        ),
+        patch.object(agno_compat_execution, "get_background_runtime", return_value=object()),
+        patch.object(agno_compat_execution, "current_execution_resources", return_value=object()),
+        patch.object(agno_compat_execution, "wait_mode", new=wait_mode),
+    ):
+        yield
 
 
 def _response_format_from_input(encoded: dict[str, Any] | None) -> dict[str, Any] | type[BaseModel] | None:
@@ -354,8 +399,13 @@ async def _run(case_input: dict[str, Any], response_raw: dict[str, Any], root: P
     messages = [Message.from_dict(deepcopy(message)) for message in case_input["messages"]]
     tools = [Function.from_dict(tool) for tool in case_input["tools"]] or None
     response_format = _response_format_from_input(case_input["response_format"])
+    tools_disabled = without_provider_tools() if case_input.get("provider_tools_disabled") else nullcontext()
     try:
-        with stubbed_provider_wire(response_raw) as recorded:
+        with (
+            stubbed_provider_wire(response_raw) as recorded,
+            managed_tool_calls(case_input.get("tool_jobs")),
+            tools_disabled,
+        ):
             if case_input["stream"]:
                 # Stop after the first provider request; tool execution is the run loop's concern.
                 async with aclosing(
@@ -373,7 +423,8 @@ async def _run(case_input: dict[str, Any], response_raw: dict[str, Any], root: P
                         ):
                             break
             else:
-                # Agno drops the adapter's parsed output here; agents parse the reply text instead.
+                # Structured output, summaries, and decisions do not stream. Agno drops the adapter's parsed
+                # output here; agents parse the reply text instead.
                 await model.aresponse(
                     messages=messages,
                     response_format=response_format,
@@ -422,12 +473,18 @@ CREATED_ISO = "2026-10-20T00:00:00.000000Z"
 class Call:
     """One tool call a canned reply makes, with ids in each wire family's native format.
 
-    ``key=None`` mimics providers that omit call ids.
+    ``key=None`` mimics providers that omit call ids. ``cut_arguments`` is the start of the arguments
+    JSON that an output limit cut off; routes that stream argument text send it instead of ``arguments``.
     """
 
     key: str | None
     name: str
     arguments: dict[str, Any]
+    cut_arguments: str | None = None
+
+    def argument_text(self) -> str:
+        """Return the arguments JSON a streaming provider sends for this call."""
+        return json.dumps(self.arguments) if self.cut_arguments is None else self.cut_arguments
 
     def native_id(self, prefix: str) -> str | None:
         """Return the call id a provider using ``prefix`` would send."""
@@ -452,6 +509,11 @@ class Reply:
     claude_citations: tuple[dict[str, Any], ...] = ()
     # Responses output items emitted before the reply's message and function calls.
     responses_items: tuple[dict[str, Any], ...] = ()
+    # The output limit stopped the reply: Claude max_tokens, Chat and Ollama length, Gemini MAX_TOKENS,
+    # or an incomplete Responses response.
+    output_limit: bool = False
+    # Claude usage iterations, which a request that compacted natively reports.
+    claude_iterations: tuple[dict[str, Any], ...] = ()
 
 
 def _pieces(text: str) -> list[str]:
@@ -497,7 +559,7 @@ def _chat_tool_call_deltas(reply: Reply, family: Family) -> list[dict[str, Any]]
     """Return tool-call deltas: a named start, then the arguments, or the whole call on Groq and Cerebras."""
     deltas = []
     for index, call in enumerate(reply.calls):
-        arguments = json.dumps(call.arguments)
+        arguments = call.argument_text()
         start: dict[str, Any] = {"index": index, "type": "function", "function": {"name": call.name, "arguments": ""}}
         if (call_id := call.native_id("call_")) is not None:
             start["id"] = call_id
@@ -511,7 +573,7 @@ def _chat_tool_call_deltas(reply: Reply, family: Family) -> list[dict[str, Any]]
 
 def _chat_reply(reply: Reply, family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     usage = _chat_usage(reply, family)
-    finish_reason = "tool_calls" if reply.calls else "stop"
+    finish_reason = "length" if reply.output_limit else "tool_calls" if reply.calls else "stop"
     base = {
         "id": "chatcmpl-parity",
         "object": "chat.completion.chunk" if stream else "chat.completion",
@@ -571,17 +633,21 @@ def _claude_blocks(reply: Reply) -> list[dict[str, Any]]:
 
 
 def _claude_usage(reply: Reply, *, output_tokens: int) -> dict[str, Any]:
-    return {
+    usage = {
         "input_tokens": reply.input_tokens,
         "cache_creation_input_tokens": reply.cache_write_tokens,
         "cache_read_input_tokens": reply.cached_tokens,
         "output_tokens": output_tokens,
     }
+    if reply.claude_iterations:
+        usage["iterations"] = list(reply.claude_iterations)
+    return usage
 
 
 def _claude_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     blocks = _claude_blocks(reply)
-    stop_reason = "tool_use" if reply.calls else "end_turn"
+    stop_reason = "max_tokens" if reply.output_limit else "tool_use" if reply.calls else "end_turn"
+    argument_text = {call.native_id("toolu_"): call.argument_text() for call in reply.calls}
     message = {
         "id": "msg_parity",
         "type": "message",
@@ -622,7 +688,11 @@ def _claude_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool)
             ]
         elif kind in {"tool_use", "server_tool_use"}:
             start = {**block, "input": {}}
-            deltas = [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
+            partial_json = argument_text.get(block["id"]) or json.dumps(block["input"])
+            deltas = [{"type": "input_json_delta", "partial_json": partial_json}]
+        elif kind == "compaction":
+            start = {**block, "content": ""}
+            deltas = [{"type": "compaction_delta", **{key: block[key] for key in ("content", "encrypted_content")}}]
         else:
             start = block
         events.append({"type": "content_block_start", "index": index, "content_block": start})
@@ -632,7 +702,8 @@ def _claude_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool)
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": reply.output_tokens},
+            "usage": {"output_tokens": reply.output_tokens}
+            | ({"iterations": list(reply.claude_iterations)} if reply.claude_iterations else {}),
         },
     )
     events.append({"type": "message_stop"})
@@ -656,7 +727,7 @@ def _responses_items(reply: Reply) -> list[dict[str, Any]]:
             {
                 "id": "msg_parity",
                 "type": "message",
-                "status": "completed",
+                "status": "incomplete" if reply.output_limit else "completed",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": reply.text, "annotations": []}],
             },
@@ -668,7 +739,7 @@ def _responses_items(reply: Reply) -> list[dict[str, Any]]:
             "status": "completed",
             "call_id": call.native_id("call_"),
             "name": call.name,
-            "arguments": json.dumps(call.arguments),
+            "arguments": call.argument_text(),
         }
         for call in reply.calls
     )
@@ -684,9 +755,9 @@ def _responses_object(reply: Reply, model_id: str, *, status: str, items: list[d
         "model": model_id,
         "output": items,
         "error": None,
-        "incomplete_details": None,
+        "incomplete_details": {"reason": "max_output_tokens"} if status == "incomplete" else None,
         "usage": None
-        if status != "completed"
+        if status not in {"completed", "incomplete"}
         else {
             "input_tokens": reply.input_tokens,
             "input_tokens_details": _input_token_details(reply),
@@ -746,8 +817,9 @@ def _responses_added_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def _responses_reply(reply: Reply, family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     items = _responses_items(reply)
+    status = "incomplete" if reply.output_limit else "completed"
     if not stream and not family.always_streams:
-        return _json_body(_responses_object(reply, model_id, status="completed", items=items))
+        return _json_body(_responses_object(reply, model_id, status=status, items=items))
     events: list[dict[str, Any]] = [
         {"type": "response.created", "response": _responses_object(reply, model_id, status="in_progress", items=[])},
     ]
@@ -758,7 +830,7 @@ def _responses_reply(reply: Reply, family: Family, *, model_id: str, stream: boo
         events.extend(_responses_item_events(index, item))
         events.append({"type": "response.output_item.done", "output_index": index, "item": item})
     events.append(
-        {"type": "response.completed", "response": _responses_object(reply, model_id, status="completed", items=items)},
+        {"type": f"response.{status}", "response": _responses_object(reply, model_id, status=status, items=items)},
     )
     return _sse(
         [{"event": event["type"], "data": {**event, "sequence_number": number}} for number, event in enumerate(events)],
@@ -799,8 +871,9 @@ def _gemini_usage(reply: Reply, *, final: bool) -> dict[str, Any]:
 
 def _gemini_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool) -> dict[str, Any]:
     parts = _gemini_parts(reply)
+    finish_reason = "MAX_TOKENS" if reply.output_limit else "STOP"
     if not stream:
-        candidate = {"content": {"role": "model", "parts": parts}, "finishReason": "STOP", "index": 0}
+        candidate = {"content": {"role": "model", "parts": parts}, "finishReason": finish_reason, "index": 0}
         return _json_body(
             {
                 "candidates": [candidate],
@@ -814,7 +887,7 @@ def _gemini_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool)
         final = index == len(parts) - 1
         candidate: dict[str, Any] = {"content": {"role": "model", "parts": [part]}, "index": 0}
         if final:
-            candidate["finishReason"] = "STOP"
+            candidate["finishReason"] = finish_reason
         chunks.append(
             {
                 "candidates": [candidate],
@@ -832,7 +905,7 @@ def _ollama_reply(reply: Reply, _family: Family, *, model_id: str, stream: bool)
         **base,
         "message": {"role": "assistant", "content": "" if stream else reply.text},
         "done": True,
-        "done_reason": "stop",
+        "done_reason": "length" if reply.output_limit else "stop",
         "total_duration": 812000000,
         "load_duration": 21000000,
         "prompt_eval_count": reply.input_tokens,
@@ -883,6 +956,8 @@ class Family:
     # model_config overrides for the prompt-cache scenario; None means no prompt-cache setting applies.
     prompt_cache_config: dict[str, Any] | None = None
     always_streams: bool = False
+    # Whether Agno's adapter sends a caller's tool_choice; Claude, Ollama, and Cerebras drop it.
+    forwards_tool_choice: bool = True
     # Family-specific goldens, each listed after the golden that seeds its history.
     extra_scenarios: tuple[str, ...] = ()
 
@@ -890,7 +965,13 @@ class Family:
 _CLAUDE_REASONING = {"thinking": {"type": "enabled", "budget_tokens": 2048}}
 _CLAUDE_PROMPT_CACHE_OFF = {"extra_kwargs": {"cache_system_prompt": False, "extended_cache_time": False}}
 _CLAUDE_EXTRAS = ("claude_citations", "claude_citations_replay", "prompt_cache_disabled")
-_NATIVE_CLAUDE_EXTRAS = (*_CLAUDE_EXTRAS, "claude_server_tool_blocks", "claude_server_tool_blocks_replay")
+_NATIVE_CLAUDE_EXTRAS = (
+    *_CLAUDE_EXTRAS,
+    "claude_server_tool_blocks",
+    "claude_server_tool_blocks_replay",
+    "native_compaction",
+    "native_compaction_replay",
+)
 _GEMINI_REASONING = {"thinking_budget": 1024, "include_thoughts": True}
 
 FAMILIES: tuple[Family, ...] = (
@@ -912,6 +993,8 @@ FAMILIES: tuple[Family, ...] = (
             "responses_explicit_replay",
             "responses_store_false_turn",
             "responses_store_false",
+            "native_compaction",
+            "native_compaction_replay",
         ),
     ),
     Family(
@@ -924,7 +1007,12 @@ FAMILIES: tuple[Family, ...] = (
             "extra_kwargs": {"prompt_cache_key": "parity-cache-key", "session_id": "parity-session"},
         },
         always_streams=True,
-        extra_scenarios=("reasoning_tool_call", "responses_explicit_replay"),
+        extra_scenarios=(
+            "reasoning_tool_call",
+            "responses_explicit_replay",
+            "native_compaction",
+            "native_compaction_replay",
+        ),
     ),
     Family(
         "azure",
@@ -978,6 +1066,7 @@ FAMILIES: tuple[Family, ...] = (
         deferred_mode="native",
         reasoning_kwargs=_CLAUDE_REASONING,
         prompt_cache_config={},
+        forwards_tool_choice=False,
         extra_scenarios=_NATIVE_CLAUDE_EXTRAS,
     ),
     Family(
@@ -991,6 +1080,7 @@ FAMILIES: tuple[Family, ...] = (
         deferred_mode="native",
         reasoning_kwargs=_CLAUDE_REASONING,
         prompt_cache_config={},
+        forwards_tool_choice=False,
         extra_scenarios=_NATIVE_CLAUDE_EXTRAS,
     ),
     Family(
@@ -1007,6 +1097,7 @@ FAMILIES: tuple[Family, ...] = (
         },
         reasoning_kwargs=_CLAUDE_REASONING,
         prompt_cache_config={},
+        forwards_tool_choice=False,
         extra_scenarios=_CLAUDE_EXTRAS,
     ),
     Family(
@@ -1025,9 +1116,20 @@ FAMILIES: tuple[Family, ...] = (
         },
         reasoning_kwargs=_GEMINI_REASONING,
     ),
-    Family("ollama", "ollama", {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://localhost:11434"}),
+    Family(
+        "ollama",
+        "ollama",
+        {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://localhost:11434"},
+        forwards_tool_choice=False,
+    ),
     Family("groq", "chat", {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": _KEY}, usage_style="groq"),
-    Family("cerebras", "chat", {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": _KEY}, usage_style="cerebras"),
+    Family(
+        "cerebras",
+        "chat",
+        {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": _KEY},
+        usage_style="cerebras",
+        forwards_tool_choice=False,
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -1158,6 +1260,60 @@ class _TripToolkit(Toolkit):
 
 
 PLAN_TRIP_TOOL = _offered_functions(_TripToolkit())["plan_trip"]
+
+
+class _OrdersToolkit(Toolkit):
+    """Order tools; the approval policy below gates the invoice function."""
+
+    def __init__(self) -> None:
+        super().__init__(name="orders", tools=[self.send_invoice])
+
+    def send_invoice(self, order_id: str) -> str:
+        """Email the invoice for one order.
+
+        Args:
+            order_id: Order to invoice.
+
+        """
+        del order_id
+        return ""
+
+
+class _DelegateToolkit(Toolkit):
+    """A stand-in for the delegate tool, whose run_subagent the approval capability marks for external execution."""
+
+    def __init__(self) -> None:
+        super().__init__(name="delegate", tools=[self.run_subagent])
+
+    def run_subagent(self, agent_name: str, task: str) -> str:
+        """Run a task with another agent and return its answer.
+
+        Args:
+            agent_name: Agent to delegate to.
+            task: Task for that agent.
+
+        """
+        del agent_name, task
+        return ""
+
+
+def _approval_gated(toolkit: Toolkit) -> dict[str, dict[str, Any]]:
+    """Return a toolkit's offered functions after agent construction applies the approval policy."""
+    config = Config.model_validate(
+        {"tool_approval": {"rules": [{"match": "send_invoice", "action": "require_approval"}]}},
+    )
+    gated = apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name=toolkit.name,
+    )
+    assert gated is not None
+    return _offered_functions(gated)
+
+
+GATED_INVOICE_TOOL = _approval_gated(_OrdersToolkit())["send_invoice"]
+EXTERNAL_SUBAGENT_TOOL = _approval_gated(_DelegateToolkit())["run_subagent"]
 # A raw MCP input schema as MindRoom's MCP toolkit offers it: no approval flags, shared types under $defs.
 CALENDAR_EVENT_TOOL = Function(
     name="calendar_create_event",
@@ -1237,6 +1393,15 @@ class Case:
     deferred_tool_names: tuple[str, ...] = ()
     portable_replay: bool | None = None
     output_schema: type[BaseModel] | None = None
+    # None streams unless the case has an output schema.
+    stream: bool | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    # Decision-only requests run inside without_provider_tools(), as participation checks and judgments do.
+    provider_tools_disabled: bool = False
+    # Names of the functions a turn that can start tool jobs offers as managed calls.
+    managed_tool_names: tuple[str, ...] = ()
+    # The threshold and history generation history planning passes to configure_native_compaction.
+    native_compaction: dict[str, Any] | None = None
 
 
 def _system(text: str = SYSTEM) -> dict[str, Any]:
@@ -1338,6 +1503,37 @@ _STRUCTURED_OUTPUTS: dict[str, tuple[type[BaseModel], str, str, dict[str, Any]]]
         },
     ),
 }
+# A reply the output limit cut off mid-sentence, and a call it cut off inside the arguments JSON.
+_CUT_ANSWER = "Pack a light rain jacket and"
+_CUT_WEATHER = Call("weather", "get_weather", {"city": "Par"}, cut_arguments='{"city": "Par')
+_INVOICE = Call("invoice", "send_invoice", {"order_id": "A-1001"})
+_WEATHER_IN_BACKGROUND = Call("weather", "get_weather", {"city": "Paris", "background_after": 30})
+_DECISION = '{"action": "respond", "reason": "The user asked a direct question."}'
+_NATIVE_COMPACTION = {"threshold": 60000, "history_generation": ""}
+_COMPACTION_ITEM = {"id": "cmp_parity", "type": "compaction", "encrypted_content": "parity-compaction"}
+_COMPACTION_BLOCK = {
+    "type": "compaction",
+    "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
+    "encrypted_content": "parity-compaction",
+}
+# A natively compacted request bills the compaction pass and the answer as separate iterations.
+_COMPACTION_ITERATIONS = (
+    {
+        "type": "compaction",
+        "input_tokens": 61000,
+        "output_tokens": 300,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    },
+    {
+        "type": "message",
+        "model": "claude-sonnet-5-5",
+        "input_tokens": 420,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    },
+)
 _ORDER_RESULT = '{"order_id": "A-1001", "status": "shipped"}'
 _WEATHER_RESULT = '{"city": "Paris", "forecast": "light rain", "high_c": 14}'
 _NOTES_RESULT = '[{"title": "Paris 2025", "text": "Bring the blue scarf."}]'
@@ -1346,7 +1542,17 @@ _NOTES_RESULT = '[{"title": "Paris 2025", "text": "Bring the blue scarf."}]'
 def _call(family: Family, call: Call, *, omit_gemini_id: bool = False) -> Call:
     """Drop the call id where providers omit it: always on Ollama, and on Gemini API calls without ids."""
     omit = family.wire == "ollama" or (omit_gemini_id and family.wire == "gemini")
-    return Call(None, call.name, call.arguments) if omit else call
+    return replace(call, key=None) if omit else call
+
+
+def _forced_tool_choice(family: Family) -> str | dict[str, Any]:
+    """Return the tool choice that forces a call in the shape each route's Agno adapter forwards."""
+    if family.wire == "responses":
+        return {"type": "function", "name": "get_weather"}
+    if family.wire == "gemini":
+        # Agno maps only mode strings for Gemini; ANY forces some function call.
+        return "any"
+    return {"type": "function", "function": {"name": "get_weather"}}
 
 
 def _foreign_tool_turn(family: Family) -> list[dict[str, Any]]:
@@ -1600,6 +1806,49 @@ def _scenario(name: str, family: Family, done: dict[str, dict[str, Any]]) -> Cas
             tools=tools,
             deferred_tool_names=DEFERRED_TOOL_NAMES,
         )
+    if name == "output_limit_stop":
+        # Non-streaming, as the compaction summary call that refuses a summary cut off by the limit.
+        reply = Reply(text=_CUT_ANSWER, output_limit=True, output_tokens=8)
+        return Case([_system(), _user(_PROMPT)], reply, stream=False)
+    if name == "output_limit_stop_tool_call":
+        reply = Reply(text="Checking the forecast. ", calls=(_CUT_WEATHER,), output_limit=True)
+        return Case([_system(), _user(_PROMPT)], reply, tools=weather_tools)
+    if name == "approval_gated_tools":
+        reply = Reply(calls=(_INVOICE,))
+        tools = (WEATHER_TOOL, GATED_INVOICE_TOOL, EXTERNAL_SUBAGENT_TOOL)
+        return Case([_system(), _user("Email the invoice for order A-1001.")], reply, tools=tools)
+    if name == "tool_job_wait_parameter":
+        reply = Reply(calls=(_call(family, _WEATHER_IN_BACKGROUND, omit_gemini_id=True),))
+        return Case([_system(), _user(_PROMPT)], reply, tools=weather_tools, managed_tool_names=("get_weather",))
+    if name == "native_compaction":
+        reply = (
+            Reply(text="Add a warm layer.", responses_items=(_COMPACTION_ITEM,), input_tokens=420)
+            if family.wire == "responses"
+            else Reply(
+                text="Add a warm layer.",
+                claude_blocks=(_COMPACTION_BLOCK,),
+                claude_iterations=_COMPACTION_ITERATIONS,
+                input_tokens=420,
+            )
+        )
+        messages = _followup(done, "plain_turn", prompt="And for the evening?")
+        return Case(messages, reply, portable_replay=True, native_compaction=_NATIVE_COMPACTION)
+    if name == "native_compaction_replay":
+        messages = _followup(done, "native_compaction", prompt="Anything else?")
+        return Case(messages, Reply(text="Walking shoes."), portable_replay=True, native_compaction=_NATIVE_COMPACTION)
+    if name == "tool_choice_forced":
+        reply = Reply(calls=(_call(family, _WEATHER, omit_gemini_id=True),))
+        return Case([_system(), _user(_PROMPT)], reply, tools=weather_tools, tool_choice=_forced_tool_choice(family))
+    if name == "tool_choice_none":
+        # A participation decision or judgment: tools stay defined, selection is off, and the call does not stream.
+        return Case(
+            [_system(), _user(_PROMPT)],
+            Reply(text=_DECISION),
+            tools=weather_tools,
+            stream=False,
+            tool_choice="none",
+            provider_tools_disabled=True,
+        )
     msg = f"unknown scenario {name}"
     raise ValueError(msg)
 
@@ -1634,6 +1883,19 @@ def family_scenarios(family: Family) -> list[str]:
     names.append("deferred_tool_search")
     if family.deferred_mode == "portable" or family.wire == "responses":
         names.append("deferred_tool_search_replay")
+    if not family.always_streams:
+        # A streamed Responses reply the limit cuts off raises IncompleteResponsesStreamError, so Codex has none.
+        names.append("output_limit_stop")
+    if family.wire in {"chat", "claude"}:
+        # Gemini and Ollama send each call whole; Responses streams no cut-off call this harness can reproduce.
+        names.append("output_limit_stop_tool_call")
+    if family.wire == "responses" or (family.wire == "chat" and family.usage_style != "cerebras"):
+        # Only these adapters send Agno's approval flags inside the request's tool definitions.
+        names.append("approval_gated_tools")
+    names.append("tool_job_wait_parameter")
+    if family.forwards_tool_choice:
+        names.append("tool_choice_forced")
+    names.append("tool_choice_none")
     return names
 
 
@@ -1654,14 +1916,21 @@ def _case_input(family: Family, case: Case) -> dict[str, Any]:
         "model_config": _merged_config(family.model_config, case.model_config),
         "messages": case.messages,
         "tools": list(case.tools),
-        "tool_choice": None,
+        "tool_choice": case.tool_choice,
         "response_format": None,
         "deferred_tool_search": {"mode": family.deferred_mode, "tool_names": list(case.deferred_tool_names)}
         if case.deferred_tool_names
         else None,
         "portable_replay": case.portable_replay,
-        "stream": case.output_schema is None,
+        "stream": case.output_schema is None if case.stream is None else case.stream,
     }
+    # Keys that only later goldens set are omitted when unset, so earlier goldens keep their exact input.
+    if case.provider_tools_disabled:
+        case_input["provider_tools_disabled"] = True
+    if case.managed_tool_names:
+        case_input["tool_jobs"] = {"managed": list(case.managed_tool_names)}
+    if case.native_compaction is not None:
+        case_input["native_compaction"] = case.native_compaction
     if case.output_schema is not None:
         case_input["response_format"] = resolved_response_format(case_input, case.output_schema)
     return _json_roundtrip(case_input)

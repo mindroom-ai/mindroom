@@ -8,6 +8,7 @@ Run ``.venv/bin/python -m tests.agno_parity.capture_prompts`` from the repositor
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import json
 import re
@@ -25,24 +26,32 @@ from unittest.mock import patch
 
 import nio
 from agno.knowledge.knowledge import Knowledge
+from agno.media import Image
 from agno.models.response import ModelResponse
 from agno.session.agent import AgentSession
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
 from pydantic import BaseModel
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
+from mindroom.api import openai_compat
+from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.dynamic_workflow import _aexecute_room_agent_participant
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
+from mindroom.media_inputs import MediaInputs
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.message_target import MessageTarget
+from mindroom.participation import ParticipationGate
 from mindroom.providers import model_loading
 from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
 from mindroom.routing import suggest_responder
@@ -128,6 +137,9 @@ _DATE_PATTERN = re.compile(
     r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
     r"(?:January|February|March|April|May|June|July|August|September|October|November|December) \d{2}, \d{4}\b",
 )
+# A delegation's tool result names its record, filed under the day the delegation started, by its random id.
+_DELEGATION_RECORD_DATE = re.compile(r"(?<=\.mindroom/delegations/)\d{4}-\d{2}-\d{2}(?=/)")
+_HEX_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 
 
 @dataclass(frozen=True)
@@ -261,11 +273,14 @@ def _call_dict(call: ModelCall) -> dict[str, Any]:
 
 
 def normalize(value: object, root: Path) -> object:
-    """Replace what changes between captures: the capture's temporary root and today's date."""
+    """Replace what changes between captures: the capture's temporary root, today's date, and random ids."""
     text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     for path in {str(root.resolve()), str(root)}:
         text = text.replace(path, "<TMP>")
-    return json.loads(_DATE_PATTERN.sub("<DATE>", text))
+    text = _DELEGATION_RECORD_DATE.sub("<DATE>", _DATE_PATTERN.sub("<DATE>", text))
+    ids: dict[str, str] = {}
+    text = _HEX_ID.sub(lambda match: ids.setdefault(match.group(), f"<ID-{len(ids) + 1}>"), text)
+    return json.loads(text)
 
 
 def _bound_config(root: Path, authored: dict[str, Any]) -> tuple[Config, RuntimePaths]:
@@ -332,6 +347,9 @@ async def _agent_turn(
     system_enrichment: tuple[EnrichmentItem, ...] = (),
     transient_enrichment: tuple[EnrichmentItem, ...] = (),
     skill_review_capture: SkillReviewCapture | None = None,
+    participation: ParticipationGate | None = None,
+    media: MediaInputs | None = None,
+    run_id: str | None = None,
 ) -> ToolExecutionIdentity:
     """Stream one Matrix reply through ``ai.stream_agent_response`` with the arguments the response runner passes."""
     runtime = _tool_runtime(config, runtime_paths, agent_name)
@@ -344,11 +362,13 @@ async def _agent_turn(
             requester_id=_REQUESTER_ID,
             reply_to_event_id=_CURRENT_EVENT_ID,
             correlation_id=_CORRELATION_ID,
+            run_id=run_id,
             transient_enrichment_items=transient_enrichment,
             system_enrichment_items=system_enrichment,
         ),
         agent_mode=agent_mode,
         skill_review_capture=skill_review_capture,
+        participation=participation,
     )
     execution_identity = build_execution_identity_from_runtime_context(runtime)
     recorder = TurnRecorder(user_message=prompt)
@@ -361,6 +381,7 @@ async def _agent_turn(
             thread_history=_thread_history(),
             current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
             knowledge=knowledge,
+            media=media,
             execution_identity=execution_identity,
             turn_recorder=recorder,
             supports_native_tool_approval=True,
@@ -971,6 +992,198 @@ async def _run_skill_review_fork(root: Path) -> ScenarioOutput:
     )
 
 
+def _assistant_config(*, model: dict[str, Any] = _ANTHROPIC, **agent: object) -> dict[str, Any]:
+    """Return a one-agent config without default tools, which keeps the scenario's requests small."""
+    return {
+        "defaults": {"tools": []},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Answer questions about the team handbook.",
+                "tools": ["calculator"],
+                "learning": False,
+                **agent,
+            },
+        },
+        "memory": {"backend": "none"},
+        "models": {"default": model},
+        "timezone": "UTC",
+    }
+
+
+def _last_user_text(call: ModelCall) -> str:
+    return next((str(message.content) for message in reversed(call.messages) if message.role == "user"), "")
+
+
+_PARTICIPATION_INSTRUCTIONS = "Reply only when the message asks about the handbook."
+
+
+def answer_participation(call: ModelCall) -> ModelResponse:
+    """Decide to respond on the decision request, which alone disables tool choice, then answer."""
+    if call.tool_choice == "none":
+        return ModelResponse(role="assistant", content='{"action": "respond", "reason": "A direct handbook question."}')
+    return answer_ok(call)
+
+
+async def _run_participation_decision(root: Path) -> ScenarioOutput:
+    authored = _assistant_config(participation={"instructions": _PARTICIPATION_INSTRUCTIONS})
+    config, runtime_paths = _bound_config(root, authored)
+    prompt = "Does the handbook cover conference travel?"
+    # The response runner's gate for an agent whose participation config sets no judgment backend.
+    gate = ParticipationGate(instructions=_PARTICIPATION_INSTRUCTIONS)
+    await _agent_turn(config, runtime_paths, "assistant", prompt, participation=gate)
+    assert gate.approved, gate.decision
+    return ScenarioOutput({"config": authored, "turn": _turn_input(prompt)})
+
+
+_COMPACT_PROMPT = "Please compact our conversation before we continue."
+_COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversation; it scheduled compaction."
+
+
+def answer_compaction(call: ModelCall) -> ModelResponse:
+    """Call compact_context on the first turn, summarize on the summary request, and answer the rest."""
+    if not call.stream:
+        return ModelResponse(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
+    if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
+        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
+    return answer_ok(call)
+
+
+async def _run_compaction_summary(root: Path) -> ScenarioOutput:
+    authored = _assistant_config(model={**_ANTHROPIC, "context_window": 200000}, tools=["compact_context"])
+    config, runtime_paths = _bound_config(root, authored)
+    follow_up = "What is the travel policy?"
+    # The summary input names the compacted run, so the turns use fixed run ids.
+    await _agent_turn(config, runtime_paths, "assistant", _COMPACT_PROMPT, run_id="run-compact")
+    # The next reply in the scope compacts its history first, with a non-streaming summary request.
+    await _agent_turn(config, runtime_paths, "assistant", follow_up, run_id="run-follow-up")
+    return ScenarioOutput({"config": authored, "turns": [_turn_input(_COMPACT_PROMPT), _turn_input(follow_up)]})
+
+
+_CRITIC_PROFILE = (
+    "---\ndescription: Finds the biggest risk in a plan.\ntools: [calculator]\n---\n"
+    "You are a careful critic. Name the single biggest risk.\n"
+)
+
+
+def answer_as_delegating_parent(call: ModelCall) -> ModelResponse:
+    """Delegate to the researcher, then to the critic profile, then answer; children answer directly."""
+    if "run_subagent" not in _tool_names(call):
+        return answer_ok(call)
+    results = sum(1 for message in call.messages if message.role == "tool")
+    if results == 0:
+        arguments: dict[str, object] = {"agent_name": "researcher", "task": "Summarize the travel policy."}
+        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_child", "run_subagent", arguments)])
+    if results == 1:
+        arguments = {"profile": "critic", "task": "Name the biggest risk in the travel policy."}
+        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_persona", "run_subagent", arguments)])
+    return answer_ok(call)
+
+
+async def _run_delegated_child_run(root: Path) -> ScenarioOutput:
+    authored = {
+        "defaults": {"tools": []},
+        "agents": {
+            "assistant": {
+                "display_name": "Assistant",
+                "role": "Answer questions about the team handbook.",
+                "tools": ["calculator"],
+                "delegate_to": ["assistant", "researcher"],
+                "memory_backend": "file",
+                # A delegated child must be allowed to answer this requester.
+                "access": {"users": [_REQUESTER_ID]},
+                "learning": False,
+            },
+            "researcher": {
+                "display_name": "Researcher",
+                "role": "Research topics in depth.",
+                "instructions": ["Name your sources."],
+                "tools": ["calculator"],
+                "access": {"users": [_REQUESTER_ID]},
+                "learning": False,
+            },
+        },
+        "memory": {"backend": "none"},
+        "models": {"default": _ANTHROPIC},
+        "timezone": "UTC",
+    }
+    config, runtime_paths = _bound_config(root, authored)
+    workspace_files = {"subagents/critic.md": _CRITIC_PROFILE}
+    profile = agent_workspace_root_path(runtime_paths.storage_root, "assistant") / "subagents" / "critic.md"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(_CRITIC_PROFILE, encoding="utf-8")
+    prompt = "Check the travel policy and its biggest risk."
+    await _agent_turn(config, runtime_paths, "assistant", prompt)
+    return ScenarioOutput({"config": authored, "workspace_files": workspace_files, "turn": _turn_input(prompt)})
+
+
+_PNG_PIXEL = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+)
+
+
+async def _run_media_current_message(root: Path) -> ScenarioOutput:
+    authored = _assistant_config()
+    config, runtime_paths = _bound_config(root, authored)
+    prompt = "What does this picture show?"
+    image = Image(id="parity-image", content=_PNG_PIXEL, mime_type="image/png", format="png")
+    await _agent_turn(config, runtime_paths, "assistant", prompt, media=MediaInputs(images=[image]))
+    return ScenarioOutput(
+        {
+            "config": authored,
+            "turn": _turn_input(prompt),
+            "media": {"images": [{"id": image.id, "mime_type": "image/png"}]},
+        },
+    )
+
+
+def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[str, Any]) -> None:
+    """Send one request to the OpenAI-compatible API, as a chat client such as LibreChat does."""
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        response = client.post("/v1/chat/completions", headers={"X-Session-Id": "api-travel"}, json=body)
+    assert response.status_code == 200, response.text
+
+
+async def _run_openai_compat_api(root: Path) -> ScenarioOutput:
+    authored = _assistant_config()
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+            "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true",
+        },
+    )
+    config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
+    body = {
+        "model": "assistant",
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": "Hi there."},
+            {"role": "assistant", "content": "Hello! How can I help?"},
+            {"role": "user", "content": "What is the travel policy?"},
+        ],
+    }
+    await asyncio.to_thread(_post_openai_compat, config, runtime_paths, body)
+    return ScenarioOutput(
+        {
+            "config": authored,
+            "request": {"headers": {"X-Session-Id": "api-travel"}, "json": body},
+            "entry_point": "POST /v1/chat/completions",
+        },
+    )
+
+
 SCENARIOS: dict[str, Scenario] = {
     "agent_anthropic": Scenario(
         "Representative Claude agent answering in a Matrix thread: role, instructions, markdown, knowledge, skills, "
@@ -1077,6 +1290,32 @@ SCENARIOS: dict[str, Scenario] = {
         "mindroom.voice.handler._process_transcription",
         _voice_normalizer,
         "@assistant what is the travel policy",
+    ),
+    "participation_decision": Scenario(
+        "Participation check of an agent with participation config and no judgment backend: the reply model's "
+        "non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
+        _run_participation_decision,
+        answer_participation,
+    ),
+    "compaction_summary": Scenario(
+        "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary "
+        "request, then replies with the summary in place of the compacted run.",
+        _run_compaction_summary,
+        answer_compaction,
+    ),
+    "delegated_child_run": Scenario(
+        "Delegation: run_subagent to a configured agent, then to an authored subagent profile from the workspace, "
+        "each child's request, and the parent's requests with both results.",
+        _run_delegated_child_run,
+        answer_as_delegating_parent,
+    ),
+    "media_current_message": Scenario(
+        "An image attached to the current Matrix message, carried on the current user message.",
+        _run_media_current_message,
+    ),
+    "openai_compat_api": Scenario(
+        "A streamed /v1/chat/completions request with earlier turns, through the OpenAI-compatible API path.",
+        _run_openai_compat_api,
     ),
 }
 

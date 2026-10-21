@@ -1,0 +1,291 @@
+{
+  "description": "A streamed /v1/chat/completions request with earlier turns, through the OpenAI-compatible API path.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "learning": false,
+          "role": "Answer questions about the team handbook.",
+          "tools": [
+            "calculator"
+          ]
+        }
+      },
+      "defaults": {
+        "tools": []
+      },
+      "memory": {
+        "backend": "none"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "POST /v1/chat/completions",
+    "request": {
+      "headers": {
+        "X-Session-Id": "api-travel"
+      },
+      "json": {
+        "messages": [
+          {
+            "content": "Hi there.",
+            "role": "user"
+          },
+          {
+            "content": "Hello! How can I help?",
+            "role": "assistant"
+          },
+          {
+            "content": "What is the travel policy?",
+            "role": "user"
+          }
+        ],
+        "model": "assistant",
+        "stream": true
+      }
+    }
+  },
+  "requests": [
+    {
+      "deferred_tool_names": [],
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant, the MindRoom agent exposed through the OpenAI-compatible API as model `assistant`.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nIn OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. Always use the sender or role labels exactly as provided in the prompt.\nFollow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.\n\n\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).Answer questions about the team handbook.\n</your_role>\n\n<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nDo not reflect on the quality of the returned search results in your response",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "<msg event_id=\"$openai-1\" from=\"user\"><![CDATA[Hi there.]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "<msg event_id=\"$openai-2\" from=\"assistant\"><![CDATA[Hello! How can I help?]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "What is the travel policy?",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "response_format": null,
+      "stream": true,
+      "tool_choice": null,
+      "tools": [
+        {
+          "function": {
+            "description": "Add two numbers and return the result.",
+            "external_execution": false,
+            "name": "add",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "description": "(float) First number.",
+                  "type": "number"
+                },
+                "b": {
+                  "description": "(float) Second number.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Divide first number by second and return the result.",
+            "external_execution": false,
+            "name": "divide",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "description": "(float) Numerator.",
+                  "type": "number"
+                },
+                "b": {
+                  "description": "(float) Denominator.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Raise first number to the power of the second number and return the result.",
+            "external_execution": false,
+            "name": "exponentiate",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "description": "(float) Base.",
+                  "type": "number"
+                },
+                "b": {
+                  "description": "(float) Exponent.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+            "external_execution": false,
+            "name": "factorial",
+            "parameters": {
+              "properties": {
+                "n": {
+                  "description": "(int) Number to calculate the factorial of, at most 1558.",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+            "external_execution": false,
+            "name": "is_prime",
+            "parameters": {
+              "properties": {
+                "n": {
+                  "description": "(int) Number to check if prime, at most 10**12.",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Multiply two numbers and return the result.",
+            "external_execution": false,
+            "name": "multiply",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "description": "(float) First number.",
+                  "type": "number"
+                },
+                "b": {
+                  "description": "(float) Second number.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Calculate the square root of a number and return the result.",
+            "external_execution": false,
+            "name": "square_root",
+            "parameters": {
+              "properties": {
+                "n": {
+                  "description": "(float) Number to calculate the square root of.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "n"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Subtract second number from first and return the result.",
+            "external_execution": false,
+            "name": "subtract",
+            "parameters": {
+              "properties": {
+                "a": {
+                  "description": "(float) First number.",
+                  "type": "number"
+                },
+                "b": {
+                  "description": "(float) Second number.",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "scenario": "openai_compat_api"
+}

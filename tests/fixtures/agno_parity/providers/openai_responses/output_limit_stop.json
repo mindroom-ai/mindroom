@@ -1,0 +1,118 @@
+{
+  "family": "openai_responses",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api": "responses",
+      "api_key": "parity-test-key",
+      "id": "gpt-6-astra",
+      "provider": "openai"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": false,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and",
+      "from_history": false,
+      "provider_data": {
+        "incomplete_reason": "max_output_tokens",
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "OpenAI Responses"
+        },
+        "mindroom_response_stored": true,
+        "response_id": "resp_parity",
+        "response_status": "incomplete"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 8,
+      "total_tokens": 50
+    },
+    "stop_reason": "incomplete"
+  },
+  "request": {
+    "body": {
+      "input": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "developer"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-6-astra",
+      "reasoning": {},
+      "store": true
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.openai.com/v1/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "created_at": 1792540800,
+      "error": null,
+      "id": "resp_parity",
+      "incomplete_details": {
+        "reason": "max_output_tokens"
+      },
+      "model": "gpt-6-astra",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            {
+              "annotations": [],
+              "text": "Pack a light rain jacket and",
+              "type": "output_text"
+            }
+          ],
+          "id": "msg_parity",
+          "role": "assistant",
+          "status": "incomplete",
+          "type": "message"
+        }
+      ],
+      "status": "incomplete",
+      "usage": {
+        "input_tokens": 42,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 8,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 50
+      }
+    },
+    "status": 200
+  },
+  "scenario": "output_limit_stop"
+}
