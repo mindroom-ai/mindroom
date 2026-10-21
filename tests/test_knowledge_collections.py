@@ -413,7 +413,7 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
         second = pool.submit(lookup)
         indexes = [first.result(timeout=10), second.result(timeout=10)]
     for index in indexes:
-        assert index.knowledge.vector_db.exists() is True
+        assert index.reader.exists() is True
     # A native client with different settings can open immediately: none of
     # the published handles retain a system in this process.
     with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:

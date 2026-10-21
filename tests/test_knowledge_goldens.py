@@ -15,10 +15,14 @@ import httpx
 import numpy as np
 import ollama
 import pytest
+from agno.agent import Agent
+from agno.agent._default_tools import create_knowledge_search_tool
+from agno.knowledge.knowledge import Knowledge
 from openai import AsyncOpenAI, OpenAI
 
 import mindroom.embeddings.sentence_transformers_embedder as local_embedder
 from mindroom.config.main import Config
+from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
@@ -30,12 +34,23 @@ from mindroom.knowledge.registry import (
     published_index_storage_path,
     resolve_published_index_key,
 )
+from mindroom.knowledge.search import (
+    KNOWLEDGE_SEARCH_TOOL_NAME,
+    AgentKnowledge,
+    KnowledgeSource,
+    KnowledgeSourceDescription,
+    _format_search_hits,
+    knowledge_search_tool_description,
+)
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
+from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from tests.agno_parity.knowledge_vectors import parity_vector
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from agno.tools.function import Function
     from chromadb.api.models.Collection import Collection
 
     from mindroom.constants import RuntimePaths
@@ -270,5 +285,128 @@ def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: _Parit
     for search in SEARCH_GOLDENS["searches"]:
         if search["agent"] != "librarian" or "documents" not in search:
             continue
-        documents = proxy.search(search["query"], limit=10)
-        assert _with_approximate_distances([document.to_dict() for document in documents]) == search["documents"]
+        hits = proxy.search(search["query"], limit=10)
+        assert json.loads(_format_search_hits(hits)) == _with_approximate_distances(search["documents"])
+
+
+def _normalized_search_documents(output: str) -> list[dict[str, Any]]:
+    """Parse a search result, checking its layout and normalizing the per-version content hash."""
+    documents = json.loads(output)
+    assert output == json.dumps(documents, indent=2, ensure_ascii=False)
+    for document in documents:
+        assert _HEX64.fullmatch(document["meta_data"]["content_hash"]), document
+        document["meta_data"]["content_hash"] = "<sha256>"
+    return documents
+
+
+def _expected_search_output(search: dict[str, Any]) -> list[dict[str, Any]] | str:
+    return _with_approximate_distances(search["documents"]) if "documents" in search else search["text"]
+
+
+async def _owned_tool_output(knowledge: AgentKnowledge, query: str) -> str:
+    """Run the owned ``search_knowledge_base`` tool the way a tool call reaches it."""
+    function = knowledge.search_function()
+    assert function.entrypoint is not None
+    return await function.entrypoint(query=query)
+
+
+async def _agno_tool_output(knowledge: StrictSearchKnowledge, query: str) -> str:
+    """Run Agno's own ``search_knowledge_base`` tool over the handle an Agno agent receives."""
+    function = create_knowledge_search_tool(Agent(knowledge=knowledge, search_knowledge=True), async_mode=True)
+    assert function.entrypoint is not None
+    return await function.entrypoint(query=query)
+
+
+@pytest.mark.asyncio
+async def test_search_tool_results_match_agnos(tmp_path: Path, parity_embedder: _ParityEmbedder) -> None:
+    """The owned search tool and Agno's tool over the owned handle both return what Agno's search returned.
+
+    Documents keep their values and layout, merged bases interleave, an empty base reports no documents, and a
+    failed query embedding reports the error type. Agno's key order varies between processes; the owned one does not.
+    """
+    config, runtime_paths = _golden_config(tmp_path)
+    await _refresh_golden_bases(config, runtime_paths)
+    failing = False
+
+    def _embed(texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
+        del purpose
+        if failing:
+            message = "embedder request failed (HTTP 503)"
+            raise EmbedderRequestError(message)
+        return [parity_vector(text) for text in texts]
+
+    parity_embedder.embed = _embed  # type: ignore[method-assign]
+    for search in SEARCH_GOLDENS["searches"]:
+        failing = search.get("text", "").startswith("Error")
+        handle = resolve_agent_knowledge_access(search["agent"], config, runtime_paths).knowledge
+        assert handle is not None
+        owned = await _owned_tool_output(handle.agent_knowledge, search["query"])
+        agno = await _agno_tool_output(handle, search["query"])
+        if "documents" in search:
+            assert all(list(document) == ["name", "meta_data", "content"] for document in json.loads(owned))
+            assert _normalized_search_documents(owned) == _expected_search_output(search)
+            assert _normalized_search_documents(agno) == _expected_search_output(search)
+        else:
+            assert owned == agno == search["text"]
+
+
+def _agno_generated_search_tool(knowledge: StrictSearchKnowledge, *, memory_search_available: bool) -> Function:
+    """Return Agno's generated ``search_knowledge_base`` tool with the description MindRoom gives it."""
+    function = create_knowledge_search_tool(Agent(knowledge=knowledge, search_knowledge=True), async_mode=True)
+    function.description = knowledge_search_tool_description(
+        knowledge.agent_knowledge.source_descriptions(),
+        memory_search_available=memory_search_available,
+    )
+    return function
+
+
+@pytest.mark.parametrize("memory_search_available", [False, True])
+def test_search_function_schema_is_agnos(memory_search_available: bool) -> None:
+    """The owned search tool is the Agno function Agno generates, so providers receive the same schema."""
+    source = KnowledgeSource(
+        description=KnowledgeSourceDescription(base_id="handbook", description="The team handbook and its policies."),
+        index=cast("ChromaReadProxy", object()),
+    )
+    knowledge = AgentKnowledge(sources=(source,))
+    owned = knowledge.search_function(memory_search_available=memory_search_available)
+    agno = _agno_generated_search_tool(
+        StrictSearchKnowledge(knowledge),
+        memory_search_available=memory_search_available,
+    )
+    owned.process_entrypoint()
+    agno.process_entrypoint()
+
+    assert owned.to_dict() == agno.to_dict()
+    prompt_golden = json.loads((GOLDEN_DIR.parent / "prompts" / "agent_openai_chat.json").read_text(encoding="utf-8"))
+    [golden_tool] = [
+        tool["function"]
+        for request in prompt_golden["requests"]
+        for tool in request["tools"]
+        if tool["function"]["name"] == KNOWLEDGE_SEARCH_TOOL_NAME
+    ][:1]
+    if not memory_search_available:
+        assert owned.description == golden_tool["description"]
+    assert owned.parameters["properties"] == golden_tool["parameters"]["properties"]
+    assert owned.parameters["required"] == golden_tool["parameters"]["required"]
+
+
+def test_prompt_block_is_the_one_in_every_prompt_golden() -> None:
+    """The owned prompt block is the ``<knowledge_base>`` block every knowledge-enabled prompt golden carries."""
+    block = AgentKnowledge(sources=()).prompt_block()
+    assert block == Knowledge().build_context()
+    carrying = [
+        path.name
+        for path in sorted((GOLDEN_DIR.parent / "prompts").glob("*.json"))
+        if "<knowledge_base>" in path.read_text(encoding="utf-8")
+    ]
+    assert carrying
+    for name in carrying:
+        golden = json.loads((GOLDEN_DIR.parent / "prompts" / name).read_text(encoding="utf-8"))
+        system_texts = [
+            message["content"]
+            for request in golden["requests"]
+            for message in request["messages"]
+            if message["role"] == "system" and "<knowledge_base>" in message["content"]
+        ]
+        assert system_texts, name
+        assert all(f"{block}\n" in text or text.endswith(block) for text in system_texts), name

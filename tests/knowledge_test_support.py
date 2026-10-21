@@ -6,7 +6,6 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import pytest
-from agno.knowledge.document.base import Document
 from chromadb.errors import NotFoundError
 
 import mindroom.knowledge.read_proxy as knowledge_read_proxy
@@ -16,6 +15,7 @@ import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.knowledge.read_protocol import SearchHit
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -217,7 +217,7 @@ class _Client:
 
 
 class _VectorDb:
-    """The in-memory store every fake collection reads and writes, and the published read handle over it."""
+    """The in-memory store every fake collection reads and writes, and a published index reader over it."""
 
     collections: ClassVar[dict[str, list[dict[str, object]]]] = {}
     lock: ClassVar[Lock] = Lock()
@@ -229,26 +229,14 @@ class _VectorDb:
         with self.lock:
             return self.collection_name in self.collections
 
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        _ = (query, filters)
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        _ = query
         with self.lock:
             items = list(self.collections.get(self.collection_name, []))
-        return [Document(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
+        return [SearchHit(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
 
-    async def async_search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        return self.search(query=query, limit=limit, filters=filters)
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 class _ReadProxy(_VectorDb):
@@ -262,17 +250,6 @@ class _ReadProxy(_VectorDb):
     ) -> None:
         self.published_settings = published_settings
         super().__init__(collection=collection_name, path=path, embedder=embedder)
-
-
-class _SearchKnowledge:
-    """Published search handle over a fake read proxy."""
-
-    def __init__(self, vector_db: _VectorDb | None = None) -> None:
-        self.vector_db = vector_db
-
-    def search(self, query: str, max_results: int | None = None) -> list[Document]:
-        assert self.vector_db is not None
-        return self.vector_db.search(query=query, limit=max_results or 5)
 
 
 class _FakeEmbedder:
@@ -303,7 +280,6 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "collection_exists",
         lambda _path, collection: _VectorDb(collection=collection).exists(),
     )
-    monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _SearchKnowledge)
     monkeypatch.setattr(
         "mindroom.knowledge.registry.create_configured_embedder",
         lambda *_args, **_kwargs: _FakeEmbedder(),

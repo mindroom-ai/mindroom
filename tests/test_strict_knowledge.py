@@ -1,69 +1,70 @@
-"""Tests for strict knowledge search error propagation."""
+"""Tests for the Agno knowledge handle that delegates search to MindRoom's own knowledge search."""
 
 from __future__ import annotations
 
 import pytest
-from agno.knowledge.document import Document
 
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 
 
-class _RecordingVectorDb:
+class _RecordingIndex:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, int, object]] = []
+        self.calls: list[tuple[str, int]] = []
 
-    def exists(self) -> bool:
-        return True
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        self.calls.append((query, limit))
+        return [SearchHit(content="hit", name="notes.md", meta_data={"source_path": "notes.md"})]
 
-    def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-        self.calls.append((query, limit, filters))
-        return [Document(content="hit")]
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
+
+
+class _FailingIndex(_RecordingIndex):
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        del query, limit
+        msg = "vector search failed"
+        raise RuntimeError(msg)
+
+
+def _handle(index: _RecordingIndex) -> StrictSearchKnowledge:
+    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=index)
+    return StrictSearchKnowledge(AgentKnowledge(sources=(source,)))
 
 
 def test_strict_search_knowledge_drops_agno_user_scope() -> None:
     """Agno forwards the run's user id; MindRoom knowledge is shared, so the search stays unscoped."""
-    vector_db = _RecordingVectorDb()
-    knowledge = StrictSearchKnowledge(vector_db=vector_db, max_results=3)
+    index = _RecordingIndex()
+    knowledge = _handle(index)
 
     documents = knowledge.search("query", user_id="@alice:example.test")
 
-    assert [document.content for document in documents] == ["hit"]
-    assert vector_db.calls == [("query", 3, None)]
+    assert [(document.name, document.meta_data, document.content) for document in documents] == [
+        ("notes.md", {"source_path": "notes.md"}, "hit"),
+    ]
+    assert index.calls == [("query", knowledge.max_results)]
 
 
-class _FailingSearchVectorDb(_RecordingVectorDb):
-    def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-        del query, limit, filters
-        msg = "vector search failed"
-        raise RuntimeError(msg)
-
-    async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-        return self.search(query=query, limit=limit, filters=filters)
-
-
-def test_strict_search_knowledge_propagates_vector_failure() -> None:
+def test_strict_search_knowledge_propagates_search_failure() -> None:
     """Failed searches must not become plausible empty search results."""
-    knowledge = StrictSearchKnowledge(vector_db=_FailingSearchVectorDb())
+    knowledge = _handle(_FailingIndex())
     with pytest.raises(RuntimeError, match="vector search failed"):
         knowledge.search("query")
 
 
 @pytest.mark.asyncio
-async def test_strict_search_knowledge_propagates_async_vector_failure() -> None:
-    """The async search path retains the vector provider's failure."""
-    knowledge = StrictSearchKnowledge(vector_db=_FailingSearchVectorDb())
+async def test_strict_search_knowledge_propagates_async_search_failure() -> None:
+    """The async search path retains the index's failure."""
+    knowledge = _handle(_FailingIndex())
     with pytest.raises(RuntimeError, match="vector search failed"):
         await knowledge.asearch("query")
 
 
-@pytest.mark.asyncio
-async def test_strict_search_knowledge_sync_fallback_propagates_failure() -> None:
-    """An unimplemented async adapter must not hide a failed synchronous fallback."""
+def test_strict_search_knowledge_prompt_block_is_the_owned_one() -> None:
+    """Agno renders the handle's prompt block from MindRoom's own knowledge search."""
+    knowledge = _handle(_RecordingIndex())
 
-    class SyncOnlyVectorDb(_FailingSearchVectorDb):
-        async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-            raise NotImplementedError
-
-    knowledge = StrictSearchKnowledge(vector_db=SyncOnlyVectorDb())
-    with pytest.raises(RuntimeError, match="vector search failed"):
-        await knowledge.asearch("query")
+    assert knowledge.build_context(enable_agentic_filters=False, user_id="@alice:example.test") == (
+        knowledge.agent_knowledge.prompt_block()
+    )

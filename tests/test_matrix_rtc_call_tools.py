@@ -36,6 +36,8 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
@@ -110,6 +112,12 @@ class FakeAgnoAgent:
     async def aget_system_message(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
         """Return a deterministic rendered prompt."""
         return SimpleNamespace(content=self._prompt)
+
+
+def _ready_knowledge() -> StrictSearchKnowledge:
+    """Return an agent's knowledge handle over one published index."""
+    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=object())
+    return StrictSearchKnowledge(AgentKnowledge(sources=(source,)))
 
 
 def _config() -> Config:
@@ -1083,7 +1091,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
     )
-    knowledge = SimpleNamespace(vector_db=None)
+    knowledge = _ready_knowledge()
     refresh_scheduler = object()
     execution_identity = SimpleNamespace()
     calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
@@ -1893,7 +1901,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     second_scheduler = object()
     orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler, budgets=None)
     execution_identity = SimpleNamespace()
-    ready_knowledge = SimpleNamespace(vector_db=None)
+    ready_knowledge = _ready_knowledge()
     resolver_calls: list[dict[str, object]] = []
     ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
     resolutions = iter(

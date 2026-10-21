@@ -21,7 +21,6 @@ from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
-from agno.knowledge.document.base import Document
 from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
@@ -63,6 +62,7 @@ from mindroom.knowledge.collections import (
 from mindroom.knowledge.index_metadata import write_json_atomic
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
+from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
@@ -277,14 +277,14 @@ class _FakeVectorDb:
         with self.lock:
             return self.collection_name in self.store
 
-    def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-        _ = (query, filters)
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        _ = query
         with self.lock:
             records = list(self.store.get(self.collection_name, [])[:limit])
-        return [Document(content=record.content, meta_data=dict(record.metadata)) for record in records]
+        return [SearchHit(content=record.content, meta_data=dict(record.metadata)) for record in records]
 
-    async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
-        return self.search(query=query, limit=limit, filters=filters)
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 class _FakeReadProxy(_FakeVectorDb):
@@ -298,20 +298,6 @@ class _FakeReadProxy(_FakeVectorDb):
     ) -> None:
         self.published_settings = published_settings
         super().__init__(collection=collection_name, path=path, embedder=embedder)
-
-
-class _FakeSearchKnowledge:
-    """Published search handle over a fake read proxy."""
-
-    def __init__(self, vector_db: _FakeVectorDb | None = None) -> None:
-        self.vector_db = vector_db
-        self.name: str | None = None
-        self.description: str | None = None
-        self.max_results = 5
-
-    def search(self, query: str, max_results: int | None = None) -> list[Document]:
-        assert self.vector_db is not None
-        return self.vector_db.search(query=query, limit=max_results or self.max_results)
 
 
 def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,7 +498,6 @@ def fake_vector_store(
         "collection_exists",
         lambda _path, collection: _FakeVectorDb(collection=collection).exists(),
     )
-    monkeypatch.setattr(knowledge_registry, "StrictSearchKnowledge", _FakeSearchKnowledge)
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 
     async def _no_sleep(_seconds: float) -> None:
@@ -703,7 +688,7 @@ async def test_candidate_resume_never_disturbs_the_last_good_published_index(
     assert result.index_published is False
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("published", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("published", limit=5)] == [
         "first published",
     ]
     state = _published_state(config, runtime_paths)
@@ -849,7 +834,7 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     assert state.collection == published_collection
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("body", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("body", limit=5)] == [
         "published body",
     ]
 
@@ -3195,7 +3180,7 @@ async def test_overlapping_chunks_are_batch_prefetched_and_published(
     assert state.indexed_count == 1
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    hits = lookup.index.knowledge.search("token0000", max_results=5)
+    hits = lookup.index.reader.search("token0000", limit=5)
     assert hits, "the published overlapping index returned nothing"
     assert all("token" in document.content for document in hits)
 

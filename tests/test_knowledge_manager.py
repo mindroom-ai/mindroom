@@ -102,7 +102,6 @@ from tests.knowledge_test_support import (
     _Collection,
     _config,
     _FakeEmbedder,
-    _SearchKnowledge,
     _VectorDb,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
 )
@@ -322,9 +321,9 @@ async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish
     assert populated_result.index_published is True
     assert populated_result.availability is KnowledgeAvailability.READY
     assert populated_lookup.index is not None
-    assert [
-        document.content.strip() for document in populated_lookup.index.knowledge.search("published", max_results=5)
-    ] == ["published-after-content-exists"]
+    assert [document.content.strip() for document in populated_lookup.index.reader.search("published", limit=5)] == [
+        "published-after-content-exists",
+    ]
 
 
 @pytest.mark.asyncio
@@ -379,16 +378,10 @@ def _published_result_index(base_id: str, **_kwargs: object) -> object:
             "metadata": {"source_path": f"{base_id}.md"},
         },
     ]
-    knowledge = SimpleNamespace(
-        vector_db=vector_db,
-        name=None,
-        description=None,
-        max_results=10,
-    )
     return SimpleNamespace(
         key=SimpleNamespace(base_id=base_id),
         index=SimpleNamespace(
-            knowledge=knowledge,
+            reader=vector_db,
             state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
         ),
         availability=KnowledgeAvailability.READY,
@@ -472,7 +465,7 @@ async def test_narrowed_agent_knowledge_searches_only_the_named_bases(
     )
 
     knowledge = resolution.knowledge
-    documents = knowledge.vector_db.search(query="anything", limit=10) if knowledge is not None else []
+    documents = knowledge.agent_knowledge.search("anything", 10) if knowledge is not None else []
     searched = {document.content.removeprefix("result from ") for document in documents}
     assert {
         "file memory" if base_id.startswith("file_memory_") else base_id for base_id in searched
@@ -1612,7 +1605,7 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
     for base_id in ("research", "summary"):
         lookup = get_published_index(base_id, config=config, runtime_paths=runtime_paths)
         assert lookup.index is not None
-        assert [document.content for document in lookup.index.knowledge.search("anything", max_results=5)] == [
+        assert [document.content for document in lookup.index.reader.search("anything", limit=5)] == [
             "restored public",
         ]
     assert scheduler.schedule_refresh.call_count == 2
@@ -2880,14 +2873,14 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
     refreshed_beta_lookup = get_published_index("beta", config=config, runtime_paths=runtime_paths)
 
     assert alpha_lookup.index is not None
-    assert [document.content for document in alpha_lookup.index.knowledge.search("local", max_results=5)] == [
+    assert [document.content for document in alpha_lookup.index.reader.search("local", limit=5)] == [
         "shared local new",
     ]
     assert beta_state is not None
     assert knowledge_registry.published_index_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.index is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
-    assert [document.content for document in refreshed_beta_lookup.index.knowledge.search("local", max_results=5)] == [
+    assert [document.content for document in refreshed_beta_lookup.index.reader.search("local", limit=5)] == [
         "shared local old",
     ]
 
@@ -3550,7 +3543,7 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
     assert result.index_published is True
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.READY
-    assert [document.content for document in lookup.index.knowledge.search("updated", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("updated", limit=5)] == [
         "alice private git updated",
     ]
 
@@ -3685,7 +3678,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     cached_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert cached_lookup.index is not None
-    assert [document.content for document in cached_lookup.index.knowledge.search("metadata", max_results=5)] == [
+    assert [document.content for document in cached_lookup.index.reader.search("metadata", limit=5)] == [
         "stable metadata",
     ]
     doc.write_text("candidate metadata", encoding="utf-8")
@@ -3723,7 +3716,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
 
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("metadata", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("metadata", limit=5)] == [
         "candidate metadata",
     ]
 
@@ -3921,7 +3914,7 @@ async def test_refresh_never_publishes_while_source_keeps_changing(
     )
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("index", limit=5)] == [
         "stable index",
     ]
     checkpoint = load_candidate_checkpoint(_base_storage_path(config, runtime_paths))
@@ -3959,9 +3952,10 @@ async def test_refresh_reconciles_one_source_change_and_publishes(
     assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert lookup.index is not None
-    assert sorted(
-        document.meta_data["source_path"] for document in lookup.index.knowledge.search("index", max_results=5)
-    ) == ["doc.md", "late.md"]
+    assert sorted(document.meta_data["source_path"] for document in lookup.index.reader.search("index", limit=5)) == [
+        "doc.md",
+        "late.md",
+    ]
     # Publication retires the candidate checkpoint.
     assert load_candidate_checkpoint(_base_storage_path(config, runtime_paths)) is None
 
@@ -4186,7 +4180,7 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     first_lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert first_lookup.index is not None
-    first_collection = first_lookup.index.knowledge.vector_db.collection_name
+    first_collection = first_lookup.index.reader.collection_name
 
     for generation in range(2, 7):
         doc.write_text(f"generation {generation}", encoding="utf-8")
@@ -4195,7 +4189,7 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
     assert first_collection not in _VectorDb.collections
     latest = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert latest.index is not None
-    assert [document.content for document in latest.index.knowledge.search("generation", max_results=5)] == [
+    assert [document.content for document in latest.index.reader.search("generation", limit=5)] == [
         "generation 6",
     ]
 
@@ -4233,7 +4227,7 @@ async def test_get_published_index_reopens_when_persisted_collection_changes(tmp
     assert refreshed_lookup.index is not None
     assert refreshed_lookup.index is not cached_index
     assert refreshed_lookup.index.state == child_state
-    assert [document.content for document in refreshed_lookup.index.knowledge.search("child", max_results=5)] == [
+    assert [document.content for document in refreshed_lookup.index.reader.search("child", limit=5)] == [
         "child published",
     ]
 
@@ -4250,7 +4244,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     cached_a = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert cached_a.index is not None
-    assert [document.content for document in cached_a.index.knowledge.search("config", max_results=5)] == [
+    assert [document.content for document in cached_a.index.reader.search("config", limit=5)] == [
         "config a",
     ]
 
@@ -4262,7 +4256,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
 
     assert reverted_lookup.index is not None
     assert reverted_lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
-    assert [document.content for document in reverted_lookup.index.knowledge.search("config", max_results=5)] == [
+    assert [document.content for document in reverted_lookup.index.reader.search("config", limit=5)] == [
         "config b",
     ]
 
@@ -4288,7 +4282,7 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
     assert len(_VectorDb.collections) == 1
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("generation", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("generation", limit=5)] == [
         "generation 5",
     ]
 
@@ -4318,7 +4312,7 @@ async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collectio
     assert default_collection not in _VectorDb.collections
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("stale", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("stale", limit=5)] == [
         "stale list new",
     ]
 
@@ -4351,7 +4345,7 @@ async def test_superseded_collection_listing_failure_is_best_effort(
     assert result.availability is KnowledgeAvailability.READY
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.READY
-    assert [document.content for document in lookup.index.knowledge.search("cleanup", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("cleanup", limit=5)] == [
         "cleanup new",
     ]
 
@@ -4977,11 +4971,11 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
     scheduler.schedule_refresh = MagicMock()
     unavailable: dict[str, KnowledgeAvailability] = {}
 
-    def _broken_vector_db(*_args: object, **_kwargs: object) -> object:
+    def _broken_reader(*_args: object, **_kwargs: object) -> object:
         msg = "cannot open collection"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_vector_db", _broken_vector_db)
+    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_reader", _broken_reader)
     _resolution = resolve_agent_knowledge_access(
         "helper",
         config,
@@ -5030,11 +5024,11 @@ def test_published_index_handle_open_failure_degrades_and_schedules_repair_refre
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
 
-    def _broken_vector_db(*_args: object, **_kwargs: object) -> object:
+    def _broken_reader(*_args: object, **_kwargs: object) -> object:
         msg = "cannot open collection"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_vector_db", _broken_vector_db)
+    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_reader", _broken_reader)
 
     resolution = resolve_agent_knowledge_access(
         "helper",
@@ -5334,7 +5328,7 @@ async def test_cold_refresh_publishes_when_empty_file_produces_no_vectors(tmp_pa
     assert state.indexed_count == 2
     assert knowledge_registry.published_index_refresh_state(state) == "none"
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("useful", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("useful", limit=5)] == [
         "useful vectors",
     ]
 
@@ -7944,7 +7938,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
         refresh_target = knowledge_registry.refresh_target_for_published_index_key(key)
         knowledge_registry._publish_knowledge_index(
             key,
-            knowledge=_SearchKnowledge(_VectorDb(collection=collection)),
+            reader=_VectorDb(collection=collection),
             state=knowledge_registry.PublishedIndexState(
                 settings=key.indexing_settings,
                 status="complete",
@@ -8047,18 +8041,18 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
 def test_publish_knowledge_index_caches_handle_without_collection_leases(tmp_path: Path) -> None:
     """Published indexs use only the active cache, not reader lease bookkeeping."""
 
-    class _NonWeakrefKnowledge:
+    class _NonWeakrefReader:
         __slots__ = ()
 
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    knowledge = _NonWeakrefKnowledge()
+    reader = _NonWeakrefReader()
 
     index = knowledge_registry._publish_knowledge_index(
         key,
-        knowledge=knowledge,
+        reader=reader,
         state=knowledge_registry.PublishedIndexState(
             settings=key.indexing_settings,
             status="complete",
@@ -8261,7 +8255,7 @@ async def test_local_refresh_reindexes_when_content_changes_with_same_mtime_and_
     assert result.index_published is True
     assert reindex_count == 2
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("index", limit=5)] == [
         "new index",
     ]
 
@@ -8955,7 +8949,7 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
     assert result.index_published is True
     assert reindex_count == 1
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("git", limit=5)] == [
         "git tracked index",
     ]
 
@@ -9013,7 +9007,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert missing_collection not in _VectorDb.collections
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("git", limit=5)] == [
         "git repaired",
     ]
 
@@ -9091,7 +9085,7 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     assert reindex_count == 2
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("git", limit=5)] == [
         "git chunking rebuilt",
     ]
 
@@ -9145,7 +9139,7 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
     assert reindex_count == 2
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("git", limit=5)] == [
         "git force rebuilt",
     ]
 
@@ -9197,7 +9191,7 @@ async def test_git_sync_failure_preserves_last_good_index_and_redacts_error(
     assert "x-oauth-basic" not in state.last_error
     assert lookup.index is not None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert [document.content for document in lookup.index.knowledge.search("index", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("index", limit=5)] == [
         "stable git index",
     ]
 
@@ -9350,7 +9344,7 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     beta_lookup = get_published_index("beta", config=config, runtime_paths=runtime_paths)
     assert beta_lookup.index is not None
     assert beta_lookup.availability is KnowledgeAvailability.READY
-    assert [document.content for document in beta_lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in beta_lookup.index.reader.search("git", limit=5)] == [
         "shared git old",
     ]
 
@@ -9364,7 +9358,7 @@ async def test_git_refresh_marks_duplicate_source_sibling_stale(
     assert knowledge_registry.published_index_refresh_state(beta_state) == "stale"
     assert refreshed_beta_lookup.index is not None
     assert refreshed_beta_lookup.availability is KnowledgeAvailability.STALE
-    assert [document.content for document in refreshed_beta_lookup.index.knowledge.search("git", max_results=5)] == [
+    assert [document.content for document in refreshed_beta_lookup.index.reader.search("git", limit=5)] == [
         "shared git old",
     ]
 
@@ -9427,7 +9421,7 @@ async def test_git_pull_that_changes_one_file_only_reindexes_that_file(
     assert second.indexed_count == 1, "the whole checkout was reindexed for a one-file commit"
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
-    contents = sorted(document.content for document in lookup.index.knowledge.search("body", max_results=10))
+    contents = sorted(document.content for document in lookup.index.reader.search("body", limit=10))
     assert contents == [
         "original body 0",
         "original body 1",
@@ -9767,7 +9761,7 @@ async def test_malformed_json_falls_back_to_text_and_publishes(
 
     assert result.index_published is True
     assert lookup.index is not None
-    documents = lookup.index.knowledge.search("still useful", max_results=5)
+    documents = lookup.index.reader.search("still useful", limit=5)
     assert len(documents) == 1
     assert '"claim": "still useful"' in documents[0].content
     assert "“broken”: true" in documents[0].content
@@ -9791,7 +9785,7 @@ async def test_valid_json_keeps_structured_reader(tmp_path: Path) -> None:
 
     assert result.index_published is True
     assert lookup.index is not None
-    assert [document.content for document in lookup.index.knowledge.search("claim", max_results=5)] == [
+    assert [document.content for document in lookup.index.reader.search("claim", limit=5)] == [
         '{"claim": "one"}',
         '{"claim": "two"}',
     ]

@@ -1,26 +1,25 @@
-"""Knowledge-base access and multi-knowledge vector DB behavior for AgentBot."""
+"""Knowledge-base access and merged knowledge search behavior for AgentBot."""
 
 from __future__ import annotations
 
 import hashlib
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from agno.knowledge.document import Document
-from agno.knowledge.knowledge import Knowledge
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.source_descriptions import KnowledgeWithSourceDescriptions
-from mindroom.knowledge.utils import _MultiKnowledgeVectorDb, knowledge_runtime_identity
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
+from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
+from mindroom.knowledge.utils import knowledge_runtime_identity
 from tests.bot_helpers import (
     AgentBotTestBase,
-    _AsyncStubVectorDb,
-    _FailingStubVectorDb,
+    _FailingStubIndex,
     _fake_indexing_settings,
-    _SyncStubVectorDb,
+    _StubIndex,
     make_mock_agent_user,
     make_test_agent_bot,
 )
@@ -32,6 +31,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.matrix.users import AgentMatrixUser
+
+
+def _hits(*contents: str) -> list[SearchHit]:
+    return [SearchHit(content=content) for content in contents]
+
+
+def _knowledge(*indexes: _StubIndex | _FailingStubIndex) -> AgentKnowledge:
+    return AgentKnowledge(
+        sources=tuple(
+            KnowledgeSource(description=KnowledgeSourceDescription(base_id=f"base{index}", description=""), index=stub)
+            for index, stub in enumerate(indexes)
+        ),
+    )
 
 
 @pytest.fixture
@@ -65,16 +77,16 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Agents should receive knowledge from their assigned knowledge base manager."""
+        """Agents should search their assigned base's published index under that base's description."""
         config = self.create_config_with_knowledge_bases(
             assigned_bases=["research"],
             knowledge_bases={
-                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False, description="Lab notes."),
             },
             runtime_root=tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        expected_knowledge = Knowledge()
+        expected_reader = _StubIndex(hits=[])
         lookup = SimpleNamespace(
             key=SimpleNamespace(
                 base_id="research",
@@ -83,7 +95,7 @@ class TestAgentBot(AgentBotTestBase):
                 indexing_settings=_fake_indexing_settings("research"),
             ),
             index=SimpleNamespace(
-                knowledge=expected_knowledge,
+                reader=expected_reader,
                 state=SimpleNamespace(
                     source_signature=hashlib.sha256().hexdigest(),
                     last_published_at="2999-01-01T00:00:00+00:00",
@@ -94,7 +106,12 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
-            assert bot._knowledge_access_support.for_agent("calculator") is expected_knowledge
+            knowledge = bot._knowledge_access_support.for_agent("calculator")
+
+        assert isinstance(knowledge, StrictSearchKnowledge)
+        [source] = knowledge.agent_knowledge.sources
+        assert source.index is expected_reader
+        assert source.description == KnowledgeSourceDescription(base_id="research", description="Lab notes.")
 
     def test_knowledge_for_agent_merges_multiple_assigned_bases(
         self,
@@ -111,22 +128,10 @@ class TestAgentBot(AgentBotTestBase):
             runtime_root=tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-
-        research_vector_db = MagicMock()
-        research_vector_db.search.return_value = [
-            Document(content="research content 1"),
-            Document(content="research content 2"),
-            Document(content="research content 3"),
-        ]
-        research_knowledge = Knowledge(vector_db=research_vector_db)
-
-        legal_vector_db = MagicMock()
-        legal_vector_db.search.return_value = [
-            Document(content="legal content 1"),
-            Document(content="legal content 2"),
-            Document(content="legal content 3"),
-        ]
-        legal_knowledge = Knowledge(vector_db=legal_vector_db)
+        readers = {
+            "research": _StubIndex(hits=_hits("research content 1", "research content 2", "research content 3")),
+            "legal": _StubIndex(hits=_hits("legal content 1", "legal content 2", "legal content 3")),
+        }
 
         def _lookup(base_id: str, **_kwargs: object) -> SimpleNamespace:
             return SimpleNamespace(
@@ -137,7 +142,7 @@ class TestAgentBot(AgentBotTestBase):
                     indexing_settings=_fake_indexing_settings(base_id),
                 ),
                 index=SimpleNamespace(
-                    knowledge={"research": research_knowledge, "legal": legal_knowledge}[base_id],
+                    reader=readers[base_id],
                     state=SimpleNamespace(
                         source_signature=hashlib.sha256().hexdigest(),
                         last_published_at="2999-01-01T00:00:00+00:00",
@@ -158,142 +163,68 @@ class TestAgentBot(AgentBotTestBase):
             "research content 2",
             "legal content 2",
         ]
-        research_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
-        legal_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
+        assert readers["research"].calls == [("knowledge query", 4)]
+        assert readers["legal"].calls == [("knowledge query", 4)]
 
-    def test_multi_knowledge_vector_db_interleaves_sync_results(self) -> None:
+    def test_merged_knowledge_interleaves_sync_results(self) -> None:
         """Round-robin merge should include top results from each knowledge base."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _SyncStubVectorDb(
-                    documents=[
-                        Document(content="research 1"),
-                        Document(content="research 2"),
-                        Document(content="research 3"),
-                    ],
-                ),
-                _SyncStubVectorDb(
-                    documents=[
-                        Document(content="legal 1"),
-                        Document(content="legal 2"),
-                        Document(content="legal 3"),
-                    ],
-                ),
-            ],
+        knowledge = _knowledge(
+            _StubIndex(hits=_hits("research 1", "research 2", "research 3")),
+            _StubIndex(hits=_hits("legal 1", "legal 2", "legal 3")),
         )
 
-        docs = vector_db.search(query="knowledge query", limit=4)
-        assert [doc.content for doc in docs] == ["research 1", "legal 1", "research 2", "legal 2"]
+        hits = knowledge.search("knowledge query", 4)
+        assert [hit.content for hit in hits] == ["research 1", "legal 1", "research 2", "legal 2"]
 
-    def test_multi_knowledge_runtime_identity_tracks_underlying_handles(self) -> None:
+    def test_merged_knowledge_runtime_identity_tracks_underlying_handles(self) -> None:
         """Fresh merged views over unchanged indexes keep the same runtime identity."""
-        sources = [_SyncStubVectorDb(documents=[]), _SyncStubVectorDb(documents=[])]
-        first = KnowledgeWithSourceDescriptions(
-            name="merged",
-            vector_db=_MultiKnowledgeVectorDb(vector_dbs=sources),
-        )
-        second = KnowledgeWithSourceDescriptions(
-            name="merged",
-            vector_db=_MultiKnowledgeVectorDb(vector_dbs=sources),
-        )
-        changed = KnowledgeWithSourceDescriptions(
-            name="merged",
-            vector_db=_MultiKnowledgeVectorDb(vector_dbs=[sources[0], _SyncStubVectorDb(documents=[])]),
-        )
+        indexes = [_StubIndex(hits=[]), _StubIndex(hits=[])]
+        first = StrictSearchKnowledge(_knowledge(*indexes))
+        second = StrictSearchKnowledge(_knowledge(*indexes))
+        changed = StrictSearchKnowledge(_knowledge(indexes[0], _StubIndex(hits=[])))
 
         assert knowledge_runtime_identity(first) == knowledge_runtime_identity(second)
         assert knowledge_runtime_identity(first) != knowledge_runtime_identity(changed)
 
-    def test_multi_knowledge_vector_db_sync_ignores_failing_source(self) -> None:
+    def test_merged_knowledge_sync_ignores_failing_source(self) -> None:
         """A failing knowledge source should not suppress healthy source results."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _SyncStubVectorDb(
-                    documents=[
-                        Document(content="research 1"),
-                        Document(content="research 2"),
-                    ],
-                ),
-                _FailingStubVectorDb(error_message="boom"),
-            ],
-        )
+        knowledge = _knowledge(_StubIndex(hits=_hits("research 1", "research 2")), _FailingStubIndex("boom"))
 
-        docs = vector_db.search(query="knowledge query", limit=3)
-        assert [doc.content for doc in docs] == ["research 1", "research 2"]
+        assert [hit.content for hit in knowledge.search("knowledge query", 3)] == ["research 1", "research 2"]
 
     @pytest.mark.asyncio
-    async def test_multi_knowledge_vector_db_interleaves_async_results(self) -> None:
-        """Async merge should interleave and support sync-only vector DBs."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _AsyncStubVectorDb(
-                    documents=[
-                        Document(content="research 1"),
-                        Document(content="research 2"),
-                        Document(content="research 3"),
-                    ],
-                ),
-                _SyncStubVectorDb(
-                    documents=[
-                        Document(content="legal 1"),
-                        Document(content="legal 2"),
-                        Document(content="legal 3"),
-                    ],
-                ),
-            ],
+    async def test_merged_knowledge_interleaves_async_results(self) -> None:
+        """Async merge should interleave every source's results."""
+        knowledge = _knowledge(
+            _StubIndex(hits=_hits("research 1", "research 2", "research 3")),
+            _StubIndex(hits=_hits("legal 1", "legal 2", "legal 3")),
         )
 
-        docs = await vector_db.async_search(query="knowledge query", limit=5)
-        assert [doc.content for doc in docs] == [
-            "research 1",
-            "legal 1",
-            "research 2",
-            "legal 2",
-            "research 3",
-        ]
+        hits = await knowledge.asearch("knowledge query", 5)
+        assert [hit.content for hit in hits] == ["research 1", "legal 1", "research 2", "legal 2", "research 3"]
 
     @pytest.mark.asyncio
-    async def test_multi_knowledge_vector_db_async_ignores_failing_source(self) -> None:
+    async def test_merged_knowledge_async_ignores_failing_source(self) -> None:
         """Async search should continue returning healthy source results on failures."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _AsyncStubVectorDb(
-                    documents=[
-                        Document(content="research 1"),
-                        Document(content="research 2"),
-                    ],
-                ),
-                _FailingStubVectorDb(error_message="boom"),
-            ],
-        )
+        knowledge = _knowledge(_StubIndex(hits=_hits("research 1", "research 2")), _FailingStubIndex("boom"))
 
-        docs = await vector_db.async_search(query="knowledge query", limit=3)
-        assert [doc.content for doc in docs] == ["research 1", "research 2"]
+        hits = await knowledge.asearch("knowledge query", 3)
+        assert [hit.content for hit in hits] == ["research 1", "research 2"]
 
-    def test_multi_knowledge_vector_db_sync_raises_when_all_sources_fail(self) -> None:
+    def test_merged_knowledge_sync_raises_when_all_sources_fail(self) -> None:
         """When every knowledge source fails, the first error surfaces instead of empty results."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _FailingStubVectorDb(error_message="first boom"),
-                _FailingStubVectorDb(error_message="second boom"),
-            ],
-        )
+        knowledge = _knowledge(_FailingStubIndex("first boom"), _FailingStubIndex("second boom"))
 
         with pytest.raises(RuntimeError, match="first boom"):
-            vector_db.search(query="knowledge query", limit=3)
+            knowledge.search("knowledge query", 3)
 
     @pytest.mark.asyncio
-    async def test_multi_knowledge_vector_db_async_raises_when_all_sources_fail(self) -> None:
+    async def test_merged_knowledge_async_raises_when_all_sources_fail(self) -> None:
         """Async search re-raises the first captured failure when every source fails."""
-        vector_db = _MultiKnowledgeVectorDb(
-            vector_dbs=[
-                _FailingStubVectorDb(error_message="first boom"),
-                _FailingStubVectorDb(error_message="second boom"),
-            ],
-        )
+        knowledge = _knowledge(_FailingStubIndex("first boom"), _FailingStubIndex("second boom"))
 
         with pytest.raises(RuntimeError, match="first boom"):
-            await vector_db.async_search(query="knowledge query", limit=3)
+            await knowledge.asearch("knowledge query", 3)
 
     def test_strict_knowledge_handle_propagates_search_failure(self) -> None:
         """The Knowledge handle agents query raises instead of agno's swallow-to-[].
@@ -304,10 +235,7 @@ class TestAgentBot(AgentBotTestBase):
         MindRoom read handles must keep the failure loud through the same
         ``retrieve -> search`` chain the generated tool uses.
         """
-        knowledge = KnowledgeWithSourceDescriptions(
-            name="merged",
-            vector_db=_MultiKnowledgeVectorDb(vector_dbs=[_FailingStubVectorDb(error_message="first boom")]),
-        )
+        knowledge = StrictSearchKnowledge(_knowledge(_FailingStubIndex("first boom")))
 
         with pytest.raises(RuntimeError, match="first boom"):
             knowledge.search(query="knowledge query")
@@ -317,10 +245,7 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_strict_knowledge_handle_propagates_async_search_failure(self) -> None:
         """The async search path agents use raises instead of returning []."""
-        knowledge = KnowledgeWithSourceDescriptions(
-            name="merged",
-            vector_db=_MultiKnowledgeVectorDb(vector_dbs=[_FailingStubVectorDb(error_message="first boom")]),
-        )
+        knowledge = StrictSearchKnowledge(_knowledge(_FailingStubIndex("first boom")))
 
         with pytest.raises(RuntimeError, match="first boom"):
             await knowledge.asearch(query="knowledge query")

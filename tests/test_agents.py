@@ -230,37 +230,31 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
     assert get_rooms_for_entity(ROUTER_AGENT_NAME, config) == ["lobby"]
 
 
-class _TestVectorDb:
+class _EmptyIndex:
     def exists(self) -> bool:
         return True
 
-    def create(self) -> None:
-        return
-
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[object]:
-        _ = (query, limit, filters)
+    def search(self, query: str, *, limit: int) -> list[object]:
+        _ = (query, limit)
         return []
 
+    async def asearch(self, query: str, *, limit: int) -> list[object]:
+        return self.search(query, limit=limit)
 
-def _queryable_knowledge_handle() -> Knowledge:
-    return Knowledge(vector_db=_TestVectorDb())
+
+def _queryable_knowledge_handle() -> _EmptyIndex:
+    return _EmptyIndex()
 
 
 def _patch_published_knowledge(
     monkeypatch: pytest.MonkeyPatch,
-    knowledge_by_base: dict[str, Knowledge],
+    knowledge_by_base: dict[str, _EmptyIndex],
 ) -> None:
     def _get_published_index(base_id: str, **_kwargs: object) -> object:
         return SimpleNamespace(
             key=SimpleNamespace(base_id=base_id),
             index=SimpleNamespace(
-                knowledge=knowledge_by_base[base_id],
+                reader=knowledge_by_base[base_id],
                 state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
             ),
             availability=KnowledgeAvailability.READY,
@@ -4969,7 +4963,7 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
         return SimpleNamespace(
             key=SimpleNamespace(base_id=base_id),
             index=SimpleNamespace(
-                knowledge=_queryable_knowledge_handle(),
+                reader=_queryable_knowledge_handle(),
                 state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
             ),
             availability=KnowledgeAvailability.READY,

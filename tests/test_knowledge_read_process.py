@@ -24,7 +24,7 @@ from mindroom.knowledge.indexing_config import chroma_collection_exists
 from mindroom.knowledge.read_process import read_chroma
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.knowledge.read_proxy import ChromaReadProxy
-from mindroom.knowledge.utils import _MultiKnowledgeVectorDb
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 
 
 class _Embedder:
@@ -173,7 +173,7 @@ def test_collection_probe_reports_locked_metadata(published_index: Path) -> None
 async def test_search_returns_the_fields_the_search_tool_shows(published_index: Path) -> None:
     """The process boundary keeps each hit's name, content, stored metadata, and distance, nearest first."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
-    documents = await proxy.async_search("alpha", limit=2)
+    documents = await proxy.asearch("alpha", limit=2)
     assert [(document.name, document.content) for document in documents] == [
         ("Alpha", "alpha document"),
         ("Beta", "beta document"),
@@ -191,14 +191,17 @@ async def test_merged_search_covers_more_sources_than_reader_slots(published_ind
             collection = client.create_collection(name)
             collection.add(ids=[name], embeddings=[[1.0, 0.0]], documents=[name], metadatas=[{"team": "a"}])
 
-    merged = _MultiKnowledgeVectorDb(
-        vector_dbs=[
-            ChromaReadProxy(name, str(published_index), _Embedder())
+    merged = AgentKnowledge(
+        sources=tuple(
+            KnowledgeSource(
+                description=KnowledgeSourceDescription(base_id=name, description=""),
+                index=ChromaReadProxy(name, str(published_index), _Embedder()),
+            )
             for name in ("published", "second", "third", "fourth", "fifth")
-        ],
+        ),
     )
-    documents = await merged.async_search(query="alpha", limit=5)
-    assert [document.content for document in documents] == ["alpha document", "second", "third", "fourth", "fifth"]
+    hits = await merged.asearch("alpha", 5)
+    assert [hit.content for hit in hits] == ["alpha document", "second", "third", "fourth", "fifth"]
 
 
 @pytest.mark.asyncio
@@ -266,7 +269,7 @@ async def test_embedding_failure_reaps_started_child(
 
     proxy = ChromaReadProxy("published", str(published_index), FailingEmbedder())
     with pytest.raises(PermissionError, match="embedding credentials expired"):
-        await proxy.async_search("alpha")
+        await proxy.asearch("alpha", limit=5)
     assert len(capture_read_processes) == 2
     _assert_only_warm_reader_alive(capture_read_processes)
 
@@ -288,7 +291,7 @@ async def test_async_embedding_overlaps_child_startup(
             return [[1.0, 0.0]]
 
     proxy = ChromaReadProxy("published", str(published_index), BlockingEmbedder())
-    task = asyncio.create_task(proxy.async_search("alpha", limit=1))
+    task = asyncio.create_task(proxy.asearch("alpha", limit=1))
     try:
         await asyncio.wait_for(embedding_started.wait(), timeout=2)
         assert len(capture_read_processes) == 1
@@ -318,7 +321,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
     for _ in range(5):
         embedding_started.clear()
         task = asyncio.create_task(
-            ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
+            ChromaReadProxy("published", str(published_index), BlockingEmbedder()).asearch("alpha", limit=5),
         )
         await asyncio.wait_for(embedding_started.wait(), timeout=2)
         task.cancel()
@@ -326,7 +329,7 @@ async def test_cancelled_embedding_reaps_child_and_releases_capacity(
             await task
         _assert_only_warm_reader_alive(capture_read_processes)
     assert len(capture_read_processes) == 6
-    assert await ChromaReadProxy("published", str(published_index), _Embedder()).async_search("alpha")
+    assert await ChromaReadProxy("published", str(published_index), _Embedder()).asearch("alpha", limit=5)
 
 
 @pytest.mark.asyncio
@@ -370,7 +373,7 @@ async def test_cancelled_threaded_embedder_reaps_child_before_provider_returns(
             return await asyncio.to_thread(self.embed, texts, purpose=purpose)
 
     task = asyncio.create_task(
-        ChromaReadProxy("published", str(published_index), BlockingEmbedder()).async_search("alpha"),
+        ChromaReadProxy("published", str(published_index), BlockingEmbedder()).asearch("alpha", limit=5),
     )
     try:
         await asyncio.wait_for(started.wait(), timeout=2)
@@ -388,11 +391,11 @@ async def test_cancelled_threaded_embedder_reaps_child_before_provider_returns(
 async def test_search_does_not_recreate_deleted_published_collection(published_index: Path) -> None:
     """A new reader must preserve disappearance instead of publishing fake-empty success."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
-    assert await proxy.async_search("alpha")
+    assert await proxy.asearch("alpha", limit=5)
     with Client(settings=Settings(is_persistent=True, persist_directory=str(published_index))) as client:
         client.delete_collection("published")
     with pytest.raises(RuntimeError, match="NotFoundError"):
-        await proxy.async_search("alpha")
+        await proxy.asearch("alpha", limit=5)
     assert await asyncio.to_thread(chroma_collection_exists, published_index, "published") is False
 
 
@@ -405,7 +408,7 @@ async def test_native_error_logs_redacted_child_diagnostics(
     # Chroma names a missing collection in its error, so the name carries the URL credentials.
     proxy = ChromaReadProxy("https://reader:synthetic-secret@example.test docs", str(published_index), _Embedder())
     with pytest.raises(RuntimeError, match="NotFoundError"):
-        await proxy.async_search("alpha")
+        await proxy.asearch("alpha", limit=5)
     error = capfd.readouterr().err
     assert "Traceback" in error
     assert "NotFoundError" in error
@@ -418,7 +421,7 @@ async def test_concurrent_search_burst_preserves_results(published_index: Path) 
     """More searches than reader slots still return each requested document."""
     proxy = ChromaReadProxy("published", str(published_index), _Embedder())
     results = await asyncio.gather(
-        *(proxy.async_search("alpha", limit=1) for _ in range(8)),
+        *(proxy.asearch("alpha", limit=1) for _ in range(8)),
         return_exceptions=True,
     )
     for documents in results:

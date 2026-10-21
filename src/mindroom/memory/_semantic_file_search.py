@@ -19,12 +19,11 @@ from mindroom.timing import emit_elapsed_timing
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.knowledge.document.base import Document
-    from agno.knowledge.knowledge import Knowledge
-
     from mindroom.config.main import Config
     from mindroom.config.memory import MemorySearchConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.read_protocol import SearchHit
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -79,27 +78,26 @@ async def _list_memory_knowledge_files(config: Config, base_id: str, root: Path)
     return await asyncio.to_thread(list_knowledge_files, config, base_id, root)
 
 
-def _memory_results_from_documents(
-    documents: list[Document],
+def _memory_results_from_hits(
+    hits: list[SearchHit],
     *,
     scope_user_id: str,
 ) -> list[MemoryResult]:
     results: list[MemoryResult] = []
-    for rank, document in enumerate(documents, start=1):
-        metadata = dict(document.meta_data)
-        source_file = metadata.get(_SOURCE_PATH_KEY)
+    for rank, hit in enumerate(hits, start=1):
+        source_file = hit.meta_data.get(_SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"
-        content = " ".join(document.content.split())
+        content = " ".join(hit.content.split())
         if not content:
             continue
-        score = document.reranking_score
         results.append(
             MemoryResult(
                 id=f"semantic:{source_file}:{rank}",
                 memory=content,
                 user_id=scope_user_id,
-                score=float(score) if score is not None else 1.0 - (rank * 0.000001),
+                # Hits arrive nearest first; the score keeps that order without claiming a similarity.
+                score=1.0 - (rank * 0.000001),
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )
@@ -107,19 +105,19 @@ def _memory_results_from_documents(
 
 
 async def _search_knowledge_with_timing(
-    knowledge: Knowledge,
+    knowledge: AgentKnowledge,
     *,
     query: str,
     limit: int,
-) -> list[Document]:
+) -> list[SearchHit]:
     search_start = time.monotonic()
-    documents = await knowledge.asearch(query=query, max_results=limit)
+    hits = await knowledge.asearch(query, limit)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.knowledge_search",
         search_start,
-        result_count=len(documents),
+        result_count=len(hits),
     )
-    return documents
+    return hits
 
 
 async def search_semantic_file_memories(
@@ -196,7 +194,7 @@ async def search_semantic_file_memories(
         )
 
     query_start = time.monotonic()
-    documents = await _search_knowledge_with_timing(
+    hits = await _search_knowledge_with_timing(
         resolution.knowledge,
         query=query,
         limit=limit,
@@ -207,7 +205,7 @@ async def search_semantic_file_memories(
         availability=resolution.availability.value,
     )
     results_start = time.monotonic()
-    results = _memory_results_from_documents(documents, scope_user_id=scope_user_id)
+    results = _memory_results_from_hits(hits, scope_user_id=scope_user_id)
     emit_elapsed_timing(
         f"{_SEMANTIC_TIMING_PREFIX}.result_conversion",
         results_start,

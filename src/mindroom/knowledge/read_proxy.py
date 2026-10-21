@@ -1,4 +1,4 @@
-"""Published knowledge handle with parent embeddings and isolated native reads."""
+"""Published knowledge index handle with parent embeddings and isolated native reads."""
 
 from __future__ import annotations
 
@@ -6,17 +6,16 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-from agno.knowledge.document import Document
+from typing import TYPE_CHECKING
 
 from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_process import read_chroma, read_chroma_async
-from mindroom.knowledge.read_protocol import ReadRequest, ReadResult
+from mindroom.knowledge.read_protocol import ReadRequest
 
 if TYPE_CHECKING:
     from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
+    from mindroom.knowledge.read_protocol import SearchHit
 
 
 def collection_exists(path: str, collection: str) -> bool:
@@ -47,10 +46,6 @@ def collection_exists(path: str, collection: str) -> bool:
         raise RuntimeError(message) from exc
 
 
-def _documents(result: ReadResult) -> list[Document]:
-    return [Document(content=hit.content, name=hit.name, meta_data=dict(hit.meta_data)) for hit in result.hits]
-
-
 @dataclass
 class ChromaReadProxy:
     """A scoped read descriptor; the worker selects and holds its current publication."""
@@ -70,54 +65,26 @@ class ChromaReadProxy:
         with read_collection(request) as collection_name:
             return collection_exists(self.path, collection_name)
 
-    def create(self) -> None:
-        """Never recreate a vanished published collection during Agno initialization."""
-        message = "Published knowledge collection is unavailable"
-        raise RuntimeError(message)
-
-    def search(
-        self,
-        query: str,
-        limit: int = 5,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
-        """Embed under the caller's credentials, then query outside this process."""
-        del filters  # MindRoom searches never filter.
-        embedding = self.embedder.embed([query], purpose="query")[0]
-        result = read_chroma(
-            ReadRequest(
-                path=self.path,
-                collection=self.collection_name,
-                query=query,
-                embedding=embedding,
-                limit=limit,
-                published_settings=self.published_settings.to_metadata()
-                if self.published_settings is not None
-                else None,
-            ),
+    def _request(self, query: str, embedding: list[float], limit: int) -> ReadRequest:
+        return ReadRequest(
+            path=self.path,
+            collection=self.collection_name,
+            query=query,
+            embedding=embedding,
+            limit=limit,
+            published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
         )
-        return _documents(result)
 
-    async def async_search(
-        self,
-        query: str,
-        limit: int = 5,
-        filters: dict[str, Any] | list[Any] | None = None,
-    ) -> list[Document]:
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        """Embed under the caller's credentials, then query outside this process."""
+        embedding = self.embedder.embed([query], purpose="query")[0]
+        return read_chroma(self._request(query, embedding, limit)).hits
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         """Start native imports while the parent obtains the query embedding."""
-        del filters  # MindRoom searches never filter.
 
         async def prepare_request() -> ReadRequest:
             embedding = (await self.embedder.aembed([query], purpose="query"))[0]
-            return ReadRequest(
-                path=self.path,
-                collection=self.collection_name,
-                query=query,
-                embedding=embedding,
-                limit=limit,
-                published_settings=self.published_settings.to_metadata()
-                if self.published_settings is not None
-                else None,
-            )
+            return self._request(query, embedding, limit)
 
-        return _documents(await read_chroma_async(prepare_request))
+        return (await read_chroma_async(prepare_request)).hits

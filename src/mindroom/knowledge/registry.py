@@ -11,7 +11,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, ParamSpec, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, ParamSpec, TypeVar
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -27,17 +27,15 @@ from mindroom.knowledge.indexing_config import (
     published_index_settings_compatible,
     storage_key_for_base,
 )
-from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.knowledge.knowledge import Knowledge
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.read_proxy import ChromaReadProxy
     from mindroom.runtime_resolution import ResolvedKnowledgeBinding
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -80,7 +78,7 @@ class _PublishedIndexHandle:
     """Read handle for the published knowledge index."""
 
     key: PublishedIndexKey
-    knowledge: Knowledge
+    reader: ChromaReadProxy
     state: PublishedIndexState
     metadata_path: Path
     embedder_client_signature: str | None = None
@@ -95,14 +93,6 @@ class PublishedIndexResolution:
     state: PublishedIndexState | None
     availability: KnowledgeAvailability
     schedule_refresh_on_access: bool = False
-
-
-class _PublishedIndexVectorDb(Protocol):
-    collection_name: str
-
-    def exists(self) -> bool:
-        """Return whether the collection exists."""
-        ...
 
 
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
@@ -369,13 +359,13 @@ def _state_collection_name(state: PublishedIndexState) -> str:
     return state.collection
 
 
-def _build_published_index_vector_db(
+def _build_published_index_reader(
     key: PublishedIndexKey,
     state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> _PublishedIndexVectorDb:
+) -> ChromaReadProxy:
     from mindroom.knowledge.read_proxy import ChromaReadProxy  # noqa: PLC0415
 
     return ChromaReadProxy(
@@ -386,17 +376,15 @@ def _build_published_index_vector_db(
     )
 
 
-def _build_published_index_knowledge(
+def _build_existing_published_index_reader(
     key: PublishedIndexKey,
     state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> Knowledge | None:
-    vector_db = _build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths)
-    if not vector_db.exists():
-        return None
-    return StrictSearchKnowledge(vector_db=vector_db)
+) -> ChromaReadProxy | None:
+    reader = _build_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
+    return reader if reader.exists() else None
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -468,10 +456,7 @@ def published_index_availability_for_state(
 
 
 def _cached_index_still_queryable(index: _PublishedIndexHandle) -> bool:
-    if not _published_index_state_queryable(index.key, index.state):
-        return False
-    vector_db = cast("_PublishedIndexVectorDb | None", index.knowledge.vector_db)
-    return vector_db is not None and vector_db.exists()
+    return _published_index_state_queryable(index.key, index.state) and index.reader.exists()
 
 
 def _cached_index_matches_persisted_state(
@@ -496,10 +481,10 @@ def _load_queryable_index_from_state(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> Knowledge | None:
+) -> ChromaReadProxy | None:
     if not _published_index_state_queryable(key, state):
         return None
-    return _build_published_index_knowledge(key, state, config=config, runtime_paths=runtime_paths)
+    return _build_existing_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
 
 
 def get_published_index(
@@ -551,7 +536,7 @@ def get_published_index(
                 availability=availability,
                 schedule_refresh_on_access=binding.incremental_sync_on_access,
             )
-        knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
+        reader = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
     except Exception:
         logger.warning(
             "Published knowledge index handle could not be opened",
@@ -565,7 +550,7 @@ def get_published_index(
             availability=KnowledgeAvailability.REFRESH_FAILED,
             schedule_refresh_on_access=binding.incremental_sync_on_access,
         )
-    if knowledge is None:
+    if reader is None:
         return PublishedIndexResolution(
             key=key,
             index=None,
@@ -578,7 +563,7 @@ def get_published_index(
 
     index = _PublishedIndexHandle(
         key=key,
-        knowledge=knowledge,
+        reader=reader,
         state=state,
         metadata_path=published_index_metadata_path(key),
         embedder_client_signature=current_embedder_client_signature,
@@ -596,7 +581,7 @@ def get_published_index(
 def _publish_knowledge_index(
     key: PublishedIndexKey,
     *,
-    knowledge: Knowledge,
+    reader: ChromaReadProxy,
     state: PublishedIndexState,
     metadata_path: Path | None = None,
     embedder_client_signature: str | None = None,
@@ -605,7 +590,7 @@ def _publish_knowledge_index(
     _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
     index = _PublishedIndexHandle(
         key=key,
-        knowledge=knowledge,
+        reader=reader,
         state=state,
         metadata_path=metadata_path or published_index_metadata_path(key),
         embedder_client_signature=embedder_client_signature,
@@ -623,12 +608,12 @@ def publish_knowledge_index_from_state(
     metadata_path: Path | None = None,
 ) -> _PublishedIndexHandle | None:
     """Publish a read handle rebuilt from persisted metadata."""
-    knowledge = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
-    if knowledge is None:
+    reader = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
+    if reader is None:
         return None
     return _publish_knowledge_index(
         key,
-        knowledge=knowledge,
+        reader=reader,
         state=state,
         metadata_path=metadata_path,
         embedder_client_signature=embedder_client_signature(config, runtime_paths),

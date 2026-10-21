@@ -26,6 +26,7 @@ from mindroom.knowledge.index_metadata import (
     state_for_publication,
 )
 from mindroom.knowledge.read_proxy import ChromaReadProxy, collection_exists
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.strict_knowledge import StrictSearchKnowledge
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import _config
@@ -65,7 +66,7 @@ def publication(
         published_revision=None,
     )
     monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
-    proxy = registry._build_published_index_vector_db(key, state, config=config, runtime_paths=paths)
+    proxy = registry._build_published_index_reader(key, state, config=config, runtime_paths=paths)
     assert isinstance(proxy, ChromaReadProxy)
     return space, key, proxy
 
@@ -99,7 +100,7 @@ async def test_retained_reader_follows_refresh(
     space, key, proxy = publication
     _publish(space, key, "replacement")
     _publish(space, key, "latest")
-    documents = await proxy.async_search("alpha") if asynchronous else proxy.search("alpha")
+    documents = await proxy.asearch("alpha", limit=5) if asynchronous else proxy.search("alpha", limit=5)
     assert [document.content for document in documents] == ["latest"]
 
 
@@ -126,7 +127,7 @@ def test_retained_reader_rejects_changed_scope_or_embeddings(
         ),
     )
     with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        proxy.search("alpha")
+        proxy.search("alpha", limit=5)
 
 
 def test_retained_reader_accepts_new_chunk_settings(
@@ -135,7 +136,7 @@ def test_retained_reader_accepts_new_chunk_settings(
     """Chunk boundaries do not change vector or requester compatibility."""
     space, key, proxy = publication
     _publish(space, replace(key, indexing_settings=replace(key.indexing_settings, chunk_size="2000")), "replacement")
-    assert [document.content for document in proxy.search("alpha")] == ["replacement"]
+    assert [document.content for document in proxy.search("alpha", limit=5)] == ["replacement"]
 
 
 @pytest.mark.parametrize("metadata", [None, "corrupt", "indexing"])
@@ -155,7 +156,7 @@ def test_retained_reader_does_not_hide_unavailable_publication(
         assert state is not None
         save_published_index_state(path, replace(state, status="indexing"))
     with pytest.raises(RuntimeError, match="Knowledge read failed \\(ValueError\\)"):
-        proxy.search("alpha")
+        proxy.search("alpha", limit=5)
 
 
 _GATED_READER = """
@@ -221,7 +222,7 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
     monkeypatch.setattr(collections, "collection_lifetime_lock", observed_lock)
     # These waits stay below the reader's 30-second read deadline, so a cancelled read that stopped killing
     # its reader cannot pass by the reader timing itself out.
-    read_task = asyncio.create_task(proxy.async_search("alpha"))
+    read_task = asyncio.create_task(proxy.asearch("alpha", limit=5))
     refresh_task = None
     try:
         async with asyncio.timeout(10):
@@ -254,7 +255,9 @@ async def test_cleanup_waits_for_selected_subprocess_and_releases_after_exit(
         # The warm replacement runs the gated reader; serve the follow-up read from a real one.
         monkeypatch.setattr(read_process, "_spawn_reader", spawn_reader)
         read_process._discard_warm_reader()
-        assert [document.content for document in await asyncio.to_thread(proxy.search, "alpha")] == ["replacement"]
+        assert [document.content for document in await asyncio.to_thread(proxy.search, "alpha", limit=5)] == [
+            "replacement",
+        ]
     finally:
         read_task.cancel()
         await asyncio.gather(read_task, return_exceptions=True)
@@ -277,16 +280,17 @@ def test_refresh_resolution_stays_in_requester_storage(
     other_space = replace(space, storage_path=registry.published_index_storage_path(other_key))
     _publish(space, key, "own-replacement")
     _publish(other_space, other_key, "other-private-content")
-    assert [document.content for document in proxy.search("alpha")] == ["own-replacement"]
+    assert [document.content for document in proxy.search("alpha", limit=5)] == ["own-replacement"]
 
 
 def test_knowledge_initialization_follows_refresh(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, ChromaReadProxy],
 ) -> None:
-    """Agno's initialization probe must follow the same publication as searches."""
+    """An agent's knowledge handle follows the same publication as its reader's searches."""
     space, key, proxy = publication
     _publish(space, key, "replacement")
-    knowledge = StrictSearchKnowledge(vector_db=proxy)
+    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=proxy)
+    knowledge = StrictSearchKnowledge(AgentKnowledge(sources=(source,)))
     assert [document.content for document in knowledge.search("alpha")] == ["replacement"]
 
 
@@ -300,14 +304,14 @@ def test_registry_initialization_accepts_superseded_state_snapshot(
     assert state is not None
     _publish(space, key, "replacement")
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
-    knowledge = registry._load_queryable_index_from_state(
+    reader = registry._load_queryable_index_from_state(
         key,
         state,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    assert knowledge is not None
-    assert [document.content for document in knowledge.search("alpha")] == ["replacement"]
+    assert reader is not None
+    assert [hit.content for hit in reader.search("alpha", limit=5)] == ["replacement"]
 
 
 @pytest.mark.parametrize("orphan", [False, True])

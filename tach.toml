@@ -875,6 +875,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.knowledge.search",
     "mindroom.mcp.registry",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.delegation.personas",
@@ -943,28 +944,27 @@ visibility = [
 
 [[modules]]
 path = "mindroom.agent_knowledge_descriptions"
-depends_on = ["mindroom.knowledge.source_descriptions", "mindroom.tool_system.tool_hooks"]
+depends_on = [
+    "mindroom.knowledge.search",
+    "mindroom.knowledge.strict_knowledge",
+    "mindroom.tool_system.tool_hooks",
+]
 visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agents",
     "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.delegation.personas",
 ]
 
 [[modules]]
-path = "mindroom.knowledge.source_descriptions"
-depends_on = ["mindroom.knowledge.strict_knowledge"]
-visibility = [
-    "mindroom.agent_knowledge_descriptions",
-    "mindroom.knowledge.utils",
-]
+path = "mindroom.knowledge.search"
+depends_on = ["mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.knowledge.strict_knowledge"
-depends_on = ["mindroom.knowledge.agno_compat_knowledge", ]
+depends_on = []
 visibility = [
-    "mindroom.knowledge.registry",
-    "mindroom.knowledge.source_descriptions",
+    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.utils",
 ]
 
 [[modules]]
@@ -5878,7 +5878,6 @@ depends_on = [
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
     "mindroom.runtime_resolution",
-    "mindroom.knowledge.strict_knowledge",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -5999,7 +5998,8 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
-    "mindroom.knowledge.source_descriptions",
+    "mindroom.knowledge.search",
+    "mindroom.knowledge.strict_knowledge",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
@@ -7448,7 +7448,7 @@ depends_on = [
 path = "mindroom.delegation.personas"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_knowledge_descriptions",
+    "mindroom.knowledge.search",
     "mindroom.knowledge.utils",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
@@ -8093,16 +8093,6 @@ expose = [
     "read_session",
     "cached_run_counts",
 ]
-
-
-[[modules]]
-path = "mindroom.knowledge.agno_compat_knowledge"
-depends_on = []
-visibility = ["mindroom.knowledge.strict_knowledge"]
-
-[[interfaces]]
-from = ["mindroom.knowledge.agno_compat_knowledge"]
-expose = ["search", "asearch"]
 
 
 [[modules]]
