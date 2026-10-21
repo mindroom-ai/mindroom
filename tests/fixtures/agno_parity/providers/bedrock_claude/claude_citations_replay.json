@@ -1,0 +1,286 @@
+{
+  "family": "bedrock_claude",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What does my packing note say?",
+        "files": [
+          {
+            "content": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg==",
+            "filename": "packing.txt",
+            "id": "parity-note",
+            "mime_type": "text/plain"
+          }
+        ],
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "content": "Your list says to bring an umbrella.",
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "provider_metrics": {
+            "context_usage": {
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "input_tokens": 42
+            }
+          },
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "content_blocks": [
+            {
+              "citations": [
+                {
+                  "cited_text": "Packing list: umbrella, scarf, walking shoes.",
+                  "document_index": 0,
+                  "document_title": "packing.txt",
+                  "end_char_index": 45,
+                  "start_char_index": 0,
+                  "type": "char_location"
+                }
+              ],
+              "text": "Your list says to bring an umbrella.",
+              "type": "text"
+            }
+          ],
+          "mindroom_model": {
+            "id": "anthropic.claude-sonnet-5-5",
+            "provider": "AwsBedrock"
+          },
+          "mindroom_native_compaction": null,
+          "stop_reason": "end_turn"
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+      },
+      {
+        "content": "Anything else?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "aws_access_key": "parity-access-key",
+        "aws_region": "us-east-1",
+        "aws_secret_key": "parity-secret-key"
+      },
+      "id": "anthropic.claude-sonnet-5-5",
+      "provider": "bedrock_claude"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [],
+        "urls": []
+      },
+      "content": "Walking shoes.",
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "text": "Walking shoes.",
+            "type": "text"
+          }
+        ],
+        "mindroom_model": {
+          "id": "anthropic.claude-sonnet-5-5",
+          "provider": "AwsBedrock"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "end_turn"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "end_turn"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "content": [
+            {
+              "text": "What does my packing note say?",
+              "type": "text"
+            },
+            {
+              "citations": {
+                "enabled": true
+              },
+              "source": {
+                "data": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg==",
+                "media_type": "text/plain",
+                "type": "text"
+              },
+              "type": "document"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "text": "Your list says to bring an umbrella.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "text": "Anything else?",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "model": "anthropic.claude-sonnet-5-5",
+      "stream": true,
+      "system": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "anthropic.claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "Walking",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": " shoes.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "claude_citations_replay"
+}

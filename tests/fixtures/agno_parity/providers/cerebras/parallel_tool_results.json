@@ -1,0 +1,355 @@
+{
+  "family": "cerebras",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "mindroom_model": {
+            "id": "gpt-oss-120b",
+            "provider": "Cerebras"
+          }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+              "name": "get_weather"
+            },
+            "id": "call_parity_weather",
+            "type": "function"
+          },
+          {
+            "function": {
+              "arguments": "{\"query\": \"Paris packing list\"}",
+              "name": "search_notes"
+            },
+            "id": "call_parity_notes",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "city": "Paris",
+          "unit": "celsius"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call_parity_weather",
+        "tool_name": "get_weather"
+      },
+      {
+        "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "query": "Paris packing list"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call_parity_notes",
+        "tool_name": "search_notes"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "gpt-oss-120b",
+      "provider": "cerebras"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-oss-120b",
+          "provider": "Cerebras"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+                "name": "get_weather"
+              },
+              "id": "call_parity_weather",
+              "type": "function"
+            },
+            {
+              "function": {
+                "arguments": "{\"query\": \"Paris packing list\"}",
+                "name": "search_notes"
+              },
+              "id": "call_parity_notes",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+          "role": "tool",
+          "tool_call_id": "call_parity_weather"
+        },
+        {
+          "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]",
+          "role": "tool",
+          "tool_call_id": "call_parity_notes"
+        }
+      ],
+      "model": "gpt-oss-120b",
+      "stream": true,
+      "tools": [
+        {
+          "function": {
+            "description": "Return the forecast for one city.",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "City name.",
+                  "type": "string"
+                },
+                "unit": {
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search the user's travel notes.",
+            "name": "search_notes",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "description": "Maximum results.",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Search text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.cerebras.ai/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Pack a light rain jacket"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": " and comfortable shoes."
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "time_info": {
+            "completion_time": 0.01,
+            "prompt_time": 0.002,
+            "queue_time": 0.001,
+            "total_time": 0.013
+          },
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "parallel_tool_results"
+}

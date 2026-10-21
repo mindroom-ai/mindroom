@@ -1,0 +1,298 @@
+{
+  "family": "openai_responses",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api": "responses",
+      "api_key": "parity-test-key",
+      "id": "gpt-6-astra",
+      "provider": "openai"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "OpenAI Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_stored": true,
+        "response_id": "resp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "call_id": "call_parity_weather",
+          "function": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "name": "get_weather"
+          },
+          "id": "fc_parity_weather",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "input": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "developer"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "gpt-6-astra",
+      "reasoning": {},
+      "store": true,
+      "stream": true,
+      "tools": [
+        {
+          "description": "Return the forecast for one city.",
+          "external_execution": false,
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        },
+        {
+          "description": "Search the user's travel notes.",
+          "external_execution": false,
+          "name": "search_notes",
+          "parameters": {
+            "properties": {
+              "limit": {
+                "description": "Maximum results.",
+                "type": "integer"
+              },
+              "query": {
+                "description": "Search text.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "requires_confirmation": false,
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.openai.com/v1/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "in_progress",
+            "type": "function_call"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "delta": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+          "item_id": "fc_parity_weather",
+          "output_index": 0,
+          "sequence_number": 2,
+          "type": "response.function_call_arguments.delta"
+        },
+        "event": "response.function_call_arguments.delta"
+      },
+      {
+        "data": {
+          "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+          "item_id": "fc_parity_weather",
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.function_call_arguments.done"
+        },
+        "event": "response.function_call_arguments.done"
+      },
+      {
+        "data": {
+          "item": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "completed",
+            "type": "function_call"
+          },
+          "output_index": 0,
+          "sequence_number": 4,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+                "call_id": "call_parity_weather",
+                "id": "fc_parity_weather",
+                "name": "get_weather",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 5,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "tool_definitions"
+}

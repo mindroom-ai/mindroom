@@ -1,0 +1,175 @@
+{
+  "family": "gemini_vertexai",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "content": "Pack a light rain jacket and comfortable shoes.",
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "mindroom_model": {
+            "id": "gemini-3.8-flash",
+            "provider": "Google"
+          }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+      },
+      {
+        "content": "And for the evening?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "location": "us-central1",
+        "project_id": "parity-project",
+        "vertexai": true
+      },
+      "id": "gemini-3.8-flash",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Add a warm layer.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.8-flash",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "What should I pack for Paris tomorrow?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "text": "Pack a light rain jacket and comfortable shoes."
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "text": "And for the evening?"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {},
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          }
+        ],
+        "role": "user"
+      }
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": "Add a warm"
+                  }
+                ],
+                "role": "model"
+              },
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 1,
+            "promptTokenCount": 42,
+            "totalTokenCount": 43
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": " layer."
+                  }
+                ],
+                "role": "model"
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
+        }
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "system_history"
+}

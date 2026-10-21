@@ -1,0 +1,250 @@
+{
+  "family": "ollama",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "host": "http://localhost:11434",
+      "id": "qwen3.8:27b",
+      "provider": "ollama"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "qwen3.8:27b",
+          "provider": "Ollama"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "name": "get_weather"
+          },
+          "id": "<uuid4>",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"query\": \"Paris packing list\"}",
+            "name": "search_notes"
+          },
+          "id": "<uuid4>",
+          "type": "function"
+        }
+      ]
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "qwen3.8:27b",
+      "stream": true,
+      "tools": [
+        {
+          "function": {
+            "description": "Return the forecast for one city.",
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "City name.",
+                  "type": "string"
+                },
+                "unit": {
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search the user's travel notes.",
+            "name": "search_notes",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "description": "Maximum results.",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Search text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://localhost:11434/api/chat"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/x-ndjson"
+    },
+    "ndjson": [
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": "",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": false,
+        "message": {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": {
+                  "city": "Paris",
+                  "unit": "celsius"
+                },
+                "name": "get_weather"
+              }
+            },
+            {
+              "function": {
+                "arguments": {
+                  "query": "Paris packing list"
+                },
+                "name": "search_notes"
+              }
+            }
+          ]
+        },
+        "model": "qwen3.8:27b"
+      },
+      {
+        "created_at": "2026-10-20T00:00:00.000000Z",
+        "done": true,
+        "done_reason": "stop",
+        "eval_count": 12,
+        "eval_duration": 640000000,
+        "load_duration": 21000000,
+        "message": {
+          "content": "",
+          "role": "assistant"
+        },
+        "model": "qwen3.8:27b",
+        "prompt_eval_count": 42,
+        "prompt_eval_duration": 120000000,
+        "total_duration": 812000000
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "parallel_tool_calls"
+}

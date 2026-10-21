@@ -1,0 +1,403 @@
+{
+  "family": "llama_cpp",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "portable",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "id": "chatcmpl-parity",
+          "mindroom_model": {
+            "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+            "provider": "LlamaCpp"
+          },
+          "system_fingerprint": "fp_parity"
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"order_id\": \"A-1001\"}",
+              "name": "lookup_order"
+            },
+            "id": "call_parity_order",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "order_id": "A-1001"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call_parity_order",
+        "tool_name": "lookup_order"
+      }
+    ],
+    "model_config": {
+      "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "provider": "llama_cpp"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search the deferred tools by keyword.",
+        "name": "tool_search",
+        "parameters": {
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Call a deferred tool returned by tool_search.",
+        "name": "call_tool",
+        "parameters": {
+          "properties": {
+            "arguments": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Look up one order by id.",
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "Order A-1001 has shipped.",
+      "from_history": false,
+      "provider_data": {
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "provider": "LlamaCpp"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "Where is order A-1001?",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"name\": \"lookup_order\", \"arguments\": {\"order_id\": \"A-1001\"}}",
+                "name": "call_tool"
+              },
+              "id": "call_parity_order",
+              "type": "function"
+            }
+          ]
+        },
+        {
+          "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+          "role": "tool",
+          "tool_call_id": "call_parity_order"
+        }
+      ],
+      "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "tools": [
+        {
+          "function": {
+            "description": "Call a deferred tool returned by tool_search.",
+            "external_execution": false,
+            "name": "call_tool",
+            "parameters": {
+              "properties": {
+                "arguments": {
+                  "type": "object"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Return the forecast for one city.",
+            "external_execution": false,
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "City name.",
+                  "type": "string"
+                },
+                "unit": {
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search the deferred tools by keyword.",
+            "external_execution": false,
+            "name": "tool_search",
+            "parameters": {
+              "properties": {
+                "query": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "http://127.0.0.1:8080/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Order A-1001"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": " has shipped."
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search_replay"
+}

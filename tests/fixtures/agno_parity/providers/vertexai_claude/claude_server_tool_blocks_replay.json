@@ -1,0 +1,478 @@
+{
+  "family": "vertexai_claude",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "native",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "provider_metrics": {
+            "context_usage": {
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "input_tokens": 42
+            }
+          },
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "content_blocks": [
+            {
+              "id": "srvtoolu_parity",
+              "input": {
+                "pattern": "order"
+              },
+              "name": "tool_search_tool_regex",
+              "type": "server_tool_use"
+            },
+            {
+              "content": {
+                "tool_references": [
+                  {
+                    "tool_name": "lookup_order",
+                    "type": "tool_reference"
+                  }
+                ],
+                "type": "tool_search_tool_search_result"
+              },
+              "tool_use_id": "srvtoolu_parity",
+              "type": "tool_search_tool_result"
+            },
+            {
+              "id": "toolu_parity_order",
+              "input": {
+                "order_id": "A-1001"
+              },
+              "name": "lookup_order",
+              "type": "tool_use"
+            }
+          ],
+          "mindroom_model": {
+            "id": "claude-sonnet-5-5",
+            "provider": "VertexAI"
+          },
+          "mindroom_native_compaction": null,
+          "server_tool_blocks": [
+            {
+              "caller": null,
+              "id": "srvtoolu_parity",
+              "input": {
+                "pattern": "order"
+              },
+              "name": "tool_search_tool_regex",
+              "type": "server_tool_use"
+            },
+            {
+              "content": {
+                "tool_references": [
+                  {
+                    "tool_name": "lookup_order",
+                    "type": "tool_reference"
+                  }
+                ],
+                "type": "tool_search_tool_search_result"
+              },
+              "tool_use_id": "srvtoolu_parity",
+              "type": "tool_search_tool_result"
+            }
+          ],
+          "stop_reason": "tool_use"
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"order_id\": \"A-1001\"}",
+              "name": "lookup_order"
+            },
+            "id": "toolu_parity_order",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "order_id": "A-1001"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "toolu_parity_order",
+        "tool_name": "lookup_order"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "project_id": "parity-project",
+        "region": "us-east5"
+      },
+      "id": "claude-sonnet-5-5",
+      "provider": "vertexai_claude"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Look up one order by id.",
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "citations": {
+        "documents": [],
+        "raw": [],
+        "urls": []
+      },
+      "content": "Order A-1001 has shipped.",
+      "from_history": false,
+      "provider_data": {
+        "content_blocks": [
+          {
+            "text": "Order A-1001 has shipped.",
+            "type": "text"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "VertexAI"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "end_turn"
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "end_turn"
+  },
+  "request": {
+    "body": {
+      "anthropic_version": "vertex-2023-10-16",
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "content": [
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "text": "Where is order A-1001?",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "id": "srvtoolu_parity",
+              "input": {
+                "pattern": "order"
+              },
+              "name": "tool_search_tool_regex",
+              "type": "server_tool_use"
+            },
+            {
+              "content": {
+                "tool_references": [
+                  {
+                    "tool_name": "lookup_order",
+                    "type": "tool_reference"
+                  }
+                ],
+                "type": "tool_search_tool_search_result"
+              },
+              "tool_use_id": "srvtoolu_parity",
+              "type": "tool_search_tool_result"
+            },
+            {
+              "id": "toolu_parity_order",
+              "input": {
+                "order_id": "A-1001"
+              },
+              "name": "lookup_order",
+              "type": "tool_use"
+            }
+          ],
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "cache_control": {
+                "ttl": "1h",
+                "type": "ephemeral"
+              },
+              "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+              "tool_use_id": "toolu_parity_order",
+              "type": "tool_result"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "stream": true,
+      "system": [
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text"
+        }
+      ],
+      "tools": [
+        {
+          "name": "tool_search_tool_regex",
+          "type": "tool_search_tool_regex_20251119"
+        },
+        {
+          "cache_control": {
+            "ttl": "1h",
+            "type": "ephemeral"
+          },
+          "description": "Return the forecast for one city.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "city": {
+                "description": "City name.",
+                "type": "string"
+              },
+              "unit": {
+                "description": "Temperature unit.",
+                "enum": [
+                  "celsius",
+                  "fahrenheit"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          },
+          "name": "get_weather"
+        },
+        {
+          "defer_loading": true,
+          "description": "Look up one order by id.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "order_id": {
+                "description": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "type": "object"
+          },
+          "name": "lookup_order"
+        },
+        {
+          "defer_loading": true,
+          "description": "Email the invoice for one order.",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "order_id": {
+                "description": "",
+                "type": "string"
+              }
+            },
+            "required": [
+              "order_id"
+            ],
+            "type": "object"
+          },
+          "name": "send_invoice"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:streamRawPredict"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "Order A-1001",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": " has shipped.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "claude_server_tool_blocks_replay"
+}

@@ -1,0 +1,365 @@
+{
+  "family": "gemini_vertexai",
+  "input": {
+    "deferred_tool_search": {
+      "mode": "portable",
+      "tool_names": [
+        "lookup_order",
+        "send_invoice"
+      ]
+    },
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "Where is order A-1001?",
+        "from_history": true,
+        "role": "user"
+      },
+      {
+        "from_history": true,
+        "metrics": {
+          "input_tokens": 42,
+          "output_tokens": 12,
+          "total_tokens": 54
+        },
+        "provider_data": {
+          "mindroom_model": {
+            "id": "gemini-3.8-flash",
+            "provider": "Google"
+          }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"order_id\": \"A-1001\"}",
+              "name": "lookup_order"
+            },
+            "id": "parity_order",
+            "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}",
+        "from_history": true,
+        "role": "tool",
+        "tool_args": {
+          "order_id": "A-1001"
+        },
+        "tool_call_error": false,
+        "tool_call_id": "parity_order",
+        "tool_name": "lookup_order"
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "location": "us-central1",
+        "project_id": "parity-project",
+        "vertexai": true
+      },
+      "id": "gemini-3.8-flash",
+      "provider": "google"
+    },
+    "portable_replay": null,
+    "response_format": null,
+    "stream": true,
+    "tool_choice": null,
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Search the deferred tools by keyword.",
+        "name": "tool_search",
+        "parameters": {
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Call a deferred tool returned by tool_search.",
+        "name": "call_tool",
+        "parameters": {
+          "properties": {
+            "arguments": {
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Look up one order by id.",
+        "name": "lookup_order",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "description": "Email the invoice for one order.",
+        "name": "send_invoice",
+        "parameters": {
+          "properties": {
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ],
+          "type": "object"
+        }
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "Order A-1001 has shipped.",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gemini-3.8-flash",
+          "provider": "Google"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "contents": [
+        {
+          "parts": [
+            {
+              "text": "Where is order A-1001?"
+            }
+          ],
+          "role": "user"
+        },
+        {
+          "parts": [
+            {
+              "functionCall": {
+                "args": {
+                  "arguments": {
+                    "order_id": "A-1001"
+                  },
+                  "name": "lookup_order"
+                },
+                "id": "parity_order",
+                "name": "call_tool"
+              },
+              "thoughtSignature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
+            }
+          ],
+          "role": "model"
+        },
+        {
+          "parts": [
+            {
+              "functionResponse": {
+                "id": "parity_order",
+                "name": "call_tool",
+                "response": {
+                  "result": "{\"order_id\": \"A-1001\", \"status\": \"shipped\"}"
+                }
+              }
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "generationConfig": {},
+      "systemInstruction": {
+        "parts": [
+          {
+            "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          }
+        ],
+        "role": "user"
+      },
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "description": "Call a deferred tool returned by tool_search.",
+              "name": "call_tool",
+              "parameters": {
+                "properties": {
+                  "arguments": {
+                    "type": "OBJECT"
+                  },
+                  "name": {
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "OBJECT"
+              }
+            },
+            {
+              "description": "Return the forecast for one city.",
+              "name": "get_weather",
+              "parameters": {
+                "properties": {
+                  "city": {
+                    "description": "City name.",
+                    "type": "STRING"
+                  },
+                  "unit": {
+                    "description": "Temperature unit.",
+                    "enum": [
+                      "celsius",
+                      "fahrenheit"
+                    ],
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "city"
+                ],
+                "type": "OBJECT"
+              }
+            },
+            {
+              "description": "Search the deferred tools by keyword.",
+              "name": "tool_search",
+              "parameters": {
+                "properties": {
+                  "query": {
+                    "type": "STRING"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "type": "OBJECT"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "headers": {
+      "accept": "*/*",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/parity-project/locations/us-central1/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": "Order A-1001"
+                  }
+                ],
+                "role": "model"
+              },
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 1,
+            "promptTokenCount": 42,
+            "totalTokenCount": 43
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "parts": [
+                  {
+                    "text": " has shipped."
+                  }
+                ],
+                "role": "model"
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "modelVersion": "gemini-3.8-flash",
+          "responseId": "parity-response",
+          "usageMetadata": {
+            "candidatesTokenCount": 12,
+            "promptTokenCount": 42,
+            "totalTokenCount": 54
+          }
+        }
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "deferred_tool_search_replay"
+}
