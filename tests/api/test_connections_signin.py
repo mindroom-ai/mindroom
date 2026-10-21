@@ -57,7 +57,7 @@ CONNECTIONS_SESSION_COOKIE = connections_session_cookie(PORTAL_ORIGIN)
 def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API in API-key mode with a fake Matrix OpenID verifier for users alice and bob."""
 
-    async def verify(token: Any, _paths: Any) -> str:  # noqa: ANN401
+    async def verify(token: Any, _paths: Any, *, request_origin: str | None = None) -> str:  # noqa: ANN401, ARG001
         if token.access_token in {"alice", "bob", "mallory"}:
             return f"@{token.access_token}:example.org"
         raise MatrixOpenIDError(401, "Matrix OpenID verification failed.")
@@ -929,6 +929,10 @@ def test_sign_in_never_takes_the_audience_from_the_request(
     _serve(signin, MINDROOM_PUBLIC_URL="")
     response = sign_in(signin["client"], "openid-secret")
     assert response.status_code == 401
+    assert response.json()["detail"] == (
+        "Matrix OpenID verification failed. MindRoom checked the token for http://localhost:8765; "
+        f"if MindRoom is opened at {PORTAL_ORIGIN}, set MINDROOM_PUBLIC_URL to it."
+    )
     assert "set-cookie" not in response.headers
     assert binding_homeserver.userinfo_audiences == ["http://localhost:8765"]
 

@@ -93,6 +93,36 @@ async def test_audience_mismatch_from_userinfo_is_unauthorized(homeserver: tuple
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("public_url", "request_origin", "hint"),
+    [
+        (
+            "",
+            "http://10.42.0.6:8765/",
+            " MindRoom checked the token for http://localhost:8765; if MindRoom is opened at http://10.42.0.6:8765,"
+            " set MINDROOM_PUBLIC_URL to it.",
+        ),
+        ("", "http://localhost:8765/", ""),
+        ("", None, ""),
+        (AUDIENCE, "http://10.42.0.6:8765/", ""),
+    ],
+    ids=["other-address-without-public-url", "default-address", "no-request-origin", "public-url-set"],
+)
+async def test_refusal_at_another_address_names_the_public_url_setting(
+    homeserver: tuple[ComputerPeer, RuntimePaths],
+    public_url: str,
+    request_origin: str | None,
+    hint: str,
+) -> None:
+    """Chat binds the token to the address it opened, so a refusal there names the setting only while it is unset."""
+    peer, paths = homeserver
+    peer.expected_audience = "http://10.42.0.6:8765"
+    with pytest.raises(MatrixOpenIDError) as error:
+        await verify_matrix_openid(TOKEN, _with_public_url(paths, public_url), request_origin=request_origin)
+    assert (error.value.status_code, error.value.detail) == (401, "Matrix OpenID verification failed." + hint)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("public_url", "audience"),
     [
         ("https://Portal.Example.org:443", "https://portal.example.org"),

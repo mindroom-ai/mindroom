@@ -217,7 +217,7 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
     runtime = _runtime(request)
     config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
     try:
-        requester_id = await verify_matrix_openid(payload.openid_token, paths)
+        requester_id = await verify_matrix_openid(payload.openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
         raise ComputerError(error.status_code, error.detail) from None
     target = await _authorized_target(runtime, requester_id, payload.room_id, payload.agent_user_id)

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
-from mindroom.origins import deployment_origin, local_api_origin
+from mindroom.origins import deployment_origin, local_api_origin, normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
 # MindRoom's Tuwunel fork binds tokens to this audience (`io.mindroom.openid_audience`); other homeservers ignore it.
@@ -49,12 +49,36 @@ def _openid_audience(paths: RuntimePaths) -> str | None:
     return deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), local_api_origin(paths))
 
 
-async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
+def _audience_hint(paths: RuntimePaths, audience: str | None, request_origin: str | None) -> str:
+    """Name `MINDROOM_PUBLIC_URL` when it is unset and the request reached MindRoom at another origin than the audience.
+
+    Chat binds a token to the origin it opens, so a binding homeserver refuses it for the default audience.
+    """
+    origin = normalized_origin(request_origin)
+    if (
+        audience is None
+        or origin is None
+        or origin == audience
+        or (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip()
+    ):
+        return ""
+    return (
+        f" MindRoom checked the token for {audience}; if MindRoom is opened at {origin}, set MINDROOM_PUBLIC_URL to it."
+    )
+
+
+async def verify_matrix_openid(
+    token: MatrixOpenIDToken,
+    paths: RuntimePaths,
+    *,
+    request_origin: str | None = None,
+) -> str:
     """Verify only at the configured homeserver with no redirects or URL logging.
 
     The origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset, goes along as the
     audience, so a homeserver that binds tokens accepts only a token Chat requested for this deployment. The audience
-    never comes from the request, whose `Host` header a replaying backend controls.
+    never comes from the request, whose `Host` header a replaying backend controls; `request_origin` only adds the fix
+    to a failure's message.
     """
     domain = runtime_matrix_domain(paths)
     if token.matrix_server_name != domain:
@@ -70,7 +94,8 @@ async def verify_matrix_openid(token: MatrixOpenIDToken, paths: RuntimePaths) ->
                 if response.status >= 500 or response.status == 429:
                     raise MatrixOpenIDError(503, "Matrix OpenID verifier is unavailable.")
                 if response.status != 200:
-                    raise MatrixOpenIDError(401, "Matrix OpenID verification failed.")
+                    hint = _audience_hint(paths, audience, request_origin)
+                    raise MatrixOpenIDError(401, "Matrix OpenID verification failed." + hint)
                 # StreamReader.read(n) may return a partial response; read to EOF with a hard cap.
                 body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
                 payload = json.loads(body)

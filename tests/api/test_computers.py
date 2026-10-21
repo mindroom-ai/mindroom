@@ -433,6 +433,16 @@ def test_session_creation_audience_without_a_usable_public_url(
     assert peer.userinfo_audiences == [audience]
 
 
+def test_session_refused_at_another_address_names_the_public_url_setting(gateway: Gateway) -> None:
+    """Chat binds the token to the address it opened, so a refusal there tells the operator to set MINDROOM_PUBLIC_URL."""
+    client, peer, _ = gateway
+    peer.expected_audience = "http://10.42.0.6:8765"
+    response = create(client, headers={"Host": "10.42.0.6:8765"})
+    assert response.status_code == 401
+    assert "set MINDROOM_PUBLIC_URL to it." in response.text
+    assert "if MindRoom is opened at http://10.42.0.6:8765," in response.text
+
+
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:
     """An existing bearer cannot survive an API configuration generation change."""
     client, _, app = gateway
