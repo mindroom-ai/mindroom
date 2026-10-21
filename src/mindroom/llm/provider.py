@@ -30,11 +30,14 @@ class ModelIdentity:
 
     ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string (Agno's ``Model.provider``),
     and ``provider_name`` the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
+    ``endpoint`` is the base URL requests go to, when the route has one; capabilities learned from provider
+    errors and native-compaction routes are keyed by it.
     """
 
     id: str
     provider: str
     provider_name: str
+    endpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -53,12 +56,20 @@ class Capabilities:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolSpec:
-    """A model-facing tool definition; ``parameters`` is the final JSON schema."""
+    """A model-facing tool definition; ``parameters`` is the final JSON schema.
+
+    ``strict`` None means the tool never chose strictness, so wires that send the flag omit it.
+    The approval flags are not policy here: OpenAI-family wires send them inside each function definition
+    exactly as Agno's ``Function.to_dict()`` did, so request bodies and prompt caches stay unchanged.
+    """
 
     name: str
     description: str
     parameters: Mapping[str, Any]
-    strict: bool = False
+    strict: bool | None = False
+    requires_confirmation: bool | None = None
+    external_execution: bool | None = None
+    approval_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -74,8 +85,24 @@ class RequestOverrides:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class NativeCompaction:
+    """Provider-side compaction for one replay route; ``threshold`` None keeps the authored provider policy."""
+
+    route: str
+    threshold: int | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
-    """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts."""
+    """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts.
+
+    ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
+    arrive through ``stream()``, after the response completes.
+    ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
+    them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
+    ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
+    ``native_compaction`` turns on provider-side compaction for routes that support it.
+    """
 
     messages: Sequence[Message]
     tools: Sequence[ToolSpec] = ()
@@ -83,6 +110,10 @@ class ModelRequest:
     response_format: type[BaseModel] | Mapping[str, Any] | None = None
     native_tools: Sequence[Mapping[str, Any]] = ()
     overrides: RequestOverrides = RequestOverrides()
+    stream: bool = True
+    deferred_tool_names: frozenset[str] = frozenset()
+    portable_replay: bool = False
+    native_compaction: NativeCompaction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +220,7 @@ __all__ = [
     "ModelProvider",
     "ModelRequest",
     "ModelTurn",
+    "NativeCompaction",
     "ReasoningDelta",
     "RequestOverrides",
     "StopReason",
