@@ -272,9 +272,17 @@ LAN_PORTAL = "http://192.168.1.10:8765"
 LAN_CHAT = "http://192.168.1.10:8080"
 
 
-def test_portal_on_a_local_address_works_over_http_with_no_settings(signin: dict[str, Any]) -> None:
-    """A Docker stack on a home network signs Chat users in over HTTP with a cookie the browser keeps there."""
-    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_AGENT="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+def test_portal_on_a_lan_address_signs_in_over_http(signin: dict[str, Any]) -> None:
+    """A Docker stack on a home network, with `MINDROOM_PUBLIC_URL` naming its LAN address, signs Chat users in over HTTP.
+
+    The browser keeps the plain session cookie there, and the default list accepts the LAN Chat without an entry.
+    """
+    _serve(
+        signin,
+        MINDROOM_PUBLIC_URL=LAN_PORTAL,
+        MINDROOM_CONNECTIONS_AGENT="",
+        MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="",
+    )
     signin["binds"].return_value = True
     client = TestClient(main.app, base_url=LAN_PORTAL)
     response = sign_in(client, "alice", origin=LAN_CHAT, headers={"Origin": LAN_PORTAL})

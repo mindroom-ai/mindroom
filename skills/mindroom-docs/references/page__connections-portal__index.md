@@ -6,10 +6,9 @@ It is on by default, and users open it from MindRoom Chat.
 ## Open It From MindRoom Chat
 
 In MindRoom Chat, the user opens **Connections** in Settings, General, which opens `/connections/` in a new window and signs them in with the account Chat is signed in to.
-On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when it runs on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or when MindRoom and Chat both run on local addresses, as in the Docker stack.
-A MindRoom on a public address also needs `MINDROOM_PUBLIC_URL` set to the origin Chat opens.
+On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
+For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-When other devices on a home network reach MindRoom, set `MINDROOM_PUBLIC_URL` to the address Chat opens, such as `http://192.168.1.10:8765`, so OAuth callbacks come back to MindRoom and a homeserver that binds tokens accepts them.
 Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
 Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
