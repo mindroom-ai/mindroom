@@ -312,6 +312,44 @@ def test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index(tmp_
     assert indexes == [("r2", 0), ("r0", 1), ("r1", 2)]
 
 
+def test_an_agent_named_agno_migrates_the_agno_runs_table(tmp_path: Path) -> None:
+    """Agno names the runs table beside ``agno_sessions`` ``agno_runs``; the migration works on it and adds no other."""
+    scope = HistoryScope(kind="agent", scope_id="agno")
+    seeding = create_state_storage("agno", tmp_path, subdir="sessions", session_table="agno_sessions")
+    seed_session(
+        seeding,
+        AgentSession(
+            session_id="session",
+            agent_id="agno",
+            runs=[RunOutput(run_id=run_id, agent_id="agno") for run_id in ("gone", "r1", "r2")],
+            summary=SessionSummary(summary="legacy summary"),
+            metadata=_compaction_metadata(scope.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    seeding.close()
+    db_file = tmp_path / "sessions" / "agno.db"
+    with closing(sqlite3.connect(db_file)) as connection, connection:
+        connection.execute("DROP TABLE agno_sessions_summaries")
+        connection.execute("DROP TABLE agno_sessions_removed_runs")
+        connection.execute("UPDATE agno_runs SET run_index = NULL WHERE run_id = 'r2'")
+
+    storage = create_state_storage("agno", tmp_path, subdir="sessions", session_table="agno_sessions")
+    try:
+        assert stored_run_ids(storage, "session") == ["r2", "r1"]
+        assert summary_rows_of(storage, scope.key, "session") == [
+            StoredSummaryRow(summary="legacy summary", summary_model=None, legacy=True),
+        ]
+    finally:
+        storage.close()
+    with closing(sqlite3.connect(db_file)) as connection:
+        runs_tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%runs' ORDER BY name",
+        ).fetchall()
+        indexes = connection.execute("SELECT run_id, run_index FROM agno_runs ORDER BY run_index").fetchall()
+    assert runs_tables == [("agno_runs",), ("agno_sessions_removed_runs",)]
+    assert indexes == [("r2", 0), ("r1", 2)]
+
+
 def _agno_2_database_with_summary(tmp_path: Path) -> Path:
     """Write the Agno 2.6.12 fixture with a replayed ``session.summary``, as a destructive compactor left it."""
     db_file = create_agno_2_sessions_db(tmp_path / "code.db")

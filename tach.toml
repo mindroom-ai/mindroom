@@ -9037,6 +9037,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.schema",
     "mindroom.logging_config",
     "mindroom.usage.storage",
 ]

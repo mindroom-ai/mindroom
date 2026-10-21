@@ -33,7 +33,8 @@ class TableNames:
     @property
     def runs(self) -> str:
         """The runs table."""
-        return f"{self.sessions}_runs"
+        # Agno 3 names the runs table beside its default sessions table ``agno_runs`` (agno/db/base.py, BaseDb.__init__).
+        return "agno_runs" if self.sessions == "agno_sessions" else f"{self.sessions}_runs"
 
     @property
     def summaries(self) -> str:

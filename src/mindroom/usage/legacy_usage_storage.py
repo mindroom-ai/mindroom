@@ -10,6 +10,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -70,7 +71,7 @@ def _needs_migration(connection: sqlite3.Connection, session_table: str) -> bool
 def _seed_usage(connection: sqlite3.Connection, session_table: str) -> None:
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(session_table)})")}
     legacy_column = "runs" if "runs" in columns else "NULL"
-    runs_table = f"{session_table}_runs"
+    runs_table = TableNames(session_table).runs
     has_runs = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (runs_table,),
