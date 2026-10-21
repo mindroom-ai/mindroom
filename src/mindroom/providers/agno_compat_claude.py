@@ -59,8 +59,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # Remove when: The pinned Agno parser keeps every tool call of a response cut off at the output limit, streamed
 # or not, and marks the response so its calls can be answered without running; the owner's answer and
 # its per-loop limit on cut-off responses in providers/claude_compat.py remain.
-# Coverage: tests/test_claude_output_limit.py::test_cut_off_tool_call_is_answered_instead_of_run;
-# tests/test_claude_output_limit.py::test_run_that_keeps_cutting_off_its_tool_calls_fails_visibly.
+# Coverage: tests/test_claude_compat.py::test_a_tool_call_cut_off_at_the_output_limit_is_kept.
 
 # Claude stop reasons of a response the output limit cut off before it was complete.
 OUTPUT_LIMIT_STOP_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})

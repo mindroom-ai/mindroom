@@ -174,8 +174,8 @@ class MindRoomLlamaCpp(OpenAIChatProviderCompat, LlamaCpp):
 # Upstream PR: None identified; the missing public utility remains untracked.
 # Remove when: Agno exposes a public byte-only parser; retain bounded header
 # decoding, unknown-format fallback, and MindRoom's visual token budgeting.
-# Coverage: tests/test_native_compaction_history.py::test_responses_image_budget_reads_only_bounded_header_bytes;
-# tests/test_native_compaction_history.py::test_responses_image_header_dimensions_keep_nonzero_visual_budget.
+# Coverage: none left; history sizing uses the owned port in providers/openai/replay_estimate.py, pinned by
+# tests/test_responses_replay_estimate.py, and no caller reaches this Agno estimate any more.
 def _embedded_image_dimensions(source: object) -> tuple[int, int] | None:
     """Read known image headers locally, with no URL fetch or pixel decoding."""
     if not isinstance(source, str) or not source.startswith("data:image/") or ";base64," not in source:

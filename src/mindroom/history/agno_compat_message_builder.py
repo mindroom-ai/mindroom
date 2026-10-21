@@ -88,9 +88,8 @@ if TYPE_CHECKING:
 # must still replay exactly once and be counted once.
 # Coverage: tests/test_history_summary_message.py::test_summary_is_the_first_history_message_for_new_runs;
 # tests/test_history_summary_message.py::test_summary_is_reinserted_on_synchronous_continuation;
-# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once;
-# tests/test_mid_turn_compaction.py::test_next_turn_reuses_the_post_compaction_prefix;
-# tests/test_mid_turn_log.py::test_a_fold_completed_after_a_later_turn_replays_its_summary_first.
+# tests/test_history_summary_message.py::test_approval_resume_replays_the_summary_once (team cases; agent requests
+# are built on the owned loop and the team runtime port removes this module).
 
 # AGNO_COMPAT: No public reference to the session a running loop writes when it ends.
 # Reason: Agno loads a run's session privately and writes that object back when the run ends, so mid-turn
@@ -99,9 +98,9 @@ if TYPE_CHECKING:
 # Upstream issue: Tracking gap; no issue identified for exposing the running loop's session or run.
 # Upstream PR: None identified.
 # Remove when: Agno exposes the session and run a model request belongs to, for example on a pre-request hook.
-# Coverage: tests/test_mid_turn_compaction.py::test_long_single_turn_compacts_mid_turn_and_continues;
-# tests/test_mid_turn_compaction.py::test_scoped_compaction_after_resume_keeps_the_run_local_summary;
-# tests/test_mid_turn_compaction.py::test_a_request_the_target_never_built_is_not_compacted.
+# Coverage: tests/test_mid_turn_compaction_resume_and_team.py::test_long_single_team_turn_compacts_mid_turn_and_continues;
+# tests/test_mid_turn_compaction_resume_and_team.py::test_scoped_compaction_after_resume_keeps_the_run_local_summary
+# (agent runs compact through the owned loop's hook; the team runtime port removes this module).
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
