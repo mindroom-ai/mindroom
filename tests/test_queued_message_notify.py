@@ -531,13 +531,21 @@ def _seed(
     return seed_session(
         store,
         ConversationSession(
-            session_id=session_id, kind=kind, owner_id=owner, runs=list(runs), created_at=1, updated_at=1,
+            session_id=session_id,
+            kind=kind,
+            owner_id=owner,
+            runs=list(runs),
+            created_at=1,
+            updated_at=1,
         ),
     )
 
 
 def _stored_runs(
-    store: ConversationStore, kind: SessionKind = "agent", *, session_id: str = "session-1",
+    store: ConversationStore,
+    kind: SessionKind = "agent",
+    *,
+    session_id: str = "session-1",
 ) -> list[AnyRunRecord]:
     session = ConversationStore.load_session(store, session_id, kind)
     assert session is not None
@@ -3729,7 +3737,9 @@ def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_not
         session = _seed(store, _completed("completed-run", [_owned_notice("crash-left"), prior_persisted, active_live]))
         ai_runtime.scrub_queued_notice_session_context(
             scope_context=ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id="general"), storage=store, session=session,
+                scope=HistoryScope(kind="agent", scope_id="general"),
+                storage=store,
+                session=session,
             ),
             entity_name="general",
         )
