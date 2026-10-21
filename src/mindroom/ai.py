@@ -12,15 +12,13 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.agent_loop.output_limit import output_limit_policy
-from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
-from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.approval.resume import forward_resume, resume_history
+from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
@@ -28,6 +26,7 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     note_child_run_id,
     observe_child_event,
+    observe_child_record,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
@@ -36,8 +35,8 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
-from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook, without_fold_records
-from mindroom.history.request_messages import build_request, scope_history_messages
+from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.request_messages import build_request, build_resume_request
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import ScopeSessionContext, open_resolved_scope_session_context
 from mindroom.history.storage import new_scope_session
@@ -52,17 +51,17 @@ from mindroom.hooks import (
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
+from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.participation_hook import participation_hook
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.providers.pipeline.request_log import provider_model_params
 from mindroom.response_turn import (
@@ -86,7 +85,6 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
-from mindroom.skill_learning.capture import capture_final_request
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -108,10 +106,11 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import BeforeRequestHook
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import Persist
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.ai_turn_state import AITurnState
+    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -121,7 +120,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import AnyRunRecord, RunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import (
@@ -429,6 +428,10 @@ class _AgentRunContext:
     runtime_paths: RuntimePaths
     compaction_lifecycle: CompactionLifecycle | None
     turn_recorder: TurnRecorder | None
+    # What the run's delegations need: whose turn it is, how deep it runs, and the shared knowledge refresher.
+    execution_identity: ToolExecutionIdentity | None
+    delegation_depth: int
+    refresh_scheduler: KnowledgeRefreshScheduler | None
 
     @property
     def agent_name(self) -> str:
@@ -740,65 +743,32 @@ def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persis
 
 
 def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, storage: _AttemptStorage) -> LoopHooks:
-    """Return the hooks of one agent run, in the order the turn applies them before each request.
+    """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
 
-    The participation gate decides first, so a reply that stays silent never compacts or requests; the request
-    cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
-    messages; the approval receipt projects into the first request of a resumed run only.
+    A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
+    that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
     """
     ctx = run_context.turn
     prepared = run_context.prepared_run
-    build = prepared.build
-    model = build.spec.model
-    capabilities = model.capabilities
-    before_request: list[BeforeRequestHook] = []
-    if ctx.participation is not None:
-        before_request.append(participation_hook(ctx.participation, model))
     native = prepared.prepared_history.native_history
     plan = prepared.prepared_history.replay_plan
-    # A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
-    # that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
-    scoped = storage.store is not None and plan is not None and plan.add_history_to_context
-    before_request.append(
-        mid_turn_compaction_hook(
-            config=run_context.config,
-            runtime_paths=run_context.runtime_paths,
-            entity_name=run_context.agent_name,
-            scope_id=storage.scope.scope_id if storage.scope is not None else run_context.agent_name,
-            is_team=False,
-            model_name=prepared.runtime_model_name,
-            model=model,
-            history_settings=build.history_settings,
-            store=storage.store,
-            session=storage.session if scoped else None,
-            scope=storage.scope if scoped else None,
-            native_compaction=native.native_compaction if native is not None else None,
-            deferred_tool_names=build.request_template.deferred_tool_names,
-            prompt_id=prepared.turn.prompt.id,
-            lifecycle=run_context.compaction_lifecycle,
-            turn_recorder=run_context.turn_recorder,
-        ),
-    )
-    before_request.append(approval_receipt_hook(capabilities))
-    notice_text = run_context.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
-    deferred = build.request_template.deferred_tool_names
-    return LoopHooks(
-        before_request=tuple(before_request),
-        answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
-        rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
-        tool_middleware=build.tool_middleware,
-        after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),),
-        on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),),
-        on_loop_end=(
-            capture_final_request(
-                ctx.skill_review_capture,
-                model,
-                run_id=attempt.run_id,
-                model_name=prepared.runtime_model_name,
-            )
-            if ctx.skill_review_capture is not None
-            else None
-        ),
+    return agent_loop_hooks(
+        prepared.build,
+        config=run_context.config,
+        runtime_paths=run_context.runtime_paths,
+        agent_name=run_context.agent_name,
+        model_name=prepared.runtime_model_name,
+        store=storage.store,
+        session=storage.session,
+        scope=storage.scope,
+        scoped=storage.store is not None and plan is not None and plan.add_history_to_context,
+        native_compaction=native.native_compaction if native is not None else None,
+        prompt_id=prepared.turn.prompt.id,
+        participation=ctx.participation,
+        lifecycle=run_context.compaction_lifecycle,
+        turn_recorder=run_context.turn_recorder,
+        skill_review_capture=ctx.skill_review_capture,
+        run_id=attempt.run_id,
     )
 
 
@@ -810,9 +780,13 @@ def _start_agent_run(
     terminal: _TerminalRecord,
     stream: bool,
 ) -> AsyncIterator[RunEvent]:
-    """Start one attempt's run on the owned loop, storing its terminal record where the turn's scope stores."""
+    """Start one attempt's run on the owned loop, storing its terminal record where the turn's scope stores.
+
+    A run that pauses on delegations is driven on: its children run, and the run continues with their results
+    through ``_continue_turn_run`` until it completes or waits for an approval.
+    """
     prepared = run_context.prepared_run
-    return run_agent(
+    events = run_agent(
         prepared.spec,
         attempt.run_input,
         ctx=RunContext(
@@ -826,6 +800,69 @@ def _start_agent_run(
         persist=_persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=stream),
     )
+    return drive_delegation_stream(
+        events,
+        store=storage.store,
+        session=storage.session,
+        continue_parent=partial(
+            _continue_turn_run,
+            run_context,
+            attempt,
+            storage=storage,
+            terminal=terminal,
+            stream=stream,
+        ),
+        agent_name=run_context.agent_name,
+        run_child=run_delegated_child_response,
+        config=run_context.config,
+        runtime_paths=run_context.runtime_paths,
+        execution_identity=run_context.execution_identity,
+        delegation_depth=run_context.delegation_depth,
+        refresh_scheduler=run_context.refresh_scheduler,
+    )
+
+
+async def _continue_turn_run(
+    run_context: _AgentRunContext,
+    attempt: _AgentAttempt,
+    paused: RunRecord,
+    decisions: ResumeDecisions,
+    on_event: ResumeEvents | None,
+    *,
+    storage: _AttemptStorage,
+    terminal: _TerminalRecord,
+    stream: bool,
+) -> RunRecord:
+    """Continue this attempt's paused run with its delegations' results, under the attempt's hooks and store.
+
+    The resume replays the scope's history as the attempt did and reuses the paused run's stored system message.
+    """
+    prepared = run_context.prepared_run
+    history, summary = resume_history(
+        storage.session,
+        storage.scope,
+        prepared.build,
+        prepared.prepared_history.replay_plan,
+    )
+    events = resume_agent(
+        prepared.spec,
+        paused,
+        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        approved=decisions.approved,
+        denied=decisions.denied,
+        external_results=decisions.external_results,
+        ctx=RunContext(
+            run_id=attempt.run_id,
+            session_id=run_context.session_id,
+            user_id=run_context.turn.requester_id,
+            metadata=deepcopy(paused.metadata),
+            session_state=storage.session.session_state,
+        ),
+        hooks=_agent_loop_hooks(run_context, attempt, storage),
+        persist=_persist_into(terminal, storage),
+        request_template=replace(run_context.request_template, stream=stream),
+    )
+    return await forward_resume(events, on_event)
 
 
 @timed("model_request_to_completion")
@@ -969,19 +1006,9 @@ def _replayed_history(
     plan: ResolvedReplayPlan | None,
 ) -> tuple[list[Message], ScopeSummary | None]:
     """Return the stored history this request replays under the resolved plan, and the scope summary it follows."""
-    if scope_context is None or scope_context.session is None or plan is None or not plan.add_history_to_context:
+    if scope_context is None:
         return [], None
-    session = scope_context.session
-    settings = build.history_settings
-    history = scope_history_messages(
-        session.runs,
-        scope=scope_context.scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
-    )
-    return history, session.summary
+    return resume_history(scope_context.session, scope_context.scope, build, plan)
 
 
 @timed("system_prompt_assembly")
@@ -1259,6 +1286,9 @@ async def _prepare_agent_run_context(
         runtime_paths=runtime_paths,
         compaction_lifecycle=compaction_lifecycle,
         turn_recorder=turn_recorder,
+        execution_identity=execution_identity,
+        delegation_depth=delegation_depth,
+        refresh_scheduler=refresh_scheduler,
     )
 
 
@@ -1268,18 +1298,19 @@ def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str],
 
 
 def _unresumable_pause(record: AnyRunRecord) -> RuntimeError:
-    """Return the error for a pause with no approval to ask for: only externally executed calls wait.
+    """Return the error for a pause with no approval to ask for and no delegation to drive.
 
-    Resuming a run paused on an externally executed call (a delegation) is the resume driver's job; until it runs
-    on this path, the pause fails the reply loudly instead of being recorded as an ordinary stop over the stored
-    ``PAUSED`` row.
+    Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
+    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
+    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it, and a blocking
+    reply also raises it through the runner.
     """
     pending = [
         requirement.tool_execution.tool_name
         for requirement in record.requirements or ()
         if not requirement.is_resolved()
     ]
-    msg = f"agent run {record.run_id!r} paused on {pending} without an approval to ask for; resuming it is not wired"
+    msg = f"agent run {record.run_id!r} paused on {pending} without an approval to ask for"
     return RuntimeError(msg)
 
 
@@ -1610,6 +1641,9 @@ async def ai_response(  # noqa: C901
         record = attempt_result.record
         if attempt_result.user_error is not None:
             error = attempt_result.user_error
+            if isinstance(record, RunRecord):
+                # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
+                observe_child_record(record)
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",
@@ -2085,6 +2119,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         record = state.terminal.record
         if state.error is not None:
+            if isinstance(record, RunRecord):
+                # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
+                observe_child_record(record)
             if skipped := skip_unapproved_attempt(
                 ctx.participation,
                 reason="run_failed_before_decision",

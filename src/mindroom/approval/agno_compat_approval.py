@@ -21,10 +21,11 @@ if TYPE_CHECKING:
 # AGNO_COMPAT: Persisted tool denial requires live tools and private continuation hooks.
 # Reason: Agno resolves live Functions even for denied persisted calls, and offers
 # no continuation callback before tool lookup and resumed-message construction.
+# Agent runs resume on the owned loop, which writes the denial result itself; only
+# the team continuation (``teams.py``) still runs through Agno until the team runtime cutover.
 # Upstream issue: No matching public continuation/removed-tool denial issue identified.
 # Upstream PR: None identified for this extension point.
-# Remove when: Public Agent/Team continuation APIs can reject persisted calls without
-# a live Function and invoke the owner's callback against the canonical resumed run.
+# Remove when: The team continuation runs on the owned loop; nothing else binds these hooks.
 # Coverage: tests/test_approval_response.py::test_denial_context_matches_run_identity_and_restores_lookup;
 # tests/test_team_approval_dynamic_tools.py.
 
@@ -43,26 +44,6 @@ def append_denied_tool_result(
         tool,
         functions={tool_name: Function(name=tool_name, stop_after_tool_call=tool.stop_after_tool_call)},
     )
-
-
-# AGNO_COMPAT: Continuation runs every confirmed call in the stored run, not only the supplied requirements.
-# Reason: Agent continuation keeps stored tool entries that the supplied requirements do not replace, and runs
-# each one that is confirmed without a result or that requires user input, first copying a user-input entry's
-# stored input values into its arguments. A run continued by ID is re-read from session storage first, so agent
-# session storage that worker code can write could add calls nobody approved or change an approved call's
-# arguments after they were checked; team runs are stored where no worker writes.
-# Upstream issue: No matching issue identified; tracking gap for continuing exactly the supplied requirements.
-# Upstream PR: None identified.
-# Remove when: Agent continuation runs only the caller's supplied requirements, or exposes a public callback
-# over the exact calls it is about to run; MindRoom's argument digest check must remain.
-# Coverage: tests/test_response_runner_focused.py::test_agent_continuation_runs_only_approved_calls;
-# tests/test_delegation_execution.py::test_fresh_delegation_continuation_never_runs_planted_stored_calls;
-# tests/test_delegation_approval_ownership.py::test_saved_child_approval_preserves_executable_ownership.
-def continuation_executes(tool: ToolExecution) -> bool:
-    """Return whether Agno's continuation would run this tool entry."""
-    return (
-        tool.requires_confirmation is True and tool.confirmed is True and tool.result is None
-    ) or tool.requires_user_input is True
 
 
 @contextmanager

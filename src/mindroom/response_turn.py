@@ -92,6 +92,7 @@ __all__ = [
     "apply_exact_approval_decisions",
     "apply_local_approval_decisions",
     "build_matrix_run_metadata",
+    "local_approval_requirements",
     "paused_attempt_from_pause",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
@@ -441,6 +442,20 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
         )
 
 
+def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
+    """Return copies of the requirements this actor's approval cards ask about.
+
+    A delegation driver that asked about its own calls lists them as pending requirements; projected child calls
+    belong to the child executor, so a run waiting on a child has none of its own.
+    """
+    delegation = DelegationState.from_metadata(record.metadata)
+    if delegation.pending_child_id is not None:
+        return []
+    if delegation.pending_requirements:
+        return [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
+    return deepcopy(record.requirements or [])
+
+
 def apply_local_approval_decisions(
     record: AnyRunRecord,
     *,
@@ -448,16 +463,10 @@ def apply_local_approval_decisions(
     denial_reasons: dict[str, str | None],
 ) -> list[RunRequirement]:
     """Apply this actor's approvals; projected child calls belong to the child executor."""
-    delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_child_id is not None:
+    requirements = local_approval_requirements(record)
+    if not requirements:
         return []
-    return apply_exact_approval_decisions(
-        [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
-        if delegation.pending_requirements
-        else deepcopy(record.requirements or []),
-        decisions=decisions,
-        denial_reasons=denial_reasons,
-    )
+    return apply_exact_approval_decisions(requirements, decisions=decisions, denial_reasons=denial_reasons)
 
 
 def paused_attempt_from_response(
