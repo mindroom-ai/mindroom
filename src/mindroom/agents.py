@@ -1832,13 +1832,16 @@ def _agent_toolkits(
     return tuple(adapted)
 
 
-def _tool_owners(toolkits: Sequence[Toolkit]) -> dict[str, str]:
-    """Map each function the agent offers to the authored toolkit it came from; the first toolkit of a name wins."""
-    owners: dict[str, str] = {}
+def _tool_owners(toolkits: Sequence[Toolkit]) -> dict[str, str | None]:
+    """Map each function the agent offers to the authored toolkit it came from.
+
+    The first function of a name is the one the run offers, so it owns the name even when it has no authored
+    toolkit; a later same-named function never fills the owner in.
+    """
+    owners: dict[str, str | None] = {}
     for toolkit in toolkits:
         for name, function in toolkit.get_async_functions().items():
-            if function.owning_toolkit is not None:
-                owners.setdefault(name, function.owning_toolkit)
+            owners.setdefault(name, function.owning_toolkit)
     return owners
 
 

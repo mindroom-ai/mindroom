@@ -7,10 +7,11 @@ import json
 import sqlite3
 import threading
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,6 +43,7 @@ from mindroom.llm import usage as llm_usage
 from mindroom.llm.runs import RunRecord
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.auto_flush import _extract_memory_summary
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, paused_attempt_from_response
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import (
@@ -72,10 +74,9 @@ from tests.history_helpers import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
-from tests.test_approval_turn_continuation import _call, _ScriptedModel
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.session_storage.store import ConversationStore
@@ -90,6 +91,52 @@ class _HelperModel(RecordingModel):
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield self.responses.pop(0)
+
+
+def _call(function_name: str, call_id: str, **arguments: object) -> ModelResponse:
+    """Return one Agno tool-call response, for the Agno agents this suite still drives."""
+    return ModelResponse(
+        tool_calls=[
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": function_name, "arguments": json.dumps(arguments)},
+            },
+        ],
+    )
+
+
+@dataclass
+class _ScriptedModel(SyntheticModel):
+    """Replace only Agno provider requests, checking the real schema on each call."""
+
+    responses: list[ModelResponse | RuntimeError] = field(default_factory=list)
+    requests: list[list[Message]] = field(default_factory=list)
+
+    async def ainvoke(
+        self,
+        messages: list[Message],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        **_kwargs: object,
+    ) -> ModelResponse:
+        self.requests.append(deepcopy(messages))
+        response = self.responses.pop(0)
+        if isinstance(response, RuntimeError):
+            raise response
+        names = {tool["function"]["name"] for tool in tools or ()}
+        for call in response.tool_calls or ():
+            assert call["function"]["name"] in names
+        return response
+
+    async def ainvoke_stream(
+        self,
+        messages: list[Message],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
+        yield await self.ainvoke(messages, tools=tools, **kwargs)
 
 
 def _usage_rows(storage: ConversationStore) -> list[tuple[str, str]]:

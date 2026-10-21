@@ -243,6 +243,10 @@ class DelegationRecordOwner:
         """Re-resolve and validate one record from its persisted identity."""
         return await run_blocking_until_complete(self._reopen, locator)
 
+    async def highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        """Return the largest integer a committed event id carries after ``prefix``, or 0 when none does."""
+        return await run_blocking_until_complete(self._highest_event_index, handle, prefix)
+
     async def append_event(
         self,
         handle: DelegationRecordHandle,
@@ -349,6 +353,15 @@ class DelegationRecordOwner:
         with _record_lock(handle):
             _load_state(handle)
         return handle
+
+    def _highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        handle = self._validated_handle(handle)
+        with _record_lock(handle):
+            state = _load_state(handle)
+            if state is None:
+                return 0
+            indexes = (_event_index(json.loads(line)["event_id"], prefix) for line in _committed_lines(handle, state))
+            return max(indexes, default=0)
 
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
@@ -561,6 +574,14 @@ def _load_state(handle: DelegationRecordHandle) -> _RecordState | None:
 def _event_id_digest(event_id: str) -> str:
     # Fixed-size digests keep long event IDs from growing the state file.
     return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
+
+
+def _event_index(event_id: object, prefix: str) -> int:
+    """Return the integer ``event_id`` carries after ``prefix``, or 0 for an id of another shape."""
+    if not isinstance(event_id, str) or not event_id.startswith(prefix):
+        return 0
+    suffix = event_id[len(prefix) :]
+    return int(suffix) if suffix.isascii() and suffix.isdigit() else 0
 
 
 @contextmanager

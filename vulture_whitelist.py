@@ -413,6 +413,5 @@ _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/scrip
 _.prompt_cache_breakpoints  # Capability read by the owned providers when they land (src/mindroom/llm/provider.py)
 _.child_run_id  # Stored tool-execution field read by the owned team runtime when it lands (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
-_.save_run  # Store method the runtime cutover calls for a run saved with its usage outside persist_to (src/mindroom/session_storage/store.py)
 _.minimal_required  # EnrichmentItem field minimal mode's renderer reads once F3 renders it from the build surface (src/mindroom/hooks/types.py)
 install_request_preparation  # Agno request hook the team path's mid-turn compaction tests still install until S4 and F7 (src/mindroom/agno_compat_model_hooks.py)

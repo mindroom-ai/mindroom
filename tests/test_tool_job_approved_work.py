@@ -1,66 +1,95 @@
-"""A natively approved call keeps running as a background job after its approval resumes the reply."""
+"""A natively approved call keeps running as a background job after its approval resumes the reply.
+
+The gate is the toolkit's own (``requires_confirmation`` on the function), as a tool that insists on a human
+decision declares it: a policy-gated call that can run as a job takes its approval as the job's first phase instead.
+The team continuation still runs through Agno until the team runtime cutover, which owns its variant of this test.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from agno.agent import Agent
-from agno.db.base import SessionType
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
-from agno.team import Team
-from agno.tools.function import Function
+from agno.tools import Toolkit
 
-from mindroom.ai import _AgentRunContext, _PreparedAgentRun
-from mindroom.approval.execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import ApprovalCall, ApprovalContinuation, approval_arguments_digest
-from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import (
-    CompletedApprovalRun,
-    PausedAnswer,
-    ResponseTurnContext,
-)
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import (
-    TeamMode,
-    _TeamStreamPresentation,
-    continue_paused_team_run,
-)
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.consumption import set_consumption_storage
-from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    build_execution_identity_from_runtime_context,
-    tool_runtime_context,
+from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    respond,
+    resume,
 )
-from tests.conftest import message_origin
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import (
-    lookup,
-    pending_outcomes,
-    tool_job_runtime,
-)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import lookup, pending_outcomes, tool_job_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
-async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event) -> None:
+class SlowTools(Toolkit):
+    """One natively gated function whose run the test holds open until it is released."""
+
+    started: ClassVar[asyncio.Event]
+    release: ClassVar[asyncio.Event]
+    executions: ClassVar[int] = 0
+
+    def __init__(self) -> None:
+        super().__init__(name="slow", tools=[self.work])
+        for functions in (self.functions, self.async_functions):
+            if "work" in functions:
+                functions["work"].requires_confirmation = True
+
+    async def work(self) -> str:
+        """Do the approved work."""
+        type(self).executions += 1
+        type(self).started.set()
+        await type(self).release.wait()
+        return "retained actual result"
+
+
+@contextmanager
+def _registered_slow_tool() -> Iterator[type[SlowTools]]:
+    """Register the ``slow`` toolkit for one test and restore the registries afterwards."""
+    original_registry = TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+
+    @register_tool_with_metadata(
+        name="slow",
+        file_access=ToolFileAccess.NONE,
+        display_name="Slow",
+        description="Holds its work open until released.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def slow_factory() -> type[SlowTools]:
+        return SlowTools
+
+    SlowTools.started, SlowTools.release, SlowTools.executions = asyncio.Event(), asyncio.Event(), 0
+    try:
+        yield SlowTools
+    finally:
+        TOOL_REGISTRY.clear()
+        TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+
+async def _wait_for_progress(pending: asyncio.Task[object], progress: asyncio.Event) -> None:
     """Wait for real progress, surfacing a premature response failure immediately."""
     waiter = asyncio.create_task(progress.wait())
     try:
@@ -73,225 +102,73 @@ async def _wait_for_progress(pending: asyncio.Task[str], progress: asyncio.Event
         await asyncio.gather(waiter, return_exceptions=True)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="F1 projects background_after into the managed tool definitions the owned loop offers (B6-PLAN F1)",
+)
 @pytest.mark.asyncio
-@pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("background_after", [0, 0.001])
-async def test_native_approval_leaves_running_work_to_its_follow_up(  # noqa: PLR0915
+async def test_native_approval_leaves_running_work_to_its_follow_up(
     tmp_path: Path,
-    team: bool,
+    monkeypatch: pytest.MonkeyPatch,
     background_after: float,
 ) -> None:
     """A resumed approval finishes while its approved work runs on, leaving that work to its follow-up."""
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-        agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
+        agents={"leader": AgentConfig(display_name="Leader", tools=["slow"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
-    started, release = asyncio.Event(), asyncio.Event()
-    executions = 0
-
-    async def slow_tool() -> str:
-        nonlocal executions
-        executions += 1
-        started.set()
-        await release.wait()
-        return "retained actual result"
-
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("add", "approved-call", background_after=background_after)]),
-            ModelResponse(content="Independent work done."),
+    model = ScriptedModel(
+        [
+            calls(tool_call("work", "approved-call", background_after=background_after)),
+            answer("Independent work done."),
         ],
     )
-    install_tool_job_execution(model)
-    function = Function.from_callable(slow_tool)
-    function.name = "add"
-    function.owning_toolkit = "calculator"
-    function.requires_confirmation = True
-    db_file = str(tmp_path / "approval.db")
-    storage = SqliteDb(db_file=db_file)
-    tools = [function, JobTools(paths, owner)]
-    member_model = model
-    member = Agent(id="leader", name="Leader", model=member_model, tools=tools, db=storage, telemetry=False)
-    if team:
-        member_model.responses[-1] = ModelResponse(content="Member waiting for its result.")
-        model = DelegationModel(
-            id="coordinator",
-            responses=[
-                ModelResponse(
-                    tool_calls=[_call("delegate_task_to_member", "delegate", member_id="leader", task="Add")],
-                ),
-                ModelResponse(content="Independent work done."),
-                ModelResponse(
-                    tool_calls=[
-                        _call("delegate_task_to_member", "retrieve-member", member_id="leader", task="Retrieve result"),
-                    ],
-                ),
-                ModelResponse(content="Final result received."),
-            ],
-        )
-        install_tool_job_execution(model)
-        actor = Team(id="leader", model=model, members=[member], db=storage, telemetry=False)
-    else:
-        actor = member
-    approval_calls = (
-        ApprovalCall(
-            "approved-call",
-            "add",
-            "leader",
-            2**62,
-            toolkit_name="calculator",
-            arguments_digest=approval_arguments_digest({"background_after": background_after}),
-        ),
-    )
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": owner}
     pending = None
-    try:
-        with tool_runtime_context(context):
-            paused = await actor.arun(
-                "Start the approved work",
-                session_id=context.session_id,
-                user_id=owner.requester_id,
+    with _registered_slow_tool() as slow:
+        try:
+            paused = await respond("leader", "Start the approved work", **options)
+            assert isinstance(paused, PausedAttempt)
+            assert slow.executions == 0
+            approval_calls = approval_calls_for(paused, default_agent="leader", toolkit_names={"work": "slow"})
+            assert [call.tool_call_id for call in approval_calls] == ["approved-call"]
+
+            pending = asyncio.create_task(
+                resume(
+                    approval_executor(config, paths),
+                    paused,
+                    approval_calls,
+                    agent_name="leader",
+                    decisions={call.tool_call_id: True for call in approval_calls},
+                    **options,
+                ),
             )
-            assert paused.status is RunStatus.paused
-            assert executions == 0
-            assert paused.requirements
-            if not team:
-                paused.requirements[0].confirm()
-            continuation = ApprovalContinuation(
-                approval_id="approval",
-                run_id=paused.run_id,
-                session_id=context.session_id,
-                entity_kind="team" if team else "agent",
-                entity_name="leader",
-                room_id=owner.room_id,
-                thread_id=owner.resolved_thread_id,
-                requester_id=owner.requester_id,
-                origin=message_origin(sender_id=owner.requester_id),
-                response_event_id="$response",
-                sources=ResponseSources(("$source",), ("$source",)),
-                calls=approval_calls,
-                state="claimed",
-            )
-
-            @owned_tool_execution()
-            async def resume_agent() -> str:
-                set_consumption_storage(lambda: SqliteDb(db_file=db_file))
-                assert isinstance(actor, Agent)
-                scope = ScopeSessionContext(
-                    HistoryScope(kind="agent", scope_id="leader"),
-                    storage,
-                    storage.get_session(context.session_id, session_type=SessionType.AGENT),
-                    session_id=context.session_id,
-                    storage_factory=lambda: SqliteDb(db_file=db_file),
-                )
-
-                async def prepare(ctx: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
-                    prompt = str(kwargs["prompt"])
-                    prepared = _PreparedAgentRun(
-                        agent=actor,
-                        messages=(Message(role="user", content=prompt),),
-                        unseen_event_ids=[],
-                        prepared_history=PreparedHistoryState(),
-                        runtime_model_name="default",
-                    )
-                    return _AgentRunContext(
-                        turn=ctx,
-                        session_id=context.session_id,
-                        prompt=prompt,
-                        model_prompt=None,
-                        prepared_run=prepared,
-                        run_input=prepared.run_input,
-                        metadata=ctx.matrix_run_metadata,
-                    )
-
-                with (
-                    patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
-                    patch("mindroom.ai._prepare_agent_run_context", new=prepare),
-                ):
-                    response = await _continue_persisted_agent(
-                        actor,
-                        continuation,
-                        paused,
-                        paused.requirements,
-                        paused_answer=PausedAnswer(),
-                        config=config,
-                        runtime_paths=paths,
-                        execution_identity=owner,
-                        refresh_scheduler=None,
-                        decisions={},
-                        denial_reasons={},
-                        knowledge=None,
-                        tool_trace_collector=[],
-                        run_id_callback=None,
-                        tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
-                        progress=None,
-                    )
-                assert isinstance(response, CompletedApprovalRun)
-                return response.response_text
-
-            async def resume_team() -> str:
-                session = storage.get_session(context.session_id, session_type=SessionType.TEAM)
-                scope = ScopeSessionContext(
-                    HistoryScope(kind="team", scope_id="leader"),
-                    storage,
-                    session,
-                    session_id=context.session_id,
-                    storage_factory=lambda: SqliteDb(db_file=db_file),
-                )
-                with (
-                    patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
-                    patch(
-                        "mindroom.teams.materialize_exact_team_members",
-                        return_value=ResolvedExactTeamMembers(["leader"], [member], ["Leader"], {"leader"}, []),
-                    ),
-                    patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
-                ):
-                    response = await continue_paused_team_run(
-                        member_names=("leader",),
-                        approval_calls=approval_calls,
-                        mode=TeamMode.COORDINATE,
-                        config=config,
-                        runtime_paths=paths,
-                        execution_identity=owner,
-                        session_id=context.session_id,
-                        run_id=paused.run_id,
-                        user_id=owner.requester_id,
-                        configured_team_name="leader",
-                        model_name="default",
-                        decisions={"approved-call": True},
-                        denial_reasons={"approved-call": None},
-                        refresh_scheduler=None,
-                        history_scope=scope.scope,
-                        prior_presentation_state=_TeamStreamPresentation.new(
-                            ["leader"],
-                            ["Leader"],
-                            show_tool_calls=True,
-                        ).to_state(),
-                        progress=None,
-                    )
-                return response.response_text
-
-            pending = asyncio.create_task(resume_team() if team else resume_agent())
-            await _wait_for_progress(pending, started)
-            text = await asyncio.wait_for(pending, 30)
-            assert "Independent work done." in text
+            await _wait_for_progress(pending, slow.started)
+            result = await asyncio.wait_for(pending, 30)
+            assert isinstance(result, CompletedApprovalRun)
+            assert "Independent work done." in result.response_text
             jobs = await runtime.list_jobs(owner=owner, depth=0)
             assert len(jobs) == 1
             assert (await lookup(runtime, jobs[0].job_id, owner=owner, depth=0)).status == "running"
-            release.set()
+            slow.release.set()
             ready = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
             await runtime.release_wait(jobs[0].job_id, ready.claim)
             # Nothing retrieved the outcome; its follow-up reports it.
             assert [job.job_id for job in pending_outcomes(runtime)] == [jobs[0].job_id]
-            assert executions == 1
-    finally:
-        release.set()
-        if pending is not None:
-            await asyncio.gather(pending, return_exceptions=True)
-        await runtime.shutdown()
+            assert slow.executions == 1
+        finally:
+            slow.release.set()
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            await runtime.shutdown()

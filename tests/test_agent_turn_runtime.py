@@ -13,12 +13,14 @@ import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import AsyncMock, MagicMock
 
+import nio
 import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_runtime, response_runner
+from mindroom import agents, ai, ai_runtime, loop_hooks, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -478,16 +480,16 @@ async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
-async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply_and_leaves_the_paused_run(
+async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
     streaming: bool,
 ) -> None:
-    """A run paused only on an externally executed call cannot be resumed here yet, so the reply fails loudly.
+    """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
-    The stored ``PAUSED`` row stays as the loop wrote it; the failure is the turn's, recorded as an error on its
-    recorder, not an ordinary stop written over the pause.
+    At this seam the ``PAUSED`` row stays as the loop wrote it and the failure lands on the turn recorder as an
+    error; the lifecycle owner then records the failure over the row (``test_the_runner_records_the_failure_...``).
     """
     reply = _reply(
         tmp_path,
@@ -955,13 +957,13 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
     del probe
     reply = _reply(tmp_path, monkeypatch, [answer("ok")])
     bound: dict[str, Any] = {}
-    original = ai.mid_turn_compaction_hook
+    original = loop_hooks.mid_turn_compaction_hook
 
     def capturing(**kwargs: Any) -> Any:  # noqa: ANN401
         bound.update(kwargs)
         return original(**kwargs)
 
-    monkeypatch.setattr(ai, "mid_turn_compaction_hook", capturing)
+    monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capturing)
     budget = None if replays_history else ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
 
     chunks = await _stream(reply, scheduled_history_budget=budget)
@@ -1250,3 +1252,46 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
     [row] = _usage_rows(reply.storage, paused.run_id)
     assert row["metrics"]["input_tokens"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_ask_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
+
+    The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
+    record, so it no longer waits for an approval that never comes. The blocking driver also raises the failure
+    through the runner.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="outside"), metrics=usage(7, 1))],
+        tools=(EXTERNAL_PROBE_TOOL,),
+    )
+    runner = _runner(reply, tmp_path)
+    presence = MagicMock(spec=nio.PresenceGetResponse)
+    presence.presence = "online" if streaming else "offline"
+    presence.last_active_ago = 0
+    runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
+
+    if streaming:
+        await runner.generate_response(_request())
+    else:
+        with pytest.raises(RuntimeError, match="without an approval to ask for"):
+            await runner.generate_response(_request())
+
+    assert probe.calls == []
+    session = reply.storage.load_session(SESSION_ID, "agent")
+    assert session is not None
+    [record] = session.runs
+    assert record.status is RunStatus.completed
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
+    assert record.metadata["mindroom_replay_state"] == "interrupted"
+    assert not record.requirements
