@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id, matrix_account_user_id
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
@@ -51,9 +51,7 @@ def is_managed_entity_id(
     state = matrix_state_for_runtime(runtime_paths)
     for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
         account = state.get_account(managed_account_key(entity_name))
-        persisted_user_id = (
-            MatrixID.from_username(account.username, account.domain or domain).full_id if account is not None else None
-        )
+        persisted_user_id = matrix_account_user_id(account, domain) if account is not None else None
         generated_user_id = MatrixID.from_username(
             agent_username_localpart(entity_name, runtime_paths),
             domain,
