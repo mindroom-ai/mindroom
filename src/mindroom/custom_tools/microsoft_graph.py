@@ -232,7 +232,7 @@ def html_to_text(html: str) -> str:
 
 
 def text_to_html(text: str) -> str:
-    """Return plain text as an HTML body that shows it as typed, with each line break as `<br>`."""
+    """Return plain text as an HTML body that keeps its text and line breaks and shows any markup in it literally."""
     return escape("\n".join(text.splitlines())).replace("\n", "<br>")
 
 

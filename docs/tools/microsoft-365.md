@@ -205,7 +205,7 @@ Updating a task's notes replaces them completely.
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
 Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
-Sent messages appear under the requester's name and keep their line breaks, and HTML in the text shows as typed instead of as formatting.
+Sent messages appear under the requester's name and keep their line breaks, and HTML in the text shows literally instead of as formatting.
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.

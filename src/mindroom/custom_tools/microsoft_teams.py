@@ -400,8 +400,8 @@ class MicrosoftTeamsTools(Toolkit):
         """Post a new message in one Teams channel, as the requester and visible to everyone in the channel.
 
         Before calling, tell the requester the team and channel names and the exact text, because an approval
-        prompt may show only IDs. The text shows as typed and keeps its line breaks, up to 28,000 bytes once
-        HTML-escaped, so <, >, &, quotes, and line breaks count extra.
+        prompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to
+        28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
 
         Args:
             team_id: The team's id from microsoft_teams_list_teams.
@@ -424,8 +424,9 @@ class MicrosoftTeamsTools(Toolkit):
         """Reply in the thread of one Teams channel post, as the requester and visible to everyone in the channel.
 
         Before calling, tell the requester the team and channel names, which post the reply answers, and the exact
-        text, because an approval prompt may show only IDs. The text shows as typed and keeps its line breaks, up
-        to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
+        text, because an approval prompt may show only IDs. Any HTML in the text shows literally, and the text
+        keeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count
+        extra.
 
         Args:
             team_id: The team's id from microsoft_teams_list_teams.
@@ -447,8 +448,8 @@ class MicrosoftTeamsTools(Toolkit):
         """Send a message in one existing Teams chat, as the requester and visible to every chat member.
 
         Before calling, tell the requester the chat's topic or members and the exact text, because an approval
-        prompt may show only IDs. The text shows as typed and keeps its line breaks, up to 28,000 bytes once
-        HTML-escaped, so <, >, &, quotes, and line breaks count extra.
+        prompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to
+        28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
 
         Args:
             chat_id: The chat's id from microsoft_teams_list_chats.
