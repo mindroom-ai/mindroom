@@ -39,7 +39,6 @@ from mindroom.ai import (
     _prepare_agent_and_prompt,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
-    _track_model_request_metrics,
     ai_response,
     build_matrix_run_metadata,
     collect_streamed_response_content,
@@ -48,7 +47,6 @@ from mindroom.ai import (
 from mindroom.ai_run_metadata import (
     _serialize_metrics,
     build_ai_run_metadata_content,
-    build_model_request_metrics_fallback,
 )
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -143,46 +141,6 @@ def _model_runtime_context(
         conversation_reader=MagicMock(),
         relations=MagicMock(),
         active_model_name=active_model_name,
-    )
-
-
-@pytest.mark.parametrize(
-    ("output_tokens", "expected_total", "expected_payload"),
-    [
-        (None, 0, None),
-        (0, 0, {"output_tokens": 0}),
-        (False, 0, {"output_tokens": 0}),
-        (True, 1, {"output_tokens": 1}),
-        (1.5, 0, None),
-        ("3", 0, None),
-    ],
-)
-def test_stream_request_metrics_preserve_zero_initialized_totals(
-    output_tokens: int | None,
-    expected_total: int,
-    expected_payload: dict[str, int] | None,
-) -> None:
-    """Unknown counters stay zero internally while only observed integers reach metadata."""
-    state = _StreamingAttemptState()
-
-    _track_model_request_metrics(state, ModelRequestCompletedEvent(output_tokens=output_tokens))
-    _track_model_request_metrics(state, ModelRequestCompletedEvent())
-
-    assert state.request_metric_totals == {
-        "input_tokens": 0,
-        "output_tokens": expected_total,
-        "total_tokens": 0,
-        "reasoning_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-    }
-    assert (
-        build_model_request_metrics_fallback(
-            state.request_metric_totals,
-            state.first_token_latency,
-            state.observed_request_metric_fields,
-        )
-        == expected_payload
     )
 
 

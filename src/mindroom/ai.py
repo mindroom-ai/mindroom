@@ -312,7 +312,6 @@ class _StreamingAttemptState:
 class _AgentTurnHolder:
     """Live per-turn agent state shared between attempt closures and adapter callbacks."""
 
-    build: AgentBuild | None = None
     attempt: _AgentAttempt | None = None
     state: _StreamingAttemptState | None = None  # streaming turns only
     attempt_started: bool = False  # streaming turns only
@@ -359,7 +358,6 @@ def _build_agent_turn_callbacks(
         )
 
     def _release_attempt_entity(_scope_context: ScopeSessionContext | None) -> None:
-        holder.build = None
         # Cancel snapshots taken between this release and the next attempt must
         # not see the spent attempt's partials; its completed tools already
         # carried over via the turn state.
@@ -1569,7 +1567,6 @@ async def ai_response(  # noqa: C901
             logger.exception("Error preparing agent", agent=agent_name)
             return _failed_agent_attempt(ctx, e, runtime_paths)
         prepared_run = run_context.prepared_run
-        holder.build = prepared_run.build
         run.unseen_event_ids = prepared_run.unseen_event_ids
         run.run_metadata = run_context.metadata
 
@@ -1996,7 +1993,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             yield AttemptResolved(HandledAttempt())
             return
         prepared_run = run_context.prepared_run
-        holder.build = prepared_run.build
         run.unseen_event_ids = prepared_run.unseen_event_ids
         prepared_context_input_tokens = prepared_run.prepared_history.prepared_context_tokens
         run.run_metadata = run_context.metadata
