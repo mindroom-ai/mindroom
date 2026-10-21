@@ -1086,6 +1086,7 @@ def _memory_conversation(
     Only file memory inlines a MEMORY.md. An authored persona recalls no memory, a minimal agent reads its memory on
     demand rather than in its system prompt, and a replay limit, configured or scheduled, moves the history after the
     system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
+    Without automatic compaction, fitting a long conversation into the context window is such a limit.
     """
     if (
         ctx.persona is not None
@@ -1096,7 +1097,11 @@ def _memory_conversation(
     ):
         return None
     entity = config.resolve_entity(ctx.entity_label)
-    if entity.memory_backend != "file" or not entity.history_settings.replays_whole_history:
+    if (
+        entity.memory_backend != "file"
+        or not entity.history_settings.replays_whole_history
+        or not (entity.has_authored_compaction_config and entity.compaction_config.enabled)
+    ):
         return None
     session = scope_context.session
     compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)

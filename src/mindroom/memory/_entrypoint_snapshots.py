@@ -33,7 +33,7 @@ class ConversationRef:
 @dataclass(frozen=True)
 class _Snapshot:
     preamble: str
-    text: str
+    body: str
     compaction: tuple[str | None, str | None]
     used_at: float
 
@@ -50,14 +50,15 @@ def stable_entrypoint_preamble(
     agent_name: str,
     conversation: ConversationRef,
     source_path: Path,
-    fresh_text: str,
+    fresh_body: str,
     fresh_preamble: str,
     *,
     now: float,
 ) -> str:
     """Return the preamble this conversation last sent for the file, or ``fresh_preamble`` when reuse would mislead.
 
-    ``fresh_text`` is the file's inlined text this turn.
+    ``fresh_body`` is this turn's preamble without the truncation marker, whose counts change as lines are added
+    past a cap; its header is compared too, so an edited prompt override loads again.
     A changed compaction loads the file again: the request that carries a compaction misses after the system prompt
     anyway, and the turn after one costs only its compacted history.
     An edited or deleted line loads at once, so a memory the user asked to forget is not shown again.
@@ -70,10 +71,10 @@ def stable_entrypoint_preamble(
     if (
         snapshot is not None
         and snapshot.compaction == conversation.compaction
-        and _only_added_lines(snapshot.text, fresh_text)
+        and _only_added_lines(snapshot.body, fresh_body)
     ):
-        preamble, text = snapshot.preamble, snapshot.text
+        preamble, body = snapshot.preamble, snapshot.body
     else:
-        preamble, text = fresh_preamble, fresh_text
-    _snapshots[key] = _Snapshot(preamble, text, conversation.compaction, now)
+        preamble, body = fresh_preamble, fresh_body
+    _snapshots[key] = _Snapshot(preamble, body, conversation.compaction, now)
     return preamble

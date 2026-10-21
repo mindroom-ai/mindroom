@@ -1589,7 +1589,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
 ) -> None:
     """An entry added mid-conversation leaves its inlined MEMORY.md unchanged; a deleted line reloads it.
 
-    Only a kept copy tells the agent that newer entries may be missing.
+    Only a kept copy tells the agent that newer entries may be missing, and an edited header loads again.
     """
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
@@ -1622,6 +1622,10 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
+
+    # A prompt override applies through hot reload, so an edited header loads again.
+    config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = "Edited header for `{memory_path}`."
+    assert (await preamble(ConversationRef("thread", (None, None)))).startswith("Edited header")
 
 
 @pytest.mark.asyncio

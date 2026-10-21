@@ -187,31 +187,31 @@ async def delete_agent_memory(
     )
 
 
-def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config, *, kept_copy: bool) -> str:
-    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
+def _render_entrypoint_body(entrypoint: MemoryEntrypointContext, config: Config, *, kept_copy: bool) -> str:
+    """Frame the preloaded memory entrypoint as already-inlined context, without its truncation marker.
 
-    A file whose preloaded head is blank still reports its truncation, so the
-    cap never withholds lines silently. A ``kept_copy`` preamble, one a
-    conversation may keep while entries are added, says newer entries may be missing.
+    A ``kept_copy`` body, one a conversation may keep while entries are added, says newer entries may be missing.
     """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
         memory_path=entrypoint.source_path,
     )
-    truncation_notice = (
-        render_prompt_template(
-            config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-            included_lines=entrypoint.included_lines,
-            total_lines=entrypoint.total_lines,
-            max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
-            max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
-            memory_path=entrypoint.source_path,
-        )
-        if entrypoint.omitted_lines
-        else ""
-    )
     kept_copy_notice = config.get_prompt("FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE") if kept_copy else ""
-    return "\n".join(part for part in (header, kept_copy_notice, entrypoint.text, truncation_notice) if part)
+    return "\n".join(part for part in (header, kept_copy_notice, entrypoint.text) if part)
+
+
+def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Config) -> str:
+    """Report what the caps withheld, even when the preloaded head is blank, so the cap never withholds lines silently."""
+    if not entrypoint.omitted_lines:
+        return ""
+    return render_prompt_template(
+        config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
+        included_lines=entrypoint.included_lines,
+        total_lines=entrypoint.total_lines,
+        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+        max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
+        memory_path=entrypoint.source_path,
+    )
 
 
 async def _entrypoint_preamble(
@@ -232,18 +232,19 @@ async def _entrypoint_preamble(
         config,
         execution_identity=execution_identity,
     )
-    preamble = (
-        _render_entrypoint_preamble(entrypoint, config, kept_copy=conversation is not None)
+    body = (
+        _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
         if entrypoint.text or entrypoint.omitted_lines
         else ""
     )
+    preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
     if conversation is None or entrypoint.source_path is None:
         return preamble
     return stable_entrypoint_preamble(
         agent_name,
         conversation,
         entrypoint.source_path,
-        entrypoint.text,
+        body,
         preamble,
         now=time.monotonic(),
     )

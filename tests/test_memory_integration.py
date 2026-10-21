@@ -225,9 +225,18 @@ class TestMemoryIntegration:
             mock_memory.search.assert_called_with("What is A?", filters={"user_id": "agent_general"}, top_k=3)
 
 
-@pytest.mark.parametrize("history_limit", [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}])
-def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(history_limit: dict[str, int]) -> None:
-    """Only file memory inlines MEMORY.md; a persona recalls none, a minimal agent reads it on demand, and a replay limit shifts the history."""
+@pytest.mark.parametrize(
+    "history_limit",
+    [{"num_history_runs": 5}, {"max_tool_calls_from_history": 3}, {"compaction": {"enabled": False}}],
+)
+def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
+    history_limit: dict[str, object],
+) -> None:
+    """Only a file-memory conversation whose system prompt can stay cached keeps a MEMORY.md copy.
+
+    A persona recalls no memory, a minimal agent reads it on demand, and a replay limit shifts the history; without
+    compaction, fitting a long conversation into the context window drops its oldest runs, which acts as one.
+    """
     session = AgentSession(session_id="thread", summary=SessionSummary(summary=" Earlier work. "))
     scope_context = ScopeSessionContext(
         scope=HistoryScope("agent", "general"),
