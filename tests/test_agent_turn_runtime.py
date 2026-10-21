@@ -25,8 +25,10 @@ from mindroom.approval.receipt import approval_receipt_context
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -232,7 +234,11 @@ async def _stream(
     ctx = _ctx(
         reply,
         run_id=run_id,
-        **{k: kwargs.pop(k) for k in ("participation", "skill_review_capture") if k in kwargs},
+        **{
+            k: kwargs.pop(k)
+            for k in ("participation", "skill_review_capture", "scheduled_history_budget")
+            if k in kwargs
+        },
     )
     with tool_runtime_context(reply.runtime):
         return [
@@ -765,6 +771,43 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert hooks.on_loop_end is not None
     assert captured["request_template"].native_compaction is None
     assert captured["request_template"].stream is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replays_history", [True, False])
+async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_replays_its_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    replays_history: bool,
+) -> None:
+    """A reply that replays the scope's history binds its folds to the scope; one without replay compacts run-locally.
+
+    A scheduled turn whose history budget disabled replay deliberately carries no stored history, so a fold must not
+    append a scope summary row or inject the scope's summary into its request.
+    """
+    del probe
+    reply = _reply(tmp_path, monkeypatch, [answer("ok")])
+    bound: dict[str, Any] = {}
+    original = ai.mid_turn_compaction_hook
+
+    def capturing(**kwargs: Any) -> Any:  # noqa: ANN401
+        bound.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(ai, "mid_turn_compaction_hook", capturing)
+    budget = None if replays_history else ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
+
+    chunks = await _stream(reply, scheduled_history_budget=budget)
+
+    assert _text(chunks) == "ok"
+    assert bound["store"] is not None
+    if replays_history:
+        assert bound["session"] is not None
+        assert bound["scope"] == HistoryScope(kind="agent", scope_id="assistant")
+    else:
+        assert bound["session"] is None
+        assert bound["scope"] is None
 
 
 @pytest.mark.asyncio

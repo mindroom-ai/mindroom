@@ -50,7 +50,9 @@ class LoopState:
 
     ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``tools`` are the
     definitions this request offers; ``record`` is the running run, whose tool executions and requirements the loop
-    fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started with.
+    fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started with; ``request_template``
+    carries the per-run request settings, which a hook may replace for the rest of the run (mid-turn compaction
+    turning the provider's compaction off after it compacted as text).
     """
 
     messages: list[Message]
@@ -59,6 +61,7 @@ class LoopState:
     record: AnyRunRecord
     request_index: int
     loop_start_ids: frozenset[str]
+    request_template: ModelRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +173,7 @@ async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each 
         record=record,
         request_index=0,
         loop_start_ids=frozenset(message.id for message in messages),
+        request_template=request_template,
     )
     max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
@@ -177,7 +181,7 @@ async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each 
         outbound = await _before_request(hooks, state, progress, max_requests=max_requests)
         if outbound is None:
             break
-        request = replace(request_template, messages=tuple(outbound), tools=state.tools)
+        request = replace(state.request_template, messages=tuple(outbound), tools=state.tools)
         progress.last_request = request
         turn: TurnCompleted | None = None
         events = _stream_turn(model, request, messages, record.metrics)

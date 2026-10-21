@@ -755,7 +755,10 @@ def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, sto
     if ctx.participation is not None:
         before_request.append(participation_hook(ctx.participation, model))
     native = prepared.prepared_history.native_history
-    persisted = storage.store is not None
+    plan = prepared.prepared_history.replay_plan
+    # A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
+    # that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
+    scoped = storage.store is not None and plan is not None and plan.add_history_to_context
     before_request.append(
         mid_turn_compaction_hook(
             config=run_context.config,
@@ -767,8 +770,8 @@ def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, sto
             model=model,
             history_settings=build.history_settings,
             store=storage.store,
-            session=storage.session if persisted else None,
-            scope=storage.scope if persisted else None,
+            session=storage.session if scoped else None,
+            scope=storage.scope if scoped else None,
             native_compaction=native.native_compaction if native is not None else None,
             deferred_tool_names=build.request_template.deferred_tool_names,
             prompt_id=prepared.turn.prompt.id,

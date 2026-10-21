@@ -231,6 +231,7 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             "Native compaction left the request over its limit; compacted as text",
             run_id=state.record.run_id,
         )
+        _stop_native_compaction(binding, state)
     rewritten_tokens = await asyncio.to_thread(_estimated_request_tokens, binding, messages, state.tools)
     _require_fit(policy, rewritten_tokens, summary_message)
     if rewritten_tokens > policy.limit:
@@ -241,6 +242,16 @@ async def _prepare_request(binding: _MidTurnCompaction, state: LoopState) -> Non
             run_id=state.record.run_id,
         )
         binding.stopped = True
+
+
+def _stop_native_compaction(binding: _MidTurnCompaction, state: LoopState) -> None:
+    """Stop asking the provider to compact for the rest of this run; the route's stored checkpoints still replay.
+
+    Later requests of the run are then sized as text requests, so the hook keeps compacting them itself.
+    """
+    assert binding.native_compaction is not None
+    binding.native_compaction = replace(binding.native_compaction, threshold=None)
+    state.request_template = replace(state.request_template, native_compaction=binding.native_compaction)
 
 
 async def _summarize(

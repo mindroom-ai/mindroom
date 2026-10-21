@@ -231,7 +231,7 @@ async def test_the_hook_sends_requests_unchanged_without_a_bound_receipt() -> No
 
 
 def _state_stub() -> object:
-    from mindroom.agent_loop.model_loop import LoopState  # noqa: PLC0415 - test-only state shape
+    from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState  # noqa: PLC0415 - test-only state shape
     from mindroom.llm.runs import RunRecord  # noqa: PLC0415
 
     return LoopState(
@@ -241,4 +241,5 @@ def _state_stub() -> object:
         record=RunRecord(run_id="run-1"),
         request_index=0,
         loop_start_ids=frozenset(),
+        request_template=EMPTY_REQUEST,
     )
