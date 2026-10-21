@@ -420,49 +420,45 @@ class MemoryAutoFlushWorker:
             execution_identity=scope.execution_identity,
         )
         conversations = state["scopes"].setdefault(scope.key, {})
-        try:
-            due: list[_DueConversation] = []
-            changed = False
-            for session_id, updated_at in updated_sessions(
-                storage,
-                scope.agent_name,
-                # Update times are whole seconds, so one in the start's own second is listed too.
-                since=state["agents"][scope.agent_name] - 1,
+        due: list[_DueConversation] = []
+        changed = False
+        for session_id, updated_at in updated_sessions(
+            storage,
+            scope.agent_name,
+            # Update times are whole seconds, so one in the start's own second is listed too.
+            since=state["agents"][scope.agent_name] - 1,
+        ):
+            if len(due) >= limit:
+                break
+            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
+            if session_id.startswith(DELEGATION_SESSION_PREFIX) or now - updated_at < idle_seconds:
+                continue
+            entry = conversations.get(session_id)
+            if entry is not None and (
+                entry["retry_at"] > now or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
             ):
-                if len(due) >= limit:
-                    break
-                # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
-                if session_id.startswith(DELEGATION_SESSION_PREFIX) or now - updated_at < idle_seconds:
-                    continue
-                entry = conversations.get(session_id)
-                if entry is not None and (
-                    entry["retry_at"] > now
-                    or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
-                ):
-                    continue
-                try:
-                    runs = session_runs(storage, session_id)
-                except Exception:
-                    # One conversation that cannot be read backs off instead of blocking the agent's others.
-                    logger.exception(
-                        "Memory auto-flush could not read a conversation",
-                        agent=scope.agent_name,
-                        session_id=session_id,
-                    )
-                    entry = conversations.setdefault(session_id, _new_conversation())
-                    _record_unreadable(entry, settings, updated_at, self.clock())
-                    changed = True
-                    continue
-                if not runs:
-                    # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
-                    # flush, so it does not take a place in the pass.
-                    conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
-                    changed = True
-                    continue
-                due.append(_DueConversation(session_id, updated_at, runs))
-            return due, changed
-        finally:
-            storage.close()
+                continue
+            try:
+                runs = session_runs(storage, session_id)
+            except Exception:
+                # One conversation that cannot be read backs off instead of blocking the agent's others.
+                logger.exception(
+                    "Memory auto-flush could not read a conversation",
+                    agent=scope.agent_name,
+                    session_id=session_id,
+                )
+                entry = conversations.setdefault(session_id, _new_conversation())
+                _record_unreadable(entry, settings, updated_at, self.clock())
+                changed = True
+                continue
+            if not runs:
+                # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
+                # flush, so it does not take a place in the pass.
+                conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
+                changed = True
+                continue
+            due.append(_DueConversation(session_id, updated_at, runs))
+        return due, changed
 
     async def _flush(
         self,
