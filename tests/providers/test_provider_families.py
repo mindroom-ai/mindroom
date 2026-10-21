@@ -244,7 +244,6 @@ def _openai_family_adapter(config: dict[str, Any], root: Path, wire: _Wire) -> M
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = ProviderRuntime(
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        model_name="default",
         http_client=httpx.AsyncClient(transport=wire.transport),
     )
     return build_provider(ModelConfig(**config), runtime)

@@ -794,7 +794,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_valid_keys(tmp_path: Path) -
 
 def _runtime(tmp_path: Path, **env: str) -> ProviderRuntime:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env=env)
-    return ProviderRuntime(runtime_paths=paths, model_name="default")
+    return ProviderRuntime(runtime_paths=paths)
 
 
 @pytest.mark.parametrize(

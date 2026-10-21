@@ -1,9 +1,9 @@
 """Compose the request pipeline around one provider adapter.
 
 Outermost first: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream
-retry with the idle limit, the safeguard refusal, and request logging. Each attempt is therefore logged, a refusal
-is final before any retry sees it, retries never resend media a route rejected, and the guidance message passes
-through the same projections as the conversation it follows.
+retry with the idle limit, the safeguard refusal, and request logging. Each attempt is therefore logged, a refused
+one included; retries never resend media a route rejected; and the guidance message passes through the same
+projections as the conversation it follows.
 """
 
 from __future__ import annotations

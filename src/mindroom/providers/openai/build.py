@@ -1,8 +1,9 @@
 """Build the OpenAI-family adapter for one configured model.
 
-Credential and endpoint resolution follow the Agno-backed loader: the model's dashboard key, then its
-configured key, then the provider's shared key, then the variable the provider's SDK class read.
-A route without a usable key fails at its first request, worded like the Agno-era error.
+Credential and endpoint resolution follow the Agno-backed loader: the model's configured key (the provider
+registry folds in a key the dashboard saved for the model), then the provider's shared key, then the variable
+the provider's SDK class read. A route without a usable key fails at its first request, worded like the
+Agno-era error.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity
@@ -60,7 +60,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = ["OPENAI_FAMILY_PROVIDERS", "ProviderRuntime", "build_provider"]
@@ -186,13 +185,11 @@ _NO_SHARED_KEY = frozenset({"llama_cpp", "kimi"})
 class ProviderRuntime:
     """What building a provider needs beyond its config.
 
-    ``model_name`` is the config key, which names the model's dashboard credential (``model:<name>``);
     ``execution_identity`` scopes the derived prompt-cache keys; ``http_client`` is the pooled client SDK
     clients send through.
     """
 
     runtime_paths: RuntimePaths
-    model_name: str
     execution_identity: ToolExecutionIdentity | None = None
     codex_default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
@@ -202,16 +199,9 @@ def _canonical(provider: str) -> str:
     return provider.strip().lower().replace("-", "_")
 
 
-def _dashboard_key(runtime: ProviderRuntime) -> str | None:
-    credentials = get_runtime_shared_credentials_manager(runtime.runtime_paths).load_credentials(
-        f"model:{runtime.model_name}",
-    )
-    return credentials.get("api_key") if credentials else None
-
-
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
-    """Return the key from the dashboard, the config, or the provider's shared key, in that order."""
-    key = _dashboard_key(runtime) or model_config.configured_api_key()
+    """Return the configured key, else the provider's shared key."""
+    key = model_config.configured_api_key()
     extra_kwargs = model_config.extra_kwargs or {}
     alternative_auth = route_key == "azure" and any(
         extra_kwargs.get(name) for name in ("azure_ad_token", "azure_ad_token_provider")
@@ -561,7 +551,7 @@ def _build_responses(
     )
 
 
-def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ModelProvider:
+def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter | ResponsesAdapter:
     """Return the adapter for one OpenAI-family model config, without the pipeline wrappers.
 
     ``provider: openai`` uses Responses when ``api: responses`` is set, or when ``api`` is unset and the

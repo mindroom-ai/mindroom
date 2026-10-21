@@ -5926,7 +5926,6 @@ depends_on = []
 path = "mindroom.providers.openai"
 depends_on = [
     "mindroom.constants",
-    "mindroom.credentials.manager",
     "mindroom.credentials.sync",
     "mindroom.file_locks",
     "mindroom.llm",
@@ -7850,6 +7849,19 @@ depends_on = []
 visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models", "mindroom.providers.google_gemini", "mindroom.providers.groq_model", "mindroom.providers.cerebras_model", "mindroom.providers.ollama_model", "mindroom.providers.gemini", "mindroom.providers.ollama_adapter", "mindroom.providers.openai"]
 
 # Owned provider adapters (stream-only, over mindroom.llm); the provider registry wires them in.
+[[modules]]
+path = "mindroom.providers.registry"
+depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.logging_config",
+    "mindroom.providers.anthropic.messages",
+    "mindroom.providers.gemini",
+    "mindroom.providers.ollama_adapter",
+    "mindroom.providers.openai",
+    "mindroom.providers.pipeline",
+    "mindroom.providers.synthetic_adapter",
+]
+
 [[modules]]
 path = "mindroom.providers.extra_kwargs"
 depends_on = []
