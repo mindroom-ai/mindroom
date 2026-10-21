@@ -228,7 +228,7 @@ Matrix sync callback
 | `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, and OpenAI server-side tool search tagging |
-| `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search, media fallback, stream retry with the idle limit, and request logging |
+| `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, decision-request config, and reply parsing (not wired yet) |
 | `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API (not wired yet) |
 | `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls, and the response plan `synthetic_model.py` serves to the Agno path (not wired yet) |

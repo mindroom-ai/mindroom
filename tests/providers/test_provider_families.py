@@ -1,8 +1,9 @@
 """Behavior every provider family must share: tool definitions, the composed pipeline, stream activity, finality.
 
 Each family's bare adapter is built from a real model config over an httpx mock transport and wrapped in the
-production pipeline (``wrap_provider``: portable tool search, media fallback, retry with the idle limit, request
-logging), so what these tests prove is what the registry (B6) will run. The OpenAI family's idle-limit and
+production pipeline (``wrap_provider``: the malformed-call guidance retry, portable tool search, media fallback,
+retry with the idle limit, the safeguard refusal, request logging), so what these tests prove is what the registry
+runs. The OpenAI family's idle-limit and
 server-tool cases live in ``test_openai_family_wire.py``; the Claude tool tri-state in its behavior tests.
 """
 
@@ -23,6 +24,7 @@ from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
@@ -549,7 +551,7 @@ async def test_failure_after_a_server_tool_started_is_final(
 
 @pytest.mark.asyncio
 async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_path: Path) -> None:
-    """Gemini's MALFORMED_FUNCTION_CALL is the model's failure, not the media's: no media-free retry, one request."""
+    """Gemini's MALFORMED_FUNCTION_CALL is the model's failure, not the media's: only the guidance retry follows."""
     spec = FAMILIES["gemini"]
     malformed = {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}]}
     wire = _Wire(lambda: _sse([malformed]))
@@ -563,8 +565,10 @@ async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_pa
     with pytest.raises(ProviderError) as raised:
         await complete(provider, request)
 
-    assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (MALFORMED_TOOL_CALL, False, 1)
-    assert "inlineData" in json.dumps(wire.body())
+    assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (MALFORMED_TOOL_CALL, False, 2)
+    assert all("inlineData" in json.dumps(wire.body(index)) for index in range(2))
+    texts = [part["text"] for content in wire.body()["contents"] for part in content["parts"] if "text" in part]
+    assert texts[-1] == MALFORMED_FUNCTION_CALL_GUIDANCE
 
 
 @pytest.mark.asyncio

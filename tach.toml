@@ -5954,6 +5954,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
+    "mindroom.providers.gemini",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.usage.storage",
