@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ import jwt
 import nio
 import pytest
 import yaml
+from aiohttp import ClientConnectionError
 from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -358,6 +360,30 @@ def test_me_names_the_user_by_matrix_display_name(
         assert len(matrix.requests) == 1, list(matrix.requests)
     assert response.status_code == 200, response.text
     assert response.json()["display_name"] == expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"exception": ClientConnectionError("refused")},
+        {"status": 429, "payload": {"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 5000}},
+    ],
+    ids=["unreachable", "rate-limited"],
+)
+def test_me_falls_back_at_once_when_the_homeserver_fails(portal: dict[str, Any], failure: dict[str, Any]) -> None:
+    """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
+        started = time.monotonic()
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        elapsed = time.monotonic() - started
+        assert sum(len(calls) for calls in matrix.requests.values()) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "bob"
+    assert elapsed < 1.5
 
 
 @pytest.mark.parametrize("broker_on", [False, True])

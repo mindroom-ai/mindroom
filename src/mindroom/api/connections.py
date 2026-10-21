@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, cast
 
 import nio
@@ -331,14 +331,18 @@ async def _egress_services(
 
 
 async def _matrix_display_name(user_id: str, runtime_paths: RuntimePaths) -> str:
-    """Read the user's display name as the router, falling back to the localpart when it cannot be read."""
+    """Read the user's display name as the router, falling back to the localpart when it cannot be read.
+
+    The lookup does not retry, so a homeserver that is down or rate limiting cannot hold up the rest of the identity.
+    """
     fallback = user_id.removeprefix("@").split(":", 1)[0] or user_id
     try:
         client = create_agent_http_client(ROUTER_AGENT_NAME, runtime_paths)
     except ValueError:
         return fallback
+    client.config = replace(client.config, max_timeouts=0, max_limit_exceeded=0)
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(2):
             response = await client.get_displayname(user_id)
     except (ClientError, TimeoutError):
         return fallback
