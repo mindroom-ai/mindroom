@@ -32,6 +32,7 @@
     "tools": [
       {
         "description": "Return the forecast for one city.",
+        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -52,10 +53,12 @@
             "city"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       },
       {
         "description": "Search the deferred tools by keyword.",
+        "external_execution": false,
         "name": "tool_search",
         "parameters": {
           "properties": {
@@ -67,10 +70,12 @@
             "query"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       },
       {
         "description": "Call a deferred tool returned by tool_search.",
+        "external_execution": false,
         "name": "call_tool",
         "parameters": {
           "properties": {
@@ -85,10 +90,12 @@
             "name"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       },
       {
         "description": "Look up one order by id.",
+        "external_execution": false,
         "name": "lookup_order",
         "parameters": {
           "properties": {
@@ -100,10 +107,12 @@
             "order_id"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       },
       {
         "description": "Email the invoice for one order.",
+        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -115,7 +124,8 @@
             "order_id"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       }
     ]
   },

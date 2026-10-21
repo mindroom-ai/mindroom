@@ -87,6 +87,7 @@
     "tools": [
       {
         "description": "Return the forecast for one city.",
+        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -107,10 +108,12 @@
             "city"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       },
       {
         "description": "Search the user's travel notes.",
+        "external_execution": false,
         "name": "search_notes",
         "parameters": {
           "properties": {
@@ -127,7 +130,8 @@
             "query"
           ],
           "type": "object"
-        }
+        },
+        "requires_confirmation": false
       }
     ]
   },

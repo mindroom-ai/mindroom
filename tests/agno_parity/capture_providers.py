@@ -1041,7 +1041,20 @@ WAV_EMPTY = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="
 PDF_TINY = base64.b64encode(b"%PDF-1.4\n%%EOF\n").decode()
 TEXT_NOTE = base64.b64encode(b"Packing list: umbrella, scarf, walking shoes.\n").decode()
 
-WEATHER_TOOL = Function(
+
+def _toolkit_function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    """Return the dict a Toolkit-registered function serializes to; Toolkit sets both approval flags to False."""
+    function = Function(
+        name=name,
+        description=description,
+        parameters=parameters,
+        requires_confirmation=False,
+        external_execution=False,
+    )
+    return function.to_dict()
+
+
+WEATHER_TOOL = _toolkit_function(
     name="get_weather",
     description="Return the forecast for one city.",
     parameters={
@@ -1052,8 +1065,8 @@ WEATHER_TOOL = Function(
         },
         "required": ["city"],
     },
-).to_dict()
-NOTES_TOOL = Function(
+)
+NOTES_TOOL = _toolkit_function(
     name="search_notes",
     description="Search the user's travel notes.",
     parameters={
@@ -1064,23 +1077,23 @@ NOTES_TOOL = Function(
         },
         "required": ["query"],
     },
-).to_dict()
-ORDER_TOOL = Function(
+)
+ORDER_TOOL = _toolkit_function(
     name="lookup_order",
     description="Look up one order by id.",
     parameters={"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
-).to_dict()
-INVOICE_TOOL = Function(
+)
+INVOICE_TOOL = _toolkit_function(
     name="send_invoice",
     description="Email the invoice for one order.",
     parameters={"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
-).to_dict()
-TOOL_SEARCH_TOOL = Function(
+)
+TOOL_SEARCH_TOOL = _toolkit_function(
     name="tool_search",
     description="Search the deferred tools by keyword.",
     parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-).to_dict()
-CALL_TOOL_TOOL = Function(
+)
+CALL_TOOL_TOOL = _toolkit_function(
     name="call_tool",
     description="Call a deferred tool returned by tool_search.",
     parameters={
@@ -1088,7 +1101,7 @@ CALL_TOOL_TOOL = Function(
         "properties": {"arguments": {"type": "object"}, "name": {"type": "string"}},
         "required": ["name"],
     },
-).to_dict()
+)
 DEFERRED_TOOL_NAMES = ("lookup_order", "send_invoice")
 
 
