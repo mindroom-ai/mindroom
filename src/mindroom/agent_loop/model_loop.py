@@ -3,8 +3,10 @@
 
 One iteration sends the live message list to the model, appends the assistant message it answers with, runs the
 tool calls it requested, and appends their results; the loop ends when the model answers without tool calls, when
-a tool stops it, when a call pauses for a decision, when a pre-request hook ends it, or when the run's request cap
-is reached. Every point MindRoom patched into Agno's loop is a ``LoopHooks`` field or a parameter here.
+a tool stops it, when the run waits for a decision, when a pre-request hook ends it, or when the run's request cap
+is reached. A run waits for a decision when a call of its own paused, or when a tool left an unresolved requirement
+on the record, as a team leader's delegation does for a paused member. Every point MindRoom patched into Agno's
+loop is a ``LoopHooks`` field or a parameter here.
 """
 
 from __future__ import annotations
@@ -168,7 +170,7 @@ async def run_model_loop(
     max_requests = None if tool_call_limit is None else tool_call_limit + _EXTRA_MODEL_REQUESTS
     progress = _Progress()
     while True:
-        outbound = await _before_request(hooks, state, max_requests=max_requests)
+        outbound = await _before_request(hooks, state, progress, max_requests=max_requests)
         if outbound is None:
             break
         request = replace(request_template, messages=tuple(outbound), tools=state.tools)
@@ -195,8 +197,22 @@ async def run_model_loop(
     yield LoopEnded(paused=progress.paused)
 
 
-async def _before_request(hooks: LoopHooks, state: LoopState, *, max_requests: int | None) -> Sequence[Message] | None:
-    """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the run."""
+async def _before_request(
+    hooks: LoopHooks,
+    state: LoopState,
+    progress: _Progress,
+    *,
+    max_requests: int | None,
+) -> Sequence[Message] | None:
+    """Apply the pause rule and the request cap, then the pre-request hooks; return the messages to send, or None.
+
+    A record that still waits for a decision ends the loop paused before any request: a resume entry may leave it
+    waiting again (a team member that paused once more), and the loop never requests while it waits, as Agno's
+    paused check did.
+    """
+    if _waits_for_decision(state.record):
+        progress.paused = True
+        return None
     if max_requests is not None and state.request_index >= max_requests:
         record = state.record
         logger.warning(
@@ -266,7 +282,12 @@ async def _run_tool_batch(
     progress.calls_so_far += len(results)
     await append_tool_results(model, state.messages, results, hooks.after_tool_batch)
     progress.stopped = any(result.stop_after_tool_call for result in results)
-    progress.paused = batch.paused
+    # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
+    progress.paused = batch.paused or _waits_for_decision(state.record)
+
+
+def _waits_for_decision(record: AnyRunRecord) -> bool:
+    return any(not requirement.is_resolved() for requirement in record.requirements or ())
 
 
 async def append_tool_results(

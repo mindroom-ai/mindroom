@@ -28,7 +28,7 @@ from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, 
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TextDelta, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
@@ -355,6 +355,49 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     assert requirement.needs_confirmation
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1"]
     assert record.content == "Checking first."
+
+
+async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after_its_batch() -> None:
+    """A delegation whose member paused leaves the member's requirement on the record; the loop pauses instead of asking."""
+    record = _record()
+
+    def delegate(task: str) -> str:
+        """Hand a task to a member that pauses on its own call.
+
+        Args:
+            task: What the member should do.
+
+        """
+        execution = ToolExecution(tool_call_id="m1", tool_name="multiply", tool_args={"task": task})
+        execution.requires_confirmation = True
+        record.requirements = [RunRequirement(execution, member_agent_id="checker", member_run_id="member-run")]
+        return "Member 'Checker' requires human input before continuing."
+
+    model = ScriptedModel([calls(tool_call("delegate", "c1", task="Multiply 6 by 7"), metrics=usage(1, 1))])
+
+    events, _ = await _run(spec(model, toolkit(delegate)), _prompt(), record=record)
+
+    assert events[-1] == LoopEnded(paused=True)
+    assert len(model.requests) == 1
+    assert record.tools is not None
+    assert (record.tools[0].result, record.tools[0].is_paused) == (
+        "Member 'Checker' requires human input before continuing.",
+        False,
+    )
+
+
+async def test_a_record_that_still_waits_for_a_decision_ends_paused_before_any_request() -> None:
+    """A resume entry may leave the run waiting again; the loop sends nothing while it waits."""
+    record = _record()
+    execution = ToolExecution(tool_call_id="m1", tool_name="multiply")
+    execution.requires_confirmation = True
+    record.requirements = [RunRequirement(execution, member_agent_id="checker", member_run_id="member-run")]
+    model = ScriptedModel([])
+
+    events, _ = await _run(spec(model), _prompt(), record=record)
+
+    assert events == [LoopEnded(paused=True)]
+    assert model.requests == []
 
 
 async def test_an_external_execution_pause_keeps_the_silent_flag() -> None:
