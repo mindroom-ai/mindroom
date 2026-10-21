@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import httpx
 import pytest
 
@@ -316,12 +317,88 @@ async def test_gemini_http_errors_are_normalized(
 
 
 @pytest.mark.asyncio
-async def test_gemini_transport_failure_is_retryable(tmp_path: Path) -> None:
-    """A connection failure before any reply is a retryable provider error."""
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("connection refused"), aiohttp.ServerDisconnectedError(), aiohttp.ClientPayloadError("cut")],
+    ids=["httpx-connect", "aiohttp-disconnected", "aiohttp-payload"],
+)
+async def test_gemini_transport_failure_is_retryable(failure: Exception, tmp_path: Path) -> None:
+    """A connection failure before any reply is retryable, on the httpx transport and on aiohttp, which production uses."""
     with pytest.raises(ProviderUnavailable) as raised:
-        await run_adapter(GEMINI, _request(), tmp_path, httpx.ConnectError("connection refused"))
+        await run_adapter(GEMINI, _request(), tmp_path, failure)
 
     assert raised.value.retryable
+
+
+@pytest.mark.asyncio
+async def test_gemini_rejects_an_authored_setting_the_sdk_cannot_validate(tmp_path: Path) -> None:
+    """A generation setting the SDK's types reject fails as an invalid request instead of a raw validation error."""
+    config = _config(GEMINI, generation_config={"candidate_count": "many"})
+
+    with pytest.raises(InvalidRequest) as raised:
+        await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    assert not raised.value.retryable
+    assert "candidate_count" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_gemini_credential_failures_are_not_provider_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credentials that cannot be loaded are a configuration error, not a retryable provider failure."""
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing-credentials.json"))
+    config = {**GEMINI_VERTEX, "extra_kwargs": dict(GEMINI_VERTEX["extra_kwargs"])}
+    adapter = gemini_adapter.build_provider(ModelConfig(**config), runtime_paths_for(tmp_path))
+
+    with pytest.raises(Exception, match=r"missing-credentials\.json") as raised:
+        [event async for event in adapter.stream(_request())]
+
+    assert not isinstance(raised.value, ProviderError)
+
+
+@pytest.mark.asyncio
+async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path) -> None:
+    """``stream=False`` sends the route's non-streaming call and still yields the usage and the finished turn."""
+    reply = httpx.Response(200, json=_gemini_chunk({"text": "Whole."}))
+
+    request, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
+
+    assert request["url"].endswith(":generateContent")
+    completed = _completed(events)
+    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
+    assert completed.message.content == "Whole."
+    assert completed.message.metrics.input_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: Path) -> None:
+    """A chunk that only shows a native tool at work keeps the idle limit alive without becoming output."""
+    response = gemini_sse(
+        _gemini_chunk({"executableCode": {"language": "PYTHON", "code": "print(1)"}}, finish=None, usage=False),
+        _gemini_chunk({"text": "2"}),
+    )
+
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, response)
+
+    assert [type(event).__name__ for event in events] == [
+        "StreamProgress",
+        "TextDelta",
+        "UsageReported",
+        "TurnCompleted",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_upload_of_a_vanished_file_is_an_invalid_request(tmp_path: Path) -> None:
+    """A local file that disappears before its upload fails the request without retries."""
+    from google import genai  # noqa: PLC0415 - the SDK client is only built for this probe
+
+    client = genai.Client(api_key="test-key")
+
+    with pytest.raises(InvalidRequest, match="could not be read"):
+        await gemini_files.uploaded_file_uri(client, tmp_path / "gone.wav", "audio/wav", provider="Google")
 
 
 _GEMINI_API = "https://generativelanguage.googleapis.com/"
@@ -754,7 +831,7 @@ async def test_ollama_sends_the_api_key_as_a_bearer_token(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_ollama_tools_are_sorted_and_leave_out_empty_descriptions(tmp_path: Path) -> None:
     """Tools go out sorted by name, and a tool without a description sends none, as Agno's did."""
-    quiet = ToolSpec(name="a_tool", description="", parameters={"type": "object", "properties": {}})
+    quiet = ToolSpec(name="a_tool", description=None, parameters={"type": "object", "properties": {}})
 
     request, _ = await run_adapter(OLLAMA, _request(tools=[WEATHER, quiet]), tmp_path, ollama_ndjson(_ollama_done()))
 
@@ -879,6 +956,20 @@ async def test_ollama_errors_are_normalized(
 
     assert type(raised.value) is error_type
     assert raised.value.provider == "Ollama"
+
+
+@pytest.mark.asyncio
+async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> None:
+    """A reply that arrives whole has its ``<think>`` reasoning moved out of the content, as Agno did."""
+    reply = httpx.Response(200, json=_ollama_done(content="<think>Plan first.</think>Hi there"))
+
+    request, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+
+    assert request["body"]["stream"] is False
+    completed = _completed(events)
+    assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
+    assert [type(event).__name__ for event in events] == ["TextDelta", "UsageReported", "TurnCompleted"]
+    assert completed.message.metrics.input_tokens == 7
 
 
 @pytest.mark.asyncio

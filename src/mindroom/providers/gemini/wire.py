@@ -347,8 +347,9 @@ async def _remote_file_part(file: File, url: str, route: MediaRoute) -> dict[str
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
+    # Agno built each declaration with ``description or ""``, so a tool without one still sends an empty string.
     declarations = [
-        _without_none(name=tool.name, description=tool.description, parameters=convert_schema(tool.parameters))
+        _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
     return {"function_declarations": declarations} if declarations else None

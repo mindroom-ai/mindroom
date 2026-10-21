@@ -204,13 +204,13 @@ class OllamaProvider:
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return Ollama tool definitions sorted by name; an empty description is left out."""
+    """Return Ollama tool definitions sorted by name; a tool without a description sends none, as Agno's did."""
     return [
         {
             "type": "function",
             "function": {
                 "name": tool.name,
-                **({"description": tool.description} if tool.description else {}),
+                **({} if tool.description is None else {"description": tool.description}),
                 "parameters": tool.parameters,
             },
         }

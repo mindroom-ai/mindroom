@@ -227,12 +227,13 @@ def _chat_tools(
     """Return tool definitions sorted by name, the order every cached prompt prefix depends on."""
     formatted: list[dict[str, Any]]
     if wire.dialect == "cerebras":
+        # Cerebras takes the function shape without Agno's approval flags or strict; None is left out.
         formatted = [
             {
                 "type": "function",
                 "function": {
                     "name": tool.name,
-                    "description": tool.description,
+                    **({} if tool.description is None else {"description": tool.description}),
                     "parameters": deepcopy(dict(tool.parameters)),
                 },
             }

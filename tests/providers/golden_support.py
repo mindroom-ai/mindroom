@@ -9,6 +9,7 @@ module turns the golden input into the owned ``ModelRequest``, runs it through t
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from contextlib import nullcontext
@@ -18,6 +19,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from pydantic import BaseModel
 
 from mindroom.llm.messages import Message
@@ -27,9 +29,7 @@ from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    import httpx
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from mindroom.llm.provider import ModelProvider, NativeCompactionReplay, StopReason, StreamEvent
 
@@ -84,6 +84,24 @@ BACKGROUND_AFTER_SCHEMA = {
         "zero continues in the background at once and returns a job handle."
     ),
 }
+
+
+class PacedBytes(httpx.AsyncByteStream):
+    """Response body chunks sent one at a time after a pause each, optionally ending in a dropped connection."""
+
+    def __init__(self, chunks: Sequence[bytes], *, pause_seconds: float = 0.0, drop: bool = False) -> None:
+        self._chunks = list(chunks)
+        self._pause_seconds = pause_seconds
+        self._drop = drop
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        """Yield each chunk after its pause, then drop the connection when asked."""
+        for chunk in self._chunks:
+            await asyncio.sleep(self._pause_seconds)
+            yield chunk
+        if self._drop:
+            msg = "connection dropped"
+            raise httpx.ReadError(msg)
 
 
 @dataclass(frozen=True)

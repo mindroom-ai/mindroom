@@ -6,7 +6,6 @@ HTTP request with the canned reply, and hand the request to the shared golden ha
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 from dataclasses import dataclass
@@ -18,10 +17,9 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.responses import ResponsesAdapter
-from tests.providers.golden_support import Replay, pipeline_provider, replay_through_pipeline
+from tests.providers.golden_support import PacedBytes, Replay, pipeline_provider, replay_through_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.provider import ModelProvider
@@ -81,23 +79,6 @@ def write_cli_logins(root: Path) -> dict[str, str]:
     return {_CODEX_HOME: str(codex_home), _KIMI_HOME: str(kimi_home)}
 
 
-class _PacedEvents(httpx.AsyncByteStream):
-    """SSE events sent one at a time after a pause each, optionally ending in a dropped connection."""
-
-    def __init__(self, events: list[bytes], *, pause_seconds: float, drop: bool) -> None:
-        self._events = events
-        self._pause_seconds = pause_seconds
-        self._drop = drop
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        for event in self._events:
-            await asyncio.sleep(self._pause_seconds)
-            yield event
-        if self._drop:
-            msg = "connection dropped"
-            raise httpx.ReadError(msg)
-
-
 def _sse_event(event: dict[str, Any]) -> bytes:
     data = event["data"]
     name = f"event: {event['event']}\n" if "event" in event else ""
@@ -115,7 +96,7 @@ def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
         return httpx.Response(status, headers=headers, content=json.dumps(response_raw["json"]).encode())
     events = [_sse_event(event) for event in response_raw["sse"]]
     if "pause_seconds" in response_raw or "drop_connection" in response_raw:
-        stream = _PacedEvents(
+        stream = PacedBytes(
             events,
             pause_seconds=response_raw.get("pause_seconds", 0.0),
             drop=response_raw.get("drop_connection", False),

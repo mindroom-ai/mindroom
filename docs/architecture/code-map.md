@@ -218,7 +218,7 @@ Matrix sync callback
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
 | `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
-| `providers/anthropic/prompt_cache.py` | Composition of the Claude prompt-cache ladder, deferred tool search, and history repairs for one request body |
+| `providers/anthropic/prompt_cache.py` | The Claude prompt-cache ladder primitives (shared with the OpenRouter ladder and the Agno path) and their composition with deferred tool search and history repairs for one request body |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
@@ -227,13 +227,15 @@ Matrix sync callback
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
-| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, and `build_provider` |
+| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, and OpenAI server-side tool search tagging |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search, media fallback, stream retry with the idle limit, and request logging |
-| `providers/gemini/` | Owned stream-only Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, and stream parsing (not wired yet) |
-| `providers/ollama_adapter.py` | Owned stream-only Ollama adapter over the native chat API (not wired yet) |
-| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls (not wired yet) |
+| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, decision-request config, and reply parsing (not wired yet) |
+| `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API (not wired yet) |
+| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls, and the response plan `synthetic_model.py` serves to the Agno path (not wired yet) |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
+| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp, timings, `<think>` splitting, one message per tool result |
+| `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
