@@ -13,7 +13,15 @@ import pytest
 
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.errors import InvalidRequest, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    SAFEGUARD_REFUSAL,
+    InvalidRequest,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+)
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -30,13 +38,16 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
+from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import FALLBACK_MARKER, forget_learned_media_limits, media_fallback_stream
+from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
-from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.pipeline.wrapped import AGGREGATE_USAGE_KEY, WrappedProvider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -92,6 +103,11 @@ def _turn(text: str = "done", usage: MessageMetrics | None = None) -> TurnComple
 
 def _transient(message: str = "overloaded") -> ProviderUnavailable:
     return ProviderUnavailable(message, provider="Scripted Chat", status_code=503)
+
+
+def _malformed() -> ProviderError:
+    message = "Generation ended with finish reason: MALFORMED_FUNCTION_CALL"
+    return ProviderError(message, provider="Scripted Chat", code=MALFORMED_TOOL_CALL)
 
 
 async def _drain(provider: WrappedProvider, request: ModelRequest) -> list[StreamEvent]:
@@ -393,6 +409,92 @@ async def test_portable_tool_search_renames_combined_gemini_results() -> None:
     ]
 
 
+# --- Safeguard refusal ----------------------------------------------------------------------------------------
+
+
+def _refusal(usage: MessageMetrics) -> TurnCompleted:
+    return TurnCompleted(message=Message(role="assistant", metrics=usage), stop_reason="refusal")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None:
+    usage = MessageMetrics(input_tokens=40, output_tokens=9, total_tokens=49)
+    inner = _ScriptedProvider([[UsageReported(usage), _refusal(usage)]])
+    events = WrappedProvider(inner, refusal_stream).stream(ModelRequest(messages=[_user()]))
+
+    assert await anext(events) == UsageReported(usage)
+    with pytest.raises(ModelSafeguardRefusal) as raised:
+        await anext(events)
+
+    refusal = raised.value
+    assert (str(refusal), refusal.code, refusal.provider, refusal.retryable) == (
+        MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+        SAFEGUARD_REFUSAL,
+        "Scripted Chat",
+        False,
+    )
+    assert inner.closed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_media_limits")
+async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
+    """A transient failure before still retries; the refused attempt ends the request with its media intact."""
+    usage = MessageMetrics(input_tokens=40, output_tokens=9, total_tokens=49)
+    inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
+    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await complete(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 2
+    assert all(request.messages[0].images for request in inner.requests)
+
+
+# --- Malformed tool-call guidance -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_request_only() -> None:
+    """The guidance is appended to the resent request, never to the caller's conversation; usage carries over."""
+    failed = MessageMetrics(input_tokens=30, total_tokens=30)
+    final = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54)
+    inner = _ScriptedProvider(
+        [[UsageReported(failed), _malformed()], [TextDelta("done"), UsageReported(final), _turn(usage=final)]],
+    )
+    message = _user()
+    conversation = [message]
+    request = ModelRequest(messages=conversation)
+
+    events = await _drain(WrappedProvider(inner, guidance_retry_stream), request)
+
+    first, retried = inner.requests
+    *resent, guidance = retried.messages
+    assert first is request
+    assert resent == [message]
+    assert (guidance.role, guidance.content, guidance.temporary) == ("user", MALFORMED_FUNCTION_CALL_GUIDANCE, True)
+    assert conversation == [message]
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {"input_tokens": 72, "output_tokens": 12, "total_tokens": 84}
+    assert (finished.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attempt",
+    [[TextDelta("partial"), _malformed()], [InvalidRequest("bad", provider="Scripted Chat", status_code=400)]],
+    ids=["malformed-after-output", "other-error"],
+)
+async def test_only_a_malformed_tool_call_before_output_gets_guidance(attempt: list[_Step]) -> None:
+    inner = _ScriptedProvider([attempt, [_turn()]])
+
+    with pytest.raises(ProviderError):
+        await _drain(WrappedProvider(inner, guidance_retry_stream), ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
 # --- Request logging ------------------------------------------------------------------------------------------
 
 
@@ -434,9 +536,18 @@ def test_stream_idle_limit_policy(tmp_path: Path) -> None:
         storage_path=tmp_path / "data",
         process_env={"OPENAI_BASE_URL": "http://localhost:4000/v1"},
     )
+    with_vertex_base_url = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_VERTEX_BASE_URL": "https://vertex.proxy.example/v1"},
+    )
     hosted = ModelConfig(provider="openai", id="gpt-6-astra")
     assert stream_idle_timeout_seconds(hosted, paths) == 300.0
     assert stream_idle_timeout_seconds(hosted, with_base_url) is None
+    assert stream_idle_timeout_seconds(hosted, with_vertex_base_url) == 300.0
+    vertex = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
+    assert stream_idle_timeout_seconds(vertex, paths) == 300.0
+    assert stream_idle_timeout_seconds(vertex, with_vertex_base_url) is None
     assert stream_idle_timeout_seconds(ModelConfig(provider="llama_cpp", id="m"), paths) is None
     assert (
         stream_idle_timeout_seconds(ModelConfig(provider="zai", id="m", extra_kwargs={"base_url": "http://x"}), paths)
@@ -465,9 +576,16 @@ async def test_composed_pipeline_drains_with_complete() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_fresh_media_limits")
-async def test_reported_usage_always_sums_to_the_finished_turn() -> None:
-    """Usage of transient retries inside a media retry is counted once, in reports and in the final metrics."""
-    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400),
+        _malformed(),
+    ],
+    ids=["media-retry", "guidance-retry"],
+)
+async def test_reported_usage_always_sums_to_the_finished_turn(rejection: ProviderError) -> None:
+    """Usage of transient retries inside a media or guidance retry is counted once, in reports and final metrics."""
     inner = _ScriptedProvider(
         [
             [UsageReported(MessageMetrics(input_tokens=5)), _transient()],

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 
 from agno.exceptions import ModelProviderError
 
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
@@ -25,7 +26,6 @@ logger = get_logger(__name__)
 # the mid-stream SSE case: the HTTP response was already committed before a
 # Claude error event or an early Responses end without visible output.
 TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
-MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
 # Errors raised before any provider request when a model has no API key at all.
 _MISSING_PROVIDER_KEY_PATTERN = re.compile(
@@ -110,8 +110,11 @@ def _run_error_additional_message(data: object) -> str | None:
 
 
 def is_model_safeguard_refusal(error: Exception | str) -> bool:
-    """Recognize typed refusals and the exact text Agno preserves in errored runs."""
-    return isinstance(error, ModelSafeguardRefusalError) or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
+    """Recognize typed refusals from either provider layer and the exact text errored runs preserve."""
+    return (
+        isinstance(error, ModelSafeguardRefusalError | ModelSafeguardRefusal)
+        or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
+    )
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:

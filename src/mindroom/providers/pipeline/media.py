@@ -13,7 +13,13 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.errors import INCOMPLETE_STREAM, MALFORMED_TOOL_CALL, ContextWindowExceeded, ProviderError
+from mindroom.llm.errors import (
+    INCOMPLETE_STREAM,
+    MALFORMED_TOOL_CALL,
+    SAFEGUARD_REFUSAL,
+    ContextWindowExceeded,
+    ProviderError,
+)
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
 from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
@@ -37,7 +43,7 @@ _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
 # A retried media-free request must not repeat a failure the media cannot have caused.
-_NOT_MEDIA_RELATED_CODES = frozenset({INCOMPLETE_STREAM, "refusal", MALFORMED_TOOL_CALL})
+_NOT_MEDIA_RELATED_CODES = frozenset({INCOMPLETE_STREAM, SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
 _PAYLOAD_TOO_LARGE_STATUS = 413
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500

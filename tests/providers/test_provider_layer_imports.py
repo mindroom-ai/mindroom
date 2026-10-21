@@ -14,7 +14,9 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.remote_media",
     "mindroom.providers.pipeline.compose",
     "mindroom.providers.pipeline.deferred_tools",
+    "mindroom.providers.pipeline.guidance_retry",
     "mindroom.providers.pipeline.media",
+    "mindroom.providers.pipeline.refusal",
     "mindroom.providers.pipeline.request_log",
     "mindroom.providers.pipeline.retry",
     "mindroom.providers.pipeline.wrapped",
@@ -30,7 +32,10 @@ OWNED_PROVIDER_MODULES = (
     "mindroom.providers.gemini.files",
     "mindroom.providers.ollama_adapter",
     "mindroom.providers.synthetic_adapter",
+    "mindroom.providers.registry",
 )
+# The provider SDKs, which load only when a model of their family is built.
+_PROVIDER_SDKS = ("anthropic", "google.genai", "ollama", "openai")
 
 # Imports each module in turn and reports the first one after which an Agno module is loaded.
 _PROBE = """
@@ -57,3 +62,10 @@ def test_owned_provider_modules_do_not_import_agno() -> None:
     )
     culprits = json.loads(completed.stdout.strip().splitlines()[-1])
     assert culprits == {}, f"importing these owned provider modules loaded Agno: {culprits}"
+
+
+def test_importing_the_registry_loads_no_provider_sdk() -> None:
+    """A process that serves only one provider family never pays for the other families' SDKs."""
+    probe = f"import json, sys; import mindroom.providers.registry; print(json.dumps(sorted(set({_PROVIDER_SDKS!r}) & set(sys.modules))))"
+    completed = subprocess.run([sys.executable, "-c", probe], check=True, capture_output=True, text=True)
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == []

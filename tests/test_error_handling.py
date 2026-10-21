@@ -19,8 +19,10 @@ from mindroom.error_handling import (
     ModelSafeguardRefusalError,
     _extract_provider_from_error,
     get_user_friendly_error_message,
+    is_model_safeguard_refusal,
     run_error_event_exception,
 )
+from mindroom.llm.errors import ModelSafeguardRefusal
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 
@@ -73,13 +75,21 @@ def test_generic_api_word_not_false_positive() -> None:
     assert "Error:" in message
 
 
-def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
-    """Explicit safeguard stops should not look like empty model responses."""
-    error = ModelSafeguardRefusalError(
-        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
-        model_name="Claude",
-        model_id="claude-fable-5-1",
-    )
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelSafeguardRefusalError(
+            message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+            model_name="Claude",
+            model_id="claude-fable-5-1",
+        ),
+        ModelSafeguardRefusal(provider="Anthropic"),
+    ],
+    ids=["agno", "owned"],
+)
+def test_model_safeguard_refusal_gives_actionable_guidance(error: Exception) -> None:
+    """Explicit safeguard stops from either provider layer should not look like empty model responses."""
+    assert is_model_safeguard_refusal(error)
 
     message = get_user_friendly_error_message(error, "mind")
 

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 # The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
-# Gemini's MALFORMED_FUNCTION_CALL; the loop answers it with one guidance retry, and the media fallback
+# Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
 # never strips media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
 # The ``ProviderError.code`` of a stream that failed after the attempt exposed output or a hosted tool ran: a retry
 # could duplicate output or rerun the tool, so the error is final and the media fallback never resends the request.
 INCOMPLETE_STREAM = "incomplete_stream"
+# The ``ProviderError.code`` of a response the model's safeguards refused: neither a retry nor a resend without the
+# request's media can change the answer.
+SAFEGUARD_REFUSAL = "refusal"
+# The text of a safeguard refusal; error runs store it, and the runtime recognizes stored refusals by it.
+MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
 
 class ProviderError(Exception):
@@ -72,11 +77,21 @@ class ProviderUnavailable(ProviderError):  # noqa: N818
         super().__init__(message, provider=provider, status_code=status_code, code=code, retryable=retryable)
 
 
+class ModelSafeguardRefusal(ProviderError):  # noqa: N818
+    """The model's safeguards stopped the response; final, so it is never retried or resent without media."""
+
+    def __init__(self, *, provider: str) -> None:
+        super().__init__(MODEL_SAFEGUARD_REFUSAL_MESSAGE, provider=provider, code=SAFEGUARD_REFUSAL)
+
+
 __all__ = [
     "INCOMPLETE_STREAM",
     "MALFORMED_TOOL_CALL",
+    "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
+    "SAFEGUARD_REFUSAL",
     "ContextWindowExceeded",
     "InvalidRequest",
+    "ModelSafeguardRefusal",
     "ProviderError",
     "ProviderUnavailable",
     "RateLimited",

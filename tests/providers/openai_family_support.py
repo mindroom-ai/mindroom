@@ -142,7 +142,6 @@ def golden_provider(
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = ProviderRuntime(
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={}),
-        model_name="default",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     adapter = build_provider(ModelConfig(**config), runtime)
