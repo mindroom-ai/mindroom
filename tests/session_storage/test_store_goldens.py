@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -129,7 +130,7 @@ def test_golden_run_logs_list_and_get_as_stored(store: GoldenStore, tmp_path: Pa
 
 
 def _session_row(db_file: Path, table: str, session_id: str) -> tuple[Any, ...]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection:
         return connection.execute(f'SELECT * FROM "{table}" WHERE session_id = ?', (session_id,)).fetchone()  # noqa: S608
 
 
@@ -190,7 +191,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     """Saving each stored run with its usage into a fresh store writes the rows, snapshots, and totals Agno wrote."""
     golden = store.restore(tmp_path / "golden")
     rows = stored_rows(golden, store.names.runs, session_id)
-    with sqlite3.connect(golden) as connection:
+    with closing(sqlite3.connect(golden)) as connection:
         kind, owner, user_id, created_at, session_data = connection.execute(
             f'SELECT session_type, COALESCE(agent_id, team_id), user_id, created_at, session_data FROM "{store.names.sessions}" '  # noqa: S608
             "WHERE session_id = ?",
@@ -269,7 +270,7 @@ def test_a_resumed_team_run_keeps_its_empty_member_and_requirement_lists(tmp_pat
 
 
 def _layout(db_file: Path, tables: tuple[str, ...]) -> dict[str, Any]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection:
         return {
             table: (
                 connection.execute(f'PRAGMA table_info("{table}")').fetchall(),
@@ -284,7 +285,7 @@ def _layout(db_file: Path, tables: tuple[str, ...]) -> dict[str, Any]:
 
 
 def _schema_objects(db_file: Path) -> list[tuple[str, str]]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection:
         return connection.execute("SELECT type, name FROM sqlite_master ORDER BY type, name").fetchall()
 
 

@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -101,12 +102,12 @@ def _seed(store: ConversationStore, runs: list[AnyRunRecord], session: Conversat
 
 
 def _query(store: ConversationStore, sql: str, *parameters: object) -> list[tuple[Any, ...]]:
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection:
         return connection.execute(sql, parameters).fetchall()
 
 
 def _execute(store: ConversationStore, sql: str, *parameters: object) -> None:
-    with sqlite3.connect(store.path) as connection:
+    with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(sql, parameters)
 
 
