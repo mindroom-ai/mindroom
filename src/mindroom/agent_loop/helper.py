@@ -14,7 +14,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.agent_loop.structured import parse_structured
+from mindroom.agent_loop.prompt import PromptSpec, render_system_message
+from mindroom.agent_loop.structured import parse_structured, select_response_format
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
@@ -24,7 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.agent_loop.structured import ResponseFormat
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
 
 logger = get_logger(__name__)
@@ -84,4 +85,36 @@ async def complete_once[T: BaseModel](
     return HelperResult(content=text if parsed is None else parsed, record=record)
 
 
-__all__ = ["HelperResult", "complete_once"]
+async def complete_prompt[T: BaseModel](
+    provider: ModelProvider,
+    prompt: str,
+    *,
+    role: str | None = None,
+    instructions: Sequence[str] = (),
+    schema: type[T] | None = None,
+    overrides: RequestOverrides | None = None,
+    run_id: str | None = None,
+) -> HelperResult[T]:
+    """Send ``prompt`` under a system message rendered from ``role`` and ``instructions``, as one helper request.
+
+    ``schema`` asks for structured output the way ``provider`` supports it, so JSON-mode routes also get the JSON
+    prompt at the end of the system message.
+    """
+    response_format = None if schema is None else select_response_format(provider.capabilities, schema)
+    system = render_system_message(
+        PromptSpec(
+            role=role,
+            instructions=tuple(instructions),
+            output_format_prompt=None if response_format is None else response_format.prompt,
+        ),
+    )
+    return await complete_once(
+        provider,
+        [system, Message(role="user", content=prompt)],
+        response_format=response_format,
+        overrides=overrides,
+        run_id=run_id,
+    )
+
+
+__all__ = ["HelperResult", "complete_once", "complete_prompt"]

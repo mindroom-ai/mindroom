@@ -5,16 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import nio
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai_runtime import cached_agent_run
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -105,27 +104,13 @@ Examples:
 
 Generate the topic:"""
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-
-    agent = Agent(
-        name="TopicGenerator",
-        role="Generate contextual room topics",
-        model=model,
-        output_schema=_RoomTopic,
-        telemetry=False,
-    )
-
-    session_id = f"topic_{room_key}"
+    provider = build_model_provider(config, runtime_paths, "default")
     try:
-        response = await cached_agent_run(
-            agent=agent,
-            run_input=prompt,
-            session_id=session_id,
-        )
+        response = await complete_prompt(provider, prompt, role="Generate contextual room topics", schema=_RoomTopic)
     except Exception:
-        logger.exception("room_topic_generation_failed", room_key=room_key, session_id=session_id)
+        logger.exception("room_topic_generation_failed", room_key=room_key)
         return None
-    await record_system_usage(response, runtime_paths=runtime_paths, kind="room_topic")
+    await record_system_usage(response.record, runtime_paths=runtime_paths, kind="room_topic")
     content = response.content
     if not isinstance(content, _RoomTopic):
         logger.warning(

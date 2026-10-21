@@ -19,17 +19,29 @@ from mindroom.agno_participation import participation_model
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
 from mindroom.hooks.enrichment import render_transient_context
+from mindroom.judgment import llm as judgment_llm
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
-from mindroom.providers import model_loading
 from mindroom.providers.groq_model import MindRoomGroq
 from tests.conftest import test_runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from tests.fakes.scripted_model import ScriptStep
+
+
+async def _fail_judge() -> None:
+    msg = "Provider failed"
+    raise RuntimeError(msg)
+
+
+async def _cancel_judge() -> None:
+    raise asyncio.CancelledError
 
 
 def _response(probability: object = 0.9, *, model: str = _PINNED_MODEL) -> bytes:
@@ -299,14 +311,14 @@ async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_deci
     approved: bool,
 ) -> None:
     """Changing the judge backend must preserve visible behavior and isolate the reply model."""
-    judge = ParticipationModel(ModelResponse(content=json.dumps({"decision": approved})))
+    judge = ScriptedModel([answer(json.dumps({"decision": approved}))])
     selected: list[str] = []
 
-    def load(_config: Config, _paths: object, model_name: str) -> ParticipationModel:
+    def load(_config: Config, _paths: object, model_name: str) -> ScriptedModel:
         selected.append(model_name)
         return judge
 
-    monkeypatch.setattr(model_loading, "get_model_instance", load)
+    monkeypatch.setattr(judgment_llm, "build_model_provider", load)
     reply = ParticipationModel(ModelResponse(content="Useful answer"))
     gate = _gate(tmp_path, backend="llm", key="")
     messages = [Message(role="system", content="Private system prompt"), Message(role="user", content="Any ideas?")]
@@ -326,33 +338,30 @@ async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_deci
     assert len(judge.requests) == 1
     assert len(reply.requests) == int(approved)
     request = judge.requests[0]
-    assert not request["tools"]
-    assert request["tool_choice"] == "none"
-    assert "Private system prompt" not in str(request["messages"])
-    assert "Offer technical help." in str(request["messages"])
+    assert not request.tools
+    assert request.tool_choice == "none"
+    assert "Private system prompt" not in str(request.messages)
+    assert "Offer technical help." in str(request.messages)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "output",
+    "turn",
     [
-        ModelResponse(content='{"decision": null}'),
-        ModelResponse(content='{"decision": "yes"}'),
-        ModelResponse(
-            content='{"decision": true}',
-            tool_calls=[{"id": "call", "type": "function", "function": {"name": "unsafe", "arguments": "{}"}}],
-        ),
-        RuntimeError("Provider failed"),
+        answer('{"decision": null}'),
+        answer('{"decision": "yes"}'),
+        calls(tool_call("unsafe", "call"), content='{"decision": true}'),
+        [Await(_fail_judge)],
     ],
 )
 async def test_dedicated_llm_abstention_uses_existing_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    output: ModelResponse | BaseException,
+    turn: list[ScriptStep],
 ) -> None:
     """Both explicit abstention and judge failures preserve the existing fallback policy."""
-    judge = ParticipationModel(output)
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    judge = ScriptedModel([turn])
+    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
     reply = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Useful help."}'))
     gate = _gate(tmp_path, backend="llm")
     with participation_model(reply, gate, run_id="primary"):
@@ -372,8 +381,8 @@ async def test_dedicated_llm_cancellation_does_not_start_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancellation has the same unsettled outcome for either backend."""
-    judge = ParticipationModel(asyncio.CancelledError())
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    judge = ScriptedModel([[Await(_cancel_judge)]])
+    monkeypatch.setattr(judgment_llm, "build_model_provider", lambda *_: judge)
     reply = ParticipationModel(ModelResponse(content="Must not run"))
     gate = _gate(tmp_path, backend="llm")
     with pytest.raises(asyncio.CancelledError), participation_model(reply, gate, run_id="primary"):

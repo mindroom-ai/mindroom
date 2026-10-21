@@ -12,12 +12,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-from agno.agent import Agent
 from agno.media import Audio
 from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.attachments.storage import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.config.voice import normalize_speech_base_url
@@ -38,7 +38,7 @@ from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -704,42 +704,31 @@ async def _process_transcription(
             transcription=transcription,
         )
 
-        # Get the AI model to process the transcription
-        model = model_loading.get_model_instance(config, runtime_paths, config.voice.intelligence.model)
+        provider = build_model_provider(config, runtime_paths, config.voice.intelligence.model)
 
-        # Create an agent for voice transcript normalization
-        agent = Agent(
-            name="VoiceTranscriptionNormalizer",
-            role="Normalize voice transcriptions while preserving natural language and mention intent",
-            model=model,
-            telemetry=False,
-        )
-
-        # Process the transcription with the agent. The transcription is already
-        # usable, so a slow or hung normalizer model fails open to it instead of
+        # The transcription is already usable, so a slow or hung normalizer model fails open to it instead of
         # blocking voice readiness (and the ingress lane serialized behind it).
-        session_id = f"voice_process_{uuid.uuid4()}"
         try:
             async with asyncio.timeout(_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS):
-                response = await agent.arun(prompt, session_id=session_id)
+                response = await complete_prompt(
+                    provider,
+                    prompt,
+                    role="Normalize voice transcriptions while preserving natural language and mention intent",
+                )
         except TimeoutError:
             logger.warning(
                 "voice_transcription_normalizer_timeout",
                 timeout_seconds=_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS,
             )
-            response = None
-
-        if response is not None:
-            await record_system_usage(response, runtime_paths=runtime_paths, kind="voice_normalization")
-
-        # Extract the content from the response
-        if response and response.content:
-            return _sanitize_unavailable_mentions(
-                response.content.strip(),
-                allowed_entities=set(agent_names) | set(team_names),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
+        else:
+            await record_system_usage(response.record, runtime_paths=runtime_paths, kind="voice_normalization")
+            if response.content:
+                return _sanitize_unavailable_mentions(
+                    response.content.strip(),
+                    allowed_entities=set(agent_names) | set(team_names),
+                    config=config,
+                    runtime_paths=runtime_paths,
+                )
 
     except Exception:
         logger.exception("Error processing transcription")

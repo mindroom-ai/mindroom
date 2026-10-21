@@ -9,9 +9,6 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
 
 from mindroom import helper_usage
 from mindroom.config.main import Config
@@ -19,6 +16,7 @@ from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.voice import handler as voice_handler
 from tests.conftest import test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_actual_entity_accounts
 
 if TYPE_CHECKING:
@@ -186,30 +184,8 @@ async def test_normalizer_records_usage_before_rejecting_empty_content(
     paths = test_runtime_paths(tmp_path)
     config = Config(voice=VoiceConfig(enabled=True))
     persist_actual_entity_accounts(config, paths, password="test-password")  # noqa: S106 - local fixture account
-    response = RunOutput(
-        run_id="voice-normalizer-paid",
-        model="normalizer-model",
-        model_provider="test-provider",
-        content="normalized transcript" if storage_failure else None,
-        metrics=RunMetrics(input_tokens=7, output_tokens=2, total_tokens=9),
-        messages=[
-            Message(
-                role="assistant",
-                created_at=1_700_000_000,
-                metrics=MessageMetrics(input_tokens=7, output_tokens=2, total_tokens=9),
-            ),
-        ],
-    )
-
-    class FakeAgent:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def arun(self, *_args: object, **_kwargs: object) -> RunOutput:
-            return response
-
-    monkeypatch.setattr(voice_handler, "Agent", FakeAgent)
-    monkeypatch.setattr(voice_handler.model_loading, "get_model_instance", lambda *_args: object())
+    model = ScriptedModel([answer("normalized transcript" if storage_failure else "", usage(7, 2))])
+    monkeypatch.setattr(voice_handler, "build_model_provider", lambda *_args: model)
     if storage_failure:
 
         async def fail_write(*_args: object, **_kwargs: object) -> None:

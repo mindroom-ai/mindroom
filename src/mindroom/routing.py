@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.agent import Agent
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from mindroom.agent_descriptions import describe_agent
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
-from mindroom.providers import model_loading
+from mindroom.providers.registry import build_model_provider
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 from mindroom.tool_system.events import body_without_tool_markers
 
@@ -29,8 +29,6 @@ logger = get_logger(__name__)
 
 class _RoutingSuggestion(BaseModel):
     """Structured output for routing decisions."""
-
-    model_config = ConfigDict(from_attributes=True)
 
     entity_name: str = Field(description="The name of the agent or team that should respond")
     reasoning: str = Field(description="Brief explanation of why this agent or team was chosen")
@@ -97,31 +95,22 @@ async def suggest_responder(
             runtime_paths=runtime_paths,
         ).model_name
 
-        model = model_loading.get_model_instance(config, runtime_paths, router_model_name)
-        logger.info(
-            "using_router_model",
-            model_name=router_model_name,
-            model_class=model.__class__.__name__,
-            model_id=model.id,
-        )
+        provider = build_model_provider(config, runtime_paths, router_model_name)
+        logger.info("using_router_model", model_name=router_model_name, model_id=provider.identity.id)
 
-        agent = Agent(
-            name="Router",
+        result = await complete_prompt(
+            provider,
+            prompt,
             role="Route messages to appropriate agents or teams",
-            model=model,
-            output_schema=_RoutingSuggestion,
-            telemetry=False,
+            schema=_RoutingSuggestion,
         )
-
-        response = await agent.arun(prompt, session_id="routing")
-        await record_system_usage(response, runtime_paths=runtime_paths, kind="routing")
-        try:
-            suggestion = _RoutingSuggestion.model_validate(response.content)
-        except ValidationError:
+        await record_system_usage(result.record, runtime_paths=runtime_paths, kind="routing")
+        suggestion = result.content
+        if not isinstance(suggestion, _RoutingSuggestion):
             logger.warning(
                 "Unexpected response type from AI routing",
                 expected="_RoutingSuggestion",
-                actual=type(response.content).__name__,
+                actual=type(suggestion).__name__,
             )
             return None
 

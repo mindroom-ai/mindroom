@@ -59,6 +59,8 @@ from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import usage as owned_usage
 from tests.history_helpers import (
     RecordingModel,
     _completed_run,
@@ -449,21 +451,10 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
     assert isinstance(storage, SqliteDb)
     identity = build_execution_identity_from_runtime_context(context)
-    model = _HelperModel(
-        id="helper-model",
-        provider="test-provider",
-        responses=[
-            ModelResponse(
-                content=content,
-                response_usage=MessageMetrics(input_tokens=100, output_tokens=10, total_tokens=110),
-            ),
-            ModelResponse(
-                content="Remember another preference.",
-                response_usage=MessageMetrics(input_tokens=50, output_tokens=5, total_tokens=55),
-            ),
-        ],
+    model = ScriptedModel(
+        [answer(content, owned_usage(100, 10)), answer("Remember another preference.", owned_usage(50, 5))],
     )
-    monkeypatch.setattr("mindroom.memory.auto_flush.model_loading.get_model_instance", lambda *_args: model)
+    monkeypatch.setattr("mindroom.memory.auto_flush.build_model_provider", lambda *_args: model)
     try:
         for _ in range(2):
             await _extract_memory_summary(

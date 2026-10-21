@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
-from mindroom.providers.model_loading import canonical_provider, get_model_instance
+from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,8 +64,8 @@ class _PriceTable:
 def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
     """Map each priced model's recorded (provider, model ID) usage identity to its prices.
 
-    Usage records the provider name of the live model object, which can differ from the
-    configured provider (for example per API transport), so priced models are instantiated.
+    Usage records the metrics provider name of the model's provider, which can differ from the
+    configured provider (for example per API transport), so each priced model's provider is built.
     """
     table: dict[tuple[str, str], PricedModel] = {}
     complete = True
@@ -73,19 +74,19 @@ def price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
         if model_config.pricing is None:
             continue
         try:
-            model = get_model_instance(config, runtime_paths, model_name)
+            identity = build_model_provider(config, runtime_paths, model_name).identity
         except Exception as error:
             # Provider SDKs raise arbitrary construction errors; an unusable model stays unpriced.
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
             complete = False
             continue
-        key = (model.get_provider(), model.id)
+        key = (identity.provider_name, identity.id)
         priced = PricedModel(
             pricing=model_config.pricing,
             input_includes_cache=not provider_reports_cache_tokens_outside_input(
                 provider=key[0],
                 configured_provider=model_config.provider,
-                model_id=model.id,
+                model_id=identity.id,
             ),
         )
         existing = table.get(key)

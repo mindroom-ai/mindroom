@@ -185,7 +185,7 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
         },
     )
 
-    with patch("mindroom.budgets.pricing.get_model_instance", side_effect=RuntimeError("missing SDK")):
+    with patch("mindroom.budgets.pricing.build_model_provider", side_effect=RuntimeError("missing SDK")):
         table = price_table(config, _paths(tmp_path))
 
     assert table == _PriceTable(prices={}, complete=False)

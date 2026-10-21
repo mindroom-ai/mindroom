@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from html import escape
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai_runtime import cached_agent_run
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.authorization import (
     ReplyMembershipPendingError,
     classify_responder_candidates_from_cached_room,
@@ -22,18 +20,13 @@ from mindroom.authorization import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.helper_usage import record_system_usage
+from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
-from mindroom.model_defaults import (
-    CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
-    GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
-    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
-)
-from mindroom.providers import model_loading
-from mindroom.providers.model_instance_checks import isinstance_of_loaded
+from mindroom.providers.registry import build_model_provider
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
@@ -59,13 +52,12 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 logger = get_logger(__name__)
-_VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
-_GOOGLE_GEMINI_CLASS = ("mindroom.providers.google_gemini", "MindRoomGoogleGemini")
 _THREAD_SUMMARY_MAX_LENGTH = 300
 _MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
@@ -135,58 +127,18 @@ class _ThreadEnrichment(_ThreadSummary):
     )
 
 
-@runtime_checkable
-class _SupportsTemperature(Protocol):
-    """Protocol for model instances that accept a temperature override."""
+def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
+    """Return the summary model's provider without the temperature its config authors.
 
-    temperature: float | None
-
-
-@runtime_checkable
-class _IdentifiedModel(Protocol):
-    """Protocol for model instances exposing their provider request ID."""
-
-    id: str
-
-
-def _summary_model_requires_provider_temperature(model: object) -> bool:
-    """Return whether a summary model requires its provider sampling default."""
-    return isinstance_of_loaded(model, _VERTEXAI_CLAUDE_CLASS) or (
-        isinstance(model, _IdentifiedModel)
-        and (
-            model.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
-            # OpenRouter-style IDs carry a provider prefix, such as openai/gpt-5-mini.
-            or model.id.casefold().rsplit("/", 1)[-1].startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
-            or (
-                isinstance_of_loaded(model, _GOOGLE_GEMINI_CLASS)
-                and model.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
-            )
-        )
-    )
-
-
-def _configure_summary_model_temperature(
-    model: object,
-    *,
-    summary_temperature: float | None,
-    model_name: str,
-) -> None:
-    """Prepare the summary model's temperature setting for one request."""
-    if isinstance(model, _SupportsTemperature):
-        if _summary_model_requires_provider_temperature(model):
-            model.temperature = None
-        else:
-            model.temperature = summary_temperature
-        return
-    if summary_temperature is None:
-        return
-
-    model_class = type(model).__name__
-    logger.warning(
-        f"Thread summary model class {model_class} does not support a runtime temperature override; continuing with provider defaults",
-        model_class=model_class,
-        model_name=model_name,
-    )
+    Summaries send ``defaults.thread_summary_temperature`` instead, and no temperature at all when it is null or
+    the route keeps its provider's sampling default.
+    """
+    model_config = config.models.get(model_name)
+    if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
+        extra_kwargs = {key: value for key, value in model_config.extra_kwargs.items() if key != "temperature"}
+        models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
+        config = config.model_copy(update={"models": models})
+    return build_model_provider(config, runtime_paths, model_name)
 
 
 def _normalize_thread_summary_text(raw_text: str) -> str:
@@ -632,12 +584,7 @@ async def _generate_summary(
 ) -> str | _ThreadEnrichment | None:
     """Generate a summary and optional one-shot tags via one LLM run."""
     resolved_model_name = model_name or config.defaults.thread_summary_model or "default"
-    model = model_loading.get_model_instance(config, runtime_paths, resolved_model_name)
-    _configure_summary_model_temperature(
-        model,
-        summary_temperature=config.defaults.thread_summary_temperature,
-        model_name=resolved_model_name,
-    )
+    provider = _summary_provider(config, runtime_paths, resolved_model_name)
 
     if trusted_sender_ids is None:
         trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
@@ -656,20 +603,14 @@ async def _generate_summary(
             else "(tags are not requested for this summary refresh)"
         ),
     )
-    session_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
-    agent = Agent(
-        name="ThreadSummarizer",
+    response = await complete_prompt(
+        provider,
+        prompt,
         instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
-        model=model,
-        output_schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
-        telemetry=False,
+        schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
+        overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )
-    response = await cached_agent_run(
-        agent=agent,
-        run_input=prompt,
-        session_id=f"thread_summary_{session_hash}",
-    )
-    await record_system_usage(response, runtime_paths=runtime_paths, kind="thread_summary")
+    await record_system_usage(response.record, runtime_paths=runtime_paths, kind="thread_summary")
     content = response.content
     if tag_vocabulary is not None:
         if not isinstance(content, _ThreadEnrichment):
@@ -689,11 +630,7 @@ async def _generate_summary(
             summary=content.summary,
             tags=normalized_tags[:_MAX_INITIAL_TAGS],
         )
-    if isinstance(content, _ThreadEnrichment):
-        return None
-    if isinstance(content, _ThreadSummary):
-        return content.summary
-    return None
+    return content.summary if isinstance(content, _ThreadSummary) else None
 
 
 async def _thread_is_resolved(
