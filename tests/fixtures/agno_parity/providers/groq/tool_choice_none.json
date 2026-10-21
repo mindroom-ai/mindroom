@@ -1,0 +1,219 @@
+{
+  "family": "groq",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "What should I pack for Paris tomorrow?",
+        "role": "user"
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "id": "openai/gpt-oss-120b",
+      "provider": "groq"
+    },
+    "portable_replay": null,
+    "provider_tools_disabled": true,
+    "response_format": null,
+    "stream": false,
+    "tool_choice": "none",
+    "tools": [
+      {
+        "description": "Return the forecast for one city.",
+        "external_execution": false,
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "description": "City name.",
+              "type": "string"
+            },
+            "unit": {
+              "description": "Temperature unit.",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      },
+      {
+        "description": "Search the user's travel notes.",
+        "external_execution": false,
+        "name": "search_notes",
+        "parameters": {
+          "properties": {
+            "limit": {
+              "description": "Maximum results.",
+              "type": "integer"
+            },
+            "query": {
+              "description": "Search text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "requires_confirmation": false
+      }
+    ]
+  },
+  "parsed": {
+    "message": {
+      "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+      "from_history": false,
+      "provider_data": {
+        "mindroom_model": {
+          "id": "openai/gpt-oss-120b",
+          "provider": "Groq"
+        }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "completion_time": 0.021,
+        "prompt_time": 0.004,
+        "queue_time": 0.011,
+        "total_time": 0.025
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": null
+  },
+  "request": {
+    "body": {
+      "messages": [
+        {
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "role": "system"
+        },
+        {
+          "content": "What should I pack for Paris tomorrow?",
+          "role": "user"
+        }
+      ],
+      "model": "openai/gpt-oss-120b",
+      "tool_choice": "none",
+      "tools": [
+        {
+          "function": {
+            "description": "Return the forecast for one city.",
+            "external_execution": false,
+            "name": "get_weather",
+            "parameters": {
+              "properties": {
+                "city": {
+                  "description": "City name.",
+                  "type": "string"
+                },
+                "unit": {
+                  "description": "Temperature unit.",
+                  "enum": [
+                    "celsius",
+                    "fahrenheit"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        },
+        {
+          "function": {
+            "description": "Search the user's travel notes.",
+            "external_execution": false,
+            "name": "search_notes",
+            "parameters": {
+              "properties": {
+                "limit": {
+                  "description": "Maximum results.",
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Search text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            "requires_confirmation": false
+          },
+          "type": "function"
+        }
+      ]
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://api.groq.com/openai/v1/chat/completions"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "application/json"
+    },
+    "json": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "{\"action\": \"respond\", \"reason\": \"The user asked a direct question.\"}",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 1792540800,
+      "id": "chatcmpl-parity",
+      "model": "openai/gpt-oss-120b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_parity",
+      "usage": {
+        "completion_time": 0.021,
+        "completion_tokens": 12,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "prompt_time": 0.004,
+        "prompt_tokens": 42,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "queue_time": 0.011,
+        "total_time": 0.025,
+        "total_tokens": 54
+      }
+    },
+    "status": 200
+  },
+  "scenario": "tool_choice_none"
+}
