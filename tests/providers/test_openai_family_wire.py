@@ -24,6 +24,7 @@ from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.openai_family_support import golden_provider
 
@@ -362,6 +363,72 @@ async def test_responses_stream_without_completion_fails(
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.code, info.value.retryable) == ("incomplete_stream", retryable)
+
+
+_SEARCH_CALL = {"id": "ws_1", "type": "web_search_call", "status": "in_progress", "action": {"type": "search"}}
+_FUNCTION_CALL = {
+    "id": "fc_1",
+    "type": "function_call",
+    "call_id": "call_1",
+    "name": "get_weather",
+    "arguments": "",
+    "status": "in_progress",
+}
+_SERVER_ERROR = {"type": "error", "sequence_number": 8, "code": "server_error", "message": "boom", "param": None}
+
+
+def _item_event(kind: str, item: dict[str, Any]) -> dict[str, Any]:
+    return {"type": f"response.output_item.{kind}", "sequence_number": 1, "output_index": 0, "item": item}
+
+
+def _argument_delta(delta: str) -> dict[str, Any]:
+    return {
+        "type": "response.function_call_arguments.delta",
+        "sequence_number": 2,
+        "item_id": "fc_1",
+        "output_index": 0,
+        "delta": delta,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "drop_connection", "retryable", "requests"),
+    [
+        ([_text_events("")[0], _SERVER_ERROR], False, True, 5),
+        (
+            [
+                _text_events("")[0],
+                _item_event("added", _SEARCH_CALL),
+                _item_event("done", {**_SEARCH_CALL, "status": "completed"}),
+                _SERVER_ERROR,
+            ],
+            False,
+            False,
+            1,
+        ),
+        ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, False, 1),
+    ],
+    ids=["before-output", "hosted-tool-then-error-event", "function-call-then-dropped-connection"],
+)
+async def test_responses_failure_after_exposed_output_is_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[dict[str, Any]],
+    drop_connection: bool,
+    retryable: bool,
+    requests: int,
+) -> None:
+    """A retry after a hosted tool or function call started could run the tool again, so the failure stands."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    reply = {**_responses_reply(*events), "drop_connection": drop_connection}
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
+
+    with pytest.raises(ProviderError) as info:
+        await _turn(built, ModelRequest(messages=[_user()], native_tools=[{"type": "web_search"}]))
+
+    assert (info.value.retryable, len(built.requests)) == (retryable, requests)
+    assert (info.value.code == "incomplete_stream") is not retryable
 
 
 @pytest.mark.asyncio

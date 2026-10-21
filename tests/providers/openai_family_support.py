@@ -8,6 +8,7 @@ return the recorded request and the parsed turn in the golden's normalized form.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
@@ -27,6 +28,8 @@ from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.pipeline.compose import wrap_provider
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.llm.provider import ModelProvider
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
@@ -116,20 +119,47 @@ def write_cli_logins(root: Path) -> dict[str, str]:
     return {_CODEX_HOME: str(codex_home), _KIMI_HOME: str(kimi_home)}
 
 
+class _PacedEvents(httpx.AsyncByteStream):
+    """SSE events sent one at a time after a pause each, optionally ending in a dropped connection."""
+
+    def __init__(self, events: list[bytes], *, pause_seconds: float, drop: bool) -> None:
+        self._events = events
+        self._pause_seconds = pause_seconds
+        self._drop = drop
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for event in self._events:
+            await asyncio.sleep(self._pause_seconds)
+            yield event
+        if self._drop:
+            msg = "connection dropped"
+            raise httpx.ReadError(msg)
+
+
+def _sse_event(event: dict[str, Any]) -> bytes:
+    data = event["data"]
+    name = f"event: {event['event']}\n" if "event" in event else ""
+    return f"{name}data: {data if isinstance(data, str) else json.dumps(data)}\n\n".encode()
+
+
 def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
-    """Build the HTTP response a golden's ``response_raw`` describes."""
-    if "sse" in response_raw:
-        lines: list[str] = []
-        for event in response_raw["sse"]:
-            if "event" in event:
-                lines.append(f"event: {event['event']}")
-            data = event["data"]
-            lines.append(f"data: {data if isinstance(data, str) else json.dumps(data)}")
-            lines.append("")
-        content = ("\n".join(lines) + "\n").encode()
-    else:
-        content = json.dumps(response_raw["json"]).encode()
-    return httpx.Response(response_raw["status"], headers=response_raw["headers"], content=content)
+    """Build the HTTP response a golden's ``response_raw`` describes.
+
+    Tests may add ``pause_seconds`` to send each SSE event after a pause, and ``drop_connection`` to end the
+    stream with a transport error instead of EOF.
+    """
+    status, headers = response_raw["status"], response_raw["headers"]
+    if "sse" not in response_raw:
+        return httpx.Response(status, headers=headers, content=json.dumps(response_raw["json"]).encode())
+    events = [_sse_event(event) for event in response_raw["sse"]]
+    if "pause_seconds" in response_raw or "drop_connection" in response_raw:
+        stream = _PacedEvents(
+            events,
+            pause_seconds=response_raw.get("pause_seconds", 0.0),
+            drop=response_raw.get("drop_connection", False),
+        )
+        return httpx.Response(status, headers=headers, stream=stream)
+    return httpx.Response(status, headers=headers, content=b"".join(events))
 
 
 def normalized_request(request: httpx.Request) -> dict[str, Any]:

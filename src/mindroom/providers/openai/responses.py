@@ -93,7 +93,7 @@ class ResponsesAdapter:
                 for delta in accumulator.add(event):
                     yield delta
         except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
+            raise accumulator.attempt_error(provider_error(error, provider=self.identity.provider_name)) from error
         finally:
             await sdk_stream.close()
         if not accumulator.completed:

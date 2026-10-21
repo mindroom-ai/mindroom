@@ -58,6 +58,7 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
+_INCOMPLETE = "incomplete_stream"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -497,7 +498,7 @@ class ResponsesStream:
         if event.type in {"response.completed", "response.incomplete", "response.failed"} and current.response.usage:
             self.terminal_usage = _usage(current.response.usage)
         if event.type in {"error", "response.failed"}:
-            raise self._failure(event)
+            raise self.attempt_error(self._failure(event))
         self.exposed = self.exposed or not (_exposes_no_output(event) and not self._tool_use)
         events: list[StreamEvent] = []
         if event.type == "response.output_text.delta":
@@ -549,13 +550,24 @@ class ResponsesStream:
         )
         self.parts.status = response.status
 
+    def attempt_error(self, error: ProviderError) -> ProviderError:
+        """Return the error that ends this attempt: ``error`` itself until the attempt exposed output.
+
+        Afterwards a retry could duplicate output or rerun hosted tools, so the failure becomes final; its code
+        also tells the media fallback that inline media did not cause it.
+        """
+        if not self.exposed:
+            return error
+        message = f"OpenAI Responses stream failed after yielding output: {error}"
+        return ProviderError(message, provider=self.wire.provider_name, status_code=error.status_code, code=_INCOMPLETE)
+
     def incomplete_error(self) -> ProviderError:
         """Return the error for a stream that ended without ``response.completed``."""
         message = "OpenAI Responses stream ended without response.completed"
-        if self.exposed:
-            return ProviderError(message, provider=self.wire.provider_name, code="incomplete_stream")
-        # Nothing reached the caller, so the early end is retried like a dropped connection.
-        return ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code="incomplete_stream")
+        # Before any exposed output, the early end is retried like a dropped connection.
+        return self.attempt_error(
+            ProviderUnavailable(message, provider=self.wire.provider_name, status_code=200, code=_INCOMPLETE),
+        )
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after ``response.completed``."""
