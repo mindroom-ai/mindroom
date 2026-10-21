@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One check reads Matrix state once for all entities, and still knows persisted and generated accounts.
+    """One check reads Matrix state once for all entities, and still knows persisted accounts and generated IDs.
 
     API requests run this check hundreds of times, so a state read per entity made the Connections page slow.
     """
@@ -29,6 +29,7 @@ def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatc
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_coder", "renamed_coder", "pw", domain="localhost")
+    state.add_account("agent_helper", "helper", "pw", domain="old.example")
     state.save(runtime_paths=runtime_paths)
     reads = 0
     cache_key = matrix_state._matrix_state_cache_key
@@ -41,6 +42,8 @@ def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatc
     monkeypatch.setattr(matrix_state, "_matrix_state_cache_key", counting_cache_key)
 
     assert is_managed_entity_id("@renamed_coder:localhost", config, runtime_paths)
-    assert is_managed_entity_id("@mindroom_writer:localhost", config, runtime_paths)
+    assert is_managed_entity_id("@helper:old.example", config, runtime_paths)
+    # Coder's saved account was renamed, so only the generated ID can match.
+    assert is_managed_entity_id("@mindroom_coder:localhost", config, runtime_paths)
     assert not is_managed_entity_id("@alice:localhost", config, runtime_paths)
-    assert reads == 3
+    assert reads == 4
