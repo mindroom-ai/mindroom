@@ -354,14 +354,14 @@ describe("egress broker panel", () => {
     ).toBeTruthy();
   });
 
-  it("says that per-user keys need trusted upstream auth where their page is not served", async () => {
+  it("says nobody can sign in to the Agent Keys page while Chat sign-in and trusted upstream JWT are both off", async () => {
     keyAgents = { ...keyAgents, personal_page_served: false };
     render(<EgressBroker />);
     await screen.findByText("GitHub");
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which needs trusted upstream auth and is not served here. Give such agents a shared worker scope to set their keys here.",
+      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
     );
     expect(within(note).queryByRole("link")).toBeNull();
   });

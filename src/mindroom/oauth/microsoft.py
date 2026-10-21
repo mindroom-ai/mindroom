@@ -19,6 +19,7 @@ __all__ = [
     "GRAPH_ME_URL",
     "microsoft_files_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_onenote_oauth_provider",
     "microsoft_teams_oauth_provider",
     "microsoft_todo_oauth_provider",
     "microsoft_token_url",
@@ -179,4 +180,14 @@ def microsoft_teams_oauth_provider() -> OAuthProvider:
             "ChatMessage.Send",
         ),
         status_capabilities=("read and send Teams channel and chat messages",),
+    )
+
+
+def microsoft_onenote_oauth_provider() -> OAuthProvider:
+    """Return the OneNote notebooks provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_onenote",
+        display_name="Microsoft OneNote",
+        scopes=("Notes.ReadWrite.All",),
+        status_capabilities=("read, create, and append to OneNote pages",),
     )

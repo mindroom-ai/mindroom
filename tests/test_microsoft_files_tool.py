@@ -35,6 +35,8 @@ PARENT = "01PARENT"
 ITEM_PATH = f"/drives/{DRIVE}/items/{ITEM}"
 ETAG = '"{0A1B},2"'
 SHARE_LINK = "https://contoso-my.sharepoint.com/:w:/r/personal/alex/Documents/report.docx?d=w1&web=1"
+DOCUMENTS = "https://contoso-my.sharepoint.com/personal/alex/Documents"
+WEB_URL = f"{DOCUMENTS}/report.docx"
 
 
 def _item(*, name: str = "report.docx", size: int = 11, folder: bool = False) -> dict[str, object]:
@@ -43,7 +45,7 @@ def _item(*, name: str = "report.docx", size: int = 11, folder: bool = False) ->
         "name": name,
         "size": size,
         "eTag": ETAG,
-        "webUrl": "https://contoso-my.sharepoint.com/personal/alex/Documents/report.docx",
+        "webUrl": f"{DOCUMENTS}/{name}",
         "lastModifiedDateTime": "2026-10-20T10:00:00Z",
         "lastModifiedBy": {"user": {"displayName": "Alex Example"}},
         "parentReference": {"driveId": DRIVE, "id": PARENT},
@@ -151,7 +153,7 @@ def test_descriptions_keep_edits_safe_and_writes_legible(tmp_path: Path, monkeyp
     assert "save any edited version under a new name outside microsoft-files-downloads" in download
     assert "pass this result's etag to microsoft_files_replace_file" in download
     for name in ("microsoft_files_replace_file", "microsoft_files_upload_file", "microsoft_files_excel_update_range"):
-        assert "Before calling, tell the requester" in _description(tools, name)
+        assert "fails with target_mismatch unless expected_web_url is the" in _description(tools, name)
 
 
 def test_item_paths_with_or_without_the_graph_prefix_need_no_lookup(
@@ -215,7 +217,7 @@ def test_get_file_summarizes_the_item(tmp_path: Path, monkeypatch: pytest.Monkey
         "name": "report.docx",
         "size": 11,
         "etag": ETAG,
-        "web_url": "https://contoso-my.sharepoint.com/personal/alex/Documents/report.docx",
+        "web_url": WEB_URL,
         "last_modified": "2026-10-20T10:00:00Z",
         "last_modified_by": "Alex Example",
         "parent": f"/drives/{DRIVE}/items/{PARENT}",
@@ -398,7 +400,7 @@ def test_replace_sends_the_etag_and_streams_the_file(tmp_path: Path, monkeypatch
     _workspace_file(tmp_path, "edited/report.docx", b"new content")
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.microsoft_files_replace_file(ITEM_PATH, "edited/report.docx", expected_etag=ETAG))
+    result = _payload(tools.microsoft_files_replace_file(ITEM_PATH, "edited/report.docx", ETAG, WEB_URL))
 
     put = graph.requests[-1]
     assert (put.method, put.url.path) == ("PUT", f"/v1.0{ITEM_PATH}/content")
@@ -413,7 +415,10 @@ def test_replace_requires_the_etag_the_edit_started_from(tmp_path: Path, monkeyp
 
     parameter = inspect.signature(tools.microsoft_files_replace_file).parameters["expected_etag"]
     assert parameter.default is inspect.Parameter.empty
-    assert _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", " "))["code"] == "invalid_argument"
+    assert (
+        _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", " ", WEB_URL))["code"]
+        == "invalid_argument"
+    )
     assert graph.requests == []
 
 
@@ -429,14 +434,17 @@ def test_replace_failures_keep_their_codes(
     files.write = httpx.Response(status, json={"error": {"code": "x"}})
     tools, _graph = _tools(tmp_path, monkeypatch, files)
 
-    assert _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", expected_etag=ETAG))["code"] == code
+    assert _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", ETAG, WEB_URL))["code"] == code
 
 
 def test_replace_refuses_a_folder_before_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _workspace_file(tmp_path, "report.docx", b"new content")
     tools, graph = _tools(tmp_path, monkeypatch, _Graph(item=_item(name="Reports", folder=True)))
 
-    assert _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", ETAG))["code"] == "is_folder"
+    assert (
+        _payload(tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", ETAG, f"{DOCUMENTS}/Reports"))["code"]
+        == "is_folder"
+    )
     assert [request.method for request in graph.requests] == ["GET"]
 
 
@@ -445,22 +453,25 @@ def test_replace_refuses_a_local_path_outside_the_workspace(tmp_path: Path, monk
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     assert (
-        _payload(tools.microsoft_files_replace_file(ITEM_PATH, "../secret.txt", ETAG))["code"] == "invalid_local_path"
+        _payload(tools.microsoft_files_replace_file(ITEM_PATH, "../secret.txt", ETAG, WEB_URL))["code"]
+        == "invalid_local_path"
     )
     assert graph.requests == []
 
 
 def test_upload_never_overwrites(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _workspace_file(tmp_path, "report.docx", b"new content")
-    files = _Graph()
+    files = _Graph(item=_item(name="Reports", folder=True))
     files.write = httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}})
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _payload(tools.microsoft_files_upload_file("report.docx", folder=f"/drives/{DRIVE}/items/{PARENT}"))
+    result = _payload(
+        tools.microsoft_files_upload_file("report.docx", ITEM_PATH, expected_web_url=f"{DOCUMENTS}/Reports"),
+    )
 
     assert result["code"] == "name_conflict"
     put = graph.requests[-1]
-    assert put.url.path == f"/v1.0/drives/{DRIVE}/items/{PARENT}:/report.docx:/content"
+    assert put.url.path == f"/v1.0{ITEM_PATH}:/report.docx:/content"
     assert put.url.params["@microsoft.graph.conflictBehavior"] == "fail"
 
 
@@ -483,6 +494,33 @@ def test_upload_refuses_names_onedrive_rejects(tmp_path: Path, monkeypatch: pyte
 
     assert _payload(tools.microsoft_files_upload_file("report.docx", name=name))["code"] == "invalid_name"
     assert graph.requests == []
+
+
+_BOUND_WRITES: dict[str, Callable[[MicrosoftFilesTools, str], str]] = {
+    "replace": lambda tools, url: tools.microsoft_files_replace_file(ITEM_PATH, "report.docx", ETAG, url),
+    "upload": lambda tools, url: tools.microsoft_files_upload_file("new.docx", ITEM_PATH, expected_web_url=url),
+    "excel": lambda tools, url: tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1", [["x"]], url),
+}
+
+
+@pytest.mark.parametrize("write", list(_BOUND_WRITES))
+def test_writes_run_only_on_the_target_whose_web_url_was_passed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write: str,
+) -> None:
+    _workspace_file(tmp_path, "report.docx", b"new content")
+    _workspace_file(tmp_path, "new.docx", b"new content")
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    call = _BOUND_WRITES[write]
+
+    assert _payload(call(tools, " "))["code"] == "invalid_argument"
+    assert graph.requests == []
+    refused = _payload(call(tools, f"{DOCUMENTS}/mine.docx"))
+    assert (refused["code"], refused["web_url"]) == ("target_mismatch", WEB_URL)
+    assert [request.method for request in graph.requests] == ["GET"]
+    assert _payload(call(tools, WEB_URL))["status"] == "ok"
+    assert graph.requests[-1].method in {"PUT", "PATCH"}
 
 
 def test_excel_list_worksheets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,7 +588,7 @@ def test_excel_update_range_patches_the_values(tmp_path: Path, monkeypatch: pyte
     files.write = httpx.Response(200, json={"address": "Budget!A1:B1", "values": [["x", 2]]})
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:B1", [["x", 2]]))
+    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:B1", [["x", 2]], WEB_URL))
 
     patch = graph.requests[-1]
     assert patch.method == "PATCH"
@@ -578,7 +616,7 @@ def test_excel_update_refuses_malformed_input(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values))  # type: ignore[arg-type]
+    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values, WEB_URL))  # type: ignore[arg-type]
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -614,7 +652,9 @@ def test_excel_update_accepts_values_matching_the_address(tmp_path: Path, monkey
     files.write = httpx.Response(200, json={"address": "Budget!B2:C3", "values": [[1, 2], [3, 4]]})
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "$B$2:C3", [[1, 2], [3, 4]]))
+    result = _payload(
+        tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "$B$2:C3", [[1, 2], [3, 4]], WEB_URL),
+    )
 
     assert result["status"] == "ok"
     assert json.loads(graph.requests[-1].content) == {"values": [[1, 2], [3, 4]]}
@@ -623,7 +663,9 @@ def test_excel_update_accepts_values_matching_the_address(tmp_path: Path, monkey
 def test_excel_update_refuses_a_range_over_the_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:CV101", [[0] * 100] * 101))
+    result = _payload(
+        tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", "A1:CV101", [[0] * 100] * 101, WEB_URL),
+    )
 
     assert result["code"] == "too_large"
     assert graph.requests == []

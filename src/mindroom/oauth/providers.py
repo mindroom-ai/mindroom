@@ -32,6 +32,7 @@ from mindroom.credentials.policy import (
     is_oauth_token_service,
 )
 from mindroom.logging_config import get_logger
+from mindroom.origins import local_api_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
@@ -354,10 +355,6 @@ def _runtime_env_value(runtime_paths: RuntimePaths, names: tuple[str, ...]) -> s
         if value:
             return value.strip()
     return None
-
-
-def _runtime_port(runtime_paths: RuntimePaths) -> str:
-    return runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
@@ -813,7 +810,7 @@ class OAuthProvider:
         )
         if configured_origin:
             return f"{configured_origin.rstrip('/')}{self.redirect_path}"
-        return f"http://localhost:{_runtime_port(runtime_paths)}{self.redirect_path}"
+        return f"{local_api_origin(runtime_paths)}{self.redirect_path}"
 
     def issue_pkce_code_verifier(self) -> str | None:
         """Return a new PKCE verifier when this provider requires PKCE."""
