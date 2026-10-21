@@ -19,7 +19,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.teams import TeamMode
+from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
@@ -33,6 +33,7 @@ from tests.conftest import (
     patch_response_runner_module,
     runtime_paths_for,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
@@ -275,25 +276,22 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-@patch("mindroom.teams.resolve_agent_knowledge_access")
-@patch("mindroom.teams.create_agent")
-@patch("mindroom.teams.Team.arun")
+@patch("mindroom.teams.members.resolve_agent_knowledge_access")
 async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
-    mock_team_arun: AsyncMock,
-    mock_create_agent: MagicMock,
     mock_resolve_agent_knowledge_access: MagicMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")}
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-    fake_member = MagicMock()
-    fake_member.name = "MockAgent"
-    fake_member.instructions = []
-    mock_create_agent.return_value = fake_member
+    # The members build on scripted providers that are never asked; the team's leader answers on its own.
+    team_leader = ScriptedModel([answer("Team response")])
+    monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr("mindroom.teams.envelope.build_model_provider", lambda *_args, **_kwargs: team_leader)
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.get_domain(runtime_paths_for(mock_config))
@@ -307,7 +305,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
-        patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.teams.formation._select_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
@@ -337,9 +335,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config  # This is what teams.py uses
+        mock_orchestrator.config = mock_config
+        mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
         bot.orchestrator = mock_orchestrator
-        mock_team_arun.return_value = "Team response"
 
         await bot.start()
 
@@ -407,7 +405,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
-        mock_team_arun.reset_mock()
 
         # Create a new message event with a different ID for Test 2
         message_event_2 = nio.RoomMessageText(
@@ -490,7 +487,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder-mention"}, test_room_id),
             nio.RoomSendResponse.from_dict({"event_id": "$edit-mention"}, test_room_id),
         ]
-        mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(

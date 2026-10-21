@@ -11,29 +11,25 @@ import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
 from contextvars import Context
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests.conftest import seed_session
-from tests.history_helpers import FakeModel
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from mindroom.ai import ResponseTurnContext
 
 import pytest
-from agno.agent import Agent as AgnoAgent
 from agno.metrics import RunMetrics
 from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
-from agno.run.team import RunContentEvent as TeamContentEvent
-from agno.run.team import TeamRunOutput
-from agno.team import Team as AgnoTeam
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
@@ -41,6 +37,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
@@ -59,16 +56,21 @@ from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
+from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
-from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
+from mindroom.history.types import PreparedHistoryState, ResolvedReplayPlan
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.llm.events import ContentDelta, RunFinished
+from mindroom.llm.messages import Message as OwnedMessage
+from mindroom.llm.provider import ModelIdentity, ModelRequest
+from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.llm.runs import RunStatus as OwnedRunStatus
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
@@ -77,32 +79,21 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.providers.media_fallback import install_provider_media_fallback
 from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.routing import ResponderSelection
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode
+from mindroom.teams.envelope import BuiltTeam
+from mindroom.teams.members import ResolvedExactTeamMembers
+from mindroom.teams.runtime import MemberEvent
+from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
     get_tool_execution_identity,
 )
+from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 
-_TEST_MODEL = "openai:gpt-6-astra"
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-
-
-def _make_test_agent(name: str) -> AgnoAgent:
-    agent_id = name.removesuffix("Agent").replace(" ", "_").lower() or name.lower()
-    return AgnoAgent(name=name, id=agent_id, model=_TEST_MODEL)
-
-
-def _make_test_team(
-    *,
-    name: str = "Test Team",
-    team_id: str = "test-team",
-) -> AgnoTeam:
-    return AgnoTeam(name=name, id=team_id, model=_TEST_MODEL, members=[], tools=[])
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -190,29 +181,25 @@ def _prepared_team_execution_context(
     run_metadata: dict[str, object] | None = None,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
-    messages: list[Message] | None = None,
+    messages: list[OwnedMessage] | None = None,
     prepared_context_tokens: int | None = None,
 ) -> SimpleNamespace:
-    prepared_context = _PreparedExecutionContext(
-        messages=tuple(messages or [Message(role="user", content=final_prompt)]),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(
-            replay_plan=replay_plan,
-            replays_persisted_history=replays_persisted_history,
-            prepared_context_tokens=prepared_context_tokens,
-        ),
+    """Return a prepared team turn as ``prepare_materialized_team_execution`` builds one: its turn and run metadata."""
+    turn_messages = list(messages or [OwnedMessage(role="user", content=final_prompt)])
+    turn = TurnMessages(prompt=turn_messages[-1], context=tuple(turn_messages[:-1]))
+    prepared_history = PreparedHistoryState(
+        replay_plan=replay_plan,
+        replays_persisted_history=replays_persisted_history,
+        prepared_context_tokens=prepared_context_tokens,
     )
     return SimpleNamespace(
-        messages=prepared_context.messages,
-        final_prompt=prepared_context.final_prompt,
-        run_metadata=run_metadata or build_prepared_history_metadata_content(prepared_context.prepared_history),
-        replay_plan=replay_plan,
+        turn=turn,
+        history=(),
+        summary=None,
+        run_metadata=run_metadata or build_prepared_history_metadata_content(prepared_history),
         unseen_event_ids=[],
-        replays_persisted_history=replays_persisted_history,
-        compaction_decision=CompactionDecision(mode="none", reason="unclassified"),
-        compaction_reply_outcome="none",
-        prepared_context_tokens=prepared_context_tokens,
-        prepared_history=prepared_context.prepared_history,
+        prepared_history=prepared_history,
+        runtime_model_name="default",
     )
 
 
@@ -3144,31 +3131,119 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
         yield client
 
 
+_TEAM_SESSION_PROMPT = openai_compat._PreparedOpenAITeamPrompt("Build it", None)
+
+
+@dataclass(frozen=True)
+class _TeamRunCall:
+    """One ``run_team`` call the bridge made: the team, its request, and the run's context."""
+
+    spec: TeamSpec
+    messages: list[OwnedMessage]
+    ctx: RunContext
+    request_template: ModelRequest
+
+
+@contextmanager
+def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
+    """Run the real team loop while recording what the bridge hands it."""
+    recorded: list[_TeamRunCall] = []
+    real_run_team = openai_compat.run_team
+
+    def recording_run_team(
+        spec: TeamSpec,
+        messages: Sequence[OwnedMessage],
+        *,
+        ctx: RunContext,
+        request_template: ModelRequest,
+        **kwargs: object,
+    ) -> AsyncIterator[object]:
+        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template))
+        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, **kwargs)  # type: ignore[arg-type]
+
+    with patch("mindroom.api.openai_compat.run_team", new=recording_run_team):
+        yield recorded
+
+
+def _scripted_team(
+    *leader_turns: Sequence[ScriptStep],
+    members: Sequence[tuple[str, str, ScriptedModel]] = (),
+    mode: TeamMode = TeamMode.COORDINATE,
+    leader_identity: ModelIdentity = SYNTHETIC,
+) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
+    """Return what ``_build_team`` builds: a leader on a scripted provider and ``(id, name, model)`` members."""
+    leader = ScriptedModel([list(turn) for turn in leader_turns], identity=leader_identity)
+    spec = TeamSpec(
+        id="test-team",
+        name="Test Team",
+        mode=mode,
+        model=leader,
+        system_message=OwnedMessage(role="system", content="You lead the team."),
+        members=tuple(
+            TeamMember(
+                spec=AgentSpec(
+                    id=member_id,
+                    name=name,
+                    model=model,
+                    system_message=OwnedMessage(role="system", content=f"You are {name}."),
+                    toolkits=(),
+                ),
+                role=f"{name} role.",
+            )
+            for member_id, name, model in members
+        ),
+    )
+    resolved = ResolvedExactTeamMembers(
+        requested_agent_names=[member_id for member_id, _name, _model in members],
+        builds=[],
+        display_names=[name for _member_id, name, _model in members],
+        materialized_agent_names={member_id for member_id, _name, _model in members},
+        failed_agent_names=[],
+    )
+    return resolved, BuiltTeam(spec=spec, leader_middleware=()), mode
+
+
+def _finished(status: OwnedRunStatus = OwnedRunStatus.completed, content: str | None = None) -> RunFinished:
+    """Return the terminal event of a team run that ended with ``status``."""
+    return RunFinished(TeamRunRecord(run_id="team-run", team_id="test-team", status=status, content=content))
+
+
+def _team_events(*events: object) -> Callable[..., AsyncIterator[object]]:
+    """Return a ``run_team`` stand-in that yields ``events`` for whatever team it is asked to run."""
+
+    async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        for event in events:
+            yield event
+
+    return run
+
+
+def _sse_contents(response_text: str) -> list[str]:
+    """Return the content deltas of an SSE body, in order."""
+    contents: list[str] = []
+    for line in response_text.strip().split("\n\n"):
+        if line.startswith("data: ") and line != "data: [DONE]":
+            chunk = json.loads(line.removeprefix("data: "))
+            delta = chunk["choices"][0]["delta"]
+            if "content" in delta:
+                contents.append(delta["content"])
+    return contents
+
+
 def _post_team_completion_capturing_run_user(
     client: TestClient,
     *,
     stream: bool,
     headers: dict[str, str] | None = None,
-) -> MagicMock:
-    """Post one team completion carrying a spoofed body ``user`` and return the captured ``team.arun``."""
-    mock_team = _make_test_team()
-
-    async def stream_events() -> AsyncIterator[object]:
-        yield TeamContentEvent(content="Team answer")
-
-    async def run() -> TeamRunOutput:
-        return TeamRunOutput(content="Team answer")
-
-    mock_team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
+) -> RunContext:
+    """Post one team completion carrying a spoofed body ``user`` and return the run context the team ran under."""
     with (
-        patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
-        ),
+        patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer("Team answer", chunk=99))),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
         ),
+        _recorded_team_runs() as runs,
     ):
         response = client.post(
             "/v1/chat/completions",
@@ -3182,20 +3257,21 @@ def _post_team_completion_capturing_run_user(
         )
     assert response.status_code == 200
     assert "Team answer" in response.text
-    return mock_team.arun
+    [run] = runs
+    return run.ctx
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_team_run_ignores_request_body_user_without_requester(team_app_client: TestClient, stream: bool) -> None:
-    """The request body ``user`` must not choose the Agno user scope of a team run."""
-    arun = _post_team_completion_capturing_run_user(team_app_client, stream=stream)
+    """The request body ``user`` must not choose the user scope of a team run."""
+    ctx = _post_team_completion_capturing_run_user(team_app_client, stream=stream)
 
-    assert arun.call_args.kwargs["user_id"] is None
+    assert ctx.user_id is None
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config: Config, stream: bool) -> None:
-    """A mapped key's canonical requester, never the body ``user``, owns the team run's Agno user scope."""
+    """A mapped key's canonical requester, never the body ``user``, owns the team run's user scope."""
     team_config.teams["super_team"].access = ResponderAccessConfig(users=["@alice:localhost"])
     runtime_paths = _runtime_paths(
         {
@@ -3211,39 +3287,34 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
         patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,
     ):
-        arun = _post_team_completion_capturing_run_user(
+        ctx = _post_team_completion_capturing_run_user(
             client,
             stream=stream,
             headers={"Authorization": "Bearer alice-key"},
         )
 
-    assert arun.call_args.kwargs["user_id"] == "@alice:localhost"
+    assert ctx.user_id == "@alice:localhost"
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_team_run_records_helper_usage_in_its_conversation(team_app_client: TestClient, stream: bool) -> None:
     """Helper work during an API team run, such as a member's Claude Code session, belongs to the team conversation."""
     owners: list[HelperUsageOwner | None] = []
-    mock_team = _make_test_team()
+    session_ids: list[str | None] = []
 
-    async def stream_events() -> AsyncIterator[object]:
+    async def run(*_args: object, ctx: RunContext, **_kwargs: object) -> AsyncIterator[object]:
         owners.append(get_helper_usage_owner())
-        yield TeamContentEvent(content="Team answer")
+        session_ids.append(ctx.session_id)
+        yield ContentDelta("Team answer")
+        yield _finished(content="Team answer")
 
-    async def run() -> TeamRunOutput:
-        owners.append(get_helper_usage_owner())
-        return TeamRunOutput(content="Team answer")
-
-    mock_team.arun = MagicMock(side_effect=lambda *_args, **kwargs: stream_events() if kwargs.get("stream") else run())
     with (
-        patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
-        ),
+        patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
         ),
+        patch("mindroom.api.openai_compat.run_team", new=run),
     ):
         response = team_app_client.post(
             "/v1/chat/completions",
@@ -3254,7 +3325,7 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
     assert response.status_code == 200
     assert len(owners) == 1
     assert owners[0] is not None
-    assert owners[0].session_id == mock_team.arun.call_args.kwargs["session_id"]
+    assert owners[0].session_id == session_ids[0]
 
 
 class TestTeamCompletion:
@@ -3278,28 +3349,26 @@ class TestTeamCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-        prepared_messages = (
-            Message(role="assistant", content="Previous team reply"),
-            Message(role="user", content="Build it"),
-        )
+        _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         run_metadata = {"correlation_id": "metadata-correlation"}
 
         with patch(
             "mindroom.api.openai_compat.prepare_materialized_team_execution",
             new_callable=AsyncMock,
         ) as mock_prepare:
-            mock_prepare.return_value = SimpleNamespace(
-                messages=prepared_messages,
+            mock_prepare.return_value = _prepared_team_execution_context(
+                final_prompt="Build it",
                 run_metadata=run_metadata,
+                messages=[
+                    OwnedMessage(role="assistant", content="Previous team reply"),
+                    OwnedMessage(role="user", content="Build it"),
+                ],
             )
 
             prepared = await openai_compat._prepare_openai_team_prompt(
                 scope_context=None,
                 team_name="super_team",
-                agents=mock_agents,
-                team=mock_team,
+                built=built,
                 prompt="Build it",
                 config=team_config,
                 runtime_paths=runtime_paths,
@@ -3313,8 +3382,7 @@ class TestTeamCompletion:
         assert mock_prepare.await_count == 1
         preparation_kwargs = mock_prepare.await_args.kwargs
         preparation_ctx = mock_prepare.await_args.args[0]
-        assert preparation_kwargs["agents"] == mock_agents
-        assert preparation_kwargs["team"] is mock_team
+        assert preparation_kwargs["spec"] is built.spec
         assert preparation_kwargs["message"] == "Build it"
         assert preparation_kwargs["thread_history"] == []
         assert preparation_ctx.reply_to_event_id is None
@@ -3351,19 +3419,15 @@ class TestTeamCompletion:
 
     def test_team_non_streaming(self, team_app_client: TestClient) -> None:
         """Non-streaming team completion returns proper OpenAI response."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+        team = _scripted_team(answer("Team consensus result"))
 
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
+            _recorded_team_runs() as runs,
         ):
             mock_prepare.return_value = _prepared_team_execution_context(
                 final_prompt="Build a feature",
@@ -3384,46 +3448,32 @@ class TestTeamCompletion:
         assert data["choices"][0]["finish_reason"] == "stop"
         assert "Team consensus result" in data["choices"][0]["message"]["content"]
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["agents"] == mock_agents
-        assert mock_prepare.await_args.kwargs["team"] is mock_team
+        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "Build a feature"
-        metadata = mock_team.arun.call_args.kwargs["metadata"]
-        assert metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
+        [run] = runs
+        assert [message.content for message in run.messages] == ["Build a feature"]
+        assert run.request_template.stream is False
+        assert run.ctx.metadata is not None
+        assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(
-            return_value=TeamRunOutput(
-                content="Team consensus result",
-                model="claude-sonnet-5-5",
-                model_provider="Anthropic",
-                metrics=RunMetrics(
-                    input_tokens=100,
-                    output_tokens=20,
-                    total_tokens=120,
-                    cache_read_tokens=1000,
-                    cache_write_tokens=200,
-                ),
-                member_responses=[
-                    RunOutput(
-                        content="Member view",
-                        model="gpt-6-astra",
-                        model_provider="OpenAI",
-                        metrics=RunMetrics(input_tokens=50, output_tokens=10, total_tokens=60, cache_read_tokens=30),
-                    ),
-                ],
-            ),
+        member = ScriptedModel(
+            [answer("Member view", usage(50, 10, cache_read_tokens=30))],
+            identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI", provider_name="OpenAI"),
         )
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+        team = _scripted_team(
+            calls(
+                tool_call("delegate_task_to_member", "call-1", member_id="general", task="View"),
+                metrics=usage(0, 0),
+            ),
+            answer("Team consensus result", usage(100, 20, cache_read_tokens=1000, cache_write_tokens=200)),
+            members=[("general", "GeneralAgent", member)],
+            leader_identity=ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic"),
+        )
 
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
@@ -3438,10 +3488,31 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert response.json()["usage"] == {"prompt_tokens": 1350, "completion_tokens": 30, "total_tokens": 1380}
 
-    def test_team_non_streaming_unready_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
-        """Non-streaming team completions should prepend the degraded knowledge notice."""
-        from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
-
+    @pytest.mark.parametrize(
+        ("availability", "search_available", "notice"),
+        [
+            (
+                KnowledgeAvailability.INITIALIZING,
+                False,
+                "Knowledge base `docs` is initializing and unavailable for semantic search this turn.",
+            ),
+            (
+                KnowledgeAvailability.CONFIG_MISMATCH,
+                True,
+                "Knowledge base `docs` is refreshing against newer config and may be stale this turn.",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_team_completion_degraded_kb_emits_system_hint(
+        self,
+        team_app_client: TestClient,
+        availability: KnowledgeAvailability,
+        search_available: bool,
+        notice: str,
+        stream: bool,
+    ) -> None:
+        """Team completions should prepend the degraded knowledge notice to the prompt."""
         scheduled_base_ids: list[str] = []
 
         class _FakeRefreshScheduler:
@@ -3452,9 +3523,10 @@ class TestTeamCompletion:
                 _ = base_id
                 return False
 
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Team consensus result"))
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+        members, built, _mode = _scripted_team(
+            answer("Team consensus result", chunk=99),
+            members=[("general", "GeneralAgent", ScriptedModel([])), ("code", "CodeAgent", ScriptedModel([]))],
+        )
 
         def fake_materialize(
             requested_agent_names: list[str],
@@ -3469,22 +3541,17 @@ class TestTeamCompletion:
             assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
             assert refresh_scheduler is config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.INITIALIZING,
-                search_available=False,
+                availability=availability,
+                search_available=search_available,
             )
             refresh_scheduler.schedule_refresh("docs")
-            return ResolvedExactTeamMembers(
-                requested_agent_names=requested_agent_names,
-                agents=mock_agents,
-                display_names=["GeneralAgent", "CodeAgent"],
-                materialized_agent_names=set(requested_agent_names),
-                failed_agent_names=[],
-            )
+            assert requested_agent_names == members.requested_agent_names
+            return members
 
         config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
             patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
-            patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
+            patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
@@ -3496,27 +3563,23 @@ class TestTeamCompletion:
                 json={
                     "model": "team/super_team",
                     "messages": [{"role": "user", "content": "Build a feature"}],
+                    "stream": stream,
                 },
             )
 
         assert response.status_code == 200
-        assert (
-            "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
-            in mock_prepare.await_args.kwargs["message"]
-        )
+        assert notice in mock_prepare.await_args.kwargs["message"]
         assert scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
-    async def test_team_non_streaming_passes_non_matrix_metadata_to_arun(
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_team_completion_passes_non_matrix_metadata_to_the_run(
         self,
         team_config: Config,
         tmp_path: Path,
+        stream: bool,
     ) -> None:
-        """Non-Matrix team runs should pass minted run metadata through to team.arun()."""
-        from agno.run.team import TeamRunOutput  # noqa: PLC0415
-
-        from mindroom.teams import TeamMode  # noqa: PLC0415
-
+        """Non-Matrix team completions pass minted run metadata through to the team run."""
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
         execution_identity = build_tool_execution_identity(
             channel="openai_compat",
@@ -3528,10 +3591,9 @@ class TestTeamCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
         prepared_correlation_ids: list[str] = []
         request_log_contexts: list[dict[str, object]] = []
+        run_metadata: list[dict[str, Any] | None] = []
 
         async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
             correlation_id = ctx.correlation_id
@@ -3543,11 +3605,11 @@ class TestTeamCompletion:
                 run_metadata={"correlation_id": correlation_id},
             )
 
-        async def mock_arun(*_args: object, **kwargs: object) -> TeamRunOutput:
+        async def run(*_args: object, ctx: RunContext, **_kwargs: object) -> AsyncIterator[object]:
             request_log_contexts.append(current_llm_request_log_context())
-            metadata = kwargs["metadata"]
-            assert isinstance(metadata, dict)
-            correlation_id = metadata["correlation_id"]
+            run_metadata.append(ctx.metadata)
+            assert ctx.metadata is not None
+            correlation_id = ctx.metadata["correlation_id"]
             assert isinstance(correlation_id, str)
             record_tool_success(
                 tool_name="demo_tool",
@@ -3564,21 +3626,20 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
                 runtime_paths=runtime_paths,
             )
-            return TeamRunOutput(content="Team consensus result")
+            yield ContentDelta("Hello ")
+            yield ContentDelta("world!")
+            yield _finished(content="Hello world!")
 
-        mock_team.arun = AsyncMock(side_effect=mock_arun)
-
+        completion = openai_compat._stream_team_completion if stream else openai_compat._non_stream_team_completion
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
+            patch("mindroom.api.openai_compat.run_team", new=run),
         ):
-            response = await openai_compat._non_stream_team_completion(
+            response = await completion(
                 "super_team",
                 "team/super_team",
                 "Build it",
@@ -3589,9 +3650,18 @@ class TestTeamCompletion:
                 openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
                 execution_identity=execution_identity,
             )
+            if isinstance(response, StreamingResponse):
+                body_chunks = [
+                    chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+                    async for chunk in response.body_iterator
+                ]
+                body = "".join(body_chunks)
+                assert "Hello " in body
+                assert "world!" in body
+            else:
+                assert response.status_code == 200
 
-        assert response.status_code == 200
-        metadata = mock_team.arun.await_args.kwargs["metadata"]
+        [metadata] = run_metadata
         assert isinstance(metadata, dict)
         correlation_id = metadata["correlation_id"]
         assert isinstance(correlation_id, str)
@@ -3606,91 +3676,22 @@ class TestTeamCompletion:
         assert records[0]["correlation_id"] == correlation_id
         assert records[0]["reply_to_event_id"] is None
 
-    def test_team_non_streaming_formats_plain_run_output_fallback(self, team_app_client: TestClient) -> None:
-        """Non-streaming team completions should format plain RunOutput fallbacks like the main runtime."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=RunOutput(content="Recovered team response"))
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
+    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
+    def test_team_non_streaming_failed_record_returns_500(
+        self,
+        team_app_client: TestClient,
+        status: OwnedRunStatus,
+    ) -> None:
+        """A team run that ends in a failed record surfaces as an API failure, not as content."""
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
+            patch("mindroom.api.openai_compat.run_team", new=_team_events(_finished(status, "it went wrong"))),
         ):
-            mock_prepare.return_value = _prepared_team_execution_context(
-                final_prompt="Build it",
-                prepared_context_tokens=456,
-            )
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                },
-            )
-
-        assert response.status_code == 200
-        content = response.json()["choices"][0]["message"]["content"]
-        assert content == "**Agent**: Recovered team response"
-        assert "RunOutput(" not in content
-
-    def test_team_non_streaming_rejects_plain_run_output_error(self, team_app_client: TestClient) -> None:
-        """Errored RunOutput fallbacks should surface as API failures, not successful content."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=RunOutput(status="error", content="validation failed in team"))
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(
-                final_prompt="Build it",
-                prepared_context_tokens=456,
-            )
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    def test_team_non_streaming_rejects_plain_run_output_cancelled(self, team_app_client: TestClient) -> None:
-        """Cancelled RunOutput fallbacks should surface as API failures, not successful content."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=RunOutput(status="cancelled", content="Run run-123 was cancelled"))
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(
-                final_prompt="Build it",
-                prepared_context_tokens=456,
-            )
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -3704,25 +3705,16 @@ class TestTeamCompletion:
         assert response.json()["error"]["message"] == "Team execution failed"
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
-        """Streaming team completion streams TeamContentEvent (leader text) directly."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Hello ")
-            yield TeamContentEvent(content="world!")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
+        """Streaming team completion streams the leader's text directly."""
+        team = _scripted_team(answer("Hello world!", chunk=6))
 
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
+            _recorded_team_runs() as runs,
         ):
             mock_prepare.return_value = _prepared_team_execution_context(
                 final_prompt="Build it",
@@ -3747,517 +3739,36 @@ class TestTeamCompletion:
         assert first["choices"][0]["delta"] == {"role": "assistant"}
         assert first["model"] == "team/super_team"
 
-        # Leader content is streamed directly (not buffered)
-        content_parts = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    content_parts.append(delta["content"])
-        full_content = "".join(content_parts)
-        assert full_content == "Hello world!"
-        # Each TeamContentEvent is a separate chunk (streamed directly)
+        # Leader content is streamed directly (not buffered): each delta is its own chunk.
+        content_parts = _sse_contents(response.text)
+        assert "".join(content_parts) == "Hello world!"
         assert "Hello " in content_parts
         assert "world!" in content_parts
         assert mock_prepare.await_count == 1
-        assert mock_prepare.await_args.kwargs["agents"] == mock_agents
-        assert mock_prepare.await_args.kwargs["team"] is mock_team
-        run_input = mock_team.arun.call_args.args[0]
-        assert run_input == "Build it"
-        metadata = mock_team.arun.call_args.kwargs["metadata"]
-        assert metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
-
-    @pytest.mark.asyncio
-    async def test_team_streaming_passes_non_matrix_metadata_to_arun(
-        self,
-        team_config: Config,
-        tmp_path: Path,
-    ) -> None:
-        """Non-Matrix team streams should pass minted run metadata through to team.arun()."""
-        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-
-        from mindroom.teams import TeamMode  # noqa: PLC0415
-
-        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
-        execution_identity = build_tool_execution_identity(
-            channel="openai_compat",
-            agent_name="team/super_team",
-            session_id="session-123",
-            runtime_paths=runtime_paths,
-            requester_id=None,
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-        )
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-        prepared_correlation_ids: list[str] = []
-        request_log_contexts: list[dict[str, object]] = []
-
-        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
-            correlation_id = ctx.correlation_id
-            assert isinstance(correlation_id, str)
-            assert ctx.requester_id is None
-            prepared_correlation_ids.append(correlation_id)
-            return _prepared_team_execution_context(
-                final_prompt="Build it",
-                run_metadata={"correlation_id": correlation_id},
-            )
-
-        async def mock_stream_events(*_args: object, **kwargs: object) -> AsyncIterator[object]:
-            request_log_contexts.append(current_llm_request_log_context())
-            metadata = kwargs["metadata"]
-            assert isinstance(metadata, dict)
-            correlation_id = metadata["correlation_id"]
-            assert isinstance(correlation_id, str)
-            record_tool_success(
-                tool_name="demo_tool",
-                arguments={"query": "test"},
-                result={"status": "ok"},
-                duration_ms=1.0,
-                agent_name="team/super_team",
-                room_id=None,
-                thread_id=None,
-                reply_to_event_id=None,
-                requester_id=None,
-                session_id="session-123",
-                correlation_id=correlation_id,
-                execution_identity=execution_identity,
-                runtime_paths=runtime_paths,
-            )
-            yield TeamContentEvent(content="Hello ")
-            yield TeamContentEvent(content="world!")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new=AsyncMock(side_effect=mock_prepare_team_execution),
-            ),
-        ):
-            response = await openai_compat._stream_team_completion(
-                "super_team",
-                "team/super_team",
-                "Build it",
-                "session-123",
-                team_config,
-                runtime_paths,
-                None,
-                openai_compat._openai_team_models("super_team", team_config, lambda model_name: model_name),
-                execution_identity=execution_identity,
-            )
-
-        assert isinstance(response, StreamingResponse)
-        body_chunks = [
-            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator
-        ]
-        body = "".join(body_chunks)
-        metadata = mock_team.arun.call_args.kwargs["metadata"]
-        assert isinstance(metadata, dict)
-        correlation_id = metadata["correlation_id"]
-        assert isinstance(correlation_id, str)
-        assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
-        assert prepared_correlation_ids == [correlation_id]
-        assert request_log_contexts[0]["agent_id"] == "team/super_team"
-        assert request_log_contexts[0]["session_id"] == "session-123"
-        assert "requester_id" not in request_log_contexts[0]
-        assert request_log_contexts[0]["correlation_id"] == correlation_id
-        assert request_log_contexts[0]["full_prompt"] == "Build it"
-        assert "Hello " in body
-        assert "world!" in body
-        records = _read_jsonl(_tool_calls_path(runtime_paths))
-        assert records[0]["correlation_id"] == correlation_id
-        assert records[0]["reply_to_event_id"] is None
-
-    def test_team_streaming_config_mismatch_kb_emits_system_hint(self, team_app_client: TestClient) -> None:
-        """Streaming team completions should prepend the stale-knowledge notice."""
-        from mindroom.team_exact_members import ResolvedExactTeamMembers  # noqa: PLC0415
-
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Hello world!")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        def fake_materialize(
-            requested_agent_names: list[str],
-            **kwargs: object,
-        ) -> ResolvedExactTeamMembers:
-            unavailable_bases = cast(
-                "dict[str, KnowledgeAvailabilityDetail] | None",
-                kwargs["unavailable_bases"],
-            )
-            refresh_scheduler = kwargs["refresh_scheduler"]
-            assert unavailable_bases is not None
-            assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
-            assert refresh_scheduler is config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler
-            unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.CONFIG_MISMATCH,
-                search_available=True,
-            )
-            refresh_scheduler.schedule_refresh("docs")
-            return ResolvedExactTeamMembers(
-                requested_agent_names=requested_agent_names,
-                agents=mock_agents,
-                display_names=["GeneralAgent", "CodeAgent"],
-                materialized_agent_names=set(requested_agent_names),
-                failed_agent_names=[],
-            )
-
-        config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
-        with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
-            patch("mindroom.api.openai_compat.build_materialized_team_instance", return_value=mock_team),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        assert (
-            "Knowledge base `docs` is refreshing against newer config and may be stale this turn."
-            in mock_prepare.await_args.kwargs["message"]
-        )
-        assert scheduled_base_ids == ["docs"]
-
-    def test_team_streaming_falls_back_to_final_team_run_output(self, team_app_client: TestClient) -> None:
-        """Providers that yield a final TeamRunOutput in stream mode should still emit content."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamRunOutput(content="Team consensus result")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        content_parts: list[str] = []
-        for line in response.text.strip().split("\n\n"):
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    content_parts.append(delta["content"])
-        assert "".join(content_parts) == "**Team Consensus**:\n\nTeam consensus result"
-
-    def test_team_streaming_falls_back_to_final_run_output(self, team_app_client: TestClient) -> None:
-        """Providers that yield a final plain RunOutput in stream mode should still emit content."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunOutput(content="Recovered team response")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        content_parts: list[str] = []
-        for line in response.text.strip().split("\n\n"):
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    content_parts.append(delta["content"])
-        assert "".join(content_parts) == "**Agent**: Recovered team response"
-
-    def test_team_streaming_first_team_run_output_error_returns_500(self, team_app_client: TestClient) -> None:
-        """Streaming should treat an error-status TeamRunOutput as a failed team execution."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamRunOutput(status="error", content="Team execution failed upstream")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    def test_team_streaming_first_run_output_error_returns_500(self, team_app_client: TestClient) -> None:
-        """Streaming should treat an error-status RunOutput as a failed team execution."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunOutput(status="error", content="Team execution failed upstream")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    def test_team_streaming_first_run_output_cancelled_returns_500(self, team_app_client: TestClient) -> None:
-        """Streaming should treat a cancelled RunOutput as a failed team execution."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunOutput(status="cancelled", content="Run run-123 was cancelled")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    def test_team_streaming_first_cancelled_event_returns_500(self, team_app_client: TestClient) -> None:
-        """Streaming should treat a cancelled team event as a failed team execution."""
-        from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent  # noqa: PLC0415
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamRunCancelledEvent(run_id="run-123", reason="Run run-123 was cancelled")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    def test_team_streaming_midstream_cancelled_event_emits_failure_chunk(self, team_app_client: TestClient) -> None:
-        """A cancelled team event after streaming starts should emit the failure chunk."""
-        from agno.run.team import RunCancelledEvent as TeamRunCancelledEvent  # noqa: PLC0415
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Team started. ")
-            yield TeamRunCancelledEvent(run_id="run-123", reason="Run run-123 was cancelled")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    contents.append(delta["content"])
-
-        full = "".join(contents)
-        assert "Team started. " in full
-        assert "Team execution failed." in full
-        assert full.index("Team started. ") < full.index("Team execution failed.")
-        assert lines[-1] == "data: [DONE]"
-
-    def test_team_streaming_keeps_scope_storage_open_until_stream_finishes(self, team_app_client: TestClient) -> None:
-        """The bound team scope must stay open until SSE streaming is fully consumed."""
-
-        class _FakeStorage:
-            def __init__(self) -> None:
-                self.closed = False
-
-            def close(self) -> None:
-                self.closed = True
-
-        fake_storage = _FakeStorage()
-        mock_team = _make_test_team()
-        mock_team.db = fake_storage
-        mock_agents: list[AgnoAgent] = []
-
-        @contextmanager
-        def _open_scope_context() -> Iterator[ScopeSessionContext]:
-            yield ScopeSessionContext(
-                scope=HistoryScope(kind="team", scope_id="super_team"),
-                storage=fake_storage,
-                session=None,
-            )
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            assert fake_storage.closed is False
-            yield TeamContentEvent(content="Hello ")
-            assert fake_storage.closed is False
-            yield TeamContentEvent(content="world!")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with (
-            patch(
-                "mindroom.api.openai_compat.open_bound_scope_session_context",
-                return_value=_open_scope_context(),
-            ),
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        assert fake_storage.closed is True
+        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
+        [run] = runs
+        assert [message.content for message in run.messages] == ["Build it"]
+        assert run.request_template.stream is True
+        assert run.ctx.metadata is not None
+        assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 
     def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
         """Team streaming must keep worker-routing identity active after preflight."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+        async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield TeamContentEvent(content="Hello ")
+            yield ContentDelta("Hello ")
 
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield TeamContentEvent(content="world!")
+            yield ContentDelta("world!")
+            yield _finished(content="Hello world!")
 
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
+            patch("mindroom.api.openai_compat.run_team", new=run),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4289,28 +3800,23 @@ class TestTeamCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        mock_team = _make_test_team()
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+        async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             try:
                 assert get_tool_execution_identity() == execution_identity
-                yield TeamContentEvent(content="Hello")
+                yield ContentDelta("Hello")
                 await asyncio.Future()
             finally:
                 observed_final_identities.append(get_tool_execution_identity())
 
-        mock_team.arun = mock_stream_events
-
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=([_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
             patch(
                 "mindroom.api.openai_compat._prepare_openai_team_prompt",
-                new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+                new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
             ),
+            patch("mindroom.api.openai_compat.run_team", new=run),
         ):
             response = await openai_compat._stream_team_completion(
                 "super_team",
@@ -4332,20 +3838,14 @@ class TestTeamCompletion:
 
     def test_team_streaming_builds_team_inside_execution_identity(self, team_app_client: TestClient) -> None:
         """Streamed team requests must establish execution identity before member agents are built."""
-        mock_team = _make_test_team()
         observed_agent_names: list[str | None] = []
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Hello world!")
-
-        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[list[AgnoAgent], AgnoTeam, TeamMode]:
+        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
             identity = get_tool_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            return [_make_test_agent("GeneralAgent")], mock_team, TeamMode.COORDINATE
-
-        mock_team.arun = mock_stream_events
+            return _scripted_team(answer("Hello world!"))
 
         with patch("mindroom.api.openai_compat._build_team", side_effect=fake_build_team):
             response = team_app_client.post(
@@ -4362,102 +3862,16 @@ class TestTeamCompletion:
         assert len(observed_session_ids) == 1
         assert observed_session_ids[0] is not None
 
-    def test_team_streaming_tool_events_emit_start_and_done_with_ids(
+    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
+    def test_team_streaming_first_failed_record_returns_500(
         self,
         team_app_client: TestClient,
+        status: OwnedRunStatus,
     ) -> None:
-        """Both agent-level and team-level tool events are emitted with stable IDs."""
-        from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-        from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent  # noqa: PLC0415
-        from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent  # noqa: PLC0415
-
-        # Agent-level tool
-        agent_tool_started = ToolExecution(
-            tool_name="search",
-            tool_args={"query": "X"},
-            tool_call_id="tc-agent-1",
-        )
-        agent_tool_completed = ToolExecution(
-            tool_name="search",
-            tool_args={"query": "X"},
-            tool_call_id="tc-agent-1",
-            result="3 results",
-        )
-        # Team-level tool
-        team_tool_started = ToolExecution(
-            tool_name="transfer_task",
-            tool_args={"agent": "code"},
-            tool_call_id="tc-team-1",
-        )
-        team_tool_completed = ToolExecution(
-            tool_name="transfer_task",
-            tool_args={"agent": "code"},
-            tool_call_id="tc-team-1",
-            result="delegated",
-        )
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamToolCallStartedEvent(tool=team_tool_started)
-            yield ToolCallStartedEvent(tool=agent_tool_started)
-            yield ToolCallCompletedEvent(tool=agent_tool_completed)
-            yield TeamToolCallCompletedEvent(tool=team_tool_completed)
-            yield TeamContentEvent(content="Final answer")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Search for X"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
-        # Agent-level tool
-        assert '<tool id="2" state="start">search(query=X)</tool>' in full_content
-        assert '<tool id="2" state="done">search(query=X)\n3 results</tool>' in full_content
-        # Team-level tool
-        assert '<tool id="1" state="start">transfer_task(agent=code)</tool>' in full_content
-        assert '<tool id="1" state="done">transfer_task(agent=code)\ndelegated</tool>' in full_content
-
-    def test_team_streaming_first_event_error_returns_500(self, team_app_client: TestClient) -> None:
-        """Team stream returns HTTP 500 when first event is an explicit run error."""
-        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamRunErrorEvent(content="Error code: 404 - {'error': {'message': 'model not found'}}")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        """Team stream returns HTTP 500 when the run ends in a failed record before any content."""
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
+            patch("mindroom.api.openai_compat.run_team", new=_team_events(_finished(status, "model not found"))),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4472,23 +3886,19 @@ class TestTeamCompletion:
         assert response.json()["error"]["type"] == "server_error"
         assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_streaming_midstream_error_emits_failure_chunk(self, team_app_client: TestClient) -> None:
-        """When stream error occurs after start, already-streamed content and failure chunk are emitted."""
-        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
-        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Team started. ")
-            yield TeamRunErrorEvent(content="Error code: 500 - Internal Server Error")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
+    def test_team_streaming_midstream_failed_record_emits_failure_chunk(
+        self,
+        team_app_client: TestClient,
+        status: OwnedRunStatus,
+    ) -> None:
+        """When the run fails after streaming started, the streamed content and a failure chunk are emitted."""
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
+            patch(
+                "mindroom.api.openai_compat.run_team",
+                new=_team_events(ContentDelta("Team started. "), _finished(status, "Internal Server Error")),
+            ),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4501,19 +3911,9 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    contents.append(delta["content"])
-
-        # Leader content was streamed directly before the error
-        full = "".join(contents)
+        full = "".join(_sse_contents(response.text))
         assert "Team started. " in full
         assert "Team execution failed." in full
-        # Leader content comes before the failure message
         assert full.index("Team started. ") < full.index("Team execution failed.")
         assert lines[-1] == "data: [DONE]"
 
@@ -4556,12 +3956,12 @@ class TestTeamCompletion:
     def test_team_member_materialization_failure_returns_generic_500(self, team_app_client: TestClient) -> None:
         """Configured team build failures should not expose internal exception details."""
         with (
-            patch("mindroom.providers.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
+            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
             patch(
-                "mindroom.teams.create_agent",
-                side_effect=[_make_test_agent("GeneralAgent"), RuntimeError("boom")],
+                "mindroom.teams.members.resolve_agent_knowledge_access",
+                return_value=_KnowledgeResolution(knowledge=None),
             ),
+            patch("mindroom.teams.members.create_agent", side_effect=RuntimeError("boom")),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4575,43 +3975,21 @@ class TestTeamCompletion:
         assert response.json()["error"]["type"] == "server_error"
         assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_execution_failure_500(self, team_app_client: TestClient) -> None:
-        """Team execution exception returns 500."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(side_effect=RuntimeError("Model error"))
-        mock_agents = [_make_test_agent("GeneralAgent")]
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_team_execution_failure_500(self, team_app_client: TestClient, stream: bool) -> None:
+        """A provider failure before the first chunk returns 500."""
 
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
+        async def boom() -> None:
+            msg = "Model error"
+            raise RuntimeError(msg)
+
+        with patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team([Await(boom)])):
             response = team_app_client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "team/super_team",
                     "messages": [{"role": "user", "content": "Hello"}],
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-
-    def test_team_streaming_execution_failure_500(self, team_app_client: TestClient) -> None:
-        """Team streaming exceptions before first chunk return 500."""
-        mock_team = _make_test_team()
-        mock_team.arun = MagicMock(side_effect=RuntimeError("boom"))
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Hello"}],
-                    "stream": True,
+                    "stream": stream,
                 },
             )
 
@@ -4619,23 +3997,24 @@ class TestTeamCompletion:
         assert response.json()["error"]["type"] == "server_error"
 
     def test_team_streaming_skips_member_content(self, team_app_client: TestClient) -> None:
-        """Member agent RunContentEvent is skipped; only leader TeamContentEvent is streamed."""
-        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+        """Member content is skipped; only the leader's content is streamed."""
+        team = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
 
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
+        def member(text: str) -> MemberEvent:
+            return MemberEvent("general", "GeneralAgent", "member-run", ContentDelta(text))
 
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="member noise ")
-            yield TeamContentEvent(content="leader ")
-            yield RunContentEvent(content="more noise ")
-            yield TeamContentEvent(content="answer")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
+            patch(
+                "mindroom.api.openai_compat.run_team",
+                new=_team_events(
+                    member("member noise "),
+                    ContentDelta("leader "),
+                    member("more noise "),
+                    ContentDelta("answer"),
+                    _finished(content="leader answer"),
+                ),
+            ),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4648,15 +4027,7 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    contents.append(delta["content"])
-
-        full = "".join(contents)
+        full = "".join(_sse_contents(response.text))
         # Only leader content is present
         assert full == "leader answer"
         # Member content is skipped
@@ -4664,78 +4035,30 @@ class TestTeamCompletion:
         assert "more noise" not in full
         assert lines[-1] == "data: [DONE]"
 
-    def test_team_streaming_pending_tools_finalized_on_error(self, team_app_client: TestClient) -> None:
-        """Pending tool calls get (interrupted) done tags when stream errors."""
-        from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.agent import ToolCallStartedEvent  # noqa: PLC0415
-        from agno.run.team import RunErrorEvent as TeamRunErrorEvent  # noqa: PLC0415
-
-        tool_started = ToolExecution(
-            tool_name="run_shell",
-            tool_args={"cmd": "ls"},
-            tool_call_id="tc-pending-1",
+    def test_team_streaming_skips_interleaved_parallel_member_content(self, team_app_client: TestClient) -> None:
+        """Interleaved content from parallel members is skipped; the leader's content is streamed."""
+        team = _scripted_team(
+            members=[("a", "AgentA", ScriptedModel([])), ("b", "AgentB", ScriptedModel([]))],
+            mode=TeamMode.COLLABORATE,
         )
 
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
+        def member(member_id: str, text: str) -> MemberEvent:
+            return MemberEvent(member_id, f"Agent{member_id.upper()}", f"{member_id}-run", ContentDelta(text))
 
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=tool_started)
-            yield TeamRunErrorEvent(content="Error: timeout")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Run it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    contents.append(delta["content"])
-
-        full = "".join(contents)
-        # Start tag was emitted
-        assert '<tool id="1" state="start">' in full
-        # Pending tool got finalized with (interrupted)
-        assert '<tool id="1" state="done">(interrupted)</tool>' in full
-        assert "Team execution failed." in full
-
-    def test_team_streaming_skips_interleaved_parallel_member_content(self, team_app_client: TestClient) -> None:
-        """Interleaved RunContentEvent from parallel members is skipped; leader content is streamed."""
-        from agno.run.agent import RunContentEvent  # noqa: PLC0415
-
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("AgentA"), _make_test_agent("AgentB")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            # Simulate interleaved chunks from two parallel members
-            yield RunContentEvent(content="From A chunk1 ")
-            yield RunContentEvent(content="From B chunk1 ")
-            yield RunContentEvent(content="From A chunk2 ")
-            yield RunContentEvent(content="From B chunk2 ")
-            # Leader synthesizes the answer
-            yield TeamContentEvent(content="Combined answer from leader")
-
-        mock_team.arun = mock_stream_events
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COLLABORATE),
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
+            patch(
+                "mindroom.api.openai_compat.run_team",
+                new=_team_events(
+                    # Interleaved chunks from two parallel members, then the leader's synthesis.
+                    member("a", "From A chunk1 "),
+                    member("b", "From B chunk1 "),
+                    member("a", "From A chunk2 "),
+                    member("b", "From B chunk2 "),
+                    ContentDelta("Combined answer from leader"),
+                    _finished(content="Combined answer from leader"),
+                ),
+            ),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4747,16 +4070,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            if line.startswith("data: ") and line != "data: [DONE]":
-                chunk = json.loads(line.removeprefix("data: "))
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    contents.append(delta["content"])
-
-        full = "".join(contents)
+        full = "".join(_sse_contents(response.text))
         # Only leader content is streamed
         assert full == "Combined answer from leader"
         # Member content is skipped entirely
@@ -4767,16 +4081,9 @@ class TestTeamCompletion:
 
     def test_team_non_streaming_includes_thread_history(self, team_app_client: TestClient) -> None:
         """Team prompt includes prior messages converted from request history."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
-        mock_team.add_history_to_context = True
-        mock_team.num_history_runs = 3
-        mock_team.num_history_messages = None
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer("ok"))),
+            _recorded_team_runs() as runs,
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4791,8 +4098,8 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "\n\n".join(
+        [run] = runs
+        assert run.messages[-1].content == "\n\n".join(
             (
                 render_msg_tag(sender="user", body="Start", event_id="$openai-1"),
                 render_msg_tag(sender="assistant", body="Ack", event_id="$openai-2"),
@@ -4818,16 +4125,9 @@ class TestTeamCompletion:
             for idx in range(2, 35)
         )
 
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
-        mock_team.add_history_to_context = True
-        mock_team.num_history_runs = 3
-        mock_team.num_history_messages = None
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
-
-        with patch(
-            "mindroom.api.openai_compat._build_team",
-            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer("ok"))),
+            _recorded_team_runs() as runs,
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4835,29 +4135,29 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        run_input = mock_team.arun.call_args.args[0]
+        [run] = runs
+        run_input = run.messages[-1].content
+        assert isinstance(run_input, str)
         assert render_msg_tag(sender="user", body="msg 0", event_id="$openai-1") in run_input
         assert render_msg_tag(sender="assistant", body=long_body, event_id="$openai-2") in run_input
         assert run_input.endswith("Final prompt")
 
-    def test_team_non_streaming_prefers_persisted_history_over_thread_history(
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_team_completion_prefers_persisted_history_over_thread_history(
         self,
         team_app_client: TestClient,
+        stream: bool,
     ) -> None:
-        """Persisted team history should suppress request-history stuffing and rely on Agno replay."""
-        mock_team = _make_test_team()
-        mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="ok"))
-        mock_agents = [_make_test_agent("GeneralAgent"), _make_test_agent("CodeAgent")]
+        """Persisted team history should suppress request-history stuffing and rely on the stored replay."""
+        team = _scripted_team(answer("ok", chunk=99))
 
         with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new_callable=AsyncMock,
             ) as mock_prepare,
+            _recorded_team_runs() as runs,
         ):
             mock_prepare.return_value = _prepared_team_execution_context(
                 final_prompt="Follow-up",
@@ -4879,63 +4179,16 @@ class TestTeamCompletion:
                         {"role": "assistant", "content": "Ack"},
                         {"role": "user", "content": "Follow-up"},
                     ],
+                    "stream": stream,
                 },
             )
 
         assert response.status_code == 200
         assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
-        assert mock_prepare.await_args.kwargs["team"] is mock_team
+        assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "Follow-up"
-        assert "Previous conversation in this thread:" not in prompt
-        assert "user: Start" not in prompt
-        assert "assistant: Ack" not in prompt
-
-    def test_team_streaming_prefers_persisted_history_over_thread_history(self, team_app_client: TestClient) -> None:
-        """Persisted team history should suppress request-history stuffing in the streaming path too."""
-        mock_team = _make_test_team()
-        mock_agents = [_make_test_agent("GeneralAgent")]
-
-        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
-            yield TeamContentEvent(content="Hello world!")
-
-        mock_team.arun = MagicMock(side_effect=mock_stream_events)
-
-        with (
-            patch(
-                "mindroom.api.openai_compat._build_team",
-                return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
-            ),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(
-                final_prompt="Follow-up",
-                replays_persisted_history=True,
-            )
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [
-                        {"role": "user", "content": "Start"},
-                        {"role": "assistant", "content": "Ack"},
-                        {"role": "user", "content": "Follow-up"},
-                    ],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 200
-        assert mock_prepare.await_args.kwargs["message"] == "Follow-up"
-        assert mock_prepare.await_args.kwargs["team"] is mock_team
-        assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
-        prompt = mock_team.arun.call_args.args[0]
-        assert prompt == "Follow-up"
-        assert "Previous conversation in this thread:" not in prompt
+        [run] = runs
+        assert [message.content for message in run.messages] == ["Follow-up"]
 
     @pytest.mark.asyncio
     async def test_prepare_openai_team_prompt_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
@@ -4946,12 +4199,21 @@ class TestTeamCompletion:
             router=RouterConfig(model="default"),
         )
         runtime_paths = _runtime_paths()
-        agent = _make_test_agent("GeneralAgent")
-        team = _make_test_team(name="General Team", team_id="general-team")
+        _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         prior_response_id = "prior-openai-team-response"
 
+        def notice(marker: object) -> OwnedMessage:
+            return OwnedMessage(
+                role="user",
+                content=QUEUED_MESSAGE_NOTICE_TEXT,
+                provider_data={
+                    _QUEUED_NOTICE_MARKER_KEY: marker,
+                    _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+                },
+            )
+
         with open_bound_scope_session_context(
-            agents=[agent],
+            member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -4961,44 +4223,52 @@ class TestTeamCompletion:
             assert scope_context is not None
             assert scope_context.session is not None
             scope_context.session.runs = [
-                TeamRunOutput(
+                TeamRunRecord(
                     run_id="run-queued-notice",
-                    team_id=scope_context.session.team_id,
+                    team_id=scope_context.session.owner_id,
                     team_name="General Team",
                     session_id="session-openai-team-prep",
                     content="done",
-                    messages=[
-                        Message(
-                            role="user",
-                            content=QUEUED_MESSAGE_NOTICE_TEXT,
-                            provider_data={
-                                _QUEUED_NOTICE_MARKER_KEY: True,
-                                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-                            },
-                        ),
-                    ],
+                    messages=[notice(True)],
                     member_responses=[
-                        RunOutput(
+                        RunRecord(
                             run_id="member-run-queued-notice",
                             session_id="session-openai-team-prep",
-                            messages=[
-                                Message(
-                                    role="user",
-                                    content=QUEUED_MESSAGE_NOTICE_TEXT,
-                                    provider_data={
-                                        _QUEUED_NOTICE_MARKER_KEY: True,
-                                        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-                                    },
-                                ),
-                            ],
+                            messages=[notice(True)],
                         ),
                     ],
                 ),
             ]
             seed_session(scope_context.storage, scope_context.session)
 
+        def collect_messages(run: RunRecord | TeamRunRecord) -> list[OwnedMessage]:
+            messages = list(run.messages)
+            if isinstance(run, TeamRunRecord):
+                for member_response in run.member_responses:
+                    messages.extend(collect_messages(member_response))
+            return messages
+
+        def assert_notices_persisted(runs: Sequence[RunRecord | TeamRunRecord]) -> None:
+            persisted_messages = [message for run in runs for message in collect_messages(run)]
+            persisted_notices = [
+                message
+                for message in persisted_messages
+                if isinstance(message.provider_data, dict)
+                and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
+            ]
+            assert len(persisted_notices) == 1
+            assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
+            assert persisted_notices[0].provider_data == {
+                _QUEUED_NOTICE_MARKER_KEY: "persisted",
+                _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
+            }
+            assert not any(
+                isinstance(message.provider_data, dict) and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
+                for message in persisted_messages
+            )
+
         with open_bound_scope_session_context(
-            agents=[agent],
+            member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -5007,66 +4277,30 @@ class TestTeamCompletion:
             assert scope_context is not None
             assert scope_context.session is not None
 
-            async def fake_prepare_bound_team_run_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
+            async def fake_prepare_bound_team_execution_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
                 prepared_scope_context = kwargs["scope_context"]
-                assert prepared_scope_context is not None
+                assert isinstance(prepared_scope_context, ScopeSessionContext)
                 assert prepared_scope_context.session is not None
-
-                def collect_messages(run: RunOutput | TeamRunOutput) -> list[Message]:
-                    messages = list(run.messages or [])
-                    if isinstance(run, TeamRunOutput):
-                        for member_response in run.member_responses or []:
-                            if isinstance(member_response, (RunOutput, TeamRunOutput)):
-                                messages.extend(collect_messages(member_response))
-                    return messages
-
-                persisted_messages = [
-                    message
-                    for run in prepared_scope_context.session.runs or []
-                    if isinstance(run, (RunOutput, TeamRunOutput))
-                    for message in collect_messages(run)
-                ]
-                persisted_notices = [
-                    message
-                    for message in persisted_messages
-                    if isinstance(message.provider_data, dict)
-                    and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
-                ]
-                assert len(persisted_notices) == 1
-                assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
-                assert persisted_notices[0].provider_data == {
-                    _QUEUED_NOTICE_MARKER_KEY: "persisted",
-                    _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-                }
-                assert not any(
-                    isinstance(message.provider_data, dict)
-                    and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
-                    for message in persisted_messages
-                )
+                assert_notices_persisted(prepared_scope_context.session.runs)
                 return _prepared_team_execution_context(
                     final_prompt="Previous team reply\n\nAnalyze this.",
                     messages=[
-                        Message(role="assistant", content="Previous team reply"),
-                        Message(role="user", content="Analyze this."),
+                        OwnedMessage(role="assistant", content="Previous team reply"),
+                        OwnedMessage(role="user", content="Analyze this."),
                     ],
                 )
 
             with (
                 patch(
                     "mindroom.execution_preparation._prepare_bound_team_execution_context",
-                    new=AsyncMock(side_effect=fake_prepare_bound_team_run_context),
+                    new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
                 ),
-                patch(
-                    "mindroom.teams.model_params_payload",
-                    return_value={"temperature": 0.7},
-                    create=True,
-                ),
+                patch("mindroom.teams.envelope.provider_model_params", return_value={"temperature": 0.7}),
             ):
                 prepared_prompt = await openai_compat._prepare_openai_team_prompt(
                     scope_context=scope_context,
                     team_name="general",
-                    agents=[agent],
-                    team=team,
+                    built=built,
                     prompt="Analyze this.",
                     config=config,
                     runtime_paths=runtime_paths,
@@ -5080,7 +4314,7 @@ class TestTeamCompletion:
         assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
         assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(
-            agents=[agent],
+            member_names=["general"],
             session_id="session-openai-team-prep",
             runtime_paths=runtime_paths,
             config=config,
@@ -5088,127 +4322,14 @@ class TestTeamCompletion:
         ) as scope_context:
             assert scope_context is not None
             assert scope_context.session is not None
-            persisted_messages = [
-                message for run in scope_context.session.runs or [] for message in (run.messages or [])
-            ]
-        persisted_notices = [
-            message
-            for message in persisted_messages
-            if isinstance(message.provider_data, dict)
-            and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) == "persisted"
-        ]
-        assert len(persisted_notices) == 1
-        assert persisted_notices[0].content == QUEUED_MESSAGE_NOTICE_TEXT
-        assert persisted_notices[0].provider_data == {
-            _QUEUED_NOTICE_MARKER_KEY: "persisted",
-            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: prior_response_id,
-        }
-        assert not any(
-            isinstance(message.provider_data, dict) and message.provider_data.get(_QUEUED_NOTICE_MARKER_KEY) is True
-            for message in persisted_messages
-        )
+            assert_notices_persisted(scope_context.session.runs)
 
-    def test_collaborate_mode_delegates_to_all(self) -> None:
-        """Collaborate mode sets delegate_to_all_members=True on Team."""
-        collaborate_config = Config(
-            agents={
-                "general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            teams={
-                "collab_team": TeamConfig(
-                    display_name="Collab Team",
-                    role="Collaborative team",
-                    agents=["general"],
-                    mode="collaborate",
-                ),
-            },
-        )
-        with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.providers.model_loading.get_model_instance"),
-            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
-        ):
-            mock_create.return_value = MagicMock(name="GeneralAgent")
-
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            runtime_paths = _runtime_paths_for_config(collaborate_config)
-            with open_bound_scope_session_context(
-                agents=[],
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=collaborate_config,
-                execution_identity=None,
-                team_name="collab_team",
-            ) as scope_context:
-                assert scope_context is not None
-                _build_team(
-                    "collab_team",
-                    collaborate_config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models(
-                        "collab_team",
-                        collaborate_config,
-                        lambda model_name: model_name,
-                    ),
-                )
-
-            mock_team_init.assert_called_once()
-            assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
-
-    def test_coordinate_mode_no_delegate_all(self) -> None:
-        """Coordinate mode sets delegate_to_all_members=False on Team."""
-        with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.providers.model_loading.get_model_instance"),
-            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
-        ):
-            mock_create.return_value = MagicMock(name="GeneralAgent")
-
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            # team_config fixture uses coordinate mode
-            config = Config(
-                agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-                teams={
-                    "coord_team": TeamConfig(
-                        display_name="Coord Team",
-                        role="Coordinated team",
-                        agents=["general"],
-                        mode="coordinate",
-                    ),
-                },
-            )
-            runtime_paths = _runtime_paths_for_config(config)
-            with open_bound_scope_session_context(
-                agents=[],
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=None,
-                team_name="coord_team",
-            ) as scope_context:
-                assert scope_context is not None
-                _build_team(
-                    "coord_team",
-                    config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-                )
-
-            mock_team_init.assert_called_once()
-            assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
-
-    def test_build_team_uses_stable_team_scope_db(self) -> None:
-        """Configured teams should persist runs into the stable team scope store."""
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("collaborate", TeamMode.COLLABORATE), ("coordinate", TeamMode.COORDINATE)],
+    )
+    def test_build_team_takes_the_configured_mode_and_id(self, mode: str, expected: TeamMode) -> None:
+        """A configured team is built in its configured mode under its configured name."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -5218,89 +4339,37 @@ class TestTeamCompletion:
                     display_name="Coord Team",
                     role="Coordinated team",
                     agents=["general"],
-                    mode="coordinate",
+                    mode=mode,
                 ),
             },
         )
         runtime_paths = _runtime_paths_for_config(config)
-        member = MagicMock(name="GeneralAgent")
-        member.id = "general"
-
         with (
-            patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.providers.model_loading.get_model_instance"),
-            patch("agno.team.Team.__init__", return_value=None) as mock_team_init,
-        ):
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            with open_bound_scope_session_context(
-                agents=[],
+            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
+            patch("mindroom.teams.envelope.build_model_provider", return_value=ScriptedModel([])),
+            open_bound_scope_session_context(
+                member_names=[],
                 session_id="session-1",
                 runtime_paths=runtime_paths,
                 config=config,
                 execution_identity=None,
                 team_name="coord_team",
-            ) as scope_context:
-                _build_team(
-                    "coord_team",
-                    config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-                )
-
-        assert mock_team_init.call_args.kwargs["id"] == "coord_team"
-        assert mock_team_init.call_args.kwargs["db"] is not None
-
-    def test_build_team_preserves_all_history_mode(self) -> None:
-        """Configured teams without explicit limits should keep native all-history mode."""
-        config = Config(
-            agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            router=RouterConfig(model="default"),
-            teams={
-                "coord_team": TeamConfig(
-                    display_name="Coord Team",
-                    role="Coordinated team",
-                    agents=["general"],
-                    mode="coordinate",
-                ),
-            },
-        )
-        member = MagicMock(name="GeneralAgent")
-        member.id = "general"
-
-        with (
-            patch("mindroom.teams.create_agent", return_value=member),
-            patch(
-                "mindroom.providers.model_loading.get_model_instance",
-                return_value=FakeModel(id="test-model", provider="fake"),
-            ),
+            ) as scope_context,
         ):
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            runtime_paths = _runtime_paths_for_config(config)
-            with open_bound_scope_session_context(
-                agents=[],
-                session_id="session-1",
-                runtime_paths=runtime_paths,
-                config=config,
+            assert scope_context is not None
+            members, built, built_mode = openai_compat._build_team(
+                "coord_team",
+                config,
+                runtime_paths,
                 execution_identity=None,
-                team_name="coord_team",
-            ) as scope_context:
-                assert scope_context is not None
-                _agents, team, _mode = _build_team(
-                    "coord_team",
-                    config,
-                    runtime_paths,
-                    execution_identity=None,
-                    scope_context=scope_context,
-                    models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
-                )
+                scope_context=scope_context,
+                models=openai_compat._openai_team_models("coord_team", config, lambda model_name: model_name),
+            )
 
-        assert team.num_history_runs is None
-        assert team.num_history_messages is None
+        assert built_mode is expected
+        assert (built.spec.id, built.spec.mode) == ("coord_team", expected)
+        assert [member.spec.id for member in built.spec.members] == ["general"]
+        assert [build.spec.id for build in members.builds] == ["general"]
 
     def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(
         self,
@@ -5325,17 +4394,18 @@ class TestTeamCompletion:
 
         with (
             open_bound_scope_session_context(
-                agents=[],
+                member_names=[],
                 session_id="openai-team-session",
                 runtime_paths=runtime_paths,
                 config=team_config,
                 execution_identity=execution_identity,
                 team_name="super_team",
             ) as scope_context,
-            patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
+            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
+            patch("mindroom.teams.envelope.build_model_provider", return_value=ScriptedModel([])),
         ):
             assert scope_context is not None
-            agents, _team, mode = openai_compat._build_team(
+            members, _built, mode = openai_compat._build_team(
                 "super_team",
                 team_config,
                 runtime_paths,
@@ -5345,11 +4415,11 @@ class TestTeamCompletion:
             )
 
         assert mode is TeamMode.COORDINATE
-        assert [agent.id for agent in agents] == ["general", "code"]
+        assert [build.spec.id for build in members.builds] == ["general", "code"]
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
-    def test_build_team_closes_materialized_agents_when_team_build_fails(self) -> None:
-        """Configured-team build failures should close partially built member resources."""
+    def test_build_team_propagates_team_build_failures(self) -> None:
+        """A team that cannot be built after its members fails the build loudly."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
             models={"default": ModelConfig(provider="openai", id="test-model")},
@@ -5363,11 +4433,11 @@ class TestTeamCompletion:
                 ),
             },
         )
-        built_agent = _make_test_agent("GeneralAgent")
         runtime_paths = _runtime_paths()
+        members, _built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
 
         with open_bound_scope_session_context(
-            agents=[],
+            member_names=[],
             session_id="session-1",
             runtime_paths=runtime_paths,
             config=config,
@@ -5376,20 +4446,8 @@ class TestTeamCompletion:
         ) as scope_context:
             assert scope_context is not None
             with (
-                patch(
-                    "mindroom.api.openai_compat.materialize_exact_team_members",
-                    return_value=ResolvedExactTeamMembers(
-                        requested_agent_names=["general"],
-                        agents=[built_agent],
-                        display_names=["GeneralAgent"],
-                        materialized_agent_names={"general"},
-                        failed_agent_names=[],
-                    ),
-                ),
-                patch(
-                    "mindroom.api.openai_compat.build_materialized_team_instance",
-                    side_effect=RuntimeError("team build failed"),
-                ),
+                patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
+                patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
                 pytest.raises(RuntimeError, match="team build failed"),
             ):
                 openai_compat._build_team(
@@ -5427,22 +4485,20 @@ class TestTeamCompletion:
             knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
         )
         mock_knowledge = MagicMock()
+        _members, built, _mode = _scripted_team()
         with (
-            patch("mindroom.teams.create_agent") as mock_create,
-            patch("mindroom.providers.model_loading.get_model_instance"),
+            patch("mindroom.teams.members.create_agent") as mock_create,
             patch(
-                "mindroom.teams.resolve_agent_knowledge_access",
+                "mindroom.teams.members.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ),
-            patch("agno.team.Team.__init__", return_value=None),
+            patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
         ):
             mock_create.return_value = MagicMock(name="Research")
 
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
             runtime_paths = _runtime_paths_for_config(config)
             with open_bound_scope_session_context(
-                agents=[],
+                member_names=[],
                 session_id="session-1",
                 runtime_paths=runtime_paths,
                 config=config,
@@ -5450,7 +4506,7 @@ class TestTeamCompletion:
                 team_name="team_with_kb",
             ) as scope_context:
                 assert scope_context is not None
-                _build_team(
+                openai_compat._build_team(
                     "team_with_kb",
                     config,
                     runtime_paths,

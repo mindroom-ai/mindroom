@@ -1,43 +1,39 @@
-"""Seen-event bookkeeping after a team run must not clobber what agno persisted during it."""
+"""Seen-event bookkeeping after a team run must not clobber what the run stored."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from agno.session.team import TeamSession
-
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.teams import _persist_bound_seen_event_ids
-from tests.conftest import seed_session
+from mindroom.session_storage.types import ConversationSession
+from mindroom.teams.envelope import _persist_bound_seen_event_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot(tmp_path: Path) -> None:
-    """The post-run write re-reads the row so agno's newer session_data survives."""
+    """The post-run write re-reads the row, so the session state the run wrote back survives."""
     storage = create_state_storage("eng", tmp_path, session_table="eng_sessions")
     scope = HistoryScope(kind="team", scope_id="eng")
-    stored = seed_session(
-        storage,
-        TeamSession(
-            session_id="t1",
-            team_id="eng",
-            session_data={"session_state": {"phase": "before"}},
-            metadata={},
-            runs=[],
-            created_at=1,
-            updated_at=1,
-        ),
+    stored = ConversationSession(
+        session_id="t1",
+        kind="team",
+        owner_id="eng",
+        metadata={},
+        session_state={"phase": "before"},
+        created_at=1,
+        updated_at=1,
     )
+    storage.save_session_fields(stored, "metadata", "session_state")
     snapshot = deepcopy(stored)
-    # What agno does inside arun, behind the snapshot's back.
-    stored.session_data = {"session_state": {"phase": "after"}}
-    storage.upsert_session(stored)
+    # What the run does behind the snapshot's back: its tools change the shared state and the run writes it back.
+    stored.session_state = {"phase": "after"}
+    storage.save_session_fields(stored, "session_state")
 
     _persist_bound_seen_event_ids(
         scope_context=ScopeSessionContext(scope=scope, storage=storage, session=snapshot),
@@ -48,5 +44,5 @@ def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_snapshot
     assert reloaded is not None
     seen_event_ids = read_scope_seen_event_ids(storage, reloaded, scope)
 
-    assert reloaded.session_data == {"session_state": {"phase": "after"}}
+    assert reloaded.session_state == {"phase": "after"}
     assert seen_event_ids == {"$reply", "$unseen"}
