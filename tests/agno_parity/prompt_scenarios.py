@@ -513,8 +513,8 @@ class _UnsearchedIndex:
 
 def _knowledge(base_id: str, description: str) -> AgentKnowledge:
     """Return the knowledge handle the response runner resolves for one published base."""
-    description_ = KnowledgeSourceDescription(base_id=base_id, description=description)
-    return AgentKnowledge(sources=(KnowledgeSource(description=description_, index=_UnsearchedIndex()),))
+    source_description = KnowledgeSourceDescription(base_id=base_id, description=description)
+    return AgentKnowledge(sources=(KnowledgeSource(description=source_description, index=_UnsearchedIndex()),))
 
 
 def _assert_answered(recorder: TurnRecorder) -> None:

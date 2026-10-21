@@ -77,6 +77,8 @@ async def test_a_replys_first_request_equals_the_golden(name: str, tmp_path: Pat
     assert recorded["messages"][0] == expected["messages"][0]
     assert recorded["tools"] == expected["tools"]
     assert recorded["deferred_tool_names"] == expected["deferred_tool_names"]
+    # The shell CLI surface is set exactly for the reply whose shell reaches MindRoom's CLI.
+    assert first.build.surface.cli_shell == (name == "agent_cli_shell")
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
