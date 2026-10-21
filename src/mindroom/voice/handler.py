@@ -12,10 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
-from agno.media import Audio
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.attachments.storage import register_audio_attachment
@@ -33,6 +29,10 @@ from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.helper_usage import record_system_usage
+from mindroom.llm.media import Audio
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
@@ -469,7 +469,7 @@ async def _download_audio(
     client: nio.AsyncClient,
     event: AudioMessageEvent,
 ) -> Audio | None:
-    """Download Matrix audio and convert it to an agno Audio media object."""
+    """Download Matrix audio as an audio clip."""
     audio_data = await download_media_bytes(client, event)
     if audio_data is None:
         return None
@@ -540,7 +540,7 @@ def _transcription_usage_run(
     model: str | None,
     provider: str | None,
     created_at: int,
-) -> RunOutput:
+) -> RunRecord:
     """Represent one provider response without retaining transcription content."""
     run_metrics = RunMetrics(
         input_tokens=usage.input_tokens,
@@ -555,7 +555,7 @@ def _transcription_usage_run(
     if usage.audio_tokens is not None:
         run_metrics.audio_input_tokens = run_metrics.audio_total_tokens = usage.audio_tokens
         message_metrics.audio_input_tokens = message_metrics.audio_total_tokens = usage.audio_tokens
-    return RunOutput(
+    return RunRecord(
         run_id=str(uuid.uuid4()),
         model=model,
         model_provider=provider,

@@ -1,9 +1,9 @@
 """MindRoom's tool-call policy around every tool call.
 
 Plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call
-recording, timing, and failure records. The owned loop, scheduled tool calls, script runs, and the MCP gateway run
-it as a ``ToolMiddleware`` (``build_tool_hook_middleware``). The runners that still dispatch Agno ``FunctionCall``s
-(tool jobs, voice calls, the CLI catalog, and the team job controls) prepend the same policy as an Agno tool hook
+recording, timing, and failure records. The owned loop, voice calls, scheduled tool calls, script runs, and the MCP
+gateway run it as a ``ToolMiddleware`` (``build_tool_hook_middleware``). The runners that still dispatch Agno
+``FunctionCall``s (tool jobs, the CLI catalog, and the team job controls) prepend the same policy as an Agno tool hook
 (``build_tool_hook_bridge``); for them the hook-chain adapter in ``agno_compat_tool_hooks`` keeps a synchronous tool
 body off the event loop and under its completion owner. Both go when the last of those runners dispatches through
 ``execute_tool_call``.

@@ -1,18 +1,20 @@
 """Materialize one MindRoom agent for realtime or cascaded voice calls.
 
 The realtime model calls tools through livekit-agents' function-tool
-mechanism. This module materializes the agent's regular chat toolkits (the
-same construction path as text conversations, including knowledge, skills,
-workspace-aware base dirs, and worker routing) and wraps every agno function
-as a raw livekit function tool. Tool calls run inside the standard MindRoom
-tool runtime context for the call's room and sole Matrix requester. Tools
-needing confirmation, user input, external execution, or approval are omitted
-because voice has no approval UI. Exact built-in room-recovery functions remain
-available so an agent can restore the router needed by approval policy.
+mechanism. This module builds the agent's regular chat tools (the same
+construction path as text conversations, including knowledge, skills,
+workspace-aware base dirs, and worker routing) and wraps every function the
+build offers as a raw livekit function tool that runs under the build's
+tool-call policy. Tool calls run inside the standard MindRoom tool runtime
+context for the call's room and sole Matrix requester. Tools needing
+confirmation, external execution, or approval are omitted because voice has
+no approval UI. Exact built-in room-recovery functions remain available so an
+agent can restore the router needed by approval policy.
 
 The cascaded backend delegates each transcript to the normal ``ai_response``
-path instead. LiveKit receives no tools there; Agno remains the sole model and
-tool loop, preserving text-chat model resolution, prompts, memory, and hooks.
+path instead. LiveKit receives no tools there; MindRoom's agent loop remains
+the sole model and tool loop, preserving text-chat model resolution, prompts,
+memory, and hooks.
 """
 
 from __future__ import annotations
@@ -23,27 +25,15 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session import AgentSession as AgnoAgentSession
-from agno.tools.function import Function, FunctionCall
-from agno.tools.toolkit import Toolkit
-
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
-from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import (
-    run_coroutine_until_complete,
-    wait_for_future_until_complete,
-)
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay
@@ -52,36 +42,40 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
-from mindroom.providers.claude_prompt_cache import (
-    aclose_anthropic_async_client,
-    arefresh_session_backed_bedrock_async_client,
-)
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
-    from agno.agent import Agent as AgnoAgent
+    from agno.tools.function import Function
     from livekit.agents.llm import RawFunctionTool
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -154,9 +148,10 @@ def _call_usage_owner(
             execution_identity,
         ),
         session_id=session_id,
-        initial_session=AgnoAgentSession(
+        initial_session=ConversationSession(
             session_id=session_id,
-            agent_id=agent_name,
+            kind="agent",
+            owner_id=agent_name,
             created_at=int(created_at),
             updated_at=int(created_at),
         ),
@@ -222,45 +217,35 @@ async def record_call_token_usage(
     execution_identity: ToolExecutionIdentity,
 ) -> None:
     """Upsert a realtime call's speech-model tokens for the caller, one request per response."""
-    messages = [
-        Message(
-            role="assistant",
-            created_at=int(response.created_at),
-            metrics=MessageMetrics(
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                total_tokens=response.input_tokens + response.output_tokens,
-                cache_read_tokens=response.cache_read_tokens,
-                cache_write_tokens=response.cache_write_tokens,
-                audio_input_tokens=response.audio_input_tokens,
-                audio_output_tokens=response.audio_output_tokens,
-                audio_total_tokens=response.audio_input_tokens + response.audio_output_tokens,
-                reasoning_tokens=response.reasoning_tokens,
-            ),
-            provider_data={"mindroom_model": {"id": usage.model, "provider": "OpenAI"}},
+    metrics = RunMetrics()
+    messages: list[Message] = []
+    for response in usage.responses:
+        response_metrics = MessageMetrics(
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            total_tokens=response.input_tokens + response.output_tokens,
+            cache_read_tokens=response.cache_read_tokens,
+            cache_write_tokens=response.cache_write_tokens,
+            audio_input_tokens=response.audio_input_tokens,
+            audio_output_tokens=response.audio_output_tokens,
+            audio_total_tokens=response.audio_input_tokens + response.audio_output_tokens,
+            reasoning_tokens=response.reasoning_tokens,
         )
-        for response in usage.responses
-    ]
-    model = ModelMetrics(id=usage.model, provider="OpenAI")
-    for message in messages:
-        model.accumulate(ModelMetrics(**message.metrics.to_dict()))
-    metrics = RunMetrics(
-        input_tokens=model.input_tokens,
-        output_tokens=model.output_tokens,
-        total_tokens=model.total_tokens,
-        cache_read_tokens=model.cache_read_tokens,
-        cache_write_tokens=model.cache_write_tokens,
-        audio_input_tokens=model.audio_input_tokens,
-        audio_output_tokens=model.audio_output_tokens,
-        audio_total_tokens=model.audio_total_tokens,
-        reasoning_tokens=model.reasoning_tokens,
-        details={"model": [model]},
-    )
+        metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
+        messages.append(
+            Message(
+                role="assistant",
+                created_at=int(response.created_at),
+                metrics=response_metrics,
+                provider_data={"mindroom_model": {"id": usage.model, "provider": "OpenAI"}},
+            ),
+        )
     await _save_call_usage(
         kind="realtime_voice",
         usage_id=usage.usage_id,
         created_at=usage.created_at,
-        run=RunOutput(
+        run=RunRecord(
+            run_id=usage.usage_id,
             model=usage.model,
             model_provider="OpenAI",
             created_at=int(usage.created_at),
@@ -306,7 +291,7 @@ class _CallAgentRunState:
 
 @dataclass
 class _CallResponseTracker:
-    """Match LiveKit's exact playout transcript back to one Agno run."""
+    """Match LiveKit's exact playout transcript back to one agent run."""
 
     agent_name: str
     config: Config
@@ -393,22 +378,21 @@ class _CallResponseTracker:
 
 @dataclass
 class _CallAgentCache:
-    """Own one serially reused delegate for the lifetime of a call."""
+    """Own one serially reused agent build for the lifetime of a call."""
 
     agent_name: str
     config: Config
     runtime_paths: RuntimePaths
     context: ToolRuntimeContext
     execution_identity: ToolExecutionIdentity
-    session_id: str
     active_model_name: str | None
-    agent: AgnoAgent | None = None
+    build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def get_system_prompt(self, *, requester_id: str) -> str:
-        """Prepare the full caller-bound prompt and retain its agent for delegation."""
+    async def get_system_prompt(self) -> str:
+        """Render the full caller-bound prompt and retain its build for the call's turns."""
         scheduler = (
             self.context.orchestrator.knowledge_refresh_scheduler if self.context.orchestrator is not None else None
         )
@@ -420,14 +404,8 @@ class _CallAgentCache:
             execution_identity=self.execution_identity,
         )
 
-        async def render(agent: AgnoAgent) -> str:
-            session, run_context, tools = await _prepare_call_agent_tools(
-                agent,
-                agent_name=self.agent_name,
-                session_id=self.session_id,
-                requester_id=requester_id,
-            )
-            return await _render_system_prompt(agent, session, run_context, tools)
+        async def render(build: AgentBuild) -> str:
+            return _call_instructions(build)
 
         return await self.run(
             knowledge=resolution.knowledge,
@@ -444,100 +422,37 @@ class _CallAgentCache:
         knowledge_identity: tuple[int, ...],
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         active_model_name: str | None,
-        operation: Callable[[AgnoAgent], Awaitable[str]],
+        operation: Callable[[AgentBuild], Awaitable[str]],
     ) -> str:
         """Run one turn, rebuilding only when call dependencies or the turn's model change."""
         async with self.lock:
-            reusing_agent = self._can_reuse_agent(
-                knowledge_identity=knowledge_identity,
-                refresh_scheduler=refresh_scheduler,
-                active_model_name=active_model_name,
-            )
-            agent = await self._get_agent(
-                knowledge=knowledge,
-                knowledge_identity=knowledge_identity,
-                refresh_scheduler=refresh_scheduler,
-                active_model_name=active_model_name,
-            )
-            if reusing_agent:
-                await arefresh_session_backed_bedrock_async_client(agent.model)
-            return await operation(agent)
+            build = self.build
+            if (
+                build is None
+                or self.knowledge_identity != knowledge_identity
+                or self.refresh_scheduler is not refresh_scheduler
+                or self.active_model_name != active_model_name
+            ):
+                self.build = None
+                self.active_model_name = active_model_name
+                # Drain an accepted build before a cancellation propagates, so no construction outlives the call.
+                build = await wait_for_future_until_complete(
+                    asyncio.create_task(
+                        asyncio.to_thread(self._build, knowledge=knowledge, refresh_scheduler=refresh_scheduler),
+                    ),
+                )
+                self.build = build
+                self.knowledge_identity = knowledge_identity
+                self.refresh_scheduler = refresh_scheduler
+            return await operation(build)
 
-    def _can_reuse_agent(
-        self,
-        *,
-        knowledge_identity: tuple[int, ...],
-        refresh_scheduler: KnowledgeRefreshScheduler | None,
-        active_model_name: str | None,
-    ) -> bool:
-        """Return whether the cached agent matches this turn's dependencies."""
-        return (
-            self.agent is not None
-            and self.knowledge_identity == knowledge_identity
-            and self.refresh_scheduler is refresh_scheduler
-            and self.active_model_name == active_model_name
-        )
-
-    async def aclose(self) -> None:
-        """Close the cached agent's caller-owned runtime state."""
-        async with self.lock:
-            agent, self.agent = self.agent, None
-            self.knowledge_identity = ()
-            self.refresh_scheduler = None
-            if agent is not None:
-                await self._close_agent(agent)
-
-    @staticmethod
-    async def _close_agent(agent: AgnoAgent) -> None:
-        """Release one cached agent's async client and runtime databases."""
-        await run_coroutine_until_complete(aclose_anthropic_async_client(agent.model))
-
-    async def _get_agent(
-        self,
-        *,
-        knowledge: AgentKnowledge | None,
-        knowledge_identity: tuple[int, ...],
-        refresh_scheduler: KnowledgeRefreshScheduler | None,
-        active_model_name: str | None,
-    ) -> AgnoAgent:
-        if self._can_reuse_agent(
-            knowledge_identity=knowledge_identity,
-            refresh_scheduler=refresh_scheduler,
-            active_model_name=active_model_name,
-        ):
-            assert self.agent is not None
-            return self.agent
-        if self.agent is not None:
-            agent, self.agent = self.agent, None
-            self.knowledge_identity = ()
-            self.refresh_scheduler = None
-            await self._close_agent(agent)
-        self.active_model_name = active_model_name
-        build_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._build_agent,
-                knowledge=knowledge,
-                refresh_scheduler=refresh_scheduler,
-            ),
-        )
-        try:
-            agent = await wait_for_future_until_complete(build_task)
-        except asyncio.CancelledError:
-            if not build_task.cancelled() and build_task.exception() is None:
-                await self._close_agent(build_task.result())
-            raise
-        self.agent = agent
-        self.knowledge_identity = knowledge_identity
-        self.refresh_scheduler = refresh_scheduler
-        return agent
-
-    def _build_agent(
+    def _build(
         self,
         *,
         knowledge: AgentKnowledge | None,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-    ) -> AgnoAgent:
-        """Build one cached agent with canonical prompt-sanitizing history storage."""
+    ) -> AgentBuild:
+        """Build the call's agent with canonical prompt-sanitizing history storage."""
         history_storage = create_scope_session_storage(
             agent_name=self.agent_name,
             scope=HistoryScope(kind="agent", scope_id=self.agent_name),
@@ -547,7 +462,7 @@ class _CallAgentCache:
         )
         # Build the same tools and system prompt as text chat so call turns reuse its prompt cache.
         # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
-        agent = create_agent(
+        build = create_agent(
             self.agent_name,
             self.config,
             self.runtime_paths,
@@ -560,8 +475,7 @@ class _CallAgentCache:
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
         )
-        _refuse_text_chat_functions(agent, self.config)
-        return agent
+        return _refuse_text_chat_functions(build, self.config)
 
 
 async def build_call_tools(
@@ -653,7 +567,6 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             context=context,
             execution_identity=execution_identity,
-            session_id=session_id,
             active_model_name=active_model_name,
         )
         responder = functools.partial(
@@ -680,8 +593,8 @@ async def build_call_tools(
             execution_identity=execution_identity,
             responder=responder,
             finalize_spoken_response=response_tracker.finalize if reconcile_spoken_response else None,
-            close=functools.partial(_close_cascaded_call_resources, response_tracker, agent_cache),
-            get_system_prompt=functools.partial(agent_cache.get_system_prompt, requester_id=requester_id),
+            close=response_tracker.wait_for_settlements,
+            get_system_prompt=agent_cache.get_system_prompt,
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
@@ -692,8 +605,7 @@ async def build_call_tools(
         refresh_scheduler=refresh_scheduler,
         execution_identity=execution_identity,
     )
-    knowledge = knowledge_resolution.knowledge
-    agent = await asyncio.to_thread(
+    build = await asyncio.to_thread(
         functools.partial(
             create_agent,
             agent_name,
@@ -701,19 +613,13 @@ async def build_call_tools(
             runtime_paths,
             execution_identity,
             hook_registry=context.hook_registry,
-            knowledge=knowledge,
+            knowledge=knowledge_resolution.knowledge,
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,
             refresh_scheduler=refresh_scheduler,
             eager_deferred_tools=True,
             active_model_name=active_model_name,
         ),
-    )
-    session, run_context, effective_tools = await _prepare_call_agent_tools(
-        agent,
-        agent_name=agent_name,
-        session_id=session_id,
-        requester_id=requester_id,
     )
     # Paid helper tools, such as claude_agent, record their usage in the call's ledger for the caller.
     usage_owner = _call_usage_owner(
@@ -724,73 +630,31 @@ async def build_call_tools(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    tools: list[Any] = []
-    visible_functions: list[Function | dict[Any, Any]] = []
-    for tool in effective_tools:
-        if not isinstance(tool, Function):
-            msg = f"Voice calls cannot expose provider-native tool definitions for agent {agent_name}"
-            raise TypeError(msg)
-        if _function_requires_text_chat(tool, config):
-            logger.info("call_tool_hidden_needs_text_chat", tool=tool.name, agent=agent_name)
+    # The call is one run for its tools, which share its session state the way one chat turn's tools do.
+    call_context = ToolCallContext(run_id=f"{session_id}:voice", session_id=session_id, user_id=requester_id)
+    tools: list[RawFunctionTool] = []
+    for function in prepare_run_tools(build.spec).functions.values():
+        # The build applied the call's function filter to the functions it built, not to ones added beside them.
+        if _function_requires_text_chat(function, config):
+            logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
             continue
-        visible_functions.append(tool)
         tools.append(
-            _wrap_agno_function(
-                tool,
+            _wrap_tool_function(
+                function,
+                middleware=build.tool_middleware,
+                call_context=call_context,
                 context=context,
                 agent_name=agent_name,
-                config=config,
                 authorize_operation=authorize_operation,
                 usage_owner=usage_owner,
             ),
         )
-    instructions = await _render_system_prompt(agent, session, run_context, visible_functions)
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),
-        instructions=instructions,
+        instructions=_call_instructions(build),
         execution_identity=execution_identity,
     )
-
-
-async def _prepare_call_agent_tools(
-    agent: AgnoAgent,
-    *,
-    agent_name: str,
-    session_id: str,
-    requester_id: str,
-) -> tuple[AgnoAgentSession, RunContext, list[Function | dict[Any, Any]]]:
-    """Prepare canonical tool instructions before rendering a call's system prompt."""
-    assert agent.model is not None
-    run_id = f"{session_id}:voice"
-    session = AgnoAgentSession(session_id=session_id, agent_id=agent_name, user_id=requester_id)
-    run_output = RunOutput(
-        run_id=run_id,
-        agent_id=agent_name,
-        agent_name=agent.name,
-        session_id=session_id,
-        user_id=requester_id,
-    )
-    run_context = RunContext(
-        run_id=run_id,
-        session_id=session_id,
-        user_id=requester_id,
-        session_state={},
-    )
-    processed_tools = await agent.aget_tools(
-        run_response=run_output,
-        run_context=run_context,
-        session=session,
-        user_id=requester_id,
-    )
-    effective_tools = prepare_agent_tools(
-        agent,
-        processed_tools=processed_tools,
-        run_response=run_output,
-        run_context=run_context,
-        session=session,
-    )
-    return session, run_context, effective_tools
 
 
 async def _run_call_agent(
@@ -898,7 +762,7 @@ async def _run_authorized_call_agent(
         )
         run_metadata: dict[str, Any] = {}
 
-        async def _respond(agent: AgnoAgent) -> str:
+        async def _respond(build: AgentBuild) -> str:
             try:
                 return await ai_response(
                     turn,
@@ -913,16 +777,16 @@ async def _run_authorized_call_agent(
                     refresh_scheduler=refresh_scheduler,
                     turn_recorder=recorder,
                     eager_deferred_tools=True,
-                    reusable_build=agent,
+                    reusable_build=build,
                     attempt_model_runtime=tool_support,
                 )
             finally:
                 recorder.set_run_metadata({**(recorder.run_metadata or {}), **run_metadata})
 
-        async def _run_with_agent(agent: AgnoAgent) -> str:
+        async def _run_with_build(build: AgentBuild) -> str:
             return await tool_support.run_in_context(
                 tool_context=context,
-                operation=functools.partial(_respond, agent),
+                operation=functools.partial(_respond, build),
             )
 
         response = await agent_cache.run(
@@ -930,7 +794,7 @@ async def _run_authorized_call_agent(
             knowledge_identity=knowledge_runtime_identity(knowledge_resolution.knowledge),
             refresh_scheduler=refresh_scheduler,
             active_model_name=active_model_name,
-            operation=_run_with_agent,
+            operation=_run_with_build,
         )
     except asyncio.CancelledError:
         state = _call_agent_run_state(recorder, session_id=session_id, fallback_run_id=fallback_run_id)
@@ -953,24 +817,13 @@ async def _run_authorized_call_agent(
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
 
 
-async def _close_cascaded_call_resources(
-    response_tracker: _CallResponseTracker,
-    agent_cache: _CallAgentCache,
-) -> None:
-    """Settle playout reconciliation, then close the call-owned agent."""
-    try:
-        await response_tracker.wait_for_settlements()
-    finally:
-        await agent_cache.aclose()
-
-
 def _call_agent_run_state(
     recorder: TurnRecorder,
     *,
     session_id: str,
     fallback_run_id: str,
 ) -> _CallAgentRunState:
-    """Snapshot one real Agno run for later spoken-text reconciliation.
+    """Snapshot one real agent run for later spoken-text reconciliation.
 
     The recorder's snapshot leaves out the calls a mid-turn fold summarized, as any interrupted record does.
     """
@@ -987,18 +840,9 @@ def _call_agent_run_state(
     )
 
 
-async def _render_system_prompt(
-    agent: AgnoAgent,
-    session: AgnoAgentSession,
-    run_context: RunContext,
-    tools: list[Function | dict[Any, Any]],
-) -> str:
-    """Render the same system message the agent would use for a chat turn."""
-    message = await agent.aget_system_message(session, run_context=run_context, tools=tools)
-    if message is None:
-        msg = "Agent produced no system prompt for its voice session"
-        raise ValueError(msg)
-    content = message.content
+def _call_instructions(build: AgentBuild) -> str:
+    """Return the system message a chat turn of the agent starts from, without the turn's own context."""
+    content = prompt_for_turn(build).content
     if not isinstance(content, str) or not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)
@@ -1018,54 +862,55 @@ def _normalize_tool_result(result: object) -> str:
     return text
 
 
-def _function_requires_async_execution(function: Function) -> bool:
-    """Return whether an entrypoint or hook requires Agno's async executor."""
-    callbacks = [function.entrypoint, function.pre_hook, function.post_hook, *(function.tool_hooks or [])]
-    return any(
-        callback is not None and (iscoroutinefunction(callback) or isasyncgenfunction(callback))
-        for callback in callbacks
-    )
-
-
-def _function_requires_text_chat(function: Function, config: Config) -> bool:
+def _function_requires_text_chat(function: Function | ToolFunction, config: Config) -> bool:
     """Return whether a function needs text-chat UI that a voice call lacks."""
     is_matrix_room_runtime_function = (
         function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
     )
-    return (
+    return bool(
         function.requires_confirmation
-        or function.requires_user_input
         or function.external_execution
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name))
+        or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)),
     )
 
 
-def _refuse_text_chat_call(name: str) -> str:
-    logger.info("call_tool_blocked_needs_text_chat", tool=name)
-    return _TEXT_CHAT_REQUIRED_MESSAGE
-
-
-def _refuse_text_chat_functions(agent: AgnoAgent, config: Config) -> None:
+def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild:
     """Keep functions that need text chat visible, so the prompt matches chat's, but refuse them when called."""
-    # MindRoom builds each agent's tools as a list of configured toolkits.
-    for toolkit in agent.tools if isinstance(agent.tools, list) else ():
-        if not isinstance(toolkit, Toolkit):
-            continue
-        for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-            if function.external_execution_silent:
-                # Chat hands delegation to its driver; calls run the child turn directly.
-                function.external_execution = False
-                function.external_execution_silent = False
-            if not _function_requires_text_chat(function, config):
-                continue
-            # Agno pauses the run for these flags before any tool hook can refuse.
-            function.requires_confirmation = False
-            function.requires_user_input = False
-            function.external_execution = False
-            function.approval_type = None
-            function.tool_hooks = [_refuse_text_chat_call, *(function.tool_hooks or [])]
+    refused: set[str] = set()
+
+    def callable_in_a_call(function: ToolFunction) -> ToolFunction:
+        if function.external_execution_silent:
+            # Chat hands delegation to its driver; calls run the child turn directly.
+            function = replace(function, external_execution=False, external_execution_silent=False)
+        if not _function_requires_text_chat(function, config):
+            return function
+        refused.add(function.name)
+        # The loop pauses a run for these flags before any tool-call policy can refuse the call.
+        return replace(function, requires_confirmation=False, external_execution=False, approval_type=None)
+
+    toolkits = tuple(
+        replace(toolkit, functions=tuple(callable_in_a_call(function) for function in toolkit.functions))
+        for toolkit in build.spec.toolkits
+    )
+    return replace(
+        build,
+        spec=replace(build.spec, toolkits=toolkits),
+        tool_middleware=(_text_chat_refusal(frozenset(refused)), *build.tool_middleware),
+    )
+
+
+def _text_chat_refusal(names: frozenset[str]) -> ToolMiddleware:
+    """Answer a call of one of ``names`` with the text-chat notice before any other policy sees it."""
+
+    async def refuse(call: ToolCall, call_next: ToolNext) -> object:
+        if call.function.name in names:
+            logger.info("call_tool_blocked_needs_text_chat", tool=call.function.name)
+            return _TEXT_CHAT_REQUIRED_MESSAGE
+        return await call_next(call.arguments)
+
+    return refuse
 
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
@@ -1089,57 +934,49 @@ def _function_available_during_call(
     return not unavailable
 
 
-def _wrap_agno_function(
-    function: Function,
+def _realtime_parameters(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the parameters schema the realtime model gets: one with properties is closed to other keys.
+
+    Agno prepared each realtime tool's schema a second time, and that pass marks a schema whose function takes
+    arguments ``additionalProperties: false``; the realtime model keeps receiving that shape, which the
+    voice_call_realtime golden pins. A schema that already decides it keeps its own value.
+    """
+    schema = dict(parameters)
+    if schema.get("properties"):
+        schema.setdefault("additionalProperties", False)
+    return schema
+
+
+def _wrap_tool_function(
+    function: ToolFunction,
     *,
+    middleware: Sequence[ToolMiddleware],
+    call_context: ToolCallContext,
     context: ToolRuntimeContext,
     agent_name: str,
-    config: Config,
     authorize_operation: _CallAuthorizationGuard,
     usage_owner: HelperUsageOwner,
 ) -> RawFunctionTool:
-    """Wrap one agno function as a livekit raw function tool."""
+    """Wrap one of the build's functions as a livekit raw function tool that runs under the build's policy."""
     from livekit.agents import llm  # noqa: PLC0415
 
-    # Toolkit functions carry an empty parameters schema until processed;
-    # without this the realtime model sees zero-argument tools.
-    function.process_entrypoint()
-    parameters = function.parameters if isinstance(function.parameters, dict) else {}
-    if not parameters:
-        parameters = {"type": "object", "properties": {}}
     raw_schema = {
         "name": function.name,
         "description": function.description or function.name,
-        "parameters": parameters,
+        "parameters": _realtime_parameters(function.parameters),
     }
 
     async def _handler(raw_arguments: dict[str, Any]) -> str:
-        if _function_requires_text_chat(function, config):
-            logger.info("call_tool_blocked_needs_text_chat", tool=function.name, agent=agent_name)
-            return _TEXT_CHAT_REQUIRED_MESSAGE
         async with authorize_operation() as authorized:
             if not authorized:
                 return "Call access was revoked before this tool could run."
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
             try:
                 with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
-                    # create_agent installs MindRoom's canonical hook bridge on
-                    # every function. It owns approval evaluation, including the
-                    # defensive argument copy, so do not preflight policy here.
-                    execution = FunctionCall(function=function, arguments=raw_arguments)
-                    if _function_requires_async_execution(function):
-                        result = await execution.aexecute()
-                    else:
-                        # asyncio.to_thread copies the current contextvars context,
-                        # so hooks and the tool see the call's runtime context and usage owner.
-                        result = await asyncio.to_thread(execution.execute)
+                    result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
                 logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
                 return f"Tool {function.name} failed: {error}"
-        if result.status != "success":
-            error = result.error or "unknown error"
-            logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=error)
-            return f"Tool {function.name} failed: {error}"
-        return _normalize_tool_result(result.result)
+        return _normalize_tool_result(result)
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

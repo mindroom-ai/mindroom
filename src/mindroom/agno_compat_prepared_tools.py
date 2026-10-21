@@ -88,16 +88,14 @@ def prepare_team_prompt_tools(
 
 
 # AGNO_COMPAT: Executable tool preparation lacks public run-context and media bindings.
-# Reason: RTC and live-turn calls need prepared Functions with Agno's run context and media bindings,
+# Reason: The CLI catalog's live-turn calls need prepared Functions with Agno's run context and media bindings,
 # which Agent.aget_tools alone does not supply through a public preparation API.
 # Upstream issue: https://github.com/agno-agi/agno/issues/7806
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807 is related inspection work;
 # it must also support executable run-context/media bindings to replace this path.
 # Remove when: A public Agent preparation API returns the same effective Functions
 # for execution; channel filtering and requester authorization remain with the owner.
-# Coverage: tests/test_matrix_rtc_call_tools.py::test_build_call_tools_returns_same_agent_prompt_and_tools;
-# tests/test_matrix_rtc_call_tools.py::test_build_call_tools_includes_async_only_toolkit_functions;
-# tests/test_agent_cli_turn.py::test_real_cli_call_wait_completes_inside_outer_bash.
+# Coverage: tests/test_agent_cli_turn.py::test_real_cli_call_wait_completes_inside_outer_bash.
 def prepare_agent_tools(
     agent: Agent,
     *,
