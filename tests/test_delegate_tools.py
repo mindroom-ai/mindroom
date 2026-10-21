@@ -24,8 +24,8 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.thread_models import set_thread_model_override
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.output_files import adapt_tool_function
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -177,7 +177,7 @@ class TestDelegateTools:
 
     def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
         """Test that the model-visible function description includes delegation targets."""
-        description = adapt_tool_function(tools.async_functions["run_subagent"]).description
+        description = adapt_function(tools.async_functions["run_subagent"]).description
 
         assert description is not None
         assert "Allowed subagents for this caller:" in description

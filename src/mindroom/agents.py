@@ -55,7 +55,7 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.notices import install_job_notice_hook
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function
+from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ensure_tool_registry_loaded,
@@ -74,7 +74,7 @@ from mindroom.tool_system.dynamic_toolkits import (
     drop_shadowed_deferred_functions,
     visible_tool_surface,
 )
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, adapt_tool_functions, wrap_toolkit_for_output_files
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
@@ -1463,7 +1463,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         return toolkit
 
     def adapt_entry(toolkit: Toolkit, tool_name: str | None) -> AdaptedToolkit:
-        adapted = adapt_tool_functions(toolkit)
+        adapted = adapt_toolkit(toolkit)
         # The job controls carry no registered name: they act only on the caller's own jobs, each approved already.
         if tool_name is None or not supports_native_tool_approval:
             return adapted
@@ -1814,7 +1814,7 @@ def _agent_toolkits(
                 AdaptedToolkit(name=KNOWLEDGE_SEARCH_TOOL_NAME, functions=(adapt_function(search),), instructions=None),
             )
     if skills is not None and (offered := _prune_toolkit_functions(skills, generated_visible)) is not None:
-        adapted.append(adapt_tool_functions(offered))
+        adapted.append(adapt_toolkit(offered))
     return tuple(adapted)
 
 

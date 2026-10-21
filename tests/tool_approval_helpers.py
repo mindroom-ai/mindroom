@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agents import apply_tool_approval_capability
-from mindroom.tool_system.output_files import adapt_tool_functions
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -22,7 +22,7 @@ def gated_functions(
 ) -> dict[str, ToolFunction]:
     """Return ``toolkit``'s adapted functions by name, with the approval flags a native-approval agent sets."""
     adapted = apply_tool_approval_capability(
-        adapt_tool_functions(toolkit),
+        adapt_toolkit(toolkit),
         toolkit,
         config,
         registered_tool_name=registered_tool_name,

@@ -14,8 +14,9 @@ from agno.utils.path_safety import safe_join_relative_path
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolArgumentError, ToolCallContext, execute_tool_call, parse_tool_arguments
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, adapt_tool_functions
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillsToolkit,
@@ -107,7 +108,7 @@ def test_skill_functions_equal_the_prompt_goldens(tmp_path: Path, scenario: str,
     golden = _golden(scenario)
     _write_golden_workspace(tmp_path, golden)
 
-    functions = adapt_tool_functions(_build(tmp_path, output_files=output_files)).functions
+    functions = adapt_toolkit(_build(tmp_path, output_files=output_files)).functions
 
     assert [_wire_tool(function) for function in functions] == _golden_skill_tools(golden)
 
@@ -162,7 +163,7 @@ async def _call(function: ToolFunction, arguments: dict[str, object]) -> tuple[b
 
 
 def _functions(toolkit: SkillsToolkit) -> dict[str, ToolFunction]:
-    return {function.name: function for function in adapt_tool_functions(toolkit).functions}
+    return {function.name: function for function in adapt_toolkit(toolkit).functions}
 
 
 @pytest.mark.asyncio

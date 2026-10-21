@@ -33,6 +33,7 @@ from agno.utils.schema import (
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import finished_tool_schema
 from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
@@ -71,10 +72,11 @@ def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolki
 
 
 def adapt_function(function: Function) -> ToolFunction:
-    """Process one Agno function once, on a copy, and return it as a ``ToolFunction``.
+    """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
 
     ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
-    wrapper, so the shared ``Function`` stays untouched for whoever else holds it.
+    wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A MindRoom wrapper that forges its
+    entrypoint's signature declares how the schema Agno derives from it is completed.
     """
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
@@ -87,7 +89,7 @@ def adapt_function(function: Function) -> ToolFunction:
     return ToolFunction(
         name=prepared.name,
         description=prepared.description,
-        parameters=prepared.parameters,
+        parameters=finished_tool_schema(function.entrypoint, prepared.parameters),
         strict=prepared.strict,
         requires_confirmation=prepared.requires_confirmation,
         approval_type=prepared.approval_type,

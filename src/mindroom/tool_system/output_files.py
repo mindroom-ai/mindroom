@@ -10,7 +10,7 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
@@ -21,15 +21,8 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import (
-    AdaptedToolkit,
-    Function,
-    Toolkit,
-    ToolResult,
-    adapt_function,
-    adapt_toolkit,
-)
-from mindroom.tool_system.declarations import declare_tool_schema_source
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
+from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
@@ -37,7 +30,6 @@ if sys.version_info >= (3, 14):
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -716,6 +708,8 @@ def _wrap_entrypoint(
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
     declare_tool_schema_source(wrapper, entrypoint)
+    # Agno derives the argument from the forged signature without the default the model is shown.
+    declare_tool_schema_finisher(wrapper, _with_optional_output_path)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
 
@@ -757,30 +751,3 @@ def wrap_toolkit_for_output_files(
         seen_functions.add(id(function))
         wrap_function_for_output_files(function, policy)
     return toolkit
-
-
-def adapt_tool_function(function: Function) -> ToolFunction:
-    """Adapt one Agno function, completing the output-path argument of a function this module wrapped.
-
-    Agno derives a wrapped function's schema from the wrapper's signature, which declares the argument without the
-    default the model is shown; the adapter processes each function once, so the schema is finished here, once.
-    """
-    return _finished(function, adapt_function(function))
-
-
-def adapt_tool_functions(toolkit: Toolkit) -> AdaptedToolkit:
-    """Adapt every function of ``toolkit`` as ``adapt_toolkit`` does, completing each wrapped output-path argument."""
-    adapted = adapt_toolkit(toolkit)
-    sources = toolkit.get_async_functions().values()
-    return replace(
-        adapted,
-        functions=tuple(
-            _finished(source, function) for source, function in zip(sources, adapted.functions, strict=True)
-        ),
-    )
-
-
-def _finished(source: Function, adapted: ToolFunction) -> ToolFunction:
-    if not getattr(source.entrypoint, _WRAPPED_ATTR, False):
-        return adapted
-    return replace(adapted, parameters=_with_optional_output_path(adapted.parameters))

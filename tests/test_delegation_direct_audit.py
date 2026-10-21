@@ -19,8 +19,8 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import child_execution_identity, observe_child_event, prepare_child_turn
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from mindroom.tool_system.output_files import adapt_tool_function
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -203,7 +203,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
-    function = adapt_tool_function(tools.async_functions["run_subagent"])
+    function = adapt_function(tools.async_functions["run_subagent"])
     # Minimal mode is hidden here because no allowed subagent can run it.
     assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 

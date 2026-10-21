@@ -35,10 +35,10 @@ from mindroom.tool_jobs.runtime import (
     JobAccessError,
     register_background_runtime,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.output_files import adapt_tool_functions
 from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import (
@@ -376,7 +376,7 @@ async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path
     try:
         controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
         assert controls is not None
-        [job] = adapt_tool_functions(controls).functions
+        [job] = adapt_toolkit(controls).functions
         policy = build_tool_hook_middleware(
             HookRegistry.empty(),
             agent_name="team",

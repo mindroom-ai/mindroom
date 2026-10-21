@@ -29,13 +29,12 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
-    adapt_tool_function,
-    adapt_tool_functions,
     ensure_output_path_schema_optional,
     saved_tool_output_receipt,
     validate_output_path_syntax,
@@ -216,7 +215,7 @@ def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) ->
     toolkit = _EchoToolkit()
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
 
-    function = adapt_tool_function(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
     assert list(function.parameters["properties"]) == ["text", OUTPUT_PATH_ARGUMENT]
     assert function.parameters["required"] == ["text"]
@@ -229,7 +228,7 @@ def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_
     _first_function(toolkit).strict = True
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
 
-    function = adapt_tool_function(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
     assert function.strict is False
     assert function.definition().strict is False
@@ -246,7 +245,7 @@ def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path)
     function = Function(name="tagged", entrypoint=tagged)
     wrap_function_for_output_files(function, _policy(tmp_path))
 
-    adapted = adapt_tool_function(function)
+    adapted = adapt_function(function)
 
     assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT, "kwargs"]
     _assert_output_path_schema_is_optional(adapted)
@@ -260,7 +259,7 @@ def test_adapting_a_toolkit_completes_only_the_wrapped_functions(tmp_path: Path)
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
     toolkit.register(plain)
 
-    echo, plain_function = adapt_tool_functions(toolkit).functions
+    echo, plain_function = adapt_toolkit(toolkit).functions
 
     _assert_output_path_schema_is_optional(echo)
     assert list(plain_function.parameters["properties"]) == ["text"]
@@ -331,7 +330,7 @@ def test_skip_entrypoint_processing_function_keeps_its_schema_and_an_optional_ou
     )
     wrap_function_for_output_files(function, _policy(tmp_path))
 
-    adapted = adapt_tool_function(function)
+    adapted = adapt_function(function)
 
     assert adapted.strict is False
     assert adapted.parameters["required"] == ["text"]
@@ -373,7 +372,7 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
     toolkit = _EchoToolkit()
     wrap_toolkit_for_output_files(toolkit, None)
 
-    function = adapt_tool_function(_first_function(toolkit))
+    function = adapt_function(_first_function(toolkit))
 
     assert OUTPUT_PATH_ARGUMENT not in inspect.signature(function.entrypoint).parameters
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]

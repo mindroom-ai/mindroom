@@ -5212,7 +5212,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.tool_access"
 depends_on = [
-    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[interfaces]]
@@ -5411,6 +5411,7 @@ path = "mindroom.tool_system.agno_toolkits"
 depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.tool_function",
 ]
 
@@ -6715,7 +6716,9 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "declare_tool_schema_finisher",
     "declare_tool_schema_source",
+    "finished_tool_schema",
     "tool_schema_source",
 ]
 from = ["mindroom.tool_system.declarations"]

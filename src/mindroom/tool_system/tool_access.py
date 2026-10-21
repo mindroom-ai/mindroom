@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from mindroom.tool_system.output_files import adapt_tool_function
+from mindroom.tool_system.agno_toolkits import adapt_function
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -53,14 +53,14 @@ def function_schema(function: Function) -> dict[str, Any]:
     """
     if function.entrypoint is None:
         return function.parameters
-    return dict(adapt_tool_function(function).parameters)
+    return dict(adapt_function(function).parameters)
 
 
 def function_definition(function: Function) -> dict[str, object]:
     """Return the name, description, and input schema the model is shown for one Agno function."""
     if function.entrypoint is None:
         return {"name": function.name, "description": function.description or "", "parameters": function.parameters}
-    adapted = adapt_tool_function(function)
+    adapted = adapt_function(function)
     return {"name": adapted.name, "description": adapted.description or "", "parameters": dict(adapted.parameters)}
 
 
