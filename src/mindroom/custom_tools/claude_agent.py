@@ -49,7 +49,7 @@ _SYNTHETIC_MODEL = "<synthetic>"
 
 @runtime_checkable
 class _RunContext(Protocol):
-    """Minimal run context protocol needed by this tool."""
+    """Minimal run context protocol needed by this tool; Agno's argument coercion checks the injected one against it."""
 
     session_id: str
 
