@@ -17,10 +17,9 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
-from agno.run.agent import RunOutput
-
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
+from mindroom.llm.runs import RunRecord
 from mindroom.llm_request_logging import bind_llm_request_log_context
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
@@ -79,7 +78,7 @@ def _response_replies(
 ) -> tuple[int, bool]:
     storage = create_session_storage(scope.agent, config, runtime_paths, execution_identity=scope.identity)
     run = storage.get_run(run_id)
-    return count_model_replies(run if isinstance(run, RunOutput) else None)
+    return count_model_replies(run if isinstance(run, RunRecord) else None)
 
 
 def _review_log_context(scope: _ReviewScope, correlation_id: str) -> dict[str, str]:

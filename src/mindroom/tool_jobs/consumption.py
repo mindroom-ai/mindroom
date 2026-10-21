@@ -8,11 +8,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from agno.exceptions import AgentRunException
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 from agno.tools.function import FunctionCall, ToolResult
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.agno_compat_functions import function_actor, function_agent, function_run_context
@@ -22,8 +21,7 @@ from mindroom.tool_jobs.results import read_result_payload
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from agno.db.base import BaseDb
-
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.results import ToolResultPayload
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
 
@@ -41,14 +39,14 @@ class _Consumption:
     call_id: str
     returned_inline: bool
 
-    def saved(self, storage: BaseDb) -> bool:
+    def saved(self, storage: ConversationStore) -> bool:
         """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team.
 
         A run stopped or failed after the call is saved without its tools when it did not stream, but keeps the
         call's result message, so either counts.
         """
         run = storage.get_run(self.run_id)
-        if not isinstance(run, TeamRunOutput if self.team else RunOutput):
+        if not isinstance(run, TeamRunRecord if self.team else RunRecord):
             return False
         return any(
             tool.tool_call_id == self.call_id and not tool.is_paused and tool.result is not None
@@ -60,7 +58,7 @@ class _Consumption:
 class ConsumptionOwner:
     """Claims retained across every attempt of one parent response."""
 
-    storage_factory: Callable[[], BaseDb] | None = None
+    storage_factory: Callable[[], ConversationStore] | None = None
     _claims: list[_Consumption] = field(default_factory=list)
 
     def register(
@@ -115,7 +113,7 @@ def consumption_context(owner: ConsumptionOwner) -> Iterator[None]:
         _OWNER.reset(token)
 
 
-def set_consumption_storage(storage_factory: Callable[[], BaseDb] | None) -> None:
+def set_consumption_storage(storage_factory: Callable[[], ConversationStore] | None) -> None:
     """Bind registered canonical storage after the response opens its scope."""
     owner = _OWNER.get()
     if owner is not None:

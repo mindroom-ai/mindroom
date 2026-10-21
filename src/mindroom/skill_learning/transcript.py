@@ -20,9 +20,9 @@ from mindroom.redaction import redact_sensitive_text
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.message import Message
-    from agno.run.agent import RunOutput
-    from agno.session.agent import AgentSession
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import RunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 _TAIL_MESSAGES = 24
 _DIGEST_USER_CHARS = 300
@@ -34,7 +34,7 @@ _MIN_MESSAGE_CHARS = 2_000
 _CLIP_NOTE_CHARS = 64
 
 
-def conversation_messages(session: AgentSession) -> list[list[Utterance]]:
+def conversation_messages(session: ConversationSession) -> list[list[Utterance]]:
     """Return each stored message of this session's turns, in order, as what was said in it, with tool calls and results.
 
     A prompt holding several people's messages stays one entry, so it is redacted as a whole like any stored message.
@@ -46,7 +46,7 @@ def conversation_messages(session: AgentSession) -> list[list[Utterance]]:
     ]
 
 
-def count_model_replies(run: RunOutput | None) -> tuple[int, bool]:
+def count_model_replies(run: RunRecord | None) -> tuple[int, bool]:
     """Count a model-visible run's assistant messages, one per model request including tool-calling steps.
 
     Like Hermes resetting its counter when ``skill_manage`` runs, only replies after the last reply that called it

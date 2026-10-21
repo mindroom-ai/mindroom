@@ -11,9 +11,14 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate
 from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.store import open_conversation_store
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import runtime as runtime_module
+from mindroom.tool_jobs.consumption import ConsumptionOwner
 from mindroom.tool_jobs.control import job_checkpoint, pending_human_messages_context
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
@@ -508,6 +513,59 @@ async def test_consumption_repairs_failed_cancellation_save_before_reread(
         result = await cancel_settled(runtime, "cancel-retry", owner=job_owner(), depth=0)
         assert result.status == "cancelled"
         assert result.consumed
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved(tmp_path: Path) -> None:
+    """A claim is consumed once the parent run's stored row holds its finished call; one the run never saved is released."""
+    runtime = await tool_job_runtime(tmp_path)
+    store = open_conversation_store(tmp_path / "sessions.db", TableNames("agent_sessions"))
+    parent = RunRecord(
+        run_id="parent-run",
+        session_id="parent-session",
+        agent_id="parent",
+        status=RunStatus.completed,
+        tools=[ToolExecution(tool_call_id="saved-call", tool_name="tool", result="done")],
+    )
+    store.save_run(
+        ConversationSession(session_id="parent-session", kind="agent", owner_id="parent"),
+        parent,
+        record_usage=False,
+    )
+    owner = ConsumptionOwner(storage_factory=lambda: store)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        for job_id, call_id in (("saved", "saved-call"), ("unsaved", "other-call")):
+            await start_job(
+                runtime,
+                job_id,
+                tool_name="tool",
+                depth=0,
+                adapter={},
+                owner=job_owner(),
+                operation=operation,
+            )
+            waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
+            owner.register(
+                runtime,
+                job_id,
+                waited.claim,
+                run_id="parent-run",
+                team=False,
+                call_id=call_id,
+                returned_inline=False,
+            )
+
+        await owner.finalize()
+
+        saved = await lookup(runtime, "saved", owner=job_owner(), depth=0)
+        unsaved = await lookup(runtime, "unsaved", owner=job_owner(), depth=0)
+        assert (saved.consumed, unsaved.consumed) == (True, False)
     finally:
         await runtime.shutdown()
 

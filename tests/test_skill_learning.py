@@ -37,6 +37,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.history import summary_rows
+from mindroom.llm.runs import RunRecord
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.mid_turn import QueuedMessage
 from mindroom.path_confinement import open_directory_within_root
@@ -46,6 +47,7 @@ from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.providers.tool_policy import provider_tools_disabled
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning import library
 from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, observe_final_request
@@ -195,7 +197,13 @@ def _seed(
     for run in runs:
         run.session_id = session_id
     storage = create_session_storage("mind", config, paths, execution_identity=identity)
-    seed_session(storage, AgentSession(session_id=session_id, agent_id="mind", runs=list(runs)))
+    seed_session(storage, _stored(session_id, *runs))
+
+
+def _stored(session_id: str, *runs: RunOutput) -> ConversationSession:
+    """Return the session the owned store holds for Agno runs, as their stored rows load."""
+    records = [RunRecord.from_dict(run.to_dict()) for run in runs]
+    return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=records)
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:
@@ -1348,10 +1356,10 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     runner = _runner(paths)
     assert await _count(runner, config) is None
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    storage.delete_runs(["r1"])
+    storage.delete_run_subtrees(["r1"])
     later = _tool_turn("r2", result="deployed to canary")
     later.session_id = "session"
-    seed_session(storage, AgentSession(session_id="session", agent_id="mind", runs=[later]))
+    seed_session(storage, _stored("session", later))
     # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
     assert summary_rows.append_summary(
         storage,

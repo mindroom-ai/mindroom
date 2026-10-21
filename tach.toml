@@ -8644,6 +8644,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.consumption"
 depends_on = [
+    "mindroom.llm",
     "mindroom.session_storage.agent_storage",
     "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.tool_jobs.execution_authority",
@@ -9375,6 +9376,7 @@ visibility = ["mindroom.skill_learning.runner"]
 [[modules]]
 path = "mindroom.skill_learning.runner"
 depends_on = [
+    "mindroom.llm",
     "mindroom.session_storage.agent_storage",
     "mindroom.constants",
     "mindroom.matrix.client_delivery",

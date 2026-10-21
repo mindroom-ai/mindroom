@@ -259,7 +259,7 @@ async def _replay(
     transcript = await asyncio.to_thread(
         render_transcript,
         messages,
-        summary=session.summary.summary if session.summary is not None else None,
+        summary=session.summary.text if session.summary is not None else None,
         budget_chars=_review_input_budget_tokens(config, model_name) * _CHARS_PER_TOKEN // _CONVERSATION_BUDGET_SHARE,
     )
     schemas = await asyncio.to_thread(_agent_skill_schemas, config, runtime_paths, agent_name, skills_root, catalog)
