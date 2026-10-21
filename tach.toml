@@ -1515,6 +1515,7 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.invocation",
 ]
 
 [[modules]]

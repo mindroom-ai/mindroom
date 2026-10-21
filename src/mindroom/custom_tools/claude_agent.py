@@ -9,7 +9,7 @@ from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
+from typing import ClassVar, Literal, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
 from agno.metrics import ModelMetrics, RunMetrics
@@ -48,33 +48,6 @@ _SYNTHETIC_MODEL = "<synthetic>"
 
 
 @runtime_checkable
-class _Agent(Protocol):
-    """Minimal agent protocol needed by this tool."""
-
-    name: str | None
-
-
-@runtime_checkable
-class _AgentWithId(Protocol):
-    """Agent protocol that exposes a stable id field."""
-
-    id: str | None
-
-
-@runtime_checkable
-class _AgentWithModel(Protocol):
-    """Agent protocol that exposes a model object."""
-
-    model: Any | None
-
-
-@runtime_checkable
-class _ModelWithId(Protocol):
-    """Model protocol that exposes an id field."""
-
-    id: str | None
-
-
 class _RunContext(Protocol):
     """Minimal run context protocol needed by this tool."""
 
@@ -504,17 +477,10 @@ class ClaudeAgentTools(Toolkit):
             details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
-    def _namespace(self, agent: _Agent | None) -> str:
-        if isinstance(agent, _AgentWithId):
-            agent_id = agent.id
-            if agent_id and agent_id.strip():
-                return agent_id.strip()
-        if not isinstance(agent, _Agent):
-            return "mindroom"
-        agent_name = agent.name
-        if agent_name and agent_name.strip():
-            return agent_name.strip()
-        return "mindroom"
+    def _namespace(self) -> str:
+        context = get_tool_runtime_context()
+        agent_name = context.agent_name.strip() if context is not None else ""
+        return agent_name or "mindroom"
 
     def _ensure_namespace_config(self, namespace: str) -> None:
         self._session_manager.configure_namespace(
@@ -528,27 +494,24 @@ class ClaudeAgentTools(Toolkit):
         *,
         session_label: str | None,
         run_context: _RunContext | None,
-        agent: _Agent | None,
     ) -> str:
-        agent_name = self._namespace(agent)
+        agent_name = self._namespace()
         run_session = run_context.session_id if run_context is not None else "default"
         if session_label and session_label.strip():
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
-    def _resolve_model(self, agent: _Agent | None) -> str | None:
+    def _resolve_model(self) -> str | None:
         if self.model and self.model.strip():
             return self.model.strip()
-
-        if not isinstance(agent, _AgentWithModel):
+        # Without a configured model, each turn runs on the reply's own model, such as an over-budget fallback.
+        context = get_tool_runtime_context()
+        if context is None or context.active_model_name is None:
             return None
-        model_obj = agent.model
-        if not isinstance(model_obj, _ModelWithId):
+        model_config = context.current_config.models.get(context.active_model_name)
+        if model_config is None or not model_config.id.strip():
             return None
-        model_id = model_obj.id
-        if model_id and model_id.strip():
-            return model_id.strip()
-        return None
+        return model_config.id.strip()
 
     async def _get_or_create_session(
         self,
@@ -557,7 +520,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None,
         fork_session: bool,
         run_context: _RunContext | None,
-        agent: _Agent | None,
     ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
@@ -568,10 +530,10 @@ class ClaudeAgentTools(Toolkit):
         if fork_session and not normalized_resume:
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
-        namespace = self._namespace(agent)
-        resolved_model = self._resolve_model(agent)
+        namespace = self._namespace()
+        resolved_model = self._resolve_model()
         self._ensure_namespace_config(namespace)
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
 
         stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
         stderr_callback = self._build_stderr_callback(stderr_lines)
@@ -611,7 +573,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
@@ -619,7 +580,6 @@ class ClaudeAgentTools(Toolkit):
             resume=resume,
             fork_session=fork_session,
             run_context=run_context,
-            agent=agent,
         )
         if isinstance(result, str):
             return result
@@ -634,7 +594,6 @@ class ClaudeAgentTools(Toolkit):
         resume: str | None = None,
         fork_session: bool = False,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -646,7 +605,6 @@ class ClaudeAgentTools(Toolkit):
             resume=resume,
             fork_session=fork_session,
             run_context=run_context,
-            agent=agent,
         )
         if isinstance(acquire_result, str):
             return acquire_result
@@ -731,10 +689,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -754,10 +711,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -773,10 +729,9 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
         run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label, run_context=run_context)
         removed = await self._session_manager.close(session_key)
         if not removed:
             return f"No active Claude session for `{session_key}`."
