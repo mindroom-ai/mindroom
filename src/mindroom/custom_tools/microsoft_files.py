@@ -147,6 +147,22 @@ def _etag(value: object) -> str:
     return value.strip()
 
 
+def _web_url(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        msg = "expected_web_url must be the web_url of the file or folder this call writes to."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return value.strip()
+
+
+def _checked_target(metadata: Mapping[str, Any], expected_web_url: object) -> dict[str, Any]:
+    """Return the write target's summary, refusing a target that is not the one expected_web_url names."""
+    summary = _summary(metadata)
+    if summary["web_url"] != _web_url(expected_web_url):
+        msg = "The target is not at expected_web_url; tell the requester its real web_url before trying again."
+        raise MicrosoftGraphError(code="target_mismatch", message=msg, web_url=summary["web_url"])
+    return summary
+
+
 def _limit(value: object, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         msg = f"limit must be an integer from 1 to {maximum}."
@@ -439,25 +455,31 @@ class MicrosoftFilesTools(Toolkit):
 
         return self._call(operation, validate=lambda: _parse_file(file))
 
-    def microsoft_files_replace_file(self, file: str, local_path: str, expected_etag: str) -> str:
+    def microsoft_files_replace_file(
+        self,
+        file: str,
+        local_path: str,
+        expected_etag: str,
+        expected_web_url: str,
+    ) -> str:
         """Replace one OneDrive or SharePoint file's contents with a workspace file, up to 250 MB.
 
-        Before calling, tell the requester the file's name and location, such as its web_url, because an approval
-        prompt may show only IDs. The replace fails with etag_mismatch when someone changed the file after the
-        download or details whose etag is passed, so a newer edit is never overwritten; the file's version history
-        keeps the replaced version.
+        The replace fails with target_mismatch unless expected_web_url is the file's web_url, and with
+        etag_mismatch when someone changed the file after the download or details whose etag is passed, so a newer
+        edit is never overwritten; the file's version history keeps the replaced version.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
             local_path: The workspace file to upload.
             expected_etag: The etag from the download or details this edit started from; required.
+            expected_web_url: The file's web_url from the same download or details; required.
 
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             source = self._upload_source(local_path)
             item = _resolve(file, session)
-            if _summary(self._metadata(item, session))["is_folder"]:
+            if _checked_target(self._metadata(item, session), expected_web_url)["is_folder"]:
                 raise MicrosoftGraphError(code="is_folder", message="That item is a folder, not a file.")
             return {
                 "file": _summary(
@@ -473,25 +495,37 @@ class MicrosoftFilesTools(Toolkit):
 
         return self._call(
             operation,
-            validate=lambda: (_parse_file(file), _etag(expected_etag), self._upload_source(local_path)),
+            validate=lambda: (
+                _parse_file(file),
+                _etag(expected_etag),
+                _web_url(expected_web_url),
+                self._upload_source(local_path),
+            ),
         )
 
-    def microsoft_files_upload_file(self, local_path: str, folder: str | None = None, name: str | None = None) -> str:
+    def microsoft_files_upload_file(
+        self,
+        local_path: str,
+        folder: str | None = None,
+        name: str | None = None,
+        expected_web_url: str | None = None,
+    ) -> str:
         """Upload a workspace file, up to 250 MB, as a new OneDrive or SharePoint file; it never overwrites a file.
 
-        Before calling, tell the requester the new file's name and target folder, because an approval prompt may
-        show only IDs.
+        An upload into a folder fails with target_mismatch unless expected_web_url is the folder's web_url.
 
         Args:
             local_path: The workspace file to upload.
             folder: Graph item path or OneDrive or SharePoint link of the target folder; omit for the requester's
                 OneDrive root.
             name: The new file's name; defaults to the local file's name.
+            expected_web_url: The folder's web_url from its details or listing; required with folder.
 
         """
         try:
             if folder is not None:
                 _parse_file(folder, "folder")
+                _web_url(expected_web_url)
             source = self._upload_source(local_path)
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
@@ -500,7 +534,11 @@ class MicrosoftFilesTools(Toolkit):
             return graph_error_payload(_TOOL_NAME, MicrosoftGraphError(code="invalid_name", message=error))
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
+            parent = "/me/drive/root"
+            if folder is not None:
+                target = _resolve(folder, session, "folder")
+                _checked_target(self._metadata(target, session), expected_web_url)
+                parent = target.path
             path = f"{parent}:/{quote(file_name, safe='')}:/content?@microsoft.graph.conflictBehavior=fail"
             try:
                 result = session.upload("PUT", path, source, max_bytes=_MAX_UPLOAD_BYTES)
@@ -571,17 +609,18 @@ class MicrosoftFilesTools(Toolkit):
         worksheet: str,
         address: str,
         values: list[list[str | int | float | bool | None]],
+        expected_web_url: str,
     ) -> str:
         """Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.
 
-        Before calling, tell the requester the workbook, worksheet, and range, because an approval prompt may show
-        only IDs.
+        The write fails with target_mismatch unless expected_web_url is the workbook's web_url.
 
         Args:
             file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
             worksheet: The worksheet name.
             address: The range to write, such as A1:C2, matching the shape of values.
             values: Rows of cell values; a string starting with = is written as a formula.
+            expected_web_url: The workbook's web_url from its details or listing; required.
 
         """
         try:
@@ -592,6 +631,7 @@ class MicrosoftFilesTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             item = _resolve(file, session)
+            _checked_target(self._metadata(item, session), expected_web_url)
             payload = session.json(
                 "PATCH",
                 f"{item.path}/workbook/worksheets/{sheet}/range(address='{target}')",
@@ -599,7 +639,7 @@ class MicrosoftFilesTools(Toolkit):
             )
             return {"range": _range(payload)}
 
-        return self._call(operation, validate=lambda: _parse_file(file))
+        return self._call(operation, validate=lambda: (_parse_file(file), _web_url(expected_web_url)))
 
     def _call(
         self,

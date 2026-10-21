@@ -104,6 +104,7 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 | `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
+Replacing a file, uploading into a folder, and writing a range also take the target's `web_url` as `expected_web_url`, so an approval card shows where the write lands, and fail with `target_mismatch`, naming the real `web_url`, when the target is elsewhere.
 Uploads read from the agent's workspace and follow its [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting, and downloads always land in the workspace.
 
 To edit a document, the agent downloads it, saves its edited copy under a new name outside `microsoft-files-downloads/`, and replaces the original with the `etag` from the download.
