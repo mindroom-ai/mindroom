@@ -38,8 +38,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -83,6 +82,7 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.claude_prompt_cache import native_tool_search_supported
+from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -118,7 +118,6 @@ _VERTEX_ENDPOINTS = {
     "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
 }
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
-_CONTEXT_WINDOW_MARKERS = ("prompt is too long", "context window", "exceeds the model", "too many tokens")
 
 
 def _canonical_route(provider: str) -> ClaudeRouteKind:
@@ -489,23 +488,10 @@ class ClaudeProvider:
     def _raise_provider_error(self, error: Exception) -> NoReturn:
         """Translate an SDK or transport failure into the shared provider errors."""
         provider = self.identity.provider_name
-        if isinstance(error, anthropic.APIConnectionError):
-            raise ProviderUnavailable(error.message, provider=provider) from error
-        if isinstance(error, anthropic.RateLimitError):
-            raise RateLimited(error.message, provider=provider, status_code=error.status_code) from error
+        if isinstance(error, anthropic.APIConnectionError | httpx.TransportError):
+            raise transport_error(error, provider=provider) from error
         if isinstance(error, anthropic.APIStatusError):
-            status = error.status_code
-            if status == 529 or "overloaded_error" in str(error):
-                raise RateLimited(error.message, provider=provider, status_code=status) from error
-            if status in TRANSIENT_PROVIDER_STATUS_CODES:
-                raise ProviderUnavailable(error.message, provider=provider, status_code=status) from error
-            if status == 400 and any(marker in error.message.casefold() for marker in _CONTEXT_WINDOW_MARKERS):
-                raise ContextWindowExceeded(error.message, provider=provider, status_code=status) from error
-            if 400 <= status < 500:
-                raise InvalidRequest(error.message, provider=provider, status_code=status) from error
-            raise ProviderError(error.message, provider=provider, status_code=status) from error
-        if isinstance(error, httpx.TransportError):
-            raise ProviderUnavailable(str(error), provider=provider) from error
+            raise classify_provider_error(error.message, provider=provider, status_code=error.status_code) from error
         raise ProviderError(str(error), provider=provider) from error
 
 

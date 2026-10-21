@@ -27,9 +27,9 @@ from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCa
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.remote_media import download_media
-from mindroom.providers.status_errors import provider_error_for_status, provider_unavailable
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -110,13 +110,13 @@ class OllamaProvider:
                         yield event
         except ResponseError as error:
             # The SDK reports an error the server streams after a 200 response with status -1.
-            raise provider_error_for_status(
+            raise classify_provider_error(
                 str(error),
                 provider=self.identity.provider_name,
                 status_code=error.status_code if error.status_code > 0 else None,
             ) from error
         except (httpx.TransportError, OSError) as error:
-            raise provider_unavailable(error, provider=self.identity.provider_name) from error
+            raise transport_error(error, provider=self.identity.provider_name) from error
         if reply.usage is not None:
             yield UsageReported(reply.usage)
         metrics = MessageMetrics() if reply.usage is None else replace(reply.usage)

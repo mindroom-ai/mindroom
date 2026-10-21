@@ -6,12 +6,8 @@ the wire or the SDK client is a field here. Keys a route does not accept fail wi
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 __all__ = [
     "CEREBRAS_FIELDS",
@@ -23,7 +19,6 @@ __all__ = [
     "RESPONSES_FIELDS",
     "ChatSettings",
     "ResponsesSettings",
-    "parse_settings",
 ]
 
 CLIENT_FIELDS = frozenset(
@@ -220,23 +215,3 @@ class ResponsesSettings:
     prompt_cache_key: str | None = None
     session_id: str | None = None
     default_instructions: str | None = None
-
-
-def parse_settings[SettingsT: (ChatSettings, ResponsesSettings)](
-    settings_type: type[SettingsT],
-    extra_kwargs: Mapping[str, Any],
-    *,
-    accepted: frozenset[str],
-    provider: str,
-) -> SettingsT:
-    """Build one route's settings from authored ``extra_kwargs``, rejecting keys the route does not accept."""
-    known = {item.name for item in fields(settings_type)}
-    unknown = sorted(key for key in extra_kwargs if key not in accepted or key not in known)
-    if unknown:
-        msg = (
-            f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}. "
-            f"Valid keys: {', '.join(sorted(accepted & known))}"
-        )
-        raise ValueError(msg)
-    # Authored nested values are copied so request building never writes into the config.
-    return settings_type(**{key: deepcopy(value) for key, value in extra_kwargs.items()})

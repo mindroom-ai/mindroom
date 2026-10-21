@@ -233,6 +233,7 @@ Matrix sync callback
 | `providers/ollama_adapter.py` | Owned stream-only Ollama adapter over the native chat API (not wired yet) |
 | `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls (not wired yet) |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
+| `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |

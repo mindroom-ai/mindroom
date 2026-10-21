@@ -23,6 +23,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
@@ -35,7 +36,6 @@ from mindroom.providers.gemini.wire import (
     stop_reason,
     tool_config,
 )
-from mindroom.providers.status_errors import provider_error_for_status, provider_unavailable
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -125,13 +125,13 @@ class GeminiProvider:
                             first_text_at = time.perf_counter()
                         yield event
         except APIError as error:
-            raise provider_error_for_status(
+            raise classify_provider_error(
                 str(error),
                 provider=self.identity.provider_name,
                 status_code=error.code,
             ) from error
         except (httpx.TransportError, OSError) as error:
-            raise provider_unavailable(error, provider=self.identity.provider_name) from error
+            raise transport_error(error, provider=self.identity.provider_name) from error
         if reply.usage is not None:
             yield UsageReported(reply.usage)
         metrics = replace(reply.usage) if reply.usage is not None else MessageMetrics()

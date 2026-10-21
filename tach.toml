@@ -2706,7 +2706,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.providers.anthropic.settings"
-depends_on = []
+depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.repairs"
@@ -2738,7 +2738,6 @@ path = "mindroom.providers.anthropic.messages"
 depends_on = [
     "mindroom.constants",
     "mindroom.credentials.sync",
-    "mindroom.error_handling",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
@@ -2747,6 +2746,7 @@ depends_on = [
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.anthropic.wire",
     "mindroom.providers.claude_prompt_cache",
+    "mindroom.providers.errors",
     "mindroom.providers.google_adc",
     "mindroom.providers.model_http_client",
     "mindroom.runtime_env_policy",
@@ -5914,6 +5914,8 @@ depends_on = [
     "mindroom.native_compaction",
     "mindroom.prompts",
     "mindroom.providers.agno_compat_openai_responses_items",
+    "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",
     "mindroom.providers.openai_prompt_cache",
     "mindroom.providers.openai_response_replay",
@@ -7809,7 +7811,7 @@ path = "mindroom.providers.extra_kwargs"
 depends_on = []
 
 [[modules]]
-path = "mindroom.providers.status_errors"
+path = "mindroom.providers.errors"
 depends_on = ["mindroom.llm"]
 
 [[modules]]
@@ -7818,11 +7820,11 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm"]
 
 [[modules]]
 path = "mindroom.providers.gemini"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.errors", "mindroom.providers.tool_policy"]
 
 [[modules]]
 path = "mindroom.providers.ollama_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.status_errors", "mindroom.providers.tool_policy"]
+depends_on = ["mindroom.llm", "mindroom.providers.extra_kwargs", "mindroom.providers.remote_media", "mindroom.providers.errors", "mindroom.providers.tool_policy"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"

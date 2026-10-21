@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -345,7 +345,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
             False,
         ),
         (400, {"type": "invalid_request_error", "message": "messages.0: bad"}, InvalidRequest, False),
-        (401, {"type": "authentication_error", "message": "invalid x-api-key"}, InvalidRequest, False),
+        (401, {"type": "authentication_error", "message": "invalid x-api-key"}, ProviderError, False),
     ],
 )
 async def test_sdk_status_errors_map_to_the_shared_provider_errors(
