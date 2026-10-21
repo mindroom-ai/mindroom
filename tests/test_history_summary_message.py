@@ -1,14 +1,18 @@
-"""The compaction summary replays as the first history message, never inside the system prompt."""
+"""The compaction summary replays as the first history message, never inside the system prompt.
+
+The team cases still build Agno team requests through the Agno message-builder patch until the team runtime moves
+onto the owned loop; the agent cases run on the owned request assembly.
+"""
 # ruff: noqa: D103
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.agent import Agent
 from agno.agent import _messages as agent_messages
-from agno.db.in_memory import InMemoryDb
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 from agno.run.base import RunContext, RunStatus
@@ -20,7 +24,6 @@ from agno.team import Team
 from agno.team import _messages as team_messages
 from agno.team import _run as team_run
 
-from mindroom.agents import create_agent
 from mindroom.execution_preparation import _prepared_history_with_scheduled_limit
 from mindroom.history import agno_compat_message_builder
 from mindroom.history.replay import (
@@ -29,6 +32,12 @@ from mindroom.history.replay import (
     estimate_request_messages_tokens,
     plan_replay_that_fits,
 )
+from mindroom.history.request_messages import (
+    TurnMessages,
+    build_request,
+    build_resume_request,
+    scope_history_messages,
+)
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import (
     HistoryPolicy,
@@ -36,9 +45,12 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
+    ScopeSummary,
 )
-from tests.conftest import runtime_paths_for
-from tests.test_agents import _test_config
+from mindroom.llm.messages import Message as OwnedMessage
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunStatus as OwnedRunStatus
+from mindroom.session_storage.types import ConversationSession
 from tests.test_agno_compat_message_builder import RecordingOpenAIChat, _paused_and_resumed_requests
 
 if TYPE_CHECKING:
@@ -130,7 +142,7 @@ def _summaries(messages: list[Message]) -> list[Message]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 async def test_summary_is_the_first_history_message_for_new_runs(kind: str) -> None:
     entity = _entity(kind)
 
@@ -155,7 +167,7 @@ async def test_summary_is_the_first_history_message_for_new_runs(kind: str) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 async def test_system_prompt_is_identical_before_and_after_compaction(kind: str) -> None:
     entity = _entity(kind)
 
@@ -168,7 +180,7 @@ async def test_system_prompt_is_identical_before_and_after_compaction(kind: str)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 async def test_summary_not_inserted_without_history_replay(kind: str) -> None:
     entity = _entity(kind, add_history_to_context=False)
 
@@ -178,59 +190,7 @@ async def test_summary_not_inserted_without_history_replay(kind: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
-async def test_summary_only_plan_replays_the_summary_without_runs(kind: str) -> None:
-    entity = _entity(kind)
-    session = _session(kind, _SUMMARY)
-    scope = HistoryScope(kind=kind, scope_id="helper" if kind == "agent" else "crew")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    summary_only = _session(kind, _SUMMARY)
-    summary_only.runs = []
-    summary_tokens = estimate_prompt_visible_history_tokens(
-        session=summary_only,
-        scope=scope,
-        history_settings=settings,
-    )
-
-    plan = plan_replay_that_fits(
-        session=session,
-        scope=scope,
-        history_settings=settings,
-        available_history_budget=summary_tokens,
-        current_history_tokens=summary_tokens + 1_000,
-    )
-    entity.add_history_to_context = plan.add_history_to_context
-    entity.num_history_runs = plan.num_history_runs
-    entity.num_history_messages = plan.num_history_messages
-    run_messages = await _build(kind, entity, session)
-
-    assert plan.mode == "disabled"
-    assert plan.add_history_to_context is True
-    assert plan.num_history_runs == 0
-    assert [message.content for message in run_messages.messages[2:]] == ["current request"]
-    assert len(_summaries(run_messages.messages)) == 1
-
-
-def test_replay_estimate_counts_the_rendered_summary_once() -> None:
-    scope = HistoryScope(kind="agent", scope_id="helper")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    without = estimate_prompt_visible_history_tokens(
-        session=_session("agent", None),
-        scope=scope,
-        history_settings=settings,
-    )
-    with_summary = estimate_prompt_visible_history_tokens(
-        session=_session("agent", _SUMMARY),
-        scope=scope,
-        history_settings=settings,
-    )
-
-    rendered = str(compaction_summary_message(_SUMMARY, run_local=False).content)
-    assert with_summary - without == len(rendered) // 4
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 async def test_replayed_run_local_summary_does_not_suppress_the_scope_summary(kind: str) -> None:
     session = _session(kind, _SUMMARY)
     session.runs[0].messages.insert(1, compaction_summary_message("local work so far", run_local=True))
@@ -243,25 +203,7 @@ async def test_replayed_run_local_summary_does_not_suppress_the_scope_summary(ki
     assert "local work so far" in str(summaries[1].content)
 
 
-@pytest.mark.asyncio
-async def test_stored_run_local_summary_does_not_suppress_the_scope_summary() -> None:
-    agent = _entity("agent")
-    assert isinstance(agent, Agent)
-    stored_local = compaction_summary_message("local work so far", run_local=True)
-
-    run_messages = await agent_messages.aget_continue_run_messages(
-        agent,
-        input=[stored_local, Message(role="user", content="current request")],
-        session=_session("agent", _SUMMARY),
-        add_history_to_context=True,
-    )
-
-    summaries = _summaries(run_messages.messages)
-    assert [summary.from_history for summary in summaries] == [True, False]
-    assert _SUMMARY in str(summaries[0].content)
-
-
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 def test_summary_is_reinserted_on_synchronous_continuation(kind: str) -> None:
     entity = _entity(kind)
     paused_input = [Message(role="user", content="current request")]
@@ -288,7 +230,7 @@ def test_summary_is_reinserted_on_synchronous_continuation(kind: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 async def test_approval_resume_replays_the_summary_once(kind: str) -> None:
     paused_request, resumed_request = await _paused_and_resumed_requests(kind, stream=False, summary=_SUMMARY)
 
@@ -298,39 +240,13 @@ async def test_approval_resume_replays_the_summary_once(kind: str) -> None:
     assert resumed_request[0].content == paused_request[0].content
 
 
-def test_mindroom_agents_never_render_the_summary_in_the_system_prompt() -> None:
-
-    config = _test_config()
-    agent = create_agent("calculator", config, runtime_paths_for(config), execution_identity=None)
-
-    assert agent.add_history_to_context is True
-    assert agent.add_session_summary_to_context is False
-
-
-@pytest.mark.asyncio
-async def test_minimal_agent_request_starts_history_with_the_summary() -> None:
-    agent = Agent(
-        id="helper",
-        model=RecordingOpenAIChat(id="gpt-test", api_key="sk-test"),
-        system_message="You are Helper (helper) in minimal mode.",
-        add_history_to_context=True,
-        db=InMemoryDb(),
-        telemetry=False,
-    )
-
-    run_messages = await _build("agent", agent, _session("agent", _SUMMARY))
-
-    assert run_messages.messages[0].content == "You are Helper (helper) in minimal mode."
-    assert is_compaction_summary(run_messages.messages[1])
-
-
 _LEGACY_SYSTEM_PROMPT = (
     "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
     "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
 )
 
 
-@pytest.mark.parametrize("kind", ["agent", "team"])
+@pytest.mark.parametrize("kind", ["team"])
 def test_resuming_a_pre_release_pause_keeps_its_single_summary(kind: str) -> None:
     entity = _entity(kind)
     paused_input = [
@@ -358,16 +274,108 @@ def test_resuming_a_pre_release_pause_keeps_its_single_summary(kind: str) -> Non
     assert run_messages.messages[0].content == _LEGACY_SYSTEM_PROMPT
 
 
+# The cases below run on the owned request assembly; the team cases above wait for the team runtime port.
+_AGENT_SCOPE = HistoryScope(kind="agent", scope_id="helper")
+_ALL_HISTORY = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+_CURRENT = TurnMessages(prompt=OwnedMessage(role="user", content="current request"))
+
+
+def _owned_session(summary: str | None, *, runs: bool = True) -> ConversationSession:
+    stored = [
+        RunRecord(
+            run_id=f"run-{index}",
+            session_id="session",
+            agent_id="helper",
+            status=OwnedRunStatus.completed,
+            messages=[
+                OwnedMessage(role="user", content=f"question {index}"),
+                OwnedMessage(role="assistant", content=f"answer {index}"),
+            ],
+        )
+        for index in range(2)
+    ]
+    return ConversationSession(
+        session_id="session",
+        kind="agent",
+        owner_id="helper",
+        runs=stored if runs else [],
+        summary=ScopeSummary(text=summary, updated_at=datetime.now(UTC)) if summary is not None else None,
+    )
+
+
+def _owned_summaries(messages: list[OwnedMessage]) -> list[OwnedMessage]:
+    return [message for message in messages if is_compaction_summary(message)]
+
+
+def test_a_summary_only_plan_replays_the_summary_without_runs() -> None:
+    session = _owned_session(_SUMMARY)
+    summary_tokens = estimate_prompt_visible_history_tokens(
+        session=_owned_session(_SUMMARY, runs=False),
+        scope=_AGENT_SCOPE,
+        history_settings=_ALL_HISTORY,
+    )
+
+    plan = plan_replay_that_fits(
+        session=session,
+        scope=_AGENT_SCOPE,
+        history_settings=_ALL_HISTORY,
+        available_history_budget=summary_tokens,
+        current_history_tokens=summary_tokens + 1_000,
+    )
+    history = scope_history_messages(
+        session.runs,
+        scope=_AGENT_SCOPE,
+        num_history_runs=plan.num_history_runs,
+        num_history_messages=plan.num_history_messages,
+        max_tool_calls_from_history=None,
+    )
+    request = build_request(system=(), summary=session.summary, history=history, turn=_CURRENT)
+
+    assert plan.mode == "disabled"
+    assert plan.add_history_to_context is True
+    assert plan.num_history_runs == 0
+    assert [message.content for message in request[1:]] == ["current request"]
+    assert len(_owned_summaries(request)) == 1
+
+
+def test_replay_estimate_counts_the_rendered_summary_once() -> None:
+    without = estimate_prompt_visible_history_tokens(
+        session=_owned_session(None),
+        scope=_AGENT_SCOPE,
+        history_settings=_ALL_HISTORY,
+    )
+    with_summary = estimate_prompt_visible_history_tokens(
+        session=_owned_session(_SUMMARY),
+        scope=_AGENT_SCOPE,
+        history_settings=_ALL_HISTORY,
+    )
+
+    rendered = str(compaction_summary_message(_SUMMARY, run_local=False).content)
+    assert with_summary - without == len(rendered) // 4
+
+
+def test_a_stored_run_local_summary_does_not_suppress_the_scope_summary_on_resume() -> None:
+    stored_local = compaction_summary_message("local work so far", run_local=True)
+
+    resumed = build_resume_request(
+        paused=[stored_local, OwnedMessage(role="user", content="current request")],
+        summary=_owned_session(_SUMMARY).summary,
+        history=[],
+    )
+
+    summaries = _owned_summaries(resumed)
+    assert [summary.from_history for summary in summaries] == [True, False]
+    assert _SUMMARY in str(summaries[0].content)
+
+
 def test_request_estimate_matches_the_replay_estimate_for_the_same_messages() -> None:
-    session = _session("agent", None)
-    scope = HistoryScope(kind="agent", scope_id="helper")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    messages = [message for run in session.runs or [] for message in run.messages or []]
+    session = _owned_session(None)
+    messages = [message for run in session.runs for message in run.messages]
 
     assert estimate_request_messages_tokens(messages, replay_model=None) == estimate_prompt_visible_history_tokens(
         session=session,
-        scope=scope,
-        history_settings=settings,
+        scope=_AGENT_SCOPE,
+        history_settings=_ALL_HISTORY,
     )
 
 
@@ -386,19 +394,3 @@ def test_scheduled_history_limits_keep_or_drop_the_summary() -> None:
     no_history = _prepared_history_with_scheduled_limit(summary_only, 0).replay_plan
     assert no_history is not None
     assert no_history.add_history_to_context is False
-
-
-@pytest.mark.asyncio
-async def test_in_memory_continuation_keeps_its_one_summary() -> None:
-    agent = _entity("agent")
-    assert isinstance(agent, Agent)
-    carried = compaction_summary_message("carried summary", run_local=False)
-
-    run_messages = await agent_messages.aget_continue_run_messages(
-        agent,
-        input=[carried, Message(role="user", content="current request")],
-        session=_session("agent", _SUMMARY),
-        add_history_to_context=True,
-    )
-
-    assert _summaries(run_messages.messages) == [carried]
