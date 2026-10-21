@@ -1,60 +1,82 @@
-"""The owned system-message renderer reproduces the prompt goldens from the inputs MindRoom's builders produce."""
+"""The owned path reproduces the prompt goldens: helper requests, and the first request of every Matrix reply.
+
+Helper call sites already send their requests through the owned provider layer, so the recorder compares every
+request they send. A Matrix reply does not run on the owned loop yet, so its agent is built through ``create_agent``
+as ``ai`` builds it, and the request the loop would send first is compared with the golden's first request; the
+replies' later requests, and the goldens of the other entry points, are compared once their paths move.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
-from tests.agent_loop.prompt_parity_support import rendered, run_scenario
-from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, load_golden, normalize
+from mindroom.llm.messages import Message
+from tests.agent_loop.prompt_parity_support import first_request
+from tests.agno_parity.prompt_scenarios import FIXTURE_DIR, SCENARIOS, Recorder, call_dict, load_golden, normalize
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-# The team leader's prompt belongs to the teams runtime, and helper requests already go through the owned provider
-# layer; their scenarios are compared in tests/team_runtime and tests/agent_loop/test_helper.py.
-_COMPARED_ELSEWHERE = ("team_", "helper_")
-GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json") if not path.stem.startswith(_COMPARED_ELSEWHERE))
-# Requests whose system message MindRoom writes itself instead of rendering an agent prompt.
-MINDROOM_WRITTEN = {("compaction_summary", 3)}
+GOLDENS = sorted(path.stem for path in FIXTURE_DIR.glob("*.json"))
+RECORDED = [name for name in GOLDENS if name.startswith("helper_")]
+# The owner of each golden whose entry point does not run on the owned path yet.
+PENDING = {
+    "agent_minimal_mode": "F3 renders minimal mode's bootstrap prompt and Bash facade from the build's surface",
+    "dynamic_workflow_room_agent": "F6 runs workflow participants on the owned loop",
+    "openai_compat_api": "F5 serves the OpenAI-compatible API from the owned loop",
+    "voice_call_cascaded": "F4 builds voice calls on the owned loop",
+    "voice_call_realtime": "F4 builds voice calls on the owned loop",
+}
+TEAM = [name for name in GOLDENS if name.startswith("team_")]
+BUILT = [name for name in GOLDENS if name not in RECORDED and name not in PENDING and name not in TEAM]
 
 
-def _golden_system_messages(name: str, golden: dict[str, Any]) -> list[str]:
-    messages = [
-        request["messages"][0]["content"]
-        for index, request in enumerate(golden["requests"])
-        if request["messages"][0]["role"] == "system" and (name, index) not in MINDROOM_WRITTEN
-    ]
-    exported = golden.get("exported") or {}
-    # The voice models outside MindRoom's loop receive the agent's chat prompt.
-    return messages + [exported[key] for key in ("instructions", "system_prompt") if key in exported]
-
-
-def test_every_golden_compared_here_has_a_scenario() -> None:
-    """Each prompt golden this module compares runs through a scenario."""
-    assert sorted(name for name in SCENARIOS if not name.startswith(_COMPARED_ELSEWHERE)) == GOLDENS
+def test_every_golden_is_compared_here_or_assigned_an_owner() -> None:
+    """Each prompt golden is compared by this module, by the team runtime, or named with the step that will."""
+    assert set(GOLDENS) == set(SCENARIOS)
+    assert all(SCENARIOS[name].turn is not None for name in BUILT)
+    assert sorted({*RECORDED, *BUILT, *PENDING, *TEAM}) == GOLDENS
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", GOLDENS)
-async def test_system_messages_equal_the_goldens(name: str, tmp_path: Path) -> None:
-    """Every agent system message renders, from the inputs MindRoom hands the prompt, byte for byte as the golden."""
+@pytest.mark.parametrize("name", RECORDED)
+async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
+    """Each helper's production call site sends its golden requests byte for byte, through the owned provider layer."""
+    golden = load_golden(name)
+    scenario = SCENARIOS[name]
+    recorder = Recorder(responder=scenario.responder)
+
+    with recorder.installed():
+        output = await scenario.run(tmp_path)
+
+    assert scenario.description == golden["description"]
+    assert normalize(output.input, tmp_path) == golden["input"]
+    assert recorder.calls
+    # Owned messages show the request went through the provider registry rather than an Agno model.
+    assert all(isinstance(message, Message) for call in recorder.calls for message in call.messages)
+    assert normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path) == golden["requests"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", BUILT)
+async def test_a_replys_first_request_equals_the_golden(name: str, tmp_path: Path) -> None:
+    """The agent ``create_agent`` builds for a reply sends the golden's first system message, tools, and deferral."""
     golden = load_golden(name)
 
-    run = await run_scenario(name, tmp_path)
+    first = await first_request(name, tmp_path)
 
     assert SCENARIOS[name].description == golden["description"]
-    assert normalize(run.input, tmp_path) == golden["input"]
-    assert normalize(run.exported, tmp_path) == golden.get("exported")
-    assert run.prompts
-    for prompt in run.prompts:
-        assert rendered(prompt) == prompt.agno_content
-    owned = {normalize(rendered(prompt), tmp_path) for prompt in run.prompts}
-    expected = _golden_system_messages(name, golden)
-    assert expected
-    assert [message for message in expected if message not in owned] == []
+    assert normalize(first.input, tmp_path) == golden["input"]
+    expected = golden["requests"][0]
+    recorded = normalize(call_dict(first.call), tmp_path)
+    assert isinstance(recorded, dict)
+    assert recorded["model"] == expected["model"]
+    assert recorded["messages"][0] == expected["messages"][0]
+    assert recorded["tools"] == expected["tools"]
+    assert recorded["deferred_tool_names"] == expected["deferred_tool_names"]
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:

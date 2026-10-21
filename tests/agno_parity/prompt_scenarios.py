@@ -2,8 +2,10 @@
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
 recorder keeps every request the model received: messages, tools, tool choice, and response format.
-Requests MindRoom sends through its own provider layer, the helper calls, are recorded below the request pipeline,
-where the provider adapter would receive them; the rest are still recorded at the Agno model call.
+Requests MindRoom sends through its own provider layer are recorded below the request pipeline, where the provider
+adapter would receive them; requests the Agno team runtime still sends are recorded at the Agno model call.
+A scenario that starts with a Matrix reply also exposes that reply as an ``AgentTurn``, so the agent it builds can
+be compared with the golden before the reply itself runs on the owned loop.
 `tests/fixtures/agno_parity/README.md` (Prompt goldens) describes the goldens these scenarios pin.
 """
 
@@ -25,7 +27,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import nio
-from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
 from agno.models.response import ModelResponse
 from fastapi import FastAPI
@@ -45,6 +46,7 @@ from mindroom.custom_tools.dynamic_workflow import _aexecute_room_agent_particip
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.provider import TextDelta, TurnCompleted
@@ -55,6 +57,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import model_loading, registry
 from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
+from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -94,6 +97,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -211,15 +215,14 @@ class Recorder:
         return self.responder(call)
 
     def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> ModelResponse:
-        # Helper requests offer no tools; recording tool definitions here waits for the agent requests.
-        assert not request.tools, request.tools
         call = ModelCall(
             model_id=identity.id,
             model_provider=identity.provider,
             model_index=index,
             stream=request.stream,
             messages=deepcopy(list(request.messages)),
-            tools=[],
+            # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
+            tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
             tool_choice=deepcopy(request.tool_choice),
             response_format=request.response_format,
             deferred_tool_names=sorted(request.deferred_tool_names),
@@ -316,11 +319,15 @@ class ScenarioOutput:
 
 @dataclass(frozen=True)
 class Scenario:
-    """One golden: what it pins and how to capture it."""
+    """One golden: what it pins and how to capture it.
+
+    ``turn`` builds the Matrix reply a scenario starts with, for the scenarios that start with one.
+    """
 
     description: str
     run: Callable[[Path], Awaitable[ScenarioOutput]]
     responder: Responder = answer_ok
+    turn: Callable[[Path], AgentTurn] | None = None
 
 
 def message_dict(message: Message | OwnedMessage) -> dict[str, Any]:
@@ -415,52 +422,70 @@ def _thread_history() -> list[ResolvedVisibleMessage]:
     ]
 
 
+@dataclass(frozen=True)
+class AgentTurn:
+    """One Matrix reply a scenario drives through ``ai.stream_agent_response``, as the response runner would.
+
+    ``input`` is what the golden records about the scenario that starts with this reply.
+    """
+
+    config: Config
+    runtime_paths: RuntimePaths
+    agent_name: str
+    prompt: str
+    input: dict[str, Any]
+    knowledge: AgentKnowledge | None = None
+    agent_mode: AgentMode = "standard"
+    system_enrichment: tuple[EnrichmentItem, ...] = ()
+    transient_enrichment: tuple[EnrichmentItem, ...] = ()
+    media: MediaInputs | None = None
+    run_id: str | None = None
+
+
+@contextmanager
+def reply_runtime(turn: AgentTurn) -> Iterator[ToolRuntimeContext]:
+    """Bind what a Matrix reply binds around its agent: the API server address and the tool runtime context."""
+    runtime = _tool_runtime(turn.config, turn.runtime_paths, turn.agent_name)
+    with _api_server(), tool_runtime_context(runtime):
+        yield runtime
+
+
 async def _agent_turn(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    agent_name: str,
-    prompt: str,
+    turn: AgentTurn,
     *,
-    knowledge: Knowledge | None = None,
-    agent_mode: AgentMode = "standard",
-    system_enrichment: tuple[EnrichmentItem, ...] = (),
-    transient_enrichment: tuple[EnrichmentItem, ...] = (),
     skill_review_capture: SkillReviewCapture | None = None,
     participation: ParticipationGate | None = None,
-    media: MediaInputs | None = None,
-    run_id: str | None = None,
 ) -> ToolExecutionIdentity:
     """Stream one Matrix reply through ``ai.stream_agent_response`` with the arguments the response runner passes."""
-    runtime = _tool_runtime(config, runtime_paths, agent_name)
     ctx = replace(
         make_turn_context(
-            agent_name,
+            turn.agent_name,
             session_id=_SESSION_ID,
             room_id=_ROOM_ID,
             thread_id=_THREAD_ID,
             requester_id=_REQUESTER_ID,
             reply_to_event_id=_CURRENT_EVENT_ID,
             correlation_id=_CORRELATION_ID,
-            run_id=run_id,
-            transient_enrichment_items=transient_enrichment,
-            system_enrichment_items=system_enrichment,
+            run_id=turn.run_id,
+            transient_enrichment_items=turn.transient_enrichment,
+            system_enrichment_items=turn.system_enrichment,
         ),
-        agent_mode=agent_mode,
+        agent_mode=turn.agent_mode,
         skill_review_capture=skill_review_capture,
         participation=participation,
     )
-    execution_identity = build_execution_identity_from_runtime_context(runtime)
-    recorder = TurnRecorder(user_message=prompt)
-    with _api_server(), tool_runtime_context(runtime):
+    recorder = TurnRecorder(user_message=turn.prompt)
+    with reply_runtime(turn) as runtime:
+        execution_identity = build_execution_identity_from_runtime_context(runtime)
         async for _chunk in ai.stream_agent_response(
             ctx,
-            prompt=prompt,
-            runtime_paths=runtime_paths,
-            config=config,
+            prompt=turn.prompt,
+            runtime_paths=turn.runtime_paths,
+            config=turn.config,
             thread_history=_thread_history(),
             current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
-            knowledge=knowledge,
-            media=media,
+            knowledge=turn.knowledge,
+            media=turn.media,
             execution_identity=execution_identity,
             turn_recorder=recorder,
             supports_native_tool_approval=True,
@@ -468,6 +493,28 @@ async def _agent_turn(
             pass
     _assert_answered(recorder)
     return execution_identity
+
+
+async def _run_turn(turn: AgentTurn) -> ScenarioOutput:
+    """Run a scenario that is one Matrix reply."""
+    await _agent_turn(turn)
+    return ScenarioOutput(turn.input)
+
+
+class _UnsearchedIndex:
+    """A published index the scenario's agent is offered but never searches."""
+
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        raise AssertionError((query, limit))
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        raise AssertionError((query, limit))
+
+
+def _knowledge(base_id: str, description: str) -> AgentKnowledge:
+    """Return the knowledge handle the response runner resolves for one published base."""
+    description_ = KnowledgeSourceDescription(base_id=base_id, description=description)
+    return AgentKnowledge(sources=(KnowledgeSource(description=description_, index=_UnsearchedIndex()),))
 
 
 def _assert_answered(recorder: TurnRecorder) -> None:
@@ -524,23 +571,17 @@ def _full_agent_config(model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _run_full_agent(root: Path, model: dict[str, Any]) -> ScenarioOutput:
+def _full_agent_turn(root: Path, model: dict[str, Any]) -> AgentTurn:
     authored = _full_agent_config(model)
     config, runtime_paths = _bound_config(root, authored)
     _write_workspace_files(runtime_paths, "assistant")
     prompt = "What is the travel policy for conferences?"
-    await _agent_turn(
-        config,
-        runtime_paths,
-        "assistant",
-        prompt,
-        # The response runner resolves the published index, which knowledge.utils names after its base.
-        knowledge=Knowledge(name="handbook", description=_HANDBOOK_DESCRIPTION),
-        system_enrichment=_SYSTEM_ENRICHMENT,
-        transient_enrichment=_TRANSIENT_ENRICHMENT,
-    )
-    return ScenarioOutput(
-        {
+    return AgentTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="assistant",
+        prompt=prompt,
+        input={
             "config": authored,
             "workspace_files": _WORKSPACE_FILES,
             "knowledge": {"name": "handbook", "description": _HANDBOOK_DESCRIPTION},
@@ -548,6 +589,10 @@ async def _run_full_agent(root: Path, model: dict[str, Any]) -> ScenarioOutput:
             "transient_enrichment": [asdict(item) for item in _TRANSIENT_ENRICHMENT],
             "turn": _turn_input(prompt),
         },
+        # The response runner resolves the published index, which knowledge.utils names after its base.
+        knowledge=_knowledge("handbook", _HANDBOOK_DESCRIPTION),
+        system_enrichment=_SYSTEM_ENRICHMENT,
+        transient_enrichment=_TRANSIENT_ENRICHMENT,
     )
 
 
@@ -569,14 +614,22 @@ def _shell_agent_config(**agent: object) -> dict[str, Any]:
     }
 
 
-async def _run_shell_agent(root: Path, *, agent_mode: AgentMode, **agent: object) -> ScenarioOutput:
+def _shell_agent_turn(root: Path, *, agent_mode: AgentMode, **agent: object) -> AgentTurn:
     authored = _shell_agent_config(**agent)
     config, runtime_paths = _bound_config(root, authored)
     prompt = "How much free disk space is left?"
-    await _agent_turn(config, runtime_paths, "operator", prompt, agent_mode=agent_mode)
-    return ScenarioOutput(
-        {"config": authored, "agent_mode": agent_mode, "turn": _turn_input(prompt)},
+    return AgentTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="operator",
+        prompt=prompt,
+        input={"config": authored, "agent_mode": agent_mode, "turn": _turn_input(prompt)},
+        agent_mode=agent_mode,
     )
+
+
+def _minimal_shell_turn(root: Path) -> AgentTurn:
+    return _shell_agent_turn(root, agent_mode="minimal", minimal_instructions=["Prefer read-only commands."])
 
 
 def _tool_names(call: ModelCall) -> set[str]:
@@ -1033,23 +1086,39 @@ def _skill_learning_config() -> dict[str, Any]:
     }
 
 
-async def _run_skill_review_fork(root: Path) -> ScenarioOutput:
+def _skill_review_turn(root: Path) -> AgentTurn:
     authored = _skill_learning_config()
     config, runtime_paths = _bound_config(root, authored)
     _write_workspace_files(runtime_paths, "assistant")
-    capture = SkillReviewCapture()
     prompt = "How do I file an expense report?"
-    identity = await _agent_turn(config, runtime_paths, "assistant", prompt, skill_review_capture=capture)
-    assert capture.latest is not None
-    skills_root = agent_workspace_skills_root(
-        runtime_paths,
-        "assistant",
-        workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "assistant"),
-    )
-    review = review_conversation(
+    return AgentTurn(
         config=config,
         runtime_paths=runtime_paths,
         agent_name="assistant",
+        prompt=prompt,
+        input={
+            "config": authored,
+            "workspace_files": _WORKSPACE_FILES,
+            "turn": _turn_input(prompt),
+            "review_entry_point": "mindroom.skill_learning.reviewer.review_conversation",
+        },
+    )
+
+
+async def _run_skill_review_fork(root: Path) -> ScenarioOutput:
+    turn = _skill_review_turn(root)
+    capture = SkillReviewCapture()
+    identity = await _agent_turn(turn, skill_review_capture=capture)
+    assert capture.latest is not None
+    skills_root = agent_workspace_skills_root(
+        turn.runtime_paths,
+        turn.agent_name,
+        workspace_root=agent_workspace_root_path(turn.runtime_paths.storage_root, turn.agent_name),
+    )
+    review = review_conversation(
+        config=turn.config,
+        runtime_paths=turn.runtime_paths,
+        agent_name=turn.agent_name,
         session_id=_SESSION_ID,
         identity=identity,
         skills_root=skills_root,
@@ -1058,14 +1127,7 @@ async def _run_skill_review_fork(root: Path) -> ScenarioOutput:
     )
     # The review runner starts each review in a fresh context, apart from the response's turn state.
     await asyncio.create_task(review, context=contextvars.Context())
-    return ScenarioOutput(
-        {
-            "config": authored,
-            "workspace_files": _WORKSPACE_FILES,
-            "turn": _turn_input(prompt),
-            "review_entry_point": "mindroom.skill_learning.reviewer.review_conversation",
-        },
-    )
+    return ScenarioOutput(turn.input)
 
 
 def _assistant_config(*, model: dict[str, Any] = _ANTHROPIC, **agent: object) -> dict[str, Any]:
@@ -1101,15 +1163,35 @@ def answer_participation(call: ModelCall) -> ModelResponse:
     return answer_ok(call)
 
 
-async def _run_participation_decision(root: Path) -> ScenarioOutput:
-    authored = _assistant_config(participation={"instructions": _PARTICIPATION_INSTRUCTIONS})
+def _assistant_turn(root: Path, prompt: str, *, run_id: str | None = None, **agent: object) -> AgentTurn:
+    """Return one reply of the one-agent config, with the scenario's input recorded as one turn."""
+    authored = _assistant_config(**agent)
     config, runtime_paths = _bound_config(root, authored)
-    prompt = "Does the handbook cover conference travel?"
+    return AgentTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="assistant",
+        prompt=prompt,
+        input={"config": authored, "turn": _turn_input(prompt)},
+        run_id=run_id,
+    )
+
+
+def _participation_turn(root: Path) -> AgentTurn:
+    return _assistant_turn(
+        root,
+        "Does the handbook cover conference travel?",
+        participation={"instructions": _PARTICIPATION_INSTRUCTIONS},
+    )
+
+
+async def _run_participation_decision(root: Path) -> ScenarioOutput:
+    turn = _participation_turn(root)
     # The response runner's gate for an agent whose participation config sets no judgment backend.
     gate = ParticipationGate(instructions=_PARTICIPATION_INSTRUCTIONS)
-    await _agent_turn(config, runtime_paths, "assistant", prompt, participation=gate)
+    await _agent_turn(turn, participation=gate)
     assert gate.approved, gate.decision
-    return ScenarioOutput({"config": authored, "turn": _turn_input(prompt)})
+    return ScenarioOutput(turn.input)
 
 
 _COMPACT_PROMPT = "Please compact our conversation before we continue."
@@ -1125,15 +1207,32 @@ def answer_compaction(call: ModelCall) -> ModelResponse:
     return answer_ok(call)
 
 
-async def _run_compaction_summary(root: Path) -> ScenarioOutput:
+_COMPACTION_FOLLOW_UP = "What is the travel policy?"
+
+
+def _compaction_turns(root: Path) -> tuple[AgentTurn, AgentTurn]:
+    """Return the turn that calls compact_context and the next reply in the scope, which compacts first."""
     authored = _assistant_config(model={**_ANTHROPIC, "context_window": 200000}, tools=["compact_context"])
     config, runtime_paths = _bound_config(root, authored)
-    follow_up = "What is the travel policy?"
+    scenario_input = {"config": authored, "turns": [_turn_input(_COMPACT_PROMPT), _turn_input(_COMPACTION_FOLLOW_UP)]}
     # The summary input names the compacted run, so the turns use fixed run ids.
-    await _agent_turn(config, runtime_paths, "assistant", _COMPACT_PROMPT, run_id="run-compact")
+    first = AgentTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="assistant",
+        prompt=_COMPACT_PROMPT,
+        input=scenario_input,
+        run_id="run-compact",
+    )
+    return first, replace(first, prompt=_COMPACTION_FOLLOW_UP, run_id="run-follow-up")
+
+
+async def _run_compaction_summary(root: Path) -> ScenarioOutput:
+    first, follow_up = _compaction_turns(root)
+    await _agent_turn(first)
     # The next reply in the scope compacts its history first, with a non-streaming summary request.
-    await _agent_turn(config, runtime_paths, "assistant", follow_up, run_id="run-follow-up")
-    return ScenarioOutput({"config": authored, "turns": [_turn_input(_COMPACT_PROMPT), _turn_input(follow_up)]})
+    await _agent_turn(follow_up)
+    return ScenarioOutput(first.input)
 
 
 _CRITIC_PROFILE = (
@@ -1156,7 +1255,7 @@ def answer_as_delegating_parent(call: ModelCall) -> ModelResponse:
     return answer_ok(call)
 
 
-async def _run_delegated_child_run(root: Path) -> ScenarioOutput:
+def _delegated_child_turn(root: Path) -> AgentTurn:
     authored = {
         "defaults": {"tools": []},
         "agents": {
@@ -1189,8 +1288,13 @@ async def _run_delegated_child_run(root: Path) -> ScenarioOutput:
     profile.parent.mkdir(parents=True, exist_ok=True)
     profile.write_text(_CRITIC_PROFILE, encoding="utf-8")
     prompt = "Check the travel policy and its biggest risk."
-    await _agent_turn(config, runtime_paths, "assistant", prompt)
-    return ScenarioOutput({"config": authored, "workspace_files": workspace_files, "turn": _turn_input(prompt)})
+    return AgentTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name="assistant",
+        prompt=prompt,
+        input={"config": authored, "workspace_files": workspace_files, "turn": _turn_input(prompt)},
+    )
 
 
 _PNG_PIXEL = base64.b64decode(
@@ -1198,18 +1302,13 @@ _PNG_PIXEL = base64.b64decode(
 )
 
 
-async def _run_media_current_message(root: Path) -> ScenarioOutput:
-    authored = _assistant_config()
-    config, runtime_paths = _bound_config(root, authored)
-    prompt = "What does this picture show?"
+def _media_turn(root: Path) -> AgentTurn:
     image = Image(id="parity-image", content=_PNG_PIXEL, mime_type="image/png", format="png")
-    await _agent_turn(config, runtime_paths, "assistant", prompt, media=MediaInputs(images=[image]))
-    return ScenarioOutput(
-        {
-            "config": authored,
-            "turn": _turn_input(prompt),
-            "media": {"images": [{"id": image.id, "mime_type": "image/png"}]},
-        },
+    turn = _assistant_turn(root, "What does this picture show?")
+    return replace(
+        turn,
+        input={**turn.input, "media": {"images": [{"id": image.id, "mime_type": "image/png"}]}},
+        media=MediaInputs(images=[image]),
     )
 
 
@@ -1265,24 +1364,24 @@ SCENARIOS: dict[str, Scenario] = {
         "Representative Claude agent answering in a Matrix thread: role, instructions, markdown, knowledge, skills, "
         "toolkit instructions, workspace context, file memory, delegation, a natively deferred toolkit, and hook "
         "enrichment; it calls one tool, so the second request carries the tool result.",
-        lambda root: _run_full_agent(root, _ANTHROPIC),
+        lambda root: _run_turn(_full_agent_turn(root, _ANTHROPIC)),
         answer_after_one_tool_call("add", {"a": 2, "b": 3}),
+        turn=lambda root: _full_agent_turn(root, _ANTHROPIC),
     ),
     "agent_openai_chat": Scenario(
         "The representative agent on OpenAI Chat Completions, whose deferred toolkit uses portable tool search.",
-        lambda root: _run_full_agent(root, _OPENAI_CHAT),
+        lambda root: _run_turn(_full_agent_turn(root, _OPENAI_CHAT)),
+        turn=lambda root: _full_agent_turn(root, _OPENAI_CHAT),
     ),
     "agent_minimal_mode": Scenario(
         "A shell agent in minimal mode: one Bash facade and the agent context as context documents.",
-        lambda root: _run_shell_agent(
-            root,
-            agent_mode="minimal",
-            minimal_instructions=["Prefer read-only commands."],
-        ),
+        lambda root: _run_turn(_minimal_shell_turn(root)),
+        turn=_minimal_shell_turn,
     ),
     "agent_cli_shell": Scenario(
         "A standard shell agent whose shell commands can call its other tools through the mindroom-agent CLI.",
-        lambda root: _run_shell_agent(root, agent_mode="standard"),
+        lambda root: _run_turn(_shell_agent_turn(root, agent_mode="standard")),
+        turn=lambda root: _shell_agent_turn(root, agent_mode="standard"),
     ),
     "team_coordinate": Scenario(
         "Configured coordinate team: the leader's roster prompt and delegate_task_to_member schema, two parallel "
@@ -1312,6 +1411,7 @@ SCENARIOS: dict[str, Scenario] = {
         "Skill review forking a response's final request: the response's request, then the review's request with "
         "the same messages, the review prompt appended, and the agent's tools.",
         _run_skill_review_fork,
+        turn=_skill_review_turn,
     ),
     **_structured_helper(
         "routing",
@@ -1372,22 +1472,26 @@ SCENARIOS: dict[str, Scenario] = {
         "non-streaming decision request with tool_choice none and the decision prompt appended, then the reply.",
         _run_participation_decision,
         answer_participation,
+        turn=_participation_turn,
     ),
     "compaction_summary": Scenario(
         "History compaction: a turn calls compact_context, so the next reply first sends the non-streaming summary "
         "request, then replies with the summary in place of the compacted run.",
         _run_compaction_summary,
         answer_compaction,
+        turn=lambda root: _compaction_turns(root)[0],
     ),
     "delegated_child_run": Scenario(
         "Delegation: run_subagent to a configured agent, then to an authored subagent profile from the workspace, "
         "each child's request, and the parent's requests with both results.",
-        _run_delegated_child_run,
+        lambda root: _run_turn(_delegated_child_turn(root)),
         answer_as_delegating_parent,
+        turn=_delegated_child_turn,
     ),
     "media_current_message": Scenario(
         "An image attached to the current Matrix message, carried on the current user message.",
-        _run_media_current_message,
+        lambda root: _run_turn(_media_turn(root)),
+        turn=_media_turn,
     ),
     "openai_compat_api": Scenario(
         "A streamed /v1/chat/completions request with earlier turns, through the OpenAI-compatible API path.",

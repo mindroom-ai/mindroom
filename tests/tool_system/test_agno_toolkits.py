@@ -87,6 +87,8 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
         adapted = adapt_toolkit(toolkit)
     assert adapted.name == toolkit.name
     assert_same_json(adapted_entry(adapted), expected_entry(SCHEMAS[tool_name]))
+    # The adapter carries only toolkit instructions, so no registered function may set instructions of its own.
+    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
 
 
 @pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
@@ -104,6 +106,7 @@ def test_adapted_all_enabled_tool_matches_golden(
         toolkit = support.build_toolkit(tool_name, config, runtime_paths, golden["overrides"])
         adapted = adapt_toolkit(toolkit)
     assert_same_json(adapted_entry(adapted), expected_entry(golden))
+    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
 
 
 def test_adapting_leaves_the_shared_function_untouched() -> None:

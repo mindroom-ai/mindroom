@@ -1,8 +1,8 @@
-"""Run the team prompt-golden scenarios with Agno and capture what MindRoom handed the team's prompt builder.
+"""Run the team prompt-golden scenarios with Agno and capture what MindRoom handed the prompt builders.
 
 While Agno still runs ``teams.team_response_stream``, ``TeamPromptCapture`` reads the inputs MindRoom gave Agno's
-team system-message builder, so the owned leader prompt is compared with the goldens through the production
-builders, as ``tests/agent_loop/prompt_parity_support.py`` does for agent prompts.
+team system-message builder and ``PromptCapture`` those of its members' builder, so the owned leader and member
+prompts are compared with the goldens through the production builders.
 """
 
 from __future__ import annotations
@@ -12,18 +12,20 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+from agno.agent import _messages as agno_messages
+from agno.models.anthropic import Claude
 from agno.team import Team
 from agno.team import _messages as agno_team_messages
 from agno.team.mode import TeamMode as AgnoTeamMode
 from agno.utils.team import get_member_id
 
-from mindroom.agent_loop.prompt import model_note_for
+from mindroom.agent_loop.prompt import PromptSpec, model_note_for
 from mindroom.agent_loop.spec import AgentSpec
+from mindroom.llm.provider import Capabilities
 from mindroom.team_runtime.prompt import render_leader_system_message
 from mindroom.team_runtime.spec import TeamMember, TeamMode
 from mindroom.tool_system.agno_toolkits import AdaptedToolkit
 from mindroom.tool_system.tool_function import ToolFunction
-from tests.agent_loop.prompt_parity_support import CapturedPrompt, PromptCapture, agno_model_capabilities
 from tests.agno_parity.prompt_scenarios import SCENARIOS, ModelCall, Recorder, message_dict, response_format_dict
 from tests.fakes.scripted_model import ScriptedModel
 
@@ -31,11 +33,140 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from agno.agent import Agent
+    from agno.models.base import Model
     from agno.models.message import Message as AgnoMessage
     from agno.run import RunContext as AgnoRunContext
+    from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
     from mindroom.llm.provider import ModelIdentity, ModelRequest, ToolSpec
+
+
+@dataclass(frozen=True)
+class CapturedPrompt:
+    """One member system message Agno built: the owned prompt inputs MindRoom handed it, and what Agno rendered."""
+
+    spec: PromptSpec
+    agno_content: str | None
+    capabilities: Capabilities
+
+
+def agno_model_capabilities(model: Model) -> Capabilities:
+    """Return the capabilities an owned adapter reports for the route this Agno model serves, as the prompt reads them."""
+    if model.supports_native_structured_outputs:
+        structured_output = "native"
+    elif model.supports_json_schema_outputs:
+        structured_output = "json_schema"
+    else:
+        structured_output = "json_mode"
+    return Capabilities(structured_output=structured_output, claude_family=isinstance(model, Claude))
+
+
+def _check_modeled_member_inputs(
+    agent: Agent,
+    tools: list[Any] | None,
+    run_context: AgnoRunContext | None,
+    *,
+    add_session_state_to_context: bool | None,
+) -> None:
+    """Fail when a member uses a system-message input of Agno's that ``PromptSpec`` does not model."""
+    assert agent.build_context
+    assert agent.system_message_role == "system"
+    assert agent.system_message is None or isinstance(agent.system_message, str)
+    assert not callable(agent.instructions)
+    assert agent.model is not None
+    assert agent.model.get_instructions_for_model(tools) is None
+    assert agent.model.system_prompt is None
+    assert not agent.use_instruction_tags
+    assert not agent.add_datetime_to_context
+    assert not agent.add_location_to_context
+    assert agent.name is None or not agent.add_name_to_context
+    assert agent._result_store is None
+    assert agent.expected_output is None
+    assert not agent.add_memories_to_context
+    assert not agent.add_session_summary_to_context
+    assert agent._learning is None
+    assert agent.parser_model is None
+    assert not agent.use_json_mode
+    assert agent.structured_outputs is None
+    assert not agent.enable_agentic_knowledge_filters
+    assert not add_session_state_to_context
+    assert run_context is None or run_context.output_schema is None
+
+
+async def _member_prompt_spec(agent: Agent, tools: list[Any] | None) -> PromptSpec:
+    """Return the owned prompt inputs for the system message Agno is about to build for a member."""
+    if isinstance(agent.system_message, str):
+        return PromptSpec(system_message=agent.system_message)
+    assert agent.model is not None
+    instructions = agent.instructions
+    knowledge = agent.knowledge
+    knowledge_block = (
+        await knowledge.abuild_context(enable_agentic_filters=False)
+        if knowledge is not None and agent.search_knowledge and agent.add_search_knowledge_instructions
+        else None
+    )
+    return PromptSpec(
+        description=agent.description,
+        role=agent.role,
+        instructions=(instructions,) if isinstance(instructions, str) else tuple(instructions or ()),
+        markdown=agent.markdown,
+        tool_instructions=tuple(agent._tool_instructions or ()),
+        additional_context=agent.additional_context,
+        # MindRoom's agents carry the owned skills toolkit inside the Skills object Agno's Agent takes.
+        skills_block=agent.skills.toolkit.prompt_block() if agent.skills is not None else None,
+        knowledge_block=knowledge_block,
+        model_note=model_note_for(agno_model_capabilities(agent.model), offers_tools=bool(tools)),
+    )
+
+
+@dataclass
+class PromptCapture:
+    """Record the owned prompt inputs of every member system message Agno builds while installed."""
+
+    prompts: list[CapturedPrompt] = field(default_factory=list)
+
+    @contextmanager
+    def installed(self) -> Iterator[None]:
+        """Wrap Agno's agent system-message builder, which every member run calls."""
+        build = agno_messages.aget_system_message
+
+        async def capture(
+            agent: Agent,
+            session: AgentSession,
+            run_context: AgnoRunContext | None = None,
+            tools: list[Any] | None = None,
+            add_session_state_to_context: bool | None = None,
+            input: object = None,  # noqa: A002 - Agno's parameter name
+        ) -> AgnoMessage | None:
+            _check_modeled_member_inputs(
+                agent,
+                tools,
+                run_context,
+                add_session_state_to_context=add_session_state_to_context,
+            )
+            spec = await _member_prompt_spec(agent, tools)
+            message = await build(
+                agent,
+                session=session,
+                run_context=run_context,
+                tools=tools,
+                add_session_state_to_context=add_session_state_to_context,
+                input=input,
+            )
+            assert agent.model is not None
+            self.prompts.append(
+                CapturedPrompt(
+                    spec=spec,
+                    agno_content=None if message is None else message.content,
+                    capabilities=agno_model_capabilities(agent.model),
+                ),
+            )
+            return message
+
+        with patch.object(agno_messages, "aget_system_message", capture):
+            yield
 
 
 @dataclass(frozen=True)

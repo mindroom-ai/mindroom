@@ -1,4 +1,4 @@
-"""One-shot helper calls send the helper goldens' requests and return the answer with a usage-ready run record."""
+"""One-shot helper calls send one tool-less request and return the answer with a usage-ready run record."""
 
 from __future__ import annotations
 
@@ -26,13 +26,11 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics
-from tests.agno_parity.prompt_scenarios import SCENARIOS, Recorder, call_dict, load_golden, message_dict, normalize
+from tests.agno_parity.prompt_scenarios import message_dict
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
-    from pathlib import Path
 
-HELPER_GOLDENS = sorted(name for name in SCENARIOS if name.startswith("helper_"))
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic")
 
 
@@ -67,24 +65,6 @@ class _Verdict(BaseModel):
 
 def _messages(spec: PromptSpec, prompt: str) -> list[Message]:
     return [render_system_message(spec), Message(role="user", content=prompt)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("name", HELPER_GOLDENS)
-async def test_helper_requests_equal_the_goldens(name: str, tmp_path: Path) -> None:
-    """Each helper's production call site sends its golden request byte for byte, through the owned provider layer."""
-    golden = load_golden(name)
-    scenario = SCENARIOS[name]
-    recorder = Recorder(responder=scenario.responder)
-
-    with recorder.installed():
-        output = await scenario.run(tmp_path)
-
-    assert normalize(output.input, tmp_path) == golden["input"]
-    assert recorder.calls
-    # Owned messages show the request went through the provider registry rather than an Agno model.
-    assert all(isinstance(message, Message) for call in recorder.calls for message in call.messages)
-    assert normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path) == golden["requests"]
 
 
 @pytest.mark.asyncio
