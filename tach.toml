@@ -8181,15 +8181,6 @@ from = ["mindroom.custom_tools.agno_compat_agentql"]
 expose = ["MindRoomAgentQLTools"]
 
 [[modules]]
-path = "mindroom.custom_tools.agno_compat_website_reader"
-depends_on = []
-visibility = ["mindroom.custom_tools.website"]
-
-[[interfaces]]
-from = ["mindroom.custom_tools.agno_compat_website_reader"]
-expose = ["queue_crawl_url", "crawl_with_callbacks"]
-
-[[modules]]
 path = "mindroom.tools.replicate"
 depends_on = [
     "mindroom.model_defaults",

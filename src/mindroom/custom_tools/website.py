@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import json
+import random
 import re
+import time
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
+from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge  # noqa: TC002 - metadata sync resolves runtime type hints.
-from agno.knowledge.reader.website_reader import WebsiteReader
 from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
-from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     ServerFetchUrlError,
@@ -189,8 +191,24 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
     return host == crawl_host
 
 
-class _MindRoomWebsiteReader(WebsiteReader):
-    """WebsiteReader variant that avoids selecting early search/navigation sections."""
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# The crawl budget, the breadth-first queue, the 1-3 second pause before each fetch, and the 5000-character page
+# documents follow Agno's WebsiteReader, so the tool returns what it always has.
+@dataclass
+class _MindRoomWebsiteReader:
+    """Crawls one host through the server-fetch transport and extracts each page's main text, skipping page chrome."""
+
+    max_depth: int = 3
+    max_links: int = 10
+    timeout: int = 10
+    proxy: str | None = None
+    chunking_strategy: FixedSizeChunking = field(default_factory=lambda: FixedSizeChunking(chunk_size=5000))
+    _visited: set[str] = field(default_factory=set, init=False, repr=False)
+    _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
+
+    def delay(self, min_seconds: float = 1, max_seconds: float = 3) -> None:
+        """Pause a random interval before each fetch so a crawl does not hammer one host."""
+        time.sleep(random.uniform(min_seconds, max_seconds))  # noqa: S311 - pacing, not security.
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
         """Queue same-host crawl links from the unmodified page soup."""
@@ -209,7 +227,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
             ):
                 continue
 
-            queue_crawl_url(self, str(full_url), current_depth + 1)
+            queued = (str(full_url), current_depth + 1)
+            if queued[0] not in self._visited and queued not in self._urls_to_crawl:
+                self._urls_to_crawl.append(queued)
 
     def _should_skip_crawl_url(
         self,
@@ -313,10 +333,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )
-            if self.chunk:
-                documents.extend(self.chunk_document(document))
-            else:
-                documents.append(document)
+            documents.extend(self.chunking_strategy.chunk(document))
         return documents
 
     def _record_response_content(
@@ -341,25 +358,29 @@ class _MindRoomWebsiteReader(WebsiteReader):
         """Crawl a website while logging only sanitized URL forms."""
         starting_url = validate_server_fetch_url(url)
         crawl_host = _normalized_hostname(starting_url)
-        crawler_result = crawl_with_callbacks(
-            self,
-            starting_url,
-            starting_depth,
-            should_skip=lambda current_url, current_depth, num_links: self._should_skip_crawl_url(
+        num_links = 0
+        crawler_result: dict[str, str] = {}
+        self._visited = set()
+        self._urls_to_crawl = [(starting_url, starting_depth)]
+        while self._urls_to_crawl:
+            current_url, current_depth = self._urls_to_crawl.pop(0)
+            if current_url in self._visited or self._should_skip_crawl_url(
                 current_url=current_url,
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
                 crawl_host=crawl_host,
-            ),
-            record=lambda current_url, current_depth, crawler_result: self._record_current_url(
+            ):
+                continue
+            self._visited.add(current_url)
+            self.delay()
+            num_links += self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
                 starting_url=starting_url,
                 crawler_result=crawler_result,
                 crawl_host=crawl_host,
-            ),
-        )
+            )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)

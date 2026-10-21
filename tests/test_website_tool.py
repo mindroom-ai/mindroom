@@ -595,7 +595,6 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
         assert max_seconds == 3
 
     monkeypatch.setattr("mindroom.custom_tools.website.log_debug", fake_log_debug)
-    monkeypatch.setattr("agno.knowledge.reader.website_reader.log_debug", fake_log_debug)
     monkeypatch.setattr("mindroom.custom_tools.website._server_fetch_get", fake_get)
     monkeypatch.setattr(_MindRoomWebsiteReader, "delay", no_delay)
 
