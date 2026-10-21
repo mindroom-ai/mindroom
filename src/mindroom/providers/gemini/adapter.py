@@ -14,7 +14,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import httpx
 
@@ -137,7 +137,7 @@ class GeminiProvider:
                 for event in events:
                     yield event
         except Exception as error:
-            raise self._provider_error(error, hosted_tool_ran=reply.hosted_tool_ran) from error
+            self._raise_provider_error(error, hosted_tool_ran=reply.hosted_tool_ran)
         provider_data: dict[str, Any] = {}
         if reply.thought_signature is not None:
             provider_data["thought_signature"] = reply.thought_signature
@@ -155,8 +155,12 @@ class GeminiProvider:
             yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason=stop_reason(reply))
 
-    def _provider_error(self, error: Exception, *, hosted_tool_ran: bool) -> ProviderError:
-        """Return the normalized error for one failed request; unknown failures propagate as they are."""
+    def _raise_provider_error(self, error: Exception, *, hosted_tool_ran: bool) -> NoReturn:
+        """Raise the normalized error for one failed request; unknown failures propagate as they are.
+
+        Media and chunk failures arrive normalized and are re-raised as they are: ``raise error from error`` would
+        make ``__cause__`` point at the error itself, which Rich's traceback renderer follows forever.
+        """
         import aiohttp  # noqa: PLC0415 - google-genai's production transport loads on first request
         from google.genai.errors import APIError  # noqa: PLC0415 - provider SDK loads on first request
         from pydantic import ValidationError  # noqa: PLC0415 - loaded with the SDK types it validates
@@ -166,7 +170,8 @@ class GeminiProvider:
             mapped = error
         elif isinstance(error, APIError):
             mapped = classify_provider_error(str(error), provider=provider, status_code=error.code)
-        elif isinstance(error, httpx.TransportError | aiohttp.ClientError):
+        elif isinstance(error, httpx.TransportError | aiohttp.ClientError | OSError):
+            # aiohttp lets its total timeout (a ``TimeoutError``) and a reset connection escape as plain ``OSError``s.
             mapped = transport_error(error, provider=provider)
         elif isinstance(error, ValidationError):
             # The SDK rejected an authored generation setting; the same request cannot succeed.
@@ -174,9 +179,13 @@ class GeminiProvider:
         else:
             raise error
         if hosted_tool_ran and mapped.retryable:
+            # A retry would run the native tool again.
             msg = f"Gemini stream failed after a native tool ran: {mapped}"
-            return ProviderError(msg, provider=provider, status_code=mapped.status_code, code=INCOMPLETE_STREAM)
-        return mapped
+            final = ProviderError(msg, provider=provider, status_code=mapped.status_code, code=INCOMPLETE_STREAM)
+            raise final from error
+        if mapped is error:
+            raise error
+        raise mapped from error
 
     def _request_config(
         self,

@@ -317,17 +317,47 @@ async def test_gemini_http_errors_are_normalized(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["malformed_call", "missing_file"])
+async def test_gemini_normalized_failures_do_not_cause_themselves(failure: str, tmp_path: Path) -> None:
+    """An error that arrives normalized is re-raised as it is.
+
+    A ``__cause__`` pointing at the error itself makes Rich's traceback renderer, and so the colored console log,
+    loop forever.
+    """
+    missing = Message(role="user", content="Look", images=[Image(filepath=str(tmp_path / "missing.png"))])
+    request = _request() if failure == "malformed_call" else _request(missing)
+    response = gemini_sse(_gemini_chunk(finish="MALFORMED_FUNCTION_CALL"))
+
+    with pytest.raises(ProviderError) as raised:
+        await run_adapter(GEMINI, request, tmp_path, response)
+
+    assert raised.value.__cause__ is not raised.value
+    assert raised.value.__context__ is not raised.value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
-    [httpx.ConnectError("connection refused"), aiohttp.ServerDisconnectedError(), aiohttp.ClientPayloadError("cut")],
-    ids=["httpx-connect", "aiohttp-disconnected", "aiohttp-payload"],
+    [
+        httpx.ConnectError("connection refused"),
+        aiohttp.ServerDisconnectedError(),
+        aiohttp.ClientPayloadError("cut"),
+        TimeoutError(),
+        ConnectionResetError(104, "Connection reset by peer"),
+    ],
+    ids=["httpx-connect", "aiohttp-disconnected", "aiohttp-payload", "aiohttp-total-timeout", "connection-reset"],
 )
 async def test_gemini_transport_failure_is_retryable(failure: Exception, tmp_path: Path) -> None:
-    """A connection failure before any reply is retryable, on the httpx transport and on aiohttp, which production uses."""
+    """A connection failure before any reply is retryable, on the httpx transport and on aiohttp.
+
+    Production uses aiohttp, which lets its total timeout and a reset connection escape as plain ``OSError``s.
+    """
     with pytest.raises(ProviderUnavailable) as raised:
         await run_adapter(GEMINI, _request(), tmp_path, failure)
 
     assert raised.value.retryable
+    assert raised.value.__cause__ is failure
+    assert str(raised.value)
 
 
 @pytest.mark.asyncio
