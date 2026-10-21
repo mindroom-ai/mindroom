@@ -1,0 +1,121 @@
+{
+  "description": "A shell agent in minimal mode: one Bash facade and the agent context as context documents.",
+  "input": {
+    "agent_mode": "minimal",
+    "config": {
+      "agents": {
+        "operator": {
+          "display_name": "Operator",
+          "instructions": [
+            "Explain each command before running it."
+          ],
+          "learning": false,
+          "memory_backend": "file",
+          "minimal_instructions": [
+            "Prefer read-only commands."
+          ],
+          "role": "Operate the build machine.",
+          "tools": [
+            "shell",
+            "calculator"
+          ]
+        }
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "turn": {
+      "api_server": "127.0.0.1:8765",
+      "entry_point": "mindroom.ai.stream_agent_response",
+      "prompt": "How much free disk space is left?",
+      "requester_id": "@user:localhost",
+      "room_id": "!room:localhost",
+      "thread_history": [
+        "Our handbook moved to the new wiki last week."
+      ],
+      "thread_id": "$thread:localhost"
+    }
+  },
+  "requests": [
+    {
+      "messages": [
+        {
+          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\n<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n\n\n</mindroom_session_context>\nPrefer read-only commands.",
+          "from_history": false,
+          "role": "system",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[How much free disk space is left?]]></msg>",
+          "from_history": false,
+          "role": "user",
+          "stop_after_tool_call": false
+        }
+      ],
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "response_format": null,
+      "stream": true,
+      "tool_choice": null,
+      "tools": [
+        {
+          "function": {
+            "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands.",
+            "name": "bash",
+            "parameters": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The Bash command to run."
+                },
+                "tail": {
+                  "description": "The number of output lines to return.",
+                  "type": "integer"
+                },
+                "timeout": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or never when it runs as part of a background job."
+                }
+              },
+              "required": [],
+              "type": "object"
+            }
+          },
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "scenario": "agent_minimal_mode"
+}
