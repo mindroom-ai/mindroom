@@ -167,6 +167,7 @@ def test_send_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monke
 
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in _description(tools, name)
+        assert "keeps its line breaks, up to 28,000 bytes once HTML-escaped" in _description(tools, name), name
 
 
 def test_message_reading_descriptions_mark_message_text_untrusted(
