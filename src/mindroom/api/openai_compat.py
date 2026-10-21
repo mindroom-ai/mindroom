@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, StrictStr, TypeAdapter
 from starlette.background import BackgroundTask
 
 from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
@@ -82,9 +83,9 @@ from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePa
 from mindroom.execution_preparation import render_prepared_team_messages_text
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
+from mindroom.history.storage import new_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RunFinished
-from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm_request_logging import (
@@ -93,10 +94,12 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
+from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.routing import suggest_responder
+from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import BuiltTeam, build_team_spec, prepare_materialized_team_execution, team_label
 from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection, materialize_exact_team_members
 from mindroom.teams.presentation import TeamStreamPresentation, apply_team_event, render_team_member_slots
@@ -120,6 +123,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
+    from mindroom.llm.messages import Message
     from mindroom.llm.runs import RunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.teams.runtime import TeamRunEvent
@@ -182,8 +186,13 @@ def _attach_openai_completion_lock_release(
 
 @dataclass(frozen=True, slots=True)
 class _PreparedOpenAITeamPrompt:
-    """Prepared team prompt plus the run metadata stored on the team run."""
+    """One prepared team run: its request body, the prompt text the logs show, and the metadata stored on the run.
 
+    ``run_input`` is the scope summary, the stored history the replay plan selected, then the turn, as a Matrix team
+    turn sends it.
+    """
+
+    run_input: list[Message]
     prompt: str
     run_metadata: dict[str, object] | None
 
@@ -1111,21 +1120,39 @@ def _team_run_events(
     built: BuiltTeam,
     prepared: _PreparedOpenAITeamPrompt,
     *,
+    scope_context: ScopeSessionContext | None,
     session_id: str,
     execution_identity: ToolExecutionIdentity | None,
     stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Start one team run on the prepared prompt, as the OpenAI-compatible completion sends it: one user message."""
+    """Start one team run on the prepared request, stored in the team scope with its usage as a Matrix team turn is.
+
+    The leader runs with the output-limit policy a Matrix leader gets and the team's tool middleware; a scope without
+    a stored session gets its first one here.
+    """
+    session = (
+        scope_context.session
+        or new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
+        if scope_context is not None
+        else None
+    )
     return run_team(
         built.spec,
-        [Message(role="user", content=prepared.prompt)],
+        prepared.run_input,
         ctx=RunContext(
             run_id=str(uuid4()),
             session_id=session_id,
             user_id=execution_identity.requester_id if execution_identity is not None else None,
             metadata=cast("dict[str, Any] | None", prepared.run_metadata),
+            session_state=session.session_state if session is not None else {},
         ),
-        hooks=LoopHooks(tool_middleware=built.leader_middleware),
+        hooks=LoopHooks(
+            answer_tool_calls=output_limit_policy() if built.spec.model.capabilities.claude_family else None,
+            tool_middleware=built.leader_middleware,
+        ),
+        persist=persist_to(scope_context.storage, session)
+        if scope_context is not None and session is not None
+        else None,
         request_template=ModelRequest(messages=(), stream=stream),
     )
 
@@ -1167,6 +1194,7 @@ async def _prepare_openai_team_prompt(
         configured_team_name=team_name,
     )
     return _PreparedOpenAITeamPrompt(
+        run_input=prepared_execution.run_input(MediaInputs()),
         prompt=render_prepared_team_messages_text(prepared_execution.turn.in_request_order()),
         run_metadata=cast("dict[str, object] | None", prepared_execution.run_metadata),
     )
@@ -1257,6 +1285,7 @@ async def _non_stream_team_completion(
                 events = _team_run_events(
                     built,
                     prepared_team_run,
+                    scope_context=scope_context,
                     session_id=session_id,
                     execution_identity=execution_identity,
                     stream=False,
@@ -1396,6 +1425,7 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                             _team_run_events(
                                 built,
                                 prepared_team_run,
+                                scope_context=scope_context,
                                 session_id=session_id,
                                 execution_identity=execution_identity,
                                 stream=True,

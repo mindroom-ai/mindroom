@@ -383,7 +383,13 @@ def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, str
         patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()) as build,
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(
+                return_value=openai_compat._PreparedOpenAITeamPrompt(
+                    run_input=[Message(role="user", content="Build it")],
+                    prompt="Build it",
+                    run_metadata=None,
+                ),
+            ),
         ) as prepare,
     ):
         reply = client.post(
@@ -450,7 +456,13 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
         patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=openai_compat._PreparedOpenAITeamPrompt("Build it", None)),
+            new=AsyncMock(
+                return_value=openai_compat._PreparedOpenAITeamPrompt(
+                    run_input=[Message(role="user", content="Build it")],
+                    prompt="Build it",
+                    run_metadata=None,
+                ),
+            ),
         ),
     ):
         config_lifecycle.app_state(client.app).budget_monitor = monitor

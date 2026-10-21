@@ -58,8 +58,12 @@ from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
-from mindroom.history.types import PreparedHistoryState, ResolvedReplayPlan
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    create_scope_session_storage,
+    open_bound_scope_session_context,
+)
+from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -79,7 +83,7 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.providers.media_fallback import install_provider_media_fallback
 from mindroom.providers.portable_tool_search import portable_deferred_tool_names
 from mindroom.routing import ResponderSelection
-from mindroom.teams.envelope import BuiltTeam
+from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
 from mindroom.teams.members import ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
@@ -182,9 +186,10 @@ def _prepared_team_execution_context(
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
     messages: list[OwnedMessage] | None = None,
+    history: Sequence[OwnedMessage] = (),
     prepared_context_tokens: int | None = None,
-) -> SimpleNamespace:
-    """Return a prepared team turn as ``prepare_materialized_team_execution`` builds one: its turn and run metadata."""
+) -> PreparedTeamExecution:
+    """Return a prepared team turn as ``prepare_materialized_team_execution`` builds one: its turn, replayed history, and run metadata."""
     turn_messages = list(messages or [OwnedMessage(role="user", content=final_prompt)])
     turn = TurnMessages(prompt=turn_messages[-1], context=tuple(turn_messages[:-1]))
     prepared_history = PreparedHistoryState(
@@ -192,11 +197,12 @@ def _prepared_team_execution_context(
         replays_persisted_history=replays_persisted_history,
         prepared_context_tokens=prepared_context_tokens,
     )
-    return SimpleNamespace(
+    return PreparedTeamExecution(
         turn=turn,
-        history=(),
+        history=tuple(history),
         summary=None,
-        run_metadata=run_metadata or build_prepared_history_metadata_content(prepared_history),
+        run_metadata=cast("dict[str, Any] | None", run_metadata)
+        or build_prepared_history_metadata_content(prepared_history),
         unseen_event_ids=[],
         prepared_history=prepared_history,
         runtime_model_name="default",
@@ -3131,7 +3137,11 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
         yield client
 
 
-_TEAM_SESSION_PROMPT = openai_compat._PreparedOpenAITeamPrompt("Build it", None)
+_TEAM_SESSION_PROMPT = openai_compat._PreparedOpenAITeamPrompt(
+    run_input=[OwnedMessage(role="user", content="Build it")],
+    prompt="Build it",
+    run_metadata=None,
+)
 
 
 @dataclass(frozen=True)
@@ -3170,11 +3180,15 @@ def _scripted_team(
     members: Sequence[tuple[str, str, ScriptedModel]] = (),
     mode: TeamMode = TeamMode.COORDINATE,
     leader_identity: ModelIdentity = SYNTHETIC,
+    team_id: str = "test-team",
 ) -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
-    """Return what ``_build_team`` builds: a leader on a scripted provider and ``(id, name, model)`` members."""
+    """Return what ``_build_team`` builds: a leader on a scripted provider and ``(id, name, model)`` members.
+
+    ``team_id`` is the stored ``team_id`` of the team's runs, which a configured team's scope replays by.
+    """
     leader = ScriptedModel([list(turn) for turn in leader_turns], identity=leader_identity)
     spec = TeamSpec(
-        id="test-team",
+        id=team_id,
         name="Test Team",
         mode=mode,
         model=leader,
@@ -4080,7 +4094,7 @@ class TestTeamCompletion:
         assert "From B chunk2" not in full
 
     def test_team_non_streaming_includes_thread_history(self, team_app_client: TestClient) -> None:
-        """Team prompt includes prior messages converted from request history."""
+        """The request history reaches the leader as the turn's context messages ahead of the prompt."""
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer("ok"))),
             _recorded_team_runs() as runs,
@@ -4099,13 +4113,11 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         [run] = runs
-        assert run.messages[-1].content == "\n\n".join(
-            (
-                render_msg_tag(sender="user", body="Start", event_id="$openai-1"),
-                render_msg_tag(sender="assistant", body="Ack", event_id="$openai-2"),
-                "Follow-up",
-            ),
-        )
+        assert [(message.role, message.content) for message in run.messages] == [
+            ("user", render_msg_tag(sender="user", body="Start", event_id="$openai-1")),
+            ("user", render_msg_tag(sender="assistant", body="Ack", event_id="$openai-2")),
+            ("user", "Follow-up"),
+        ]
 
     def test_team_non_streaming_preserves_full_request_history_for_ad_hoc_team_runs(
         self,
@@ -4136,11 +4148,10 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         [run] = runs
-        run_input = run.messages[-1].content
-        assert isinstance(run_input, str)
-        assert render_msg_tag(sender="user", body="msg 0", event_id="$openai-1") in run_input
-        assert render_msg_tag(sender="assistant", body=long_body, event_id="$openai-2") in run_input
-        assert run_input.endswith("Final prompt")
+        contents = [str(message.content) for message in run.messages]
+        assert render_msg_tag(sender="user", body="msg 0", event_id="$openai-1") in contents
+        assert render_msg_tag(sender="assistant", body=long_body, event_id="$openai-2") in contents
+        assert contents[-1] == "Final prompt"
 
     @pytest.mark.parametrize("stream", [False, True])
     def test_team_completion_prefers_persisted_history_over_thread_history(
@@ -4148,7 +4159,7 @@ class TestTeamCompletion:
         team_app_client: TestClient,
         stream: bool,
     ) -> None:
-        """Persisted team history should suppress request-history stuffing and rely on the stored replay."""
+        """Persisted team history suppresses request-history stuffing; the run reads the stored replay the preparation selected."""
         team = _scripted_team(answer("ok", chunk=99))
 
         with (
@@ -4169,6 +4180,7 @@ class TestTeamCompletion:
                     num_history_messages=None,
                 ),
                 replays_persisted_history=True,
+                history=[OwnedMessage(role="user", content="Start"), OwnedMessage(role="assistant", content="Ack")],
             )
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4188,7 +4200,55 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["spec"] is team[1].spec
         assert [message.body for message in mock_prepare.await_args.kwargs["thread_history"]] == ["Start", "Ack"]
         [run] = runs
-        assert [message.content for message in run.messages] == ["Follow-up"]
+        assert [message.content for message in run.messages] == ["Start", "Ack", "Follow-up"]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_team_completion_stores_its_run_in_the_team_scope_and_replays_it_next_time(
+        self,
+        team_config: Config,
+        stream: bool,
+    ) -> None:
+        """A configured team's API run lands in the team scope store, and the session's next request replays it."""
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        persist_entity_accounts(team_config, runtime_paths)
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+        team = _scripted_team(answer("First answer", chunk=99), answer("Second answer", chunk=99), team_id="super_team")
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
+            _recorded_team_runs() as runs,
+            TestClient(app, base_url="http://localhost") as client,
+        ):
+            for prompt in ("Start", "Follow-up"):
+                response = client.post(
+                    "/v1/chat/completions",
+                    headers={"X-Session-Id": "team-session"},
+                    json={
+                        "model": "team/super_team",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": stream,
+                    },
+                )
+                assert response.status_code == 200
+
+        first, second = runs
+        storage = create_scope_session_storage(
+            agent_name="super_team",
+            scope=HistoryScope(kind="team", scope_id="super_team"),
+            config=team_config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+        )
+        session = storage.load_session(first.ctx.session_id, "team")
+        assert session is not None
+        assert [(run.run_id, run.status, run.content) for run in session.runs] == [
+            (first.ctx.run_id, OwnedRunStatus.completed, "First answer"),
+            (second.ctx.run_id, OwnedRunStatus.completed, "Second answer"),
+        ]
+        assert [message.content for message in second.messages] == ["Start", "First answer", "Follow-up"]
 
     @pytest.mark.asyncio
     async def test_prepare_openai_team_prompt_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
