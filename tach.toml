@@ -844,6 +844,7 @@ visibility = [
     "mindroom.skill_learning.reviewer",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.runtime",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -2681,17 +2682,18 @@ visibility = [
     "mindroom.providers.openai_response_replay",
     "mindroom.providers.vertex_claude_compat",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.providers.openai",
 ]
 
 [[modules]]
 path = "mindroom.providers.openai_response_replay"
 depends_on = ["mindroom.providers.agno_compat_openai_responses_items", "mindroom.providers.legacy_openai_tool_replay", "mindroom.native_compaction"]
-visibility = ["mindroom.providers.openai_models"]
+visibility = ["mindroom.providers.openai_models", "mindroom.providers.openai"]
 
 [[modules]]
 path = "mindroom.providers.openrouter_prompt_cache"
 depends_on = ["mindroom.providers.claude_prompt_cache", "mindroom.hooks.enrichment"]
-visibility = ["mindroom.providers.openai_models"]
+visibility = ["mindroom.providers.openai_models", "mindroom.providers.openai"]
 
 [[modules]]
 path = "mindroom.providers.claude_native_compaction"
@@ -3636,6 +3638,7 @@ visibility = [
     "mindroom.providers.codex_model",
     "mindroom.config.main",
     "mindroom.prompt_templates",
+    "mindroom.providers.openai",
 ]
 
 [[modules]]
@@ -5147,6 +5150,8 @@ visibility = [
     "mindroom.tool_jobs.agno_execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.providers.openai",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -5536,6 +5541,7 @@ visibility = [
     "mindroom.history.message_content",
     "mindroom.providers.media_fallback",
     "mindroom.worker_computer.mcp_provider",
+    "mindroom.providers.pipeline",
 ]
 
 [[modules]]
@@ -5894,6 +5900,43 @@ depends_on = [
 [[modules]]
 path = "mindroom.llm"
 depends_on = []
+
+[[modules]]
+path = "mindroom.providers.openai"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.manager",
+    "mindroom.credentials.sync",
+    "mindroom.file_locks",
+    "mindroom.llm",
+    "mindroom.logging_config",
+    "mindroom.model_defaults",
+    "mindroom.native_compaction",
+    "mindroom.prompts",
+    "mindroom.providers.agno_compat_openai_responses_items",
+    "mindroom.providers.model_http_client",
+    "mindroom.providers.openai_prompt_cache",
+    "mindroom.providers.openai_response_replay",
+    "mindroom.providers.openai_tool_search",
+    "mindroom.providers.openrouter_prompt_cache",
+    "mindroom.providers.prompt_cache_key",
+    "mindroom.providers.tool_policy",
+    "mindroom.runtime_env_policy",
+    "mindroom.tool_system.context_bound_streams",
+]
+
+[[modules]]
+path = "mindroom.providers.pipeline"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.llm_request_logging",
+    "mindroom.logging_config",
+    "mindroom.media_delivery",
+    "mindroom.model_usage",
+    "mindroom.redaction",
+    "mindroom.tool_system.context_bound_streams",
+    "mindroom.usage.storage",
+]
 
 [[modules]]
 path = "mindroom.knowledge"
@@ -7758,7 +7801,7 @@ visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agn
 [[modules]]
 path = "mindroom.providers.tool_policy"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models", "mindroom.providers.google_gemini", "mindroom.providers.groq_model", "mindroom.providers.cerebras_model", "mindroom.providers.ollama_model"]
+visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.providers.claude_prompt_cache", "mindroom.providers.openai_models", "mindroom.providers.google_gemini", "mindroom.providers.groq_model", "mindroom.providers.cerebras_model", "mindroom.providers.ollama_model", "mindroom.providers.openai"]
 
 [[modules]]
 path = "mindroom.providers.groq_model"
@@ -8251,7 +8294,7 @@ expose = ["OpenAIResponsesProviderCompat"]
 [[modules]]
 path = "mindroom.providers.agno_compat_openai_responses_items"
 depends_on = []
-visibility = ["mindroom.providers.openai_models", "mindroom.providers.openai_response_replay"]
+visibility = ["mindroom.providers.openai_models", "mindroom.providers.openai_response_replay", "mindroom.providers.openai"]
 
 [[interfaces]]
 from = ["mindroom.providers.agno_compat_openai_responses_items"]
@@ -8881,7 +8924,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = []
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.session_storage.legacy_session_storage", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.agent_storage", "mindroom.providers.agno_compat_openai_responses", "mindroom.session_storage.agno_compat_run_messages", "mindroom.session_storage.agno_compat_sqlite", "mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.session_storage.legacy_session_storage", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"

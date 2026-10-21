@@ -1,0 +1,96 @@
+"""Portable deferred tool search for routes without native tool search.
+
+The request keeps one fixed tool list without the deferred schemas, and the model reaches a deferred
+function through ``call_tool`` after ``tool_search`` returned its definition. Stored calls to deferred
+functions are shown to the provider as ``call_tool`` calls, so the request prefix stays byte-stable and
+discovery never invalidates the prompt cache. Incoming ``call_tool`` calls are resolved by the run loop
+with ``mindroom.providers.portable_tool_search.resolve_call_tool_calls``.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Final, cast
+
+from mindroom.tool_system.context_bound_streams import closing_async_stream
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
+
+__all__ = ["portable_tool_search_stream"]
+
+_CALL_TOOL_NAME: Final = "call_tool"
+
+
+def _json_object(value: object) -> dict[str, Any] | None:
+    """Return stored call arguments parsed as the tool executor parses them, or None when they are no object."""
+    try:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                # Agno accepted Python-literal arguments on direct calls, so stored calls may hold them.
+                value = ast.literal_eval(value)
+        if value == []:
+            return {}
+        if not isinstance(value, dict):
+            return None
+        json.dumps(value)
+    except Exception:  # Model output can be malformed in many ways; any failure means "not an object".
+        return None
+    return cast("dict[str, Any]", value)
+
+
+def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
+    function = call.get("function")
+    if not isinstance(function, dict):
+        # LEGACY_COMPAT: Combined Gemini tool-result messages.
+        # Legacy format: one role="tool" message with tool_call_id=None whose tool_calls entries each carry
+        # tool_call_id, tool_name, and content; selected here when an entry has no "function" key.
+        # Last legacy release: v2026.4.35 stored them through Agno 2.4.7's Gemini adapter; v2026.4.36
+        # (Agno 2.5.13) writes one canonical tool message per result.
+        # Handling: entries naming a deferred function are renamed to call_tool, so the results the wire
+        # formatter splits from the combined message match the wrapped calls; stored history is unchanged.
+        # Coverage: tests/providers/test_provider_pipeline.py::test_portable_tool_search_renames_combined_gemini_results
+        return {**call, "tool_name": _CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
+    if function.get("name") not in deferred:
+        return call
+    arguments = _json_object(function.get("arguments") or "{}") or {}
+    wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
+    return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
+
+
+def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
+    if message.tool_calls:
+        calls = [_wrapped_call(call, deferred) for call in message.tool_calls]
+        if any(new is not old for new, old in zip(calls, message.tool_calls, strict=True)):
+            return replace(message, tool_calls=calls)
+        return message
+    if message.tool_name in deferred:
+        return replace(message, tool_name=_CALL_TOOL_NAME)
+    return message
+
+
+def _projected_request(request: ModelRequest) -> ModelRequest:
+    deferred = request.deferred_tool_names
+    return replace(
+        request,
+        messages=[_projected_message(message, deferred) for message in request.messages],
+        tools=[tool for tool in request.tools if tool.name not in deferred],
+        deferred_tool_names=frozenset(),
+    )
+
+
+async def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+    """Stream ``request`` with deferred tools hidden behind ``call_tool`` unless the route searches natively."""
+    if request.deferred_tool_names and not inner.capabilities.native_tool_search:
+        request = _projected_request(request)
+    events = inner.stream(request)
+    async with closing_async_stream(events):
+        async for event in events:
+            yield event

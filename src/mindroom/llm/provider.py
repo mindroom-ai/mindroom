@@ -30,11 +30,14 @@ class ModelIdentity:
 
     ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string (Agno's ``Model.provider``),
     and ``provider_name`` the metrics provider string (Agno's ``get_provider()``) that usage rows and pricing key by.
+    ``endpoint`` is the base URL requests go to, when the route has one; capabilities learned from provider
+    errors and native-compaction routes are keyed by it.
     """
 
     id: str
     provider: str
     provider_name: str
+    endpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -64,7 +67,7 @@ class ToolSpec:
     name: str
     description: str | None
     parameters: Mapping[str, Any]
-    strict: bool | None = False
+    strict: bool | None = None
     requires_confirmation: bool | None = None
     external_execution: bool | None = None
     approval_type: str | None = None
@@ -99,8 +102,12 @@ class NativeCompactionReplay:
 class ModelRequest:
     """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts.
 
-    ``deferred_tool_names`` are the tools a route with native tool search sends as deferred definitions, and
-    ``native_compaction`` is the provider-managed compaction route this request replays, when any.
+    ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
+    arrive through ``stream()``, after the response completes.
+    ``deferred_tool_names`` name tools kept out of the rendered prompt: routes with native tool search defer
+    them server-side, and the portable tool-search wrapper hides them behind ``call_tool`` everywhere else.
+    ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
+    ``native_compaction`` turns on provider-side compaction for routes that support it.
     """
 
     messages: Sequence[Message]
@@ -109,7 +116,9 @@ class ModelRequest:
     response_format: type[BaseModel] | Mapping[str, Any] | None = None
     native_tools: Sequence[Mapping[str, Any]] = ()
     overrides: RequestOverrides = RequestOverrides()
+    stream: bool = True
     deferred_tool_names: frozenset[str] = frozenset()
+    portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
 
 
@@ -142,6 +151,14 @@ class UsageReported:
     final: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class StreamProgress:
+    """Provider stream data that carried no other event, such as tool-call arguments or hosted-tool progress.
+
+    It only shows that the provider is still sending: idle limits count it as activity, and output consumers skip it.
+    """
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TurnCompleted:
     """The last stream event: the finished assistant message with its metrics and provider data."""
@@ -150,7 +167,7 @@ class TurnCompleted:
     stop_reason: StopReason | None = None
 
 
-type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | TurnCompleted
+type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | TurnCompleted
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -222,6 +239,7 @@ __all__ = [
     "RequestOverrides",
     "StopReason",
     "StreamEvent",
+    "StreamProgress",
     "TextDelta",
     "ToolCallReady",
     "ToolChoice",
