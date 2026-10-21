@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 MESSAGE_ID = "AAMkAGI2-msg_1="
 ATTACHMENT_ID = "AAMkAGI2-att_1="
 MESSAGE_PATH = f"/v1.0/me/messages/{MESSAGE_ID}"
+DRAFT_ID = "AAMkAGI2-draft_1="
+DRAFT_PATH = f"/v1.0/me/messages/{DRAFT_ID}"
 GRAPH = "https://graph.microsoft.com/v1.0"
 NEXT_MESSAGES = "/me/messages?$top=25&$skiptoken=page2"
 NEXT_ATTACHMENTS = f"/me/messages/{MESSAGE_ID}/attachments?$skiptoken=page2"
@@ -42,7 +44,6 @@ READ_FUNCTIONS = (
 )
 WRITE_FUNCTIONS = (
     "outlook_mail_create_draft",
-    "outlook_mail_send_draft",
     "outlook_mail_send",
     "outlook_mail_reply",
     "outlook_mail_mark_read",
@@ -83,6 +84,11 @@ def _attachment(kind: str = "fileAttachment", **overrides: object) -> dict[str, 
         "isInline": False,
         **overrides,
     }
+
+
+def _reply_draft(**overrides: object) -> httpx.Response:
+    """Return Graph's answer to createReply: the new reply draft, addressed like the message unless overridden."""
+    return httpx.Response(201, json=_message(id=DRAFT_ID, isDraft=True, bccRecipients=[], **overrides))
 
 
 def _selected(resource: dict[str, object], request: httpx.Request) -> dict[str, object]:
@@ -217,7 +223,6 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in _description(tools, name), name
     assert "untrusted" in _description(tools, "outlook_mail_get_message")
-    assert "read the draft with outlook_mail_get_message" in _description(tools, "outlook_mail_send_draft")
     assert "goes to the original's reply_to addresses when it has them" in _description(tools, "outlook_mail_reply")
     for name in ("outlook_mail_send", "outlook_mail_create_draft"):
         to = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]["to"]
@@ -437,8 +442,7 @@ def test_get_message_truncates_a_long_body(tmp_path: Path, monkeypatch: pytest.M
         lambda tools, message_id: tools.outlook_mail_get_message(message_id),
         lambda tools, message_id: tools.outlook_mail_download_attachment(message_id, ATTACHMENT_ID),
         lambda tools, message_id: tools.outlook_mail_download_attachment(MESSAGE_ID, message_id),
-        lambda tools, message_id: tools.outlook_mail_send_draft(message_id),
-        lambda tools, message_id: tools.outlook_mail_reply(message_id, "Thanks"),
+        lambda tools, message_id: tools.outlook_mail_reply(message_id, ["alex@contoso.com"], "Thanks"),
         lambda tools, message_id: tools.outlook_mail_mark_read(message_id),
         lambda tools, message_id: tools.outlook_mail_move(message_id, "archive"),
         lambda tools, message_id: tools.outlook_mail_move(MESSAGE_ID, message_id),
@@ -696,17 +700,6 @@ def test_send_refuses_a_subject_or_body_that_is_not_text(
     assert graph.requests == []
 
 
-def test_send_draft_posts_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
-
-    result = _payload(tools.outlook_mail_send_draft(MESSAGE_ID))
-
-    [request] = graph.requests
-    assert (request.method, unquote(request.url.path)) == ("POST", f"{MESSAGE_PATH}/send")
-    assert request.headers["content-length"] == "0"
-    assert result == {"message_id": MESSAGE_ID, "sent": True, "status": "ok", "tool": "outlook_mail"}
-
-
 def test_send_posts_send_mail_and_keeps_a_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
@@ -725,33 +718,78 @@ def test_send_posts_send_mail_and_keeps_a_copy(tmp_path: Path, monkeypatch: pyte
     assert result["sent"] is True
 
 
-@pytest.mark.parametrize(("reply_all", "action"), [(False, "reply"), (True, "replyAll")])
+@pytest.mark.parametrize(("reply_all", "action"), [(False, "createReply"), (True, "createReplyAll")])
 def test_reply_sends_the_body_as_an_escaped_comment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reply_all: bool,
     action: str,
 ) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    mail = _Graph()
+    mail.write = _reply_draft()
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    result = _payload(tools.outlook_mail_reply(MESSAGE_ID, "Thanks <team> & all\r\nSee you", reply_all=reply_all))
+    result = _payload(
+        tools.outlook_mail_reply(
+            MESSAGE_ID,
+            ["Sam Example <sam@contoso.com>", "team@contoso.com"],
+            "Thanks <team> & all\r\nSee you",
+            reply_all=reply_all,
+        ),
+    )
 
-    [request] = graph.requests
-    assert (request.method, unquote(request.url.path)) == ("POST", f"{MESSAGE_PATH}/{action}")
-    assert _body(request) == {"comment": "Thanks &lt;team&gt; &amp; all<br>See you"}
+    create, send = graph.requests
+    assert (create.method, unquote(create.url.path)) == ("POST", f"{MESSAGE_PATH}/{action}")
+    assert _body(create) == {"comment": "Thanks &lt;team&gt; &amp; all<br>See you"}
+    assert (send.method, unquote(send.url.path)) == ("POST", f"{DRAFT_PATH}/send")
     assert result["sent"] is True
 
 
-@pytest.mark.parametrize(("body", "reply_all"), [("", False), ("  ", False), (None, False), ("ok", "yes")])
+def test_reply_to_other_recipients_than_named_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mail = _Graph()
+    # Graph addresses the reply to the original's reply_to, an outside address the caller did not name.
+    mail.write = _reply_draft(toRecipients=[{"emailAddress": {"address": "desk@outside.example"}}], ccRecipients=[])
+    mail.override = lambda request: httpx.Response(204) if request.method == "DELETE" else None
+    tools, graph = _tools(tmp_path, monkeypatch, mail)
+
+    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=["alex@contoso.com"], body="Thanks"))
+
+    assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
+    assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
+        ("POST", f"{MESSAGE_PATH}/createReply"),
+        ("DELETE", DRAFT_PATH),
+    ]
+    graph.requests.clear()
+
+    sent = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=["Desk@Outside.example"], body="Thanks"))
+
+    assert sent["sent"] is True
+    assert (graph.requests[-1].method, unquote(graph.requests[-1].url.path)) == ("POST", f"{DRAFT_PATH}/send")
+
+
+@pytest.mark.parametrize(
+    ("recipients", "body", "reply_all"),
+    [
+        (["alex@contoso.com"], "", False),
+        (["alex@contoso.com"], "  ", False),
+        (["alex@contoso.com"], None, False),
+        (["alex@contoso.com"], "ok", "yes"),
+        ("alex@contoso.com", "ok", False),
+        (["alex"], "ok", False),
+    ],
+)
 def test_reply_refuses_malformed_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recipients: object,
     body: object,
     reply_all: object,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.outlook_mail_reply(MESSAGE_ID, body, reply_all=reply_all))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    result = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients, body, reply_all=reply_all))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
     assert graph.requests == []
 
 

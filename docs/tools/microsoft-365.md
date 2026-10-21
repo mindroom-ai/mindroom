@@ -130,7 +130,6 @@ Search and folder listings return a `next_page_token` while more results exist; 
 | `outlook_mail_get_message` | no | Read a message as plain text, up to 20,000 characters, with its recipients and attachment list. |
 | `outlook_mail_download_attachment` | no | Save a file attachment, up to 50 MB, into the workspace's `outlook-mail-attachments/` directory. |
 | `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
-| `outlook_mail_send_draft` | yes, sends mail | Send an existing draft. |
 | `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
 | `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
@@ -142,7 +141,7 @@ A search with `query` stops after its first 1,000 matches, so a narrower query f
 Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
 Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
-To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook.
+To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook, where the requester sends it.
 
 Attachments are workspace files and follow the agent's [`file_access`](../configuration/agents.md) setting.
 Each attached file may be at most 3 MB, and all attachments of one message together about 3 MB; share larger files through OneDrive and send a link instead.
@@ -225,8 +224,6 @@ tool_approval:
       action: require_approval
     - match: outlook_mail_send
       action: require_approval
-    - match: outlook_mail_send_draft
-      action: require_approval
     - match: outlook_mail_reply
       action: require_approval
     - match: outlook_calendar_create_event
@@ -251,7 +248,8 @@ tool_approval:
       action: require_approval
 ```
 
-Sent mail cannot be recalled, so require approval at least for `outlook_mail_send`, `outlook_mail_send_draft`, and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
+The approval cards of both mail functions list every recipient, and a reply is sent only to the recipients its card lists.
 `outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
 Every calendar write can email invitations, updates, cancellations, or responses to other people.
 

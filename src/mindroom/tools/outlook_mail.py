@@ -38,7 +38,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow creating and sending drafts, sending and replying, marking read, and moving messages.",
+            description="Allow creating drafts, sending and replying, marking read, and moving messages.",
         ),
     ],
     managed_init_args=(
@@ -59,7 +59,6 @@ if TYPE_CHECKING:
         "outlook_mail_get_message",
         "outlook_mail_download_attachment",
         "outlook_mail_create_draft",
-        "outlook_mail_send_draft",
         "outlook_mail_send",
         "outlook_mail_reply",
         "outlook_mail_mark_read",

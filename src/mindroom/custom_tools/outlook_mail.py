@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 _WRITE_FUNCTIONS = frozenset(
     {
         "outlook_mail_create_draft",
-        "outlook_mail_send_draft",
         "outlook_mail_send",
         "outlook_mail_reply",
         "outlook_mail_mark_read",
@@ -100,6 +99,17 @@ def _addresses(recipients: list[Any] | None) -> list[str]:
     if not isinstance(recipients, list):
         return []
     return [address for recipient in recipients if (address := _address(recipient))]
+
+
+def _address_set(recipients: list[Any]) -> set[str]:
+    """Return the email addresses of Graph recipients, compared without case."""
+    return {
+        address.casefold()
+        for recipient in recipients
+        if isinstance(recipient, dict)
+        and isinstance(email := recipient.get("emailAddress"), dict)
+        and isinstance(address := email.get("address"), str)
+    }
 
 
 def _summary(message: Mapping[str, Any]) -> dict[str, Any]:
@@ -234,7 +244,6 @@ class OutlookMailTools(Toolkit):
             "outlook_mail_get_message": self.outlook_mail_get_message,
             "outlook_mail_download_attachment": self.outlook_mail_download_attachment,
             "outlook_mail_create_draft": self.outlook_mail_create_draft,
-            "outlook_mail_send_draft": self.outlook_mail_send_draft,
             "outlook_mail_send": self.outlook_mail_send,
             "outlook_mail_reply": self.outlook_mail_reply,
             "outlook_mail_mark_read": self.outlook_mail_mark_read,
@@ -492,8 +501,8 @@ class OutlookMailTools(Toolkit):
 
         Before calling, tell the requester the recipients, subject, and attachments, because an approval prompt
         may show only part of them. Each attached file may be at most 3 MB, and all attached files together about
-        3 MB; save larger files to OneDrive and put a link in the body. Send the draft with
-        outlook_mail_send_draft, or the requester can open its web_link to edit it first.
+        3 MB; save larger files to OneDrive and put a link in the body. The requester opens its web_link to review,
+        edit, and send it in Outlook.
 
         Args:
             to: Recipient email addresses, such as sam@contoso.com or Sam Example <sam@contoso.com>.
@@ -509,24 +518,6 @@ class OutlookMailTools(Toolkit):
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
         return self._run(lambda session: {"message": _summary(session.json("POST", "/me/messages", json=message))})
-
-    def outlook_mail_send_draft(self, message_id: str) -> str:
-        """Send one existing Outlook draft as the requester.
-
-        Before calling, tell the requester every recipient (to, cc, and bcc) and the subject, because an approval
-        prompt may show only the message id; read the draft with outlook_mail_get_message first, because the
-        requester may have changed it in Outlook. The sent message is saved in Sent Items.
-
-        Args:
-            message_id: The draft's id from outlook_mail_create_draft or outlook_mail_search.
-
-        """
-
-        def operation(session: GraphSession) -> Mapping[str, object]:
-            session.request("POST", f"/me/messages/{path_segment(message_id, 'message_id')}/send")
-            return {"message_id": message_id, "sent": True}
-
-        return self._call(operation, validate=lambda: path_segment(message_id, "message_id"))
 
     def outlook_mail_send(
         self,
@@ -563,16 +554,18 @@ class OutlookMailTools(Toolkit):
 
         return self._run(operation)
 
-    def outlook_mail_reply(self, message_id: str, body: str, reply_all: bool = False) -> str:
+    def outlook_mail_reply(self, message_id: str, recipients: list[str], body: str, reply_all: bool = False) -> str:
         """Reply to one Outlook message as the requester at once, above the quoted original.
 
-        Before calling, tell the requester who will receive the reply and what it says, because an approval prompt
-        may show only the message id. The reply goes to the original's reply_to addresses when it has them, and
-        otherwise to its sender; with reply_all, its to and cc recipients also receive it. Read the message with
-        outlook_mail_get_message first to name those recipients. The reply is saved in Sent Items.
+        Before calling, tell the requester who will receive the reply and what it says. The reply goes to the
+        original's reply_to addresses when it has them, and otherwise to its sender; with reply_all, its to and cc
+        recipients also receive it. Read the message with outlook_mail_get_message first to name those recipients.
+        The reply is sent only when recipients are exactly the addresses it goes to; otherwise it fails with
+        recipients_mismatch, which lists them, and nothing is sent. The reply is saved in Sent Items.
 
         Args:
             message_id: The id of the message to answer, from outlook_mail_search.
+            recipients: Every email address the reply goes to, such as sam@contoso.com.
             body: The reply text, as plain text.
             reply_all: Also reply to every other recipient of the original message.
 
@@ -580,6 +573,7 @@ class OutlookMailTools(Toolkit):
 
         def validate() -> None:
             path_segment(message_id, "message_id")
+            _recipients(recipients, "recipients")
             if not isinstance(body, str) or not body.strip():
                 msg = "body must not be empty."
                 raise _invalid(msg)
@@ -588,9 +582,19 @@ class OutlookMailTools(Toolkit):
                 raise _invalid(msg)
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            action = "replyAll" if reply_all else "reply"
+            action = "createReplyAll" if reply_all else "createReply"
             path = f"/me/messages/{path_segment(message_id, 'message_id')}/{action}"
-            session.request("POST", path, json={"comment": text_to_html(body)})
+            draft = session.json("POST", path, json={"comment": text_to_html(body)})
+            draft_path = f"/me/messages/{path_segment(draft.get('id'), 'draft id')}"
+            actual = [*(draft.get("toRecipients") or []), *(draft.get("ccRecipients") or [])]
+            if _address_set(actual) != _address_set(_recipients(recipients, "recipients")):
+                session.request("DELETE", draft_path)
+                raise MicrosoftGraphError(
+                    code="recipients_mismatch",
+                    message="The reply goes to the recipients listed here, not the ones given; nothing was sent.",
+                    recipients=_addresses(actual),
+                )
+            session.request("POST", f"{draft_path}/send")
             return {"message_id": message_id, "reply_all": reply_all, "sent": True}
 
         return self._call(operation, validate=validate)
