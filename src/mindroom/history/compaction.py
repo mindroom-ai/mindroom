@@ -74,7 +74,7 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
-class _SummaryModel:
+class SummaryModel:
     """One serving model and its matching identity and serialized-input budget.
 
     A fallback switch replaces the whole value, so later chunks cannot use the previous model's budget or identity.
@@ -86,11 +86,11 @@ class _SummaryModel:
 
 
 @dataclass(frozen=True)
-class _Summarizer:
+class Summarizer:
     """The summary model and the request settings every summary chunk of one compaction shares."""
 
-    model: _SummaryModel
-    fallback: _SummaryModel | None
+    model: SummaryModel
+    fallback: SummaryModel | None
     prompt: str
     timeout_seconds: float
     history_settings: ResolvedHistorySettings
@@ -150,17 +150,17 @@ def load_summarizer(
     session_id: str,
     scope: HistoryScope,
     on_usage: Callable[[ModelIdentity, MessageMetrics], Awaitable[None]] | None,
-) -> _Summarizer:
+) -> Summarizer:
     """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     assert execution_plan.summary_input_budget_tokens is not None
-    summary_model = _SummaryModel(
+    summary_model = SummaryModel(
         model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
         name=execution_plan.compaction_model_name,
         input_budget_tokens=execution_plan.summary_input_budget_tokens,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
     fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
-    fallback_model: _SummaryModel | None = None
+    fallback_model: SummaryModel | None = None
     if (
         fallback_model_name is not None
         and fallback_summary_input_budget is not None
@@ -174,7 +174,7 @@ def load_summarizer(
         # fails (missing SDK, credentials, client setup), compaction still
         # runs on the healthy primary instead of aborting before any call.
         try:
-            fallback_model = _SummaryModel(
+            fallback_model = SummaryModel(
                 model=_load_compaction_model(config, runtime_paths, fallback_model_name),
                 name=fallback_model_name,
                 input_budget_tokens=fallback_summary_input_budget,
@@ -188,7 +188,7 @@ def load_summarizer(
                 fallback_model=fallback_model_name,
                 exc_info=True,
             )
-    return _Summarizer(
+    return Summarizer(
         model=summary_model,
         fallback=fallback_model,
         prompt=config.get_prompt("COMPACTION_SUMMARY_PROMPT"),
@@ -220,7 +220,7 @@ class _SummaryChunk:
     summary: str
     included_runs: list[AnyRunRecord]
     # The summarizer that served this chunk, which later chunks use: once a fallback served one, it serves the rest.
-    summarizer: _Summarizer
+    summarizer: Summarizer
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,7 @@ class _CompactionRewriteResult:
     summary_text: str
     compacted_run_count: int
     # The model that served the final persisted chunk, the fallback after a refusal switch.
-    served_by: _SummaryModel
+    served_by: SummaryModel
 
 
 async def _persist_cleared_force_state_if_needed(
@@ -309,7 +309,7 @@ async def compact_scope_history(
     session: ConversationSession,
     scope: HistoryScope,
     state: HistoryScopeState,
-    summarizer: _Summarizer,
+    summarizer: Summarizer,
     available_history_budget: int | None,
     before_tokens: int,
     replay_window_tokens: int | None,
@@ -447,7 +447,7 @@ async def _rewrite_working_session_for_compaction(
     persisted_session: ConversationSession,
     working_session: ConversationSession,
     scope: HistoryScope,
-    summarizer: _Summarizer,
+    summarizer: Summarizer,
     runs: Sequence[AnyRunRecord],
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
@@ -539,10 +539,10 @@ def _stop_for_changed_conversation(session_id: str, scope: HistoryScope, compact
 
 
 async def summarize_runs(
-    summarizer: _Summarizer,
+    summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
-) -> tuple[str, _Summarizer]:
+) -> tuple[str, Summarizer]:
     """Summarize runs into one cumulative summary without writing anything.
 
     Runs that do not fit one summary input are summarized in further chunks, each merged into the summary so far.
@@ -571,7 +571,7 @@ async def compact_running_turn(
     segment: Segment,
     snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
-    summarizer: _Summarizer,
+    summarizer: Summarizer,
     before_tokens: int,
     replay_window_tokens: int | None,
     threshold_tokens: int | None,
@@ -677,7 +677,7 @@ def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], in
 
 
 async def _summarize_chunk(  # noqa: C901, PLR0915
-    summarizer: _Summarizer,
+    summarizer: Summarizer,
     previous_summary: str | None,
     runs: Sequence[AnyRunRecord],
 ) -> _SummaryChunk | None:
@@ -849,3 +849,15 @@ def _has_stable_run_id(run: AnyRunRecord) -> bool:
 
 def _iso_utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+__all__ = [
+    "ConversationChangedError",
+    "Summarizer",
+    "SummaryModel",
+    "compact_running_turn",
+    "compact_scope_history",
+    "load_summarizer",
+    "scope_usage_recorder",
+    "summarize_runs",
+]

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import _summarize_chunk, _SummaryModel, compact_scope_history
+from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     _compact_before_reply,
@@ -483,7 +483,7 @@ async def test_summary_retry_sizing_allows_loop_progress(
         "run",
         messages=[Message(role="user", content="Hello " * 8000 if retry == "shrink" else "Hello")],
     )
-    fallback = _SummaryModel(summary_model(model_id="fallback"), "fallback", 1000)
+    fallback = SummaryModel(summary_model(model_id="fallback"), "fallback", 1000)
     result = await _summarize_chunk(
         _summarizer(
             summary_model(model_id="primary"),

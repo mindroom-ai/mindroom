@@ -29,7 +29,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.history.compaction import _summarize_chunk, _SummaryModel, compact_scope_history
+from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.storage import (
     read_scope_state,
     set_force_compaction_state,
@@ -1193,7 +1193,7 @@ async def test_summary_chunk_switches_to_fallback_once_with_unchanged_prompt_and
             _summarizer(
                 primary,
                 4_000,
-                fallback=_SummaryModel(fallback, "fallback-model", 4_000),
+                fallback=SummaryModel(fallback, "fallback-model", 4_000),
                 history_settings=_HISTORY_SETTINGS,
                 timeout_seconds=420.0,
                 scope=_SCOPE,
@@ -1271,7 +1271,7 @@ async def test_summary_chunk_propagates_fallback_refusal_or_failure(fallback_err
             _summarizer(
                 primary,
                 4_000,
-                fallback=_SummaryModel(fallback, "fallback-model", 4_000),
+                fallback=SummaryModel(fallback, "fallback-model", 4_000),
                 history_settings=_HISTORY_SETTINGS,
                 scope=_SCOPE,
             ),
@@ -1309,7 +1309,7 @@ async def test_summary_chunk_refusal_after_transient_retry_propagates_within_att
             _summarizer(
                 primary,
                 4_000,
-                fallback=_SummaryModel(fallback, "fallback-model", 4_000),
+                fallback=SummaryModel(fallback, "fallback-model", 4_000),
                 history_settings=_HISTORY_SETTINGS,
                 scope=_SCOPE,
             ),
@@ -1358,7 +1358,7 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
             summarizer=_summarizer(
                 primary,
                 100_000,
-                fallback=_SummaryModel(fallback, "fallback-model", 10_000),
+                fallback=SummaryModel(fallback, "fallback-model", 10_000),
                 history_settings=_HISTORY_SETTINGS,
                 scope=_SCOPE,
             ),

@@ -18,9 +18,9 @@ from mindroom.constants import (
 )
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.compaction import (
+    SummaryModel,
     _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
-    _SummaryModel,
     compact_scope_history,
     summarize_runs,
 )
@@ -123,7 +123,7 @@ async def _rewrite_single_run(
             summary_model,
             summary_input_budget,
             fallback=(
-                _SummaryModel(
+                SummaryModel(
                     fallback_summary_model,
                     fallback_summary_model_name or "fallback-model",
                     fallback_summary_input_budget
@@ -1854,7 +1854,7 @@ async def test_run_local_summary_switches_to_fallback_for_later_chunks() -> None
             _summarizer(
                 primary,
                 6_000,
-                fallback=_SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
+                fallback=SummaryModel(model=fallback, name="fallback-model", input_budget_tokens=6_000),
                 timeout_seconds=30,
             ),
             None,
@@ -1889,7 +1889,7 @@ async def test_a_fallback_chunk_that_was_not_stored_does_not_name_the_serving_mo
         ],
     )
     seed_session(storage, session)
-    fallback = _SummaryModel(summary_model(model_id="fallback-model-id"), "fallback-model", 6_000)
+    fallback = SummaryModel(summary_model(model_id="fallback-model-id"), "fallback-model", 6_000)
     summary_mock = AsyncMock(
         side_effect=[
             "first chunk summary",
