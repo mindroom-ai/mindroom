@@ -322,7 +322,9 @@ def _answer_delegations(record: TeamRunRecord, messages: list[Message], results:
     """Replace every delegation result that waited on a member with the members' results, as Agno's continuation did.
 
     The replacement lands on the run's tool entries and on the leader's request, so the leader reads the members'
-    results where it read the pause notice.
+    results where it read the pause notice. ``results`` holds only the members resumed in this call, so a collaborate
+    sibling's text that completed earlier, or a member completed in an earlier chained resume, no longer reaches the
+    leader; Agno 3.0.9 lost it the same way, and the request-body parity contract keeps that until the owner rules.
     """
     text = "\n".join([MEMBER_RESULTS_HEADING, *results])
     answered: set[str | None] = set()

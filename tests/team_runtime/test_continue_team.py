@@ -15,8 +15,9 @@ import pytest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.team_runtime.delegate_tools import MEMBER_PAUSED_RESULT
+from mindroom.team_runtime.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
 from mindroom.team_runtime.runtime import MemberEvent, continue_team, run_team
+from mindroom.team_runtime.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated
 from tests.fakes.scripted_model import answer, calls, tool_call, usage
 from tests.team_runtime.squad import (
@@ -161,6 +162,53 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert (member.requirements[0].confirmation, member.requirements[0].confirmation_note) == (False, "Alice declined.")
     [checker_request] = checker.requests
     assert checker_request.messages[-1].content == "Alice declined."
+
+
+async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:
+    """Pin Agno's continuation: the members' results replace the whole delegation result, siblings' text included.
+
+    A collaborate delegation returns every member's text joined; when one member pauses, Agno's resume rewrote that
+    result as the heading plus the members resumed in this call, so the text of a member that had completed earlier
+    (the writer's here) no longer reaches the leader. The owned runtime keeps that request body for parity; see the
+    B5 report's concerns for the ruling B6 may apply.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
+        answer("The panel says 42.", usage(10, 2)),
+    )
+    writer = scripted("writer-model", answer("Six times seven is 42."))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.tools is not None
+    assert paused.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+
+    events, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved=[approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")],
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "The panel says 42.")
+    # The writer's text is gone from the tool entry and from what the leader reads: only the resumed checker remains.
+    resolved = "Member results after human-in-the-loop resolution:\n[Checker]: 42"
+    assert record.tools is not None
+    assert record.tools[0].result == resolved
+    assert leader.requests[-1].messages[-1].content == resolved
+    # Only the paused member resumes; the writer is neither re-run nor re-read.
+    assert [member.agent_id for member in member_records(events)] == ["checker"]
+    assert len(writer.requests) == 1
 
 
 async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() -> None:
