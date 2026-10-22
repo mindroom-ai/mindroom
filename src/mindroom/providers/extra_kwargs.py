@@ -7,10 +7,11 @@ Keys an adapter does not accept fail with the accepted list instead of being pas
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from dataclasses import fields
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -60,10 +61,11 @@ def settings_from_extra_kwargs[T: DataclassInstance](
 
 
 def settings_params(settings: DataclassInstance) -> dict[str, Any]:
-    """Return copies of a route's JSON-safe, non-secret settings, as run metadata and the request log record them.
+    """Return a route's JSON-safe, non-secret settings, as run metadata and the request log record them.
 
     Fields marked ``SECRET`` are skipped before their values are read, so credentials and SDK clients are never
-    copied.
+    copied. The rest are masked as the request log masks its records, so neither records a credential nested in
+    a raw request map such as ``request_params`` or ``extra_body``.
     """
     params: dict[str, Any] = {}
     for field in fields(settings):
@@ -76,8 +78,8 @@ def settings_params(settings: DataclassInstance) -> dict[str, Any]:
             json.dumps(value)
         except TypeError:
             continue
-        params[field.name] = deepcopy(value)
-    return params
+        params[field.name] = value
+    return cast("dict[str, Any]", redact_sensitive_data(params))
 
 
 __all__ = ["SECRET", "settings_from_extra_kwargs", "settings_params"]

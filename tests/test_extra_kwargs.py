@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config import legacy_fields
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import render_transient_context
 from mindroom.llm.messages import Message
@@ -35,6 +35,7 @@ from mindroom.providers.openai.build import build_provider as build_openai_provi
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticSettings
+from mindroom.redaction import REDACTED
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
 from tests.providers.golden_support import Wire
@@ -163,6 +164,50 @@ def test_model_params_record_no_credential_of_any_route_family(
 
     assert params == settings_params(settings_type(**request_settings))
     assert params.items() >= request_settings.items()
+
+
+@pytest.mark.asyncio
+async def test_model_params_mask_credentials_nested_in_request_params_and_extra_body(
+    tmp_path: Path,
+    chat_wire: Wire,
+) -> None:
+    """A credential authored inside ``request_params`` or ``extra_body`` is masked in run metadata as in the request log."""
+    log_dir = tmp_path / "request-logs"
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="openrouter",
+                id="deepseek/deepseek-v4.1-flash",
+                extra_kwargs={
+                    "temperature": 0.2,
+                    "request_params": {
+                        "extra_headers": {"Authorization": "Bearer nested-header-secret", "X-Title": "MindRoom"},
+                        **_REQUEST_PARAMS,
+                    },
+                    "extra_body": {"api_key": "nested-body-secret", "transforms": ["middle-out"]},
+                },
+            ),
+        },
+        debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(log_dir)),
+    )
+    provider = build_model_provider(config, _runtime_paths(tmp_path, OPENROUTER_API_KEY="openrouter-key"))
+
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
+
+    [request] = chat_wire.requests
+    assert request.headers["authorization"] == "Bearer nested-header-secret"
+    assert json.loads(request.content)["api_key"] == "nested-body-secret"
+    assert provider.model_params == {
+        "temperature": 0.2,
+        "request_params": {"extra_headers": {"Authorization": REDACTED, "X-Title": "MindRoom"}, **_REQUEST_PARAMS},
+        "extra_body": {"api_key": REDACTED, "transforms": ["middle-out"]},
+        "strict_output": True,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+    }
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    [request_record] = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert request_record["model_params"] == provider.model_params
 
 
 # --- The Claude prompt-cache ladder ---------------------------------------------------------------------------

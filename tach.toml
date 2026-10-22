@@ -7830,7 +7830,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.providers.extra_kwargs"
-depends_on = []
+depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.providers.assistant_turn"
