@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agents import create_agent
@@ -43,7 +42,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.execution_authority import authorized_tool_call
+from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import adapt_function
@@ -72,14 +71,17 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel
-from tests.tool_job_helpers import tool_job_runtime
+from tests.tool_job_helpers import job_tool, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
+    from agno.tools.function import Function
+
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_jobs.execution_authority import JobTool
     from mindroom.tool_system.invocation import ToolOutcome
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
@@ -1365,7 +1367,7 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     blocked: list[bool] = []
     ran: list[str] = []
 
-    def authorize_execution(_owner: object, _function: Function, _arguments: Mapping[str, object]) -> None:
+    def authorize_execution(_owner: object, _tool: JobTool, _arguments: Mapping[str, object]) -> None:
         if revoked:
             msg = "No longer authorized"
             raise JobAccessError(msg)
@@ -1393,7 +1395,12 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
         ran.append("body")
         return "done"
 
-    call = FunctionCall(function=Function(name="sync_tool", entrypoint=sync_tool), arguments={})
+    call = JobCall(
+        tool=job_tool(sync_tool),
+        arguments={},
+        context=ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        team=False,
+    )
     try:
         with (
             tool_runtime_context(context),

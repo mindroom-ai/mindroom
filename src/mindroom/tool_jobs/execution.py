@@ -58,6 +58,8 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity, too
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
+    from agno.tools.function import Function
+
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
@@ -126,12 +128,17 @@ def _connects_per_run(toolkit: Toolkit) -> bool:
     return toolkit.requires_connect or any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__)
 
 
-def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
-    """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as."""
+def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
+    """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as.
+
+    ``function`` is the toolkit's own function: whether it asks its user for input is not part of the call the loop
+    sees, and such a call must finish in its run.
+    """
     return not (
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_tool_call
+        or function.requires_user_input
         or _connects_per_run(toolkit)
     )
 

@@ -1170,6 +1170,7 @@ def apply_tool_approval_capability(
     ``toolkit`` is the Agno toolkit ``adapted`` came from. With ``approvals_as_jobs``, a gated function whose call can
     become a managed job asks for its approval as that job's first phase instead of pausing the run.
     """
+    sources = toolkit.get_async_functions()
 
     def approved(function: ToolFunction) -> ToolFunction:
         if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
@@ -1187,7 +1188,7 @@ def apply_tool_approval_capability(
             registered_tool_name,
         ):
             return function
-        if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
+        if approvals_as_jobs and approval_can_run_as_job(sources[function.name], toolkit):
             return replace(function, approval_type=JOB_APPROVAL_TYPE)
         return replace(function, requires_confirmation=True, approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE)
 
