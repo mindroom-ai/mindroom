@@ -46,7 +46,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
-from mindroom.llm.events import ContentDelta, RunFinished
+from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, TextDelta, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -82,7 +82,7 @@ from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.scripted_agent_helpers import registered_toolkit
+from tests.scripted_agent_helpers import registered_toolkit, streamed_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -292,10 +292,6 @@ async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1
         )
 
 
-def _text(chunks: Sequence[Any]) -> str:
-    return "".join(chunk.text for chunk in chunks if isinstance(chunk, ContentDelta))
-
-
 def _stored(reply: _Reply, run_id: str = "run-1") -> RunRecord:
     record = reply.storage.get_run(run_id)
     assert isinstance(record, RunRecord), record
@@ -379,7 +375,7 @@ async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run
     assert probe.calls == ["a"]
     assert [type(chunk).__name__ for chunk in chunks[:2]] == ["ToolStarted", "ToolCompleted"]
     assert isinstance(chunks[-1], RunFinished)
-    assert _text(chunks) == "The probe answered."
+    assert "".join(streamed_text(chunks)) == "The probe answered."
     assert len(reply.model.requests) == 2
     assert reply.model.requests[1].messages[-1].role == "tool"
     assert reply.model.requests[1].messages[-1].content == "touched a"
@@ -522,7 +518,7 @@ async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_rec
         chunks = await _stream(reply)
 
     assert probe.calls == ["a"]
-    assert _text(chunks) == "Both handled."
+    assert "".join(streamed_text(chunks)) == "Both handled."
     results = {
         message.tool_call_id: message.content for message in reply.model.requests[1].messages if message.role == "tool"
     }
@@ -537,10 +533,10 @@ async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_rec
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_recorder", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interrupted_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     with_recorder: bool,
 ) -> None:
     """The usage a cut-off request reported is counted once, on the cancelled run stored before the turn's record.
@@ -548,7 +544,6 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
     A reply with a turn recorder leaves the interrupted record to its lifecycle owner; one without writes it itself,
     over the cancelled run the loop stored first.
     """
-    del probe
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -587,13 +582,12 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """A failed request ends the reply with the user-facing error text; the stored run says why it failed."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
 
     chunks = await _stream(reply)
@@ -606,13 +600,12 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_an_error_record_never_repeats_an_earlier_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """The interrupted-turn record of a failed reply holds only this reply's own text, not replayed history."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
     earlier = RunRecord(
         run_id="run-0",
@@ -643,18 +636,17 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_an_empty_reply_is_discarded_and_retried_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """A completed run with nothing to show is removed from the scope and the turn tries again under a new run id."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [answer(""), answer("Second try.")])
 
     chunks = await _stream(reply)
 
-    assert _text(chunks) == "Second try."
+    assert "".join(streamed_text(chunks)) == "Second try."
     assert len(reply.model.requests) == 2
     # The retry reuses the turn's run id, so the discarded empty run leaves nothing behind.
     [record] = reply.storage.list_runs(SESSION_ID)
@@ -675,7 +667,7 @@ async def test_a_queued_message_is_announced_after_a_tool_batch(
         chunks = await _stream(reply)
 
     assert probe.calls == ["a"]
-    assert _text(chunks) == "Noted."
+    assert "".join(streamed_text(chunks)) == "Noted."
     notice = reply.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     assert reply.model.requests[1].messages[-1].content == notice
     assert all(message.content != notice for message in reply.model.requests[0].messages)
@@ -687,18 +679,17 @@ def _notice_markers(messages: Sequence[Message]) -> list[bool | str | None]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finalizes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     streaming: bool,
 ) -> None:
     """The stored run carries the notice the model saw until the outer boundary marks it as persisted."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("final answer")])
 
     with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
-        result = _text(await _stream(reply)) if streaming else await _respond(reply)
+        result = "".join(streamed_text(await _stream(reply))) if streaming else await _respond(reply)
         assert _notice_markers(_stored(reply).messages) == [True]
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -707,13 +698,12 @@ async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finaliz
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_failed_reply_drops_its_live_notice_at_the_response_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """An error-only reply keeps no notice in its stored run once the boundary finalizes it."""
-    del probe
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -731,13 +721,12 @@ async def test_a_failed_reply_drops_its_live_notice_at_the_response_boundary(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """Loading the conversation turns a prior reply's live notice into the persisted one before the request."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [answer("final answer")])
     crash_left = Message(
         role="user",
@@ -769,18 +758,21 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_a_silent_participation_decision_ends_the_reply_before_any_model_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     streaming: bool,
 ) -> None:
     """A reply that decides to stay silent sends only the decision request and leaves no run behind."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"stay_silent","reason":"Humans are talking."}')])
     gate = ParticipationGate()
 
-    result = _text(await _stream(reply, participation=gate)) if streaming else await _respond(reply, participation=gate)
+    result = (
+        "".join(streamed_text(await _stream(reply, participation=gate)))
+        if streaming
+        else await _respond(reply, participation=gate)
+    )
 
     assert result == ""
     assert gate.is_silent
@@ -794,14 +786,13 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     streaming: bool,
 ) -> None:
     """The decision request is the reply's exact messages plus the decision prompt, with tool selection disabled."""
-    del probe
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -809,7 +800,11 @@ async def test_an_approving_participation_decision_reuses_the_reply_prefix(
     )
     gate = ParticipationGate(instructions="Offer concise technical help.")
 
-    result = _text(await _stream(reply, participation=gate)) if streaming else await _respond(reply, participation=gate)
+    result = (
+        "".join(streamed_text(await _stream(reply, participation=gate)))
+        if streaming
+        else await _respond(reply, participation=gate)
+    )
 
     assert result == "Useful answer"
     assert gate.approved
@@ -846,7 +841,7 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
     assert probe.calls == ["0"]
     assert len(reply.model.requests) == 3
-    assert _text(chunks) == "Working. " * 3
+    assert "".join(streamed_text(chunks)) == "Working. " * 3
     assert _stored(reply).status is RunStatus.completed
     assert [
         (entry["entity"], entry["budget"], entry["model_requests"])
@@ -876,13 +871,12 @@ async def test_an_approval_receipt_is_projected_into_the_first_request_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """Participation decides first, compaction rewrites next, the receipt projects last; the other stages are wired."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
     original = ai.run_agent
@@ -914,10 +908,10 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replays_history", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_replays_its_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     replays_history: bool,
 ) -> None:
     """A reply that replays the scope's history binds its folds to the scope; one without replay compacts run-locally.
@@ -925,7 +919,6 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
     A scheduled turn whose history budget disabled replay deliberately carries no stored history, so a fold must not
     append a scope summary row or inject the scope's summary into its request.
     """
-    del probe
     reply = _reply(tmp_path, monkeypatch, [answer("ok")])
     bound: dict[str, Any] = {}
     original = loop_hooks.mid_turn_compaction_hook
@@ -939,7 +932,7 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
 
     chunks = await _stream(reply, scheduled_history_budget=budget)
 
-    assert _text(chunks) == "ok"
+    assert "".join(streamed_text(chunks)) == "ok"
     assert bound["store"] is not None
     if replays_history:
         assert bound["session"] is not None
@@ -950,16 +943,15 @@ async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_repla
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlier_fold_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """A fold during the reply reaches its notices and its turn recorder through the owned summarizer.
 
     The run's metadata keeps what the turn seeded but none of the folded usage of the run it follows.
     """
-    del probe
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -974,7 +966,7 @@ async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlie
 
     chunks = await _stream(reply, compaction_lifecycle=lifecycle, matrix_run_metadata=seeded)
 
-    assert _text(chunks) == "done"
+    assert "".join(streamed_text(chunks)) == "done"
     assert len(summarizer.requests) == 1
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
     # An interrupted record of this run would leave out the calls the fold summarized.
@@ -1002,7 +994,7 @@ async def test_a_cut_off_response_answers_its_calls_without_running_them(
     chunks = await _stream(reply)
 
     assert probe.calls == []
-    assert _text(chunks) == "Split into parts."
+    assert "".join(streamed_text(chunks)) == "Split into parts."
     answered = [message for message in reply.model.requests[1].messages if message.role == "tool"]
     assert [(message.tool_call_id, message.content, message.tool_call_error) for message in answered] == [
         ("call_1", CUT_OFF_TOOL_CALL_RESULT, True),
@@ -1034,13 +1026,12 @@ async def test_a_third_cut_off_response_fails_the_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """A refused response fails the run with the refusal text the runtime recognizes."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [[_raising(ModelSafeguardRefusal(provider="anthropic"))]])
 
     chunks = await _stream(reply)
@@ -1052,13 +1043,12 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_session_state_a_tool_changes_is_saved_with_the_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """The shared ``session_state`` a tool writes lands on the stored session."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("remember", "call_1", label="blue")), answer("Kept.")])
 
     await _stream(reply)
@@ -1069,13 +1059,12 @@ async def test_session_state_a_tool_changes_is_saved_with_the_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_the_skill_review_capture_keeps_the_final_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
 ) -> None:
     """A response that counts toward skill learning leaves its final request, ending in the model's answer."""
-    del probe
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Final answer.")])
     capture = SkillReviewCapture()
 
@@ -1155,10 +1144,10 @@ def _interrupted_record_spy(monkeypatch: pytest.MonkeyPatch, storage: Conversati
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
 async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_the_cancelled_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
     streaming: bool,
 ) -> None:
     """Through ``ResponseRunner``, a stop mid-stream stores the ``CANCELLED`` run before the interrupted record.
@@ -1166,7 +1155,6 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     The lifecycle owner writes the interrupted-turn record over the cancelled run the loop stored, and the cut-off
     request's usage counts once.
     """
-    del probe
     reply = _reply(
         tmp_path,
         monkeypatch,
