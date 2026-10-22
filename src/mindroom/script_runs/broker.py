@@ -62,10 +62,8 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from agno.tools import Toolkit
-    from agno.tools.function import Function
-
     from mindroom.config.main import Config
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
