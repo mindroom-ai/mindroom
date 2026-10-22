@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 
@@ -43,7 +44,7 @@ async def run_offered(
         offered_function(build, name),
         arguments or {},
         context or ToolCallContext(run_id="run", session_id="session"),
-        middleware=build.tool_middleware,
+        middleware=agent_tool_middleware(build),
     )
 
 

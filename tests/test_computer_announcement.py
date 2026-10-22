@@ -347,7 +347,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
 
     build = create_agent("researcher", config, runtime_paths, execution_identity=None)
 
-    names = [middleware.__name__ for middleware in build.tool_middleware]
+    names = [middleware.__name__ for middleware in build.tool_policy]
     assert names[:2] == ["bind_live_functions", "middleware"]
     assert (names[-1] == "announce_computer") is announces
     assert names.count("announce_computer") == int(announces)

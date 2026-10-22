@@ -12,6 +12,7 @@ from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.approval.tool_approval import approval_gated
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog, cli_dispatch_active
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -125,7 +126,7 @@ async def bind_standard_cli(
         runtime_context=runtime,
         session=session,
         store=store,
-        middleware=build.tool_middleware,
+        middleware=agent_tool_middleware(build),
         tool_call_limit=build.spec.tool_call_limit,
     )
     try:

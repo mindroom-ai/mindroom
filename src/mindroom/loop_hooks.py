@@ -28,7 +28,7 @@ from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.participation_hook import participation_hook
 from mindroom.skill_learning.capture import capture_final_request
-from mindroom.tool_jobs.execution import job_definitions_hook
+from mindroom.tool_jobs.execution import agent_tool_middleware, job_definitions_hook
 from mindroom.tool_jobs.notices import job_notice_hook
 
 if TYPE_CHECKING:
@@ -99,7 +99,7 @@ def agent_loop_hooks(
         is_team=False,
         history_settings=build.history_settings,
         deferred_tool_names=build.request_template.deferred_tool_names,
-        tool_middleware=build.tool_middleware,
+        tool_middleware=agent_tool_middleware(build),
         participation=participation,
         job_definitions=jobs,
         # A delegated child cannot collect jobs; its caller hears when they end. A team member hears of its

@@ -42,6 +42,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
 from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
@@ -1826,7 +1827,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
                     echo,
                     {"text": "hi"},
                     ToolCallContext(run_id="run-1", session_id=target.session_id or "", call_id="call-1"),
-                    middleware=build.tool_middleware,
+                    middleware=agent_tool_middleware(build),
                 )
 
         assert not result.is_error, result.content
@@ -2059,7 +2060,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path:
             echo,
             {"text": "hello"},
             ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
-            middleware=build.tool_middleware,
+            middleware=agent_tool_middleware(build),
         )
 
         assert outcome.content == (

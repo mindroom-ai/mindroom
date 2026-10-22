@@ -55,7 +55,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         store=None,
         tool_owners={},
         surface=AgentSurface(mode="standard", cli_shell=False),
-        tool_middleware=(_middleware,),
+        tool_policy=(_middleware,),
         tool_jobs=JobActor(name="general", team=False, depth=0, tools={}),
     )
 
@@ -117,7 +117,9 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     assert leader.answer_tool_calls is not None
     assert agent.rewrite_tool_calls is resolve_call_tool_calls
     assert leader.rewrite_tool_calls is None
-    assert agent.tool_middleware == leader.tool_middleware == (_middleware,)
+    # The agent's calls run through its tool-call policy behind the admission of its tool jobs.
+    assert _stages(agent.tool_middleware) == ["with_job_admission", "_middleware"]
+    assert agent.tool_middleware[1:] == leader.tool_middleware == (_middleware,)
     for hooks in (agent, leader):
         assert _stages(hooks.after_tool_batch) == ["queued_notice_after_tool_batch", "job_notice_hook"]
         assert _stages(hooks.on_resume_entry) == ["queued_notice_on_resume_entry"]

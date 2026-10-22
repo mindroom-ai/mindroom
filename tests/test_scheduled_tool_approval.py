@@ -56,6 +56,7 @@ from mindroom.scheduling.tasks import (
     save_edited_scheduled_task,
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
@@ -2042,7 +2043,7 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
             prepare_run_tools(build.spec).functions["run_scheduled_call"],
             {"task_id": _TASK},
             ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
-            middleware=build.tool_middleware,
+            middleware=agent_tool_middleware(build),
         )
 
 
@@ -2069,7 +2070,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
 
     functions = prepare_run_tools(build.spec).functions
     assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
-    names = [middleware.__name__ for middleware in build.tool_middleware]
+    names = [middleware.__name__ for middleware in build.tool_policy]
     assert names.count("bind_live_functions") == int(offered is not None)
     assert (names[0] == "bind_live_functions") is (offered is not None)
 
@@ -2136,7 +2137,7 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
                 "description": "Morning DM",
             },
             ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
-            middleware=build.tool_middleware,
+            middleware=agent_tool_middleware(build),
         )
 
     [binding] = request.await_args.args
@@ -2194,7 +2195,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
                 prepare_run_tools(build.spec).functions["post_slack_message"],
                 _OTHER_ARGUMENTS,
                 ToolCallContext(run_id="run", session_id="session", call_id="call-2"),
-                middleware=build.tool_middleware,
+                middleware=agent_tool_middleware(build),
             )
 
         assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS

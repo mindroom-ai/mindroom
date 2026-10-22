@@ -70,11 +70,11 @@ class AgentBuild:
     leaves out the functions generated for the agent, such as the knowledge search. ``tool_policy`` is the agent's
     tool-call policy, outermost first: the binding through which a scheduled call runs one of the build's functions
     (for a build that offers the scheduler), plugin before and after hooks, call recording, and the computer
-    announcement. ``tool_middleware`` is what the loop runs around every call: ``tool_policy``, behind tool-job
-    admission when ``tool_jobs`` is set. Admission runs a managed job's call through ``tool_policy`` again in the
-    job's own task, so a step that must reach every call joins ``tool_policy`` inside the admission. ``tool_jobs`` is
-    the agent as tool jobs see it while the instance runs them, which the loop's hooks offer the wait budget of its
-    managed calls and the notices of its ended jobs for.
+    announcement. ``tool_jobs`` is the agent as tool jobs see it while the instance runs them, which the loop's hooks
+    offer the wait budget of its managed calls and the notices of its ended jobs for. Every call runs through
+    ``tool_policy`` behind tool-job admission when ``tool_jobs`` is set (``agent_tool_middleware``), and admission
+    runs a managed job's call through ``tool_policy`` again in the job's own task, so a step that must reach every
+    call joins ``tool_policy``.
     """
 
     spec: AgentSpec
@@ -85,7 +85,6 @@ class AgentBuild:
     tool_owners: Mapping[str, str | None]
     surface: AgentSurface
     tool_policy: tuple[ToolMiddleware, ...] = ()
-    tool_middleware: tuple[ToolMiddleware, ...] = ()
     tool_jobs: JobActor | None = None
 
 

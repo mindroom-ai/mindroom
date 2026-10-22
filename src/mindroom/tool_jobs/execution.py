@@ -61,6 +61,7 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity, too
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
@@ -226,6 +227,11 @@ def with_job_admission(actor: JobActor | None, inner: Sequence[ToolMiddleware]) 
         return await _admit(actor, rest, call, call_next)
 
     return (admit, *rest)
+
+
+def agent_tool_middleware(build: AgentBuild) -> tuple[ToolMiddleware, ...]:
+    """Return what the loop runs around each of the build's calls: ``tool_policy``, admitted as ``tool_jobs``."""
+    return with_job_admission(build.tool_jobs, build.tool_policy)
 
 
 async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCall, call_next: ToolNext) -> object:
@@ -521,6 +527,7 @@ async def _consume_result(
 
 __all__ = [
     "JobActor",
+    "agent_tool_middleware",
     "approval_can_run_as_job",
     "assembled_job_tools",
     "job_definitions_hook",

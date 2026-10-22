@@ -19,6 +19,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -178,7 +179,7 @@ async def prepare_minimal_catalog(
         runtime_context=runtime,
         session=session,
         store=store,
-        middleware=build.tool_middleware,
+        middleware=agent_tool_middleware(build),
         tool_call_limit=build.spec.tool_call_limit,
         record=record,
     )

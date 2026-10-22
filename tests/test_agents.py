@@ -78,6 +78,7 @@ from mindroom.runtime_resolution import (
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams.members import materialize_exact_team_members
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -4143,7 +4144,7 @@ async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_p
         _offered(agent)["get_skill_instructions"],
         {"skill_name": "scripted"},
         ToolCallContext(run_id="run", session_id="session", user_id="@alice:localhost", call_id="call-1"),
-        middleware=agent.tool_middleware,
+        middleware=agent_tool_middleware(agent),
     )
 
     assert "[TOOL CALL DECLINED]" in str(skill_result.content)

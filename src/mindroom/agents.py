@@ -2217,8 +2217,6 @@ def create_agent(
         if background_tool_jobs_enabled(config, runtime_paths)
         else None
     )
-    tool_policy = bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware)
-
     return AgentBuild(
         spec=spec,
         prompt=prompt,
@@ -2226,8 +2224,7 @@ def create_agent(
         history_settings=entity_view.history_settings,
         store=store,
         tool_owners=tool_assembly.tool_owners,
-        tool_policy=tool_policy,
-        tool_middleware=with_job_admission(tool_jobs, tool_policy),
+        tool_policy=bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware),
         tool_jobs=tool_jobs,
         surface=surface,
     )

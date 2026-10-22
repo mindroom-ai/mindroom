@@ -52,6 +52,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
@@ -638,6 +639,7 @@ async def build_call_tools(
     # The call is one run for its tools, which share its session state the way one chat turn's tools do.
     call_context = ToolCallContext(run_id=f"{session_id}:voice", session_id=session_id, user_id=requester_id)
     connections = _CallConnections()
+    middleware = agent_tool_middleware(build)
     tools: list[RawFunctionTool] = []
     for toolkit, function in offered_functions(build.spec):
         # The build applied the call's function filter to the functions it built, not to ones added beside them.
@@ -647,7 +649,7 @@ async def build_call_tools(
         tools.append(
             _wrap_tool_function(
                 function,
-                middleware=build.tool_middleware,
+                middleware=middleware,
                 call_context=call_context,
                 context=context,
                 agent_name=agent_name,
@@ -932,10 +934,12 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
         replace(toolkit, functions=tuple(callable_in_a_call(function) for function in toolkit.functions))
         for toolkit in build.spec.toolkits
     )
+    # A call's turns run their tools inline, so job admission runs every call in place; the refusal answers before
+    # the rest of the policy sees the call.
     return replace(
         build,
         spec=replace(build.spec, toolkits=toolkits),
-        tool_middleware=(_text_chat_refusal(frozenset(refused)), *build.tool_middleware),
+        tool_policy=(_text_chat_refusal(frozenset(refused)), *build.tool_policy),
     )
 
 

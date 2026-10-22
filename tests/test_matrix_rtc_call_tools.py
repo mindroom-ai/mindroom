@@ -53,6 +53,7 @@ from mindroom.matrix_rtc.call_tools import (
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
@@ -155,8 +156,8 @@ def _toolkit(*functions: Function) -> Toolkit:
     return toolkit
 
 
-def _build(*toolkits: Toolkit, middleware: tuple[ToolMiddleware, ...] = (), role: str = "THE CHAT ROLE") -> AgentBuild:
-    """Return an agent build offering ``toolkits`` under ``middleware``, as ``create_agent`` returns one."""
+def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: str = "THE CHAT ROLE") -> AgentBuild:
+    """Return an agent build offering ``toolkits`` under the tool-call ``policy``, as ``create_agent`` returns one."""
     return AgentBuild(
         spec=AgentSpec(
             id=AGENT,
@@ -171,7 +172,7 @@ def _build(*toolkits: Toolkit, middleware: tuple[ToolMiddleware, ...] = (), role
         store=None,
         tool_owners={},
         surface=AgentSurface(mode="standard", cli_shell=False),
-        tool_middleware=middleware,
+        tool_policy=policy,
     )
 
 
@@ -318,12 +319,17 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
             return None
 
     with recording_tool_calls(_Recorder()):
-        refused = await run_tool_call(add, {"a": 1, "b": 2}, _CALL_CONTEXT, middleware=call_build.tool_middleware)
+        refused = await run_tool_call(
+            add,
+            {"a": 1, "b": 2},
+            _CALL_CONTEXT,
+            middleware=agent_tool_middleware(call_build),
+        )
         subtracted = await run_tool_call(
             call_functions["subtract"],
             {"a": 3, "b": 1},
             _CALL_CONTEXT,
-            middleware=call_build.tool_middleware,
+            middleware=agent_tool_middleware(call_build),
         )
 
     assert refused == _TEXT_CHAT_REQUIRED_MESSAGE
@@ -635,7 +641,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         call_contexts.append(call.context)
         return await call_next(call.arguments)
 
-    built = _build(_toolkit(_function(add)), middleware=(record_call,))
+    built = _build(_toolkit(_function(add)), policy=(record_call,))
     create_calls: list[tuple[object, ...]] = []
     create_kwargs: dict[str, object] = {}
     knowledge = object()
@@ -914,12 +920,12 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     cached = _functions(cached_build)
     assert list(used) == ["safe", "confirm", "policy_approval", "run_workflow"]
     assert used["safe"] is cached["safe"]
-    assert await run_tool_call(used["safe"], {}, _CALL_CONTEXT, middleware=used_build.tool_middleware) == "safe"
+    assert await run_tool_call(used["safe"], {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build)) == "safe"
     for name in ("confirm", "policy_approval", "run_workflow"):
         refused = used[name]
         assert refused.requires_confirmation is False
         assert refused.parameters == cached[name].parameters
-        result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=used_build.tool_middleware)
+        result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
         assert result == _TEXT_CHAT_REQUIRED_MESSAGE
     create_scope_session_storage_mock.assert_called_once_with(
         agent_name=AGENT,

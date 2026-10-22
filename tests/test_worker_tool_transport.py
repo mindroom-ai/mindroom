@@ -27,6 +27,7 @@ from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
 from mindroom.message_target import MessageTarget
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.declarations import tool_schema_source
@@ -591,7 +592,7 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"
-    assert agent.tool_middleware
+    assert agent_tool_middleware(agent)
     hook_calls: list[tuple[str, str]] = []
 
     async def observe(call: ToolCall, call_next: ToolNext) -> object:
@@ -603,7 +604,7 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         hook_calls.append(("after", target))
         return result
 
-    middleware = (*agent.tool_middleware, observe)
+    middleware = (*agent_tool_middleware(agent), observe)
     run = ToolCallContext(run_id="run", session_id="session")
     with tool_runtime_context(context):
         desktop = await execute_tool_call(
