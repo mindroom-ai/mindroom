@@ -156,6 +156,7 @@ def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
         ("Bearer abcdefghIJKLmnop", f"Bearer {REDACTED}"),
         ("id-token: eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id-token: {REDACTED}"),
         ("id-token: writeAbCdEf", f"id-token: {REDACTED}"),
+        ("id_token=read eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id_token={REDACTED}"),
     ],
 )
 def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: str, expected: str) -> None:

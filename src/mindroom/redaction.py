@@ -136,9 +136,9 @@ _ORDINARY_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)*\.?")
 # generated token, and a colon, an Authorization header, or "invalid"/"provided" labels the next word a credential.
 _PROSE_WORD_PATTERN = re.compile(r"[A-Z]?[a-z]+(?:-[a-z]+)*\.?")
 _BARE_CREDENTIAL_PHRASE_PATTERN = re.compile(r"(?:api\s+key|bearer(?:\s+token)?)\s+", re.IGNORECASE)
-# GitHub Actions grants a job's OIDC token with `id-token: write`, so a value that starts with one of these words
-# names a permission, also before a YAML comment or the end of a Markdown code span.
-_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?![\w.-])")
+# GitHub Actions grants a job's OIDC token with `id-token: write`, so one of these words names a permission, alone
+# or before a YAML comment or the end of a Markdown code span.
+_ID_TOKEN_PERMISSION_PATTERN = re.compile(r"(?:none|read|write)(?=\s*(?:#|`|$))")
 # Unpaired surrogates survive JSON parsing but cannot be encoded as UTF-8 or displayed.
 _LONE_SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 _GRAPH_SHARE_ID_PATTERN = re.compile(r"/shares/[^/]+")
