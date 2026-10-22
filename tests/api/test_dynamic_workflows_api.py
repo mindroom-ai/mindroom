@@ -266,8 +266,7 @@ def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(
 def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix_user(test_client: TestClient) -> None:
     """Trusted upstream auth can use an email-derived Matrix identity to read a Matrix-requested report."""
     runtime_paths = main._app_runtime_paths(test_client.app)
-    env = trusted_upstream_env()
-    env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM")
+    env = trusted_upstream_env(matrix_user_id_claim=None)
     trusted_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=runtime_paths.storage_root,

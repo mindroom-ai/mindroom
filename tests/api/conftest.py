@@ -33,9 +33,46 @@ _TRUSTED_UPSTREAM_ISSUER = "https://issuer.example"
 _TRUSTED_UPSTREAM_JWKS_URL = "https://issuer.example/conftest/jwks"
 
 
-@cache
-def _trusted_upstream_key() -> rsa.RSAPrivateKey:
+def trusted_upstream_jwt_key() -> rsa.RSAPrivateKey:
+    """Return a new RSA key for signing trusted-upstream JWTs."""
     return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def trusted_upstream_jwks(private_key: rsa.RSAPrivateKey, kid: str = "test-key") -> dict[str, Any]:
+    """Return the JWKS that publishes `private_key`."""
+    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    return {"keys": [{**jwk, "kid": kid, "use": "sig", "alg": "RS256"}]}
+
+
+def trusted_upstream_jwt(
+    private_key: rsa.RSAPrivateKey,
+    *,
+    audience: str = _TRUSTED_UPSTREAM_AUDIENCE,
+    email: str = "alice@example.com",
+    expires_at: datetime | None = None,
+    issuer: str = _TRUSTED_UPSTREAM_ISSUER,
+    kid: str = "test-key",
+    matrix_user_id: str | None = None,
+    user_id: str = "user_123",
+) -> str:
+    """Return a gateway assertion signed by `private_key`."""
+    now = datetime.now(UTC)
+    claims = {
+        "iss": issuer,
+        "aud": audience,
+        "exp": expires_at or now + timedelta(minutes=5),
+        "iat": now,
+        "email": email,
+        "sub": user_id,
+    }
+    if matrix_user_id is not None:
+        claims["matrix_user_id"] = matrix_user_id
+    return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": kid})
+
+
+@cache
+def _shared_trusted_upstream_key() -> rsa.RSAPrivateKey:
+    return trusted_upstream_jwt_key()
 
 
 @pytest.fixture(autouse=True)
@@ -46,8 +83,7 @@ def _serve_trusted_upstream_jwks(monkeypatch: pytest.MonkeyPatch) -> None:
     def serve(client: jwt.PyJWKClient) -> Any:  # noqa: ANN401
         if client.uri != _TRUSTED_UPSTREAM_JWKS_URL:
             return fetch_data(client)
-        jwk = json.loads(RSAAlgorithm.to_jwk(_trusted_upstream_key().public_key()))
-        return {"keys": [{**jwk, "kid": "conftest-key", "use": "sig", "alg": "RS256"}]}
+        return trusted_upstream_jwks(_shared_trusted_upstream_key())
 
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", serve)
 
@@ -59,30 +95,33 @@ def trusted_upstream_headers(
     matrix_user_id: str = "@alice:example.org",
 ) -> dict[str, str]:
     """Return the Origin header and a gateway-signed assertion for an app set up by `use_trusted_upstream_runtime`."""
-    now = datetime.now(UTC)
-    claims = {
-        "iss": _TRUSTED_UPSTREAM_ISSUER,
-        "aud": _TRUSTED_UPSTREAM_AUDIENCE,
-        "exp": now + timedelta(minutes=5),
-        "email": email,
-        "sub": user_id,
-        "matrix_user_id": matrix_user_id,
-    }
-    token = jwt.encode(claims, _trusted_upstream_key(), algorithm="RS256", headers={"kid": "conftest-key"})
+    token = trusted_upstream_jwt(
+        _shared_trusted_upstream_key(),
+        email=email,
+        matrix_user_id=matrix_user_id,
+        user_id=user_id,
+    )
     return {"Origin": "http://testserver", "X-Trusted-Jwt": token}
 
 
-def trusted_upstream_env() -> dict[str, str]:
-    """Return the env that turns on trusted-upstream auth accepting `trusted_upstream_headers`."""
-    return {
+def trusted_upstream_env(
+    *,
+    user_id_claim: str | None = "sub",
+    matrix_user_id_claim: str | None = "matrix_user_id",
+) -> dict[str, str]:
+    """Return the env that turns on trusted-upstream auth accepting `trusted_upstream_jwt` assertions."""
+    env = {
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": _TRUSTED_UPSTREAM_JWKS_URL,
         "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": _TRUSTED_UPSTREAM_AUDIENCE,
         "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER": _TRUSTED_UPSTREAM_ISSUER,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM": "sub",
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": "matrix_user_id",
     }
+    if user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] = user_id_claim
+    if matrix_user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] = matrix_user_id_claim
+    return env
 
 
 def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":

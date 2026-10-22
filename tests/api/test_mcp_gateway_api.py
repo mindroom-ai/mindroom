@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from html.parser import HTMLParser
@@ -23,11 +24,12 @@ from structlog.testing import capture_logs
 
 from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
+from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from mindroom.mcp_gateway import admission
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -59,12 +61,12 @@ class _Inputs(HTMLParser):
 @pytest.fixture
 def signed_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str, str]]:
     """Exercise production JWT verification with locally signed identities."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
 
     def headers(user: str = "alice") -> dict[str, str]:
         return {
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=user,
                 email=f"{user}@example.org",
@@ -900,15 +902,35 @@ def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, settin
         assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 404
 
 
-def test_gateway_starts_without_trusted_upstream_auth(gateway_app: FastAPI) -> None:
-    """Matrix sign-in can approve MCP clients, so the gateway does not need trusted upstream auth."""
+def test_chat_session_approves_clients_without_trusted_upstream_auth(gateway_app: FastAPI) -> None:
+    """Without trusted upstream auth, a Connections session from MindRoom Chat approves clients and nothing else does."""
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
     snapshot.runtime_paths = replace(
         snapshot.runtime_paths,
-        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "false"},
+        process_env={
+            name: value
+            for name, value in snapshot.runtime_paths.process_env.items()
+            if not name.startswith("MINDROOM_TRUSTED_UPSTREAM_")
+        },
     )
-    with TestClient(gateway_app, base_url=ORIGIN) as client:
-        assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 200
+    with TestClient(gateway_app, base_url=ORIGIN, follow_redirects=False) as client:
+        _, consent_url = _authorize(client)
+        forged = {
+            "X-Trusted-User": "alice",
+            "X-Trusted-Email": "alice@example.org",
+            "Authorization": "Bearer owner-key",
+        }
+        assert client.get(consent_url, headers=forged).status_code == 401
+        assert client.get("/api/connections/mcp/clients", headers=forged).status_code == 401
+
+        client.cookies.set(
+            connections_session_cookie(ORIGIN),
+            issue_connections_session("@alice:example.org", now=time.time(), dashboard=False),
+        )
+        client_id, code = _code(client, {})
+        token = _exchange(client, client_id, code)
+        assert token.status_code == 200, token.text
+        assert _list(client, token.json()["access_token"]).status_code == 200
 
 
 @pytest.mark.parametrize("body", [b'{"client_name":', b'{"client_name":"\xff"}', b"[" * 1100])

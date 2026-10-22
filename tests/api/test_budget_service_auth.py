@@ -15,7 +15,7 @@ from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
 from tests.api.test_usage_service_auth import _ASSERTION_HEADER, _service_assertion
 
 _BUDGET_AUDIENCE = "mindroom-budget-service"
@@ -25,8 +25,8 @@ _BUDGET_CLIENT_ID = "budget-service-client.example.org"
 @pytest.fixture
 def budget_service_auth(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str], rsa.RSAPrivateKey]:
     """Return trusted-upstream settings with both the usage and the budget service configured."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     return (
         {
             "MINDROOM_API_KEY": "test-budget-key",

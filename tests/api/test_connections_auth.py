@@ -12,19 +12,19 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import auth, config_lifecycle, frontend, main
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 
 @pytest.fixture
 def signed_connections_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str, str]]:
     """Sign real upstream JWTs while keeping JWKS retrieval local."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
 
     def headers(user: str = "alice") -> dict[str, str]:
         email = f"{user}@example.org"
         return {
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 private_key,
                 user_id=user,
                 email=email,

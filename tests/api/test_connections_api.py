@@ -25,11 +25,11 @@ from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_env,
-    _trusted_upstream_jwt_key,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
     _fake_provider,
@@ -49,14 +49,14 @@ if TYPE_CHECKING:
 @pytest.fixture
 def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API with signed users and one private agent."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
         "MATRIX_HOMESERVER": "http://localhost:8008",
@@ -88,7 +88,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     )
     headers = {
         name: {
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",

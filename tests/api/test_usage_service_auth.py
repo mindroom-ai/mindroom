@@ -17,7 +17,7 @@ from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 _ISSUER = "https://issuer.example"
 _SERVICE_AUDIENCE = "mindroom-usage-export"
@@ -67,8 +67,8 @@ def usage_service_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], rsa.RSAPrivateKey]:
     """Return service-auth settings backed by a locally served RSA JWKS."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     return (
         {
             "MINDROOM_API_KEY": "test-usage-key",
@@ -185,7 +185,7 @@ def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str
     builders = {
         "missing-assertion": lambda: None,
         "query-assertion": lambda: None,
-        "invalid-signature": lambda: _service_assertion(_trusted_upstream_jwt_key()),
+        "invalid-signature": lambda: _service_assertion(trusted_upstream_jwt_key()),
         "expired": lambda: _service_assertion(private_key, exp=now - timedelta(minutes=1)),
         "future-iat": lambda: _service_assertion(private_key, iat=now + timedelta(minutes=1)),
         "wrong-issuer": lambda: _service_assertion(private_key, iss="https://other-issuer.example"),
@@ -196,7 +196,7 @@ def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str
         "non-string-client": lambda: _service_assertion(private_key, common_name=123),
         "wrong-type": lambda: _service_assertion(private_key, type="user"),
         "nonempty-subject": lambda: _service_assertion(private_key, sub="person@example.org"),
-        "human-token": lambda: _trusted_upstream_jwt(
+        "human-token": lambda: trusted_upstream_jwt(
             private_key,
             audience=_SERVICE_AUDIENCE,
             email="owner@example.org",
@@ -475,7 +475,7 @@ def test_dashboard_and_service_routes_share_preparation_and_cache(
     dashboard_email = "owner@example.org"
     dashboard_headers = {
         "Cf-Access-Authenticated-User-Email": dashboard_email,
-        _ASSERTION_HEADER: _trusted_upstream_jwt(
+        _ASSERTION_HEADER: trusted_upstream_jwt(
             private_key,
             email=dashboard_email,
             audience="mindroom-dashboard",

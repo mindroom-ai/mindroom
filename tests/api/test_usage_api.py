@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 from tests.api.test_usage_service_auth import _install_manual_export_runner
 
 if TYPE_CHECKING:
@@ -25,8 +25,8 @@ def signed_usage_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], Callable[..., dict[str, str]]]:
     """Return dashboard auth settings and real signed identity headers."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     env = {
         "MINDROOM_API_KEY": "test-usage-key",
         "MINDROOM_CONNECTIONS_AGENT": "test_agent",
@@ -47,7 +47,7 @@ def signed_usage_auth(
         expires_at: datetime | None = None,
     ) -> dict[str, str]:
         return {
-            "Cf-Access-Jwt-Assertion": _trusted_upstream_jwt(
+            "Cf-Access-Jwt-Assertion": trusted_upstream_jwt(
                 private_key,
                 email=email,
                 audience=audience,

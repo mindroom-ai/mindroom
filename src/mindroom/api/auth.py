@@ -427,7 +427,7 @@ def _trusted_upstream_matrix_user_id(
 async def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
-    jwt_client: PyJWKClient | None = None,
+    jwt_client: PyJWKClient | None,
 ) -> dict[str, Any] | None:
     """Return the browser user the gateway's signed assertion names, when trusted upstream auth is on."""
     if not settings.enabled:

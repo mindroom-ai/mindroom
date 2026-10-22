@@ -11,11 +11,11 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, frontend, main
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_env,
-    _trusted_upstream_jwt_key,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 
 if TYPE_CHECKING:
@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 @pytest.fixture
 def signed_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Sign a real upstream JWT for Alice while keeping JWKS retrieval local."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     return {
-        "X-Trusted-Jwt": _trusted_upstream_jwt(
+        "X-Trusted-Jwt": trusted_upstream_jwt(
             private_key,
             matrix_user_id="@alice:example.org",
             user_id="alice",
@@ -53,7 +53,7 @@ def gate_client(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
 
     def client(*, trusted_upstream: bool, broker_on: bool = True) -> TestClient:
-        env = _trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id") if trusted_upstream else {}
+        env = trusted_upstream_env() if trusted_upstream else {}
         if broker_on:
             env["MINDROOM_EGRESS_BROKER_PORT"] = "8768"
         runtime_paths = constants.resolve_primary_runtime_paths(

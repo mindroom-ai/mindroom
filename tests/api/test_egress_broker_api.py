@@ -24,11 +24,11 @@ from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.egress_broker.user_services import save_user_service
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_env,
-    _trusted_upstream_jwt_key,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_egress_credentials_api import (
     _finish_oauth,
@@ -345,13 +345,12 @@ def test_services_listing_says_whether_an_agent_with_per_user_keys_reaches_the_b
 def test_services_listing_says_whether_the_personal_page_is_served(
     egress_config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
     """The page where each user sets per-user keys is served while users can sign in from Chat or a signed upstream."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     signed_headers = {
-        "X-Trusted-Jwt": _trusted_upstream_jwt(
+        "X-Trusted-Jwt": trusted_upstream_jwt(
             private_key,
             email="owner@example.com",
             matrix_user_id="@owner:example.org",
@@ -364,7 +363,7 @@ def test_services_listing_says_whether_the_personal_page_is_served(
     no_sign_in = _admin_client(egress_config_file, **no_chat).get("/api/egress-broker/services")
     signed = _admin_client(
         egress_config_file,
-        **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         **no_chat,
     ).get("/api/egress-broker/services", headers=signed_headers)
 

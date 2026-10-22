@@ -11,11 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mindroom.api import main
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_env,
-    _trusted_upstream_jwt_key,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import _publish_config, _use_runtime_auth_settings
 from tests.test_usage_stats_private import ALIAS, ALICE, BOB, private_usage_data
@@ -31,13 +31,13 @@ def _client(
     overrides: dict[str, str] | None = None,
 ) -> tuple[TestClient, dict[str, dict[str, str]]]:
     data = private_usage_data(tmp_path)
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     paths = replace(
         data.paths,
         process_env={
             **data.paths.process_env,
-            **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+            **trusted_upstream_env(),
             "MINDROOM_CONNECTIONS_AGENT": "code",
             **(overrides or {}),
         },
@@ -47,7 +47,7 @@ def _client(
     _use_runtime_auth_settings(main.app)
     headers = {
         name: {
-            "X-Trusted-Jwt": _trusted_upstream_jwt(key, user_id=name, matrix_user_id=requester),
+            "X-Trusted-Jwt": trusted_upstream_jwt(key, user_id=name, matrix_user_id=requester),
         }
         for name, requester in (("alice", ALIAS), ("bob", BOB))
     }
