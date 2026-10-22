@@ -81,7 +81,8 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
+    RequestAttribution,
     bind_llm_request_log_context,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
@@ -193,13 +194,15 @@ def _openai_team_request_log_context(
     metadata = prepared.run_metadata
     correlation_id = metadata.get("correlation_id") if metadata is not None else None
     return build_llm_request_log_context(
-        agent_id=f"team/{team_name}",
-        session_id=session_id,
-        room_id=None,
-        thread_id=None,
-        reply_to_event_id=None,
-        requester_id=requester_id,
-        correlation_id=correlation_id if isinstance(correlation_id, str) else uuid4().hex,
+        RequestAttribution(
+            agent_id=f"team/{team_name}",
+            session_id=session_id,
+            room_id=None,
+            thread_id=None,
+            reply_to_event_id=None,
+            requester_id=requester_id,
+            correlation_id=correlation_id if isinstance(correlation_id, str) else uuid4().hex,
+        ),
         prompt=prepared.prompt_text,
         model_prompt=None,
         full_prompt=prepared.prompt_text,

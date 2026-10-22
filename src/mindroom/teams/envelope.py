@@ -36,12 +36,13 @@ from mindroom.history.storage import new_scope_session, update_scope_seen_event_
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.runs import RunStatus
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
+    RequestAttribution,
     bind_llm_request_log_context,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
+from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -143,13 +144,15 @@ def _team_request_log_context(
     metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     return build_llm_request_log_context(
-        agent_id=team_name,
-        session_id=ctx.session_id or "",
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        reply_to_event_id=ctx.reply_to_event_id,
-        requester_id=ctx.requester_id,
-        correlation_id=ctx.correlation_id,
+        RequestAttribution(
+            agent_id=team_name,
+            session_id=ctx.session_id or "",
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            reply_to_event_id=ctx.reply_to_event_id,
+            requester_id=ctx.requester_id,
+            correlation_id=ctx.correlation_id,
+        ),
         prompt=prompt,
         model_prompt=None,
         full_prompt=_team_run_input_text(run_input),

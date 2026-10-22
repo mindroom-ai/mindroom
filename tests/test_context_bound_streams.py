@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
     bind_llm_request_log_context,
     current_llm_request_log_context,
     stream_with_llm_request_log_context,

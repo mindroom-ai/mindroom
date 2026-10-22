@@ -64,9 +64,9 @@ from mindroom.llm.events import ContentDelta, ToolStarted
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.request_context import stream_with_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
-from mindroom.llm_request_logging import stream_with_llm_request_log_context
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
