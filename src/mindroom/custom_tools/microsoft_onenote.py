@@ -73,7 +73,7 @@ class _Request:
 
     def send(self, session: GraphSession) -> dict[str, Any]:
         if (target := self.target) is not None:
-            # Graph documents only the id, name, and self link of an expanded parent notebook, so the web link comes
+            # An expanded parent notebook carries only its id, name, and self link by default, so the web link is read
             # from the notebook itself.
             found = session.json("GET", target.path, params={"$expand": "parentNotebook"})
             notebook_path = _notebook_path((found.get("parentNotebook") or {}).get("id"))
