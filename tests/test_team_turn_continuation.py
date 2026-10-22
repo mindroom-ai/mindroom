@@ -161,7 +161,8 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
 
     first, *_, continued = team.models["default"].requests
     contents = [str(message.content) for message in continued.messages]
-    assert contents[1] == str(first.messages[1].content)
+    [first_prompt] = [str(message.content) for message in first.messages if message.role == "user"]
+    assert first_prompt in contents[:-1]
     assert "Switching." in contents
     assert CONTINUATION_MARK in contents[-1]
     session = team.storage.load_session(SESSION_ID, "team")

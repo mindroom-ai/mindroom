@@ -190,7 +190,7 @@ _LEGACY_SYSTEM_SUFFIX = (
 )
 
 
-def _seeded(team: TeamTurn) -> TeamTurn:
+def _with_seeded_history(team: TeamTurn) -> TeamTurn:
     """Seed two earlier runs and a summary into ``team``'s scope and return the team."""
     session = seed_session(
         team.storage,
@@ -234,7 +234,7 @@ async def test_a_team_turn_replays_the_summary_before_its_history_and_outside_an
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    team = _seeded(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
+    team = _with_seeded_history(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
 
     await team.stream()
 
@@ -257,7 +257,7 @@ async def test_a_team_turn_whose_plan_replays_no_history_sends_no_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scheduled turn whose history budget is spent replays neither the summary nor the stored runs."""
-    team = _seeded(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
+    team = _with_seeded_history(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
     spent = ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
 
     await team.stream(ctx=team.ctx(scheduled_history_budget=spent))
@@ -300,7 +300,7 @@ async def test_a_team_resume_replays_the_summary_once_behind_the_paused_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The leader's resumed request keeps the summary and history its paused request saw, once, as its prefix."""
-    team = _seeded(_checker_pauses(tmp_path, monkeypatch))
+    team = _with_seeded_history(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
     [paused_request] = team.models["default"].requests
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
@@ -324,7 +324,7 @@ async def test_a_team_continued_within_its_turn_replays_the_summary_only_under_a
     replays: bool,
 ) -> None:
     """The leader continues after a member's child finished, with the summary only when the turn replays history."""
-    team = _seeded(
+    team = _with_seeded_history(
         squad_turn(
             tmp_path,
             monkeypatch,
@@ -355,7 +355,7 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A team paused while Agno rendered the summary into the leader's system message resumes with only that copy."""
-    team = _seeded(_checker_pauses(tmp_path, monkeypatch))
+    team = _with_seeded_history(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None

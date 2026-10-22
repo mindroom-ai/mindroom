@@ -342,10 +342,10 @@ async def test_a_team_turn_whose_run_a_cut_removed_leaves_it_and_its_members_out
     opened_scopes: list[ScopeSessionContext],
 ) -> None:
     """A redaction that cuts the running team run after a member answered takes both out of the session it loaded."""
-    held_before_cut: list[str | None] = []
+    held_before_cut: list[AnyRunRecord] = []
 
     async def redact() -> None:
-        held_before_cut.extend(run.parent_run_id for run in _loaded_session(opened_scopes, "squad").runs)
+        held_before_cut.extend(_loaded_session(opened_scopes, "squad").runs)
         _cut(team.storage, "run-1", SESSION_ID)
 
     team = squad_turn(
@@ -359,7 +359,11 @@ async def test_a_team_turn_whose_run_a_cut_removed_leaves_it_and_its_members_out
     await team.respond()
 
     # The writer's run had joined the session under the team run before the cut.
-    assert held_before_cut == [None, "run-1"]
+    [earlier, writer] = held_before_cut
+    assert isinstance(earlier, TeamRunRecord)
+    assert earlier.run_id == "team-0"
+    assert isinstance(writer, RunRecord)
+    assert (writer.agent_id, writer.parent_run_id) == ("writer", "run-1")
     session = _loaded_session(opened_scopes, "squad")
     assert [run.run_id for run in session.runs] == ["team-0"]
     assert _as_stored(session) == _reloaded(team.storage, SESSION_ID, "team")
