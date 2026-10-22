@@ -7,7 +7,10 @@ runtime is ready, and then every ``MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS``,
 the primary unfreezes, collects once, and freezes the survivors again. Routine
 full collections then only walk objects created since the last refreeze, and
 bots a config reload replaced are collected at the next refreeze instead of
-staying frozen.
+staying frozen. After the first refreeze the primary also raises CPython's
+full-collection threshold, because each routine full collection walks the whole
+unfrozen heap to find little garbage; how much rarer they get depends on the
+workload.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -61,6 +64,12 @@ _HEAP_REFREEZE_INTERVAL_ENV = "MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS"
 _DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS = 3600.0
 # A probe walk or a refreeze costs about one full collection; shorter intervals would make it the main source of pauses.
 _MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
+# CPython runs a full collection on the 11th middle pass once the objects promoted since the last full pass
+# exceed a quarter of the old generation as counted at that pass. gc.freeze() keeps that count, so frozen objects
+# raise the bar only until the first full pass after a refreeze; from then on it covers objects since the refreeze.
+# Turn state that outlives two young passes and is later freed by refcount crosses it quickly, so under load a
+# full pass ran every few seconds, walked every object since the refreeze and found little garbage.
+_FROZEN_HEAP_FULL_COLLECTION_THRESHOLD = 100
 _TOP_TYPE_COUNT = 25
 
 
@@ -231,9 +240,20 @@ async def _run_heap_refreeze(
 ) -> None:
     """Refreeze once the runtime is ready, then after each interval until cancelled."""
     await ready()
+    _refreeze_runtime_heap()
+    _raise_full_collection_threshold()
     while True:
-        _refreeze_runtime_heap()
         await sleep(interval_seconds)
+        _refreeze_runtime_heap()
+
+
+def _raise_full_collection_threshold() -> None:
+    """Make routine full collections rarer once the runtime heap is frozen, never lowering a higher setting."""
+    young, middle, full = gc.get_threshold()
+    if full >= _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD:
+        return
+    gc.set_threshold(young, middle, _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD)
+    logger.info("gc_full_collection_threshold_raised", previous=full, threshold=_FROZEN_HEAP_FULL_COLLECTION_THRESHOLD)
 
 
 def start_heap_tasks(
