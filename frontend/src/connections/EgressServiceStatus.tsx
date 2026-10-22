@@ -62,7 +62,9 @@ export function ServiceStatus({
           Agent Keys cannot use the shared service account, so{" "}
           {service.active_source === "oauth"
             ? "this uses the account connected earlier."
-            : "this service needs a key."}
+            : oauth.connected
+              ? "this service needs a key or the account connected earlier."
+              : "this service needs a key."}
         </span>
       )}
       {refusalShown && (

@@ -877,7 +877,7 @@ describe("connected accounts", () => {
       const connect = screen.getByRole("button", {
         name: "Connect GitHub for Agent Keys for GitHub",
       });
-      expect(connect).toHaveTextContent("Connect");
+      expect(connect).toHaveTextContent(/^Connect$/);
 
       fireEvent.click(connect);
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -1035,6 +1035,19 @@ describe("connected accounts", () => {
     expect(
       within(row("Google Drive")).getByText(
         "Agent Keys cannot use the shared service account, so this uses the account connected earlier.",
+      ),
+    ).toBeInTheDocument();
+    cleanup();
+
+    renderRows([
+      drive(
+        { connected: true, account_label: "alice", reuse_enabled: false },
+        {},
+      ),
+    ]);
+    expect(
+      within(row("Google Drive")).getByText(
+        "Agent Keys cannot use the shared service account, so this service needs a key or the account connected earlier.",
       ),
     ).toBeInTheDocument();
   });
@@ -1995,11 +2008,17 @@ describe("what a row says about how the key is sent", () => {
       "Requests are refused until a key is set.",
     ],
     [
-      "a service account Agent Keys cannot use",
+      "a personal account connected before a service account",
       {
         ...{ connected: true, account_label: "octocat", reuse_enabled: false },
         service_account: true,
+        can_connect: false,
       },
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a service account with no personal account",
+      { service_account: true, can_connect: false },
       "Requests are refused until a key is set.",
     ],
   ])("states what stops refusals for %s", (_, account, note) => {

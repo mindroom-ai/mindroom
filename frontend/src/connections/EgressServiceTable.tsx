@@ -55,7 +55,7 @@ export function EgressServiceTable({
             {/* Narrower in a narrow table, such as the dashboard's panel, so Service keeps room. */}
             <th
               scope="col"
-              className="w-44 px-5 py-3 text-right font-medium @3xl:w-56"
+              className="w-48 px-5 py-3 text-right font-medium @3xl:w-56"
             >
               Actions
             </th>
@@ -92,17 +92,20 @@ function Code({ children }: { children: ReactNode }) {
 }
 
 /** "a", "a and b", or "a, b, and c", as `formatList` joins strings, for items that are not plain text. */
+/** `children` and the comma after it, kept together so the comma never starts a line of its own. */
+function WithComma({ children }: { children: ReactNode }) {
+  return <span className="inline-flex max-w-full items-end">{children},</span>;
+}
+
 function listOf(items: { key: string; node: ReactNode }[]): ReactNode {
   return items.map(({ key, node }, index) => (
     <Fragment key={key}>
-      {index === 0
-        ? null
-        : index < items.length - 1
-          ? ", "
-          : items.length > 2
-            ? ", and "
-            : " and "}
-      {node}
+      {index === 0 ? null : index < items.length - 1 ? " " : " and "}
+      {items.length > 2 && index < items.length - 1 ? (
+        <WithComma>{node}</WithComma>
+      ) : (
+        node
+      )}
     </Fragment>
   ));
 }
@@ -188,15 +191,24 @@ export function AgentSees({ service }: { service: EgressCredentialService }) {
       {names.length > 0 ? (
         <>
           Your agent sees{" "}
-          {names.map((name, index) => (
-            <Fragment key={name}>
-              {index > 0 && ", "}
+          {names.map((name, index) => {
+            const code = (
               <Code>
                 {breakAfterUnderscores(name)}=<wbr />
                 {BROKERED_PLACEHOLDER}
               </Code>
-            </Fragment>
-          ))}
+            );
+            return (
+              <Fragment key={name}>
+                {index > 0 && " "}
+                {index < names.length - 1 ? (
+                  <WithComma>{code}</WithComma>
+                ) : (
+                  code
+                )}
+              </Fragment>
+            );
+          })}
         </>
       ) : (
         <>
