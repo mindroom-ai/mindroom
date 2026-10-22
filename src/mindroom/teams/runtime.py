@@ -116,8 +116,9 @@ def run_team(
     messages = [spec.system_message, *run_input]
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=request_template.stream)
-        leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
+        stream = request_template.stream
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
+        leader = _leader_spec(spec, record, members.run, stream=stream)
         await _forward(
             drive_run(
                 leader,
@@ -178,8 +179,9 @@ def continue_team(
     decisions.require_consumed()
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist, stream=request_template.stream)
-        leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
+        stream = request_template.stream
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=stream)
+        leader = _leader_spec(spec, record, members.run, stream=stream)
         prepared = prepare_run_tools(leader)
 
         async def entry() -> AsyncIterator[RunEvent]:
