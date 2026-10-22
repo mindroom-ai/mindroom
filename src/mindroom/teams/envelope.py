@@ -628,6 +628,7 @@ class _TeamTurn:
             members=members,
             presentation=presentation,
             show_tool_calls=self.show_tool_calls,
+            stream=stream,
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
             prepared_history=prepared.prepared_history,
@@ -708,10 +709,6 @@ class _TeamTurn:
                 async for event in events:
                     if attempt.apply(event):
                         self.sync_live_turn_recorder(run, attempt)
-        except asyncio.CancelledError:
-            # The run stored its stopped record before the stop reached here, so the interrupted turn records it.
-            self.sync_live_turn_recorder(run, attempt, assistant_text=attempt.interrupted_text())
-            raise
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             return ExcludedAttempt(
@@ -725,6 +722,10 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )
+        finally:
+            # The run stores its record before its events end, however they end, so a stop from here until the turn
+            # settles records the run's records.
+            self.sync_live_turn_recorder(run, attempt)
         record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record, blocking=True)
@@ -782,21 +783,12 @@ class _TeamTurn:
         self.holder.attempt_started = False
         self.register_notice_storage(scope_context)
 
-    def sync_live_turn_recorder(
-        self,
-        run: TurnRunState,
-        attempt: TeamAttempt,
-        *,
-        assistant_text: str | None = None,
-    ) -> None:
-        """Refresh the live turn state from the attempt's document, so an interruption records what was shown.
-
-        ``assistant_text`` replaces the document's text, for a blocking turn that stopped.
-        """
+    def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
+        """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=attempt.reply.canonical_text() if assistant_text is None else assistant_text,
+            assistant_text=attempt.interrupted_text(),
             completed_tools=attempt.tool_tracker.completed_tools,
             interrupted_tools=[pending.trace_entry for pending in attempt.tool_tracker.pending_tools],
         )
