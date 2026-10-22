@@ -38,7 +38,10 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow creating drafts, sending and replying, marking read, and moving messages.",
+            description=(
+                "Allow creating drafts, sending and replying, marking read, moving messages, "
+                "and changing automatic replies."
+            ),
         ),
     ],
     managed_init_args=(
@@ -58,11 +61,13 @@ if TYPE_CHECKING:
         "outlook_mail_search",
         "outlook_mail_get_message",
         "outlook_mail_download_attachment",
+        "outlook_mail_get_automatic_replies",
         "outlook_mail_create_draft",
         "outlook_mail_send",
         "outlook_mail_reply",
         "outlook_mail_mark_read",
         "outlook_mail_move",
+        "outlook_mail_set_automatic_replies",
     ),
 )
 def outlook_mail_tools() -> type[OutlookMailTools]:

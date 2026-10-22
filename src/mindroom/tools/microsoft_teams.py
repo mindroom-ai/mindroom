@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="microsoft_teams",
     display_name="Microsoft Teams",
-    description="Read and send Teams channel and chat messages as the connected user",
+    description="Read and send Teams channel and chat messages, start chats, and read presence as the connected user",
     category=ToolCategory.COMMUNICATION,
     file_access=ToolFileAccess.NONE,
     status=ToolStatus.REQUIRES_CONFIG,
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow sending channel messages, channel replies, and chat messages.",
+            description="Allow sending channel messages, channel replies, and chat messages, and starting chats.",
         ),
     ],
     managed_init_args=(
@@ -58,9 +58,11 @@ if TYPE_CHECKING:
         "microsoft_teams_list_channel_message_replies",
         "microsoft_teams_list_chats",
         "microsoft_teams_list_chat_messages",
+        "microsoft_teams_get_presence",
         "microsoft_teams_send_channel_message",
         "microsoft_teams_reply_to_channel_message",
         "microsoft_teams_send_chat_message",
+        "microsoft_teams_start_chat",
     ),
 )
 def microsoft_teams_tools() -> type[MicrosoftTeamsTools]:

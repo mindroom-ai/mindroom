@@ -87,7 +87,7 @@ Values are parsed as YAML, so `false`, `42`, and `[shell, file]` become a boolea
 Quote a value to keep its exact spacing.
 
 Shown values are redacted like `config_manager` output; see [Access, Redaction, and Saving](tools/agent-orchestration.md#access-redaction-and-saving).
-`!config set` refuses a value containing the `***redacted***` marker or a masked URL password such as `user:***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
+`!config set` refuses a value containing the `***redacted***` marker or masked URL credentials such as `***@host`, so copying shown values back cannot overwrite a hidden secret; set the field to its real value instead.
 
 ### Configuration Confirmations
 
