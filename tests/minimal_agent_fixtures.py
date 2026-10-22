@@ -71,7 +71,7 @@ def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:
 
 async def settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, object]:
     """Poll the call's receipt until it is no longer queued, running, or waiting, as `mindroom-agent` waits for it."""
-    while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110 - poll the CLI receipt protocol
+    while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
         await asyncio.sleep(0.001)
     return receipt
 
