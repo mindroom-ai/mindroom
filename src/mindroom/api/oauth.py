@@ -1217,7 +1217,10 @@ async def _credentials_usable(
     credentials: dict[str, object],
 ) -> bool:
     """Check stored credentials against the OAuth client, whose credential file is read in a thread."""
-    return bool(credentials) and await asyncio.to_thread(oauth_credentials_usable, provider, runtime_paths, credentials)
+    if not credentials:
+        # Without credentials the check reads nothing, so it stays on the loop.
+        return oauth_credentials_usable(provider, runtime_paths, credentials)
+    return await asyncio.to_thread(oauth_credentials_usable, provider, runtime_paths, credentials)
 
 
 async def connection_status(

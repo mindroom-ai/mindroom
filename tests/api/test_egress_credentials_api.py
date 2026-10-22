@@ -50,6 +50,7 @@ from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import github as github_oauth
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth.github import LOGIN_LOOKUP_TIMEOUT_SECONDS, github_oauth_provider
+from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.conftest import (
     trusted_upstream_env,
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from mindroom.constants import RuntimePaths
-    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -1606,10 +1606,12 @@ def test_listing_and_state_read_no_oauth_client_on_the_event_loop(
     """The OAuth client is a credential file, read in a thread, and not at all for an account never connected."""
     portal = oauth_egress_portal
     on_loop = calls_on_event_loop(CredentialsManager, "load_credentials")
+    usability_reads = calls_on_event_loop(OAuthProvider, "client_config")
     _listing(portal, "alice")
     _state_services(portal, "alice", "personal")
     assert on_loop
     assert not any(on_loop)
+    assert usability_reads == []
 
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
     on_loop.clear()
@@ -1620,23 +1622,24 @@ def test_listing_and_state_read_no_oauth_client_on_the_event_loop(
 
 
 def require_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str, expected: int) -> list[str]:
-    """Make each call of the async `module.name` wait until `expected` calls have started; return the service names.
+    """Make each call of `module.name`, an `egress_service_status`, wait until `expected` calls have started.
 
-    Calls that run one after another never get there, so the first one fails after a short wait.
+    Return the names of the services they load. Calls that run one after another never get there, so the first one
+    fails after a short wait.
     """
     real = getattr(module, name)
     started: list[str] = []
     all_started: list[asyncio.Event] = []
 
-    async def gated(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+    async def gated(manager: object, target: object, service: object, service_name: str, oauth_part: object) -> object:
         if not all_started:
             all_started.append(asyncio.Event())
-        started.append(args[3])
+        started.append(service_name)
         if len(started) == expected:
             all_started[0].set()
         async with asyncio.timeout(5):
             await all_started[0].wait()
-        return await real(*args, **kwargs)
+        return await real(manager, target, service, service_name, oauth_part)
 
     monkeypatch.setattr(module, name, gated)
     return started
