@@ -951,7 +951,7 @@ def _card_calls(cards: list[MatrixDelivery]) -> list[tuple[object, object]]:
 
 
 async def _approve(bot: TeamBot, card_event_id: str) -> None:
-    """Approve one card as the requester does, then hand the woken source to its resume, as the journal's worker does."""
+    """Approve one card as the requester does, then hand the request's source to the readied resume, as the journal does."""
     manager = get_approval_store()
     assert manager is not None
     result = await manager.handle_card_response(
