@@ -433,6 +433,42 @@ describe("egress services on the personal page", () => {
     ).toHaveLength(2);
   });
 
+  it("keeps the editor and what is typed when the agent is closed and opened again", async () => {
+    await renderPage();
+    await openAdd();
+    fill("gh", "github");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse Personal Mind" }),
+    );
+    expect(screen.queryByRole("region", { name: "Personal Mind" })).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand Personal Mind" }),
+    );
+    expect(within(await personal()).getByLabelText("Name")).toHaveValue("gh");
+  });
+
+  it("finishes a save under way after the agent is closed", async () => {
+    let finish: (response: Response) => void = () => {};
+    mutation = () =>
+      new Promise<Response>((done) => {
+        finish = done;
+      });
+    await renderPage();
+    await openAdd();
+    fill("gh", "github");
+    fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse Personal Mind" }),
+    );
+    finish(new Response(null, { status: 204 }));
+    // The saved service is read back, as when the agent stays open.
+    await waitFor(() =>
+      expect(
+        calls.filter((call) => call.path === "/api/connections/egress"),
+      ).toHaveLength(2),
+    );
+  });
+
   describe("with the key in the same step", () => {
     const fillOpenAi = (key: string) => {
       fill("ai", "openai");

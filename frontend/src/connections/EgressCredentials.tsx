@@ -569,9 +569,7 @@ function AgentRow({
             className="flex w-full items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label={`${open ? "Collapse" : "Expand"} ${agent.agent_display_name}`}
             aria-expanded={open}
-            aria-controls={
-              open ? `egress-agent-panel-${agent.agent_name}` : undefined
-            }
+            aria-controls={`egress-agent-panel-${agent.agent_name}`}
             onClick={onToggle}
           >
             {open ? (
@@ -611,16 +609,16 @@ function AgentRow({
           {total === 0 ? "No services yet" : `${set} of ${total} set`}
         </td>
       </tr>
-      {open && (
-        <tr className={STACKED.row}>
-          <td
-            colSpan={3}
-            className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
-          >
-            <AgentSection agent={agent} onChanged={onChanged} />
-          </td>
-        </tr>
-      )}
+      {/* Hidden rather than removed, so closing the row keeps an open editor
+          and lets a write under way finish. */}
+      <tr className={STACKED.row} hidden={!open}>
+        <td
+          colSpan={3}
+          className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
+        >
+          <AgentSection agent={agent} onChanged={onChanged} />
+        </td>
+      </tr>
     </>
   );
 }

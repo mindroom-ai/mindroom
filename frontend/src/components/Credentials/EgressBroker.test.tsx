@@ -557,7 +557,7 @@ describe("egress broker key target", () => {
       "Replace key for openai",
       "Remove key for openai",
     ])
-      expect(screen.queryByRole("button", { name })).toBeNull();
+      await expectNoAction(name);
     // What changes the service, not its keys, stays.
     expect(await rowAction("Edit service for GitHub")).not.toHaveAttribute(
       "aria-disabled",

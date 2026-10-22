@@ -616,7 +616,9 @@ describe("connected accounts", () => {
     ]);
     const github = row("GitHub");
     expect(within(github).getByText("Using API key")).toBeInTheDocument();
-    expect(within(github).queryByText(/Connected as/)).toBeNull();
+    // The account stays connected, but the row reports the key it uses.
+    expect(within(github).queryByText("Connected")).toBeNull();
+    expect(within(github).queryByText("octocat")).toBeNull();
     expect(
       within(github).getByText(
         "Your connected GitHub account is kept for other services.",
@@ -781,10 +783,10 @@ describe("connected accounts", () => {
     ).toBeInTheDocument();
   });
 
-  it("leaves services without an account provider as plain key rows", () => {
+  it("leaves services without an account provider as plain key rows", async () => {
     renderRows([github]);
     expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
-    expect(screen.queryByText("Use an API key instead")).toBeNull();
+    await expectNoAction(/Use an API key instead/);
     expect(
       screen.getByRole("button", { name: "Set key for GitHub" }),
     ).toBeInTheDocument();
