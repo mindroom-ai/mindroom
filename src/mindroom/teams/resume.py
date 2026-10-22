@@ -17,7 +17,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
-from mindroom.approval.tool_owners import required_approval_tool_names
+from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_delegation_call
 from mindroom.helper_usage import helper_usage_context
@@ -162,9 +162,7 @@ def _route_decisions(
         if requirement is None or requirement.tool_execution.tool_name != call.tool_name:
             msg = "Saved approval calls no longer match the pending requirements; retry the request"
             raise RuntimeError(msg)
-        if call.toolkit_name is None or toolkit_owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
-            msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
-            raise RuntimeError(msg)
+        require_original_toolkit(toolkit_owners, call)
         approved[(requirement.member_agent_id, call.tool_call_id)] = call
     return _RoutedDecisions(
         approved=approved,

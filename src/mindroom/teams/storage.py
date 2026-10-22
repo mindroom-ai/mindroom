@@ -76,7 +76,7 @@ def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> Tea
 
 
 def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) -> Persist[AnyRunRecord]:
-    """Return the persist callback of one team run: keep the team's terminal record and store every record.
+    """Return the persist callback of one team run: store every record, and keep the team's terminal record when ``records`` is given.
 
     Storing a record updates the session the run loaded, member rows included.
     """
