@@ -1229,11 +1229,7 @@ async def _non_stream_team_completion(
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
-        record = completion.records.record
-        if record is None:
-            # A run that did not raise ended its stream with ``RunFinished``, which carries the record.
-            msg = f"team {team_name!r} run ended without its terminal record"
-            raise RuntimeError(msg)
+        record = completion.records.terminal()
         response_text = completion.text() or str(record.content or "")
 
         if _is_error_response(response_text):

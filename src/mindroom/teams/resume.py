@@ -539,8 +539,7 @@ async def continue_paused_team_run(
                     async for event in events:
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
-            continued = attempt.records.record
-            assert continued is not None
+            continued = attempt.records.terminal()
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,

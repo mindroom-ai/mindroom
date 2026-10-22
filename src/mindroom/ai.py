@@ -264,6 +264,11 @@ class _TerminalRecord:
     record: AnyRunRecord | None = None
 
 
+def _without_terminal_record(run_id: str) -> RuntimeError:
+    """Return the error for an agent run that finished without handing over the record it ended with."""
+    return RuntimeError(f"agent run {run_id!r} ended without its terminal record")
+
+
 @dataclass(frozen=True)
 class _AttemptStorage:
     """Where one attempt's run is stored: the scope's store and the session whose state its tools share."""
@@ -914,8 +919,7 @@ async def _run_cached_agent_attempt(
             if isinstance(event, RunFinished):
                 record = event.record
     if record is None:
-        msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-        raise RuntimeError(msg)
+        raise _without_terminal_record(attempt.run_id)
     return record
 
 
@@ -1776,8 +1780,7 @@ async def ai_response(  # noqa: C901
                 metadata_content=_blocking_metadata(prepared_run, record, RunStatus.error, run_id=attempt.run_id),
             )
         if record is None:
-            msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-            raise RuntimeError(msg)
+            raise _without_terminal_record(attempt.run_id)
         if record.status is RunStatus.completed and (
             skipped := skip_unapproved_attempt(
                 ctx.participation,
@@ -2254,8 +2257,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 )
             return
         if record is None or not state.finished:
-            msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-            raise RuntimeError(msg)
+            raise _without_terminal_record(attempt.run_id)
 
         if skipped := skip_unapproved_attempt(
             ctx.participation,

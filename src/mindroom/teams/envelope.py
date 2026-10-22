@@ -714,7 +714,7 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )
-        record = self.terminal_record(attempt)
+        record = attempt.records.terminal()
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record)
         return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
@@ -743,7 +743,7 @@ class _TeamTurn:
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
             return
-        record = self.terminal_record(attempt)
+        record = attempt.records.terminal()
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:
@@ -757,12 +757,6 @@ class _TeamTurn:
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output))
-
-    def terminal_record(self, attempt: TeamAttempt) -> TeamRunRecord:
-        """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
-        record = attempt.records.record
-        assert record is not None
-        return record
 
     def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
         """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
