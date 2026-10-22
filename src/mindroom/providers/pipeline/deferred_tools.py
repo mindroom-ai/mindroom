@@ -9,11 +9,11 @@ with ``mindroom.agent_loop.tool_search.resolve_call_tool_calls``.
 
 from __future__ import annotations
 
-import ast
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.call_tool import CALL_TOOL_NAME, arguments_object
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -23,27 +23,6 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
 __all__ = ["portable_tool_search_stream"]
-
-_CALL_TOOL_NAME: Final = "call_tool"
-
-
-def _json_object(value: object) -> dict[str, Any] | None:
-    """Return stored call arguments parsed as the tool executor parses them, or None when they are no object."""
-    try:
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                # Agno accepted Python-literal arguments on direct calls, so stored calls may hold them.
-                value = ast.literal_eval(value)
-        if value == []:
-            return {}
-        if not isinstance(value, dict):
-            return None
-        json.dumps(value)
-    except Exception:  # Model output can be malformed in many ways; any failure means "not an object".
-        return None
-    return cast("dict[str, Any]", value)
 
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
@@ -57,12 +36,12 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
         # Handling: entries naming a deferred function are renamed to call_tool, so the results the wire
         # formatter splits from the combined message match the wrapped calls; stored history is unchanged.
         # Coverage: tests/providers/test_provider_pipeline.py::test_portable_tool_search_renames_combined_gemini_results
-        return {**call, "tool_name": _CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
+        return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
     if function.get("name") not in deferred:
         return call
-    arguments = _json_object(function.get("arguments") or "{}") or {}
+    arguments = arguments_object(function.get("arguments") or "{}") or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
-    return {**call, "function": {**function, "name": _CALL_TOOL_NAME, "arguments": wrapped}}
+    return {**call, "function": {**function, "name": CALL_TOOL_NAME, "arguments": wrapped}}
 
 
 def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
@@ -72,7 +51,7 @@ def _projected_message(message: Message, deferred: frozenset[str]) -> Message:
             return replace(message, tool_calls=calls)
         return message
     if message.tool_name in deferred:
-        return replace(message, tool_name=_CALL_TOOL_NAME)
+        return replace(message, tool_name=CALL_TOOL_NAME)
     return message
 
 

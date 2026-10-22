@@ -8,14 +8,13 @@ bridge, and stored history see the real name.
 
 from __future__ import annotations
 
-import ast
 import json
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any
+
+from mindroom.llm.call_tool import CALL_TOOL_NAME, arguments_object
 
 if TYPE_CHECKING:
     from collections.abc import Container
-
-CALL_TOOL_NAME: Final = "call_tool"
 
 
 def resolve_call_tool_calls(tool_calls: list[dict[str, Any]], callable_names: Container[str]) -> list[dict[str, Any]]:
@@ -31,7 +30,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     function = call.get("function")
     if not isinstance(function, dict) or function.get("name") != CALL_TOOL_NAME:
         return call
-    payload = _json_object(function.get("arguments") or "{}")
+    payload = arguments_object(function.get("arguments") or "{}")
     if payload is None:
         return call
     name = payload.get("name")
@@ -39,7 +38,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")
-    arguments = {} if raw_arguments in (None, "") else _json_object(raw_arguments)
+    arguments = {} if raw_arguments in (None, "") else arguments_object(raw_arguments)
     if arguments is None:
         return call
     # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
@@ -49,28 +48,4 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
-def _json_object(value: object) -> dict[str, Any] | None:
-    """Return a JSON-serializable object parsed like the tool executor parses arguments, or None.
-
-    Model output can be malformed in many ways (unhashable literals, sets, deep nesting), so any failure means "not
-    an object" rather than an error that would fail the run.
-    """
-    try:
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                # Agno accepted Python-literal arguments on direct calls, so the wrapper does too.
-                value = ast.literal_eval(value)
-        if value == []:
-            # A call whose arguments are an empty list runs as a call without arguments.
-            return {}
-        if not isinstance(value, dict):
-            return None
-        json.dumps(value)
-    except Exception:  # Any failure means undecodable, as the tool executor treats arguments.
-        return None
-    return cast("dict[str, Any]", value)
-
-
-__all__ = ["CALL_TOOL_NAME", "resolve_call_tool_calls"]
+__all__ = ["resolve_call_tool_calls"]
