@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from typing import TYPE_CHECKING
 
 import nio
 import pytest
-from agno.run import RunContext
 from agno.tools.calculator import CalculatorTools
-from agno.tools.function import FunctionCall
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
@@ -19,10 +15,12 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
 from mindroom.workers.backend import WorkerBackendError
+from tests.agent_tool_helpers import call_entrypoint, offered_function, run_offered
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
@@ -30,7 +28,7 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.agent import Agent
+    from mindroom.agent_loop.build import AgentBuild
 
 
 def _create_routing_agent(
@@ -40,7 +38,7 @@ def _create_routing_agent(
     agent_settings: dict[str, object] | None = None,
     defaults: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> Agent:
+) -> AgentBuild:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -74,20 +72,10 @@ def _create_routing_agent(
     )
 
 
-async def _invoke(agent: Agent, function_name: str, **kwargs: object) -> str:
-    for toolkit in agent.tools or []:
-        if not isinstance(toolkit, Toolkit):
-            continue
-        function = toolkit.get_async_functions().get(function_name)
-        if function is None:
-            continue
-        assert function.entrypoint is not None
-        result = function.entrypoint(**kwargs)
-        if inspect.isawaitable(result):
-            result = await result
-        assert isinstance(result, str)
-        return result
-    pytest.fail(f"Agent did not materialize {function_name}")
+async def _invoke(agent: AgentBuild, function_name: str, **kwargs: object) -> str:
+    result = await call_entrypoint(offered_function(agent, function_name), **kwargs)
+    assert isinstance(result, str)
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +152,7 @@ async def test_omitted_worker_tools_honors_environment(
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith(expected[0])
     assert await _invoke(agent, "add", a=1, b=2) == expected[1]
     if expected == ("local:shell", "local:calculator"):
-        assert "No tools use a worker runtime." in (agent.role or "")
+        assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -186,8 +174,9 @@ async def test_dedicated_defaults_ignore_static_runner_url(
     assert await _invoke(agent, "add", a=1, b=2) == "local:calculator"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("worker_tools", [None, ["reasoning"]])
-def test_reasoning_retains_primary_run_state(
+async def test_reasoning_retains_primary_run_state(
     tmp_path: Path,
     proxy_targets: list[ResolvedWorkerTarget | None],
     worker_tools: list[str] | None,
@@ -198,17 +187,13 @@ def test_reasoning_retains_primary_run_state(
         {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
         agent_settings={"tools": ["reasoning"], "worker_tools": worker_tools},
     )
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "think" in tool.functions)
-    function = toolkit.functions["think"]
-    context = RunContext(run_id="reasoning-run", session_id="reasoning-session", session_state={})
-    function._run_context = context
-    result = FunctionCall(function=function, arguments={"title": "Step", "thought": "Preserve run state"}).execute()
+    context = ToolCallContext(run_id="reasoning-run", session_id="reasoning-session")
+    result = await run_offered(agent, "think", {"title": "Step", "thought": "Preserve run state"}, context=context)
 
-    assert result.status == "success"
-    assert context.session_state is not None
+    assert not result.is_error
     assert context.session_state["reasoning_steps"]
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -284,7 +269,7 @@ async def test_primary_runtime_tool_stays_local_after_real_materialization(
 
     result = json.loads(await _invoke(agent, "get_my_usage"))
     assert result["code"] == "context_unavailable"
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -349,17 +334,14 @@ async def test_room_context_tool_uses_primary_matrix_client(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
     )
-    toolkit = next(
-        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "list_schedules" in tool.async_functions
-    )
     with tool_runtime_context(context):
-        result = await FunctionCall(function=toolkit.async_functions["list_schedules"], arguments={}).aexecute()
+        result = await run_offered(agent, "list_schedules")
 
-    assert result.status == "success"
-    assert result.result == "No scheduled tasks found."
+    assert not result.is_error
+    assert result.content == "No scheduled tasks found."
     client.room_get_state.assert_awaited_once_with(target.room_id)
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,6 @@ from agno.run.base import RunStatus
 from mindroom import ai
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig
@@ -43,6 +42,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 from tests.test_delegate_tools import _delegate_runtime_context
 from tests.test_delegation_direct_audit import _identity
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -112,7 +112,7 @@ async def _delegate(
     if not native:
         return await toolkit.async_functions[tool_name].entrypoint(**arguments)
     identity = _identity()
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         id="leader",
@@ -417,7 +417,6 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
             runtime_paths=paths,
             config=config,
             execution_identity=identity,
-            supports_native_tool_approval=True,
         )
 
     assert "Leader done" in result, result

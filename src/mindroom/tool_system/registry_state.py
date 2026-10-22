@@ -16,8 +16,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from agno.tools import Toolkit
-
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 TOOL_METADATA: dict[str, ToolMetadata] = {}

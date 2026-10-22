@@ -17,9 +17,6 @@ from agno.models.openai import OpenAIChat
 from agno.run import RunContext
 from agno.team import Team
 from agno.tools import openai as agno_openai
-from agno.tools.function import FunctionCall, ToolResult
-from agno.tools.sql import SQLTools
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agents import create_agent
 from mindroom.api import sandbox_runner
@@ -31,14 +28,16 @@ from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.declarations import tool_schema_source
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, resolve_worker_key
+from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     make_conversation_reader_mock,
@@ -50,24 +49,16 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from agno.tools.function import Function
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.desktop.protocol import DesktopCommand
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _MODEL_KEY = "dummy-primary-model-key-not-granted-to-worker"
 _TOOL_KEY = "dummy-media-tool-key"
-
-
-def _function(agent: Agent, name: str) -> Function:
-    toolkit = next(
-        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and name in tool.get_async_functions()
-    )
-    return toolkit.get_async_functions()[name]
 
 
 @pytest.fixture
@@ -142,8 +133,9 @@ def test_ordinary_json_is_opaque_across_worker_transport(
     assert result == tool_result
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [False, True])
-def test_routing_preserves_pandas_frames_across_calls(
+async def test_routing_preserves_pandas_frames_across_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     explicit: bool,
@@ -159,27 +151,30 @@ def test_routing_preserves_pandas_frames_across_calls(
         {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
         agent_settings={"tools": ["pandas"], **({"worker_tools": ["pandas"]} if explicit else {})},
     )
-    created = FunctionCall(
-        function=_function(agent, "create_pandas_dataframe"),
-        arguments={
+    created = await run_offered(
+        agent,
+        "create_pandas_dataframe",
+        {
             "dataframe_name": "retained",
             "create_using_function": "DataFrame",
             "function_parameters": {"data": {"value": [42]}},
         },
-    ).execute()
-    assert created.status == "success"
-    assert created.result == "retained"
+    )
+    assert not created.is_error
+    assert created.content == "retained"
 
-    operated = FunctionCall(
-        function=_function(agent, "run_dataframe_operation"),
-        arguments={"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
-    ).execute()
-    assert operated.status == "success"
-    assert "42" in operated.result
+    operated = await run_offered(
+        agent,
+        "run_dataframe_operation",
+        {"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
+    )
+    assert not operated.is_error
+    assert "42" in operated.content
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [False, True])
-def test_routing_preserves_sql_memory_database_across_calls(
+async def test_routing_preserves_sql_memory_database_across_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     explicit: bool,
@@ -207,31 +202,30 @@ def test_routing_preserves_sql_memory_database_across_calls(
         process_env,
         agent_settings={"tools": ["sql"], **({"worker_tools": ["sql"]} if explicit else {})},
     )
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, SQLTools))
+    toolkit = source_toolkit(offered_function(agent, "run_sql_query"))
     try:
-        created = FunctionCall(
-            function=toolkit.functions["run_sql_query"],
-            arguments={"query": "CREATE TABLE retained (value INTEGER)"},
-        ).execute()
-        assert created.status == "success"
-        returned = FunctionCall(
-            function=toolkit.functions["run_sql_query"],
-            arguments={"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
-        ).execute()
-        assert returned.status == "success"
-        assert json.loads(returned.result) == [{"name": "retained"}]
+        created = await run_offered(agent, "run_sql_query", {"query": "CREATE TABLE retained (value INTEGER)"})
+        assert not created.is_error
+        returned = await run_offered(
+            agent,
+            "run_sql_query",
+            {"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
+        )
+        assert not returned.is_error
+        assert json.loads(returned.content) == [{"name": "retained"}]
     finally:
         toolkit.db_engine.dispose()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("media_kind", ["image", "audio"])
-def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
+async def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker_requests: list[dict[str, object]],
     media_kind: str,
 ) -> None:
-    """Only provider IO is stubbed; Agno injection, proxy and runner stay real."""
+    """Only provider IO is stubbed; argument injection, proxy and runner stay real."""
     content = b"provider-media-bytes"
     provider = SimpleNamespace(
         images=SimpleNamespace(
@@ -251,24 +245,21 @@ def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
         },
         agent_settings={"tools": ["openai"]},
     )
-    agent.model = OpenAIChat(id="gpt-6-astra", api_key=_MODEL_KEY)
     name, arguments = (
         ("generate_image", {"prompt": "Offline image"})
         if media_kind == "image"
         else ("generate_speech", {"text_input": "Offline speech"})
     )
-    function = _function(agent, name)
-    function._agent = agent
-    response = FunctionCall(function=function, arguments=arguments).execute()
+    # The primary's run state stays on the primary, though the call's injected agent carries it.
+    context = ToolCallContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})
+    response = await run_offered(agent, name, arguments, context=context)
 
-    assert response.status == "success"
+    assert not response.is_error
     assert len(worker_requests) == 1
     assert _MODEL_KEY not in json.dumps(worker_requests)
     if media_kind == "audio":
         assert worker_requests[0]["kwargs"]["agent"] is None
-    assert isinstance(response.result, ToolResult)
-    media = response.result.images if media_kind == "image" else response.result.audios
-    assert media is not None
+    media = response.images if media_kind == "image" else response.audios
     assert len(media) == 1
     assert media[0].content == content
 
@@ -319,20 +310,19 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
 
 
 @pytest.mark.parametrize("positional", [True, False])
-@pytest.mark.parametrize("use_team", [True, False])
-def test_declared_unused_agent_keeps_call_arguments(positional: bool, use_team: bool, tmp_path: Path) -> None:
+def test_declared_unused_agent_keeps_call_arguments(positional: bool, tmp_path: Path) -> None:
     """Discard only the declared runtime slot while retaining normal call data."""
 
-    def entrypoint(agent: Agent | Team | None, path: Path, *, options: object) -> None:
+    def entrypoint(agent: object, path: Path, *, options: object) -> None:
         del agent, path, options
 
-    owner = Team(members=[]) if use_team else Agent()
+    owner = ToolCallActor(session_state={"secret": _MODEL_KEY})
     path = tmp_path / "output.wav"
     options = {"values": (1, True, None, 2.5)}
     args = (owner, path) if positional else ()
     kwargs = {"options": options} if positional else {"agent": owner, "path": path, "options": options}
 
-    encoded_args, encoded_kwargs = prepare_worker_call_arguments(
+    encoded_args, encoded_kwargs = sandbox_proxy._worker_call_arguments(
         args,
         kwargs,
         entrypoint=entrypoint,
@@ -349,7 +339,7 @@ def test_declared_unused_agent_keeps_call_arguments(positional: bool, use_team: 
 def test_worker_keyword_names_must_be_strings() -> None:
     """The boundary rejects non-JSON keys instead of silently coercing them."""
     with pytest.raises(TypeError, match="worker argument"):
-        prepare_worker_call_arguments((), {1: "value"}, entrypoint=None, inert_agent=False)  # type: ignore[invalid-argument-type]
+        sandbox_proxy._worker_call_arguments((), {1: "value"}, entrypoint=None, inert_agent=False)  # type: ignore[invalid-argument-type]
 
 
 def _context_agent(
@@ -361,7 +351,7 @@ def _context_agent(
     extra_env: dict[str, str] | None = None,
     roomless: bool = False,
     require_approval: bool = False,
-) -> tuple[Agent, ToolRuntimeContext]:
+) -> tuple[AgentBuild, ToolRuntimeContext]:
     """Materialize a real agent with authored config and matching requester context."""
     process_env = {
         "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
@@ -473,16 +463,17 @@ async def test_config_manager_mutation_keeps_primary_runtime(tmp_path: Path, rou
     """Authorized config mutations persist the primary file under broad and explicit routing."""
     agent, context = _context_agent(tmp_path, "config_manager", routing=routing)
     with tool_runtime_context(context):
-        response = await FunctionCall(
-            function=_function(agent, "manage_config"),
-            arguments={
+        response = await run_offered(
+            agent,
+            "manage_config",
+            {
                 "operation": "patch",
                 "changes": [{"op": "replace", "path": "/agents/routing/role", "value": "Updated role"}],
             },
-        ).aexecute()
+        )
 
-    assert response.status == "success"
-    assert "Authored configuration patch updated" in response.result
+    assert not response.is_error
+    assert "Authored configuration patch updated" in response.content
     assert yaml.safe_load(context.runtime_paths.config_path.read_text())["agents"]["routing"]["role"] == "Updated role"
 
 
@@ -492,13 +483,10 @@ async def test_config_manager_remains_available_for_roomless_inspection(tmp_path
     """Primary ownership must not introduce a room requirement for read-only inspection."""
     agent, _context = _context_agent(tmp_path, "config_manager", roomless=True)
     with tool_runtime_context(None):
-        response = await FunctionCall(
-            function=_function(agent, "get_info"),
-            arguments={"info_type": "agents"},
-        ).aexecute()
+        response = await run_offered(agent, "get_info", {"info_type": "agents"})
 
-    assert response.status == "success"
-    assert "Routing" in response.result
+    assert not response.is_error
+    assert "Routing" in response.content
 
 
 @pytest.mark.asyncio
@@ -534,10 +522,10 @@ async def test_vault_access_uses_primary_owner_token_file(
         },
     )
     with tool_runtime_context(context):
-        response = await FunctionCall(function=_function(agent, "request_vault_access"), arguments={}).aexecute()
+        response = await run_offered(agent, "request_vault_access")
 
-    assert response.status == "success"
-    payload = json.loads(response.result)
+    assert not response.is_error
+    payload = json.loads(response.content)
     assert payload["access"] == "granted"
     identity = build_execution_identity_from_runtime_context(context)
     worker_key = resolve_worker_key("user_agent", identity)
@@ -571,10 +559,10 @@ async def test_browser_desktop_keeps_primary_matrix_context(
     if target is not None:
         arguments["target"] = target
     with tool_runtime_context(context):
-        response = await FunctionCall(function=_function(agent, "browser_control"), arguments=arguments).aexecute()
+        response = await run_offered(agent, "browser_control", arguments)
 
-    assert response.status == "success"
-    assert json.loads(response.result)["provider"] == "desktop"
+    assert not response.is_error
+    assert json.loads(response.content)["provider"] == "desktop"
     assert len(desktop_commands) == 1
     assert desktop_commands[0].action == "browser_observe"
     assert desktop_commands[0].parameters == {
@@ -596,41 +584,40 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         tool_config={**_DESKTOP_CONFIG, "default_target": "desktop"},
         require_approval=True,
     )
-    function = _function(agent, "browser_control")
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, BrowserTools))
-    assert function.entrypoint is not None
+    function = offered_function(agent, "browser_control")
+    toolkit = source_toolkit(function)
+    assert isinstance(toolkit, BrowserTools)
     assert inspect.unwrap(tool_schema_source(function.entrypoint)) == toolkit.browser
-    assert inspect.signature(function.entrypoint) == inspect.signature(toolkit.browser)
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"
-    assert function.tool_hooks
+    assert agent.tool_middleware
     hook_calls: list[tuple[str, str]] = []
 
-    async def observe(name: str, func: Callable[..., Awaitable[object]], args: dict[str, object]) -> object:
-        assert name == "browser_control"
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        assert call.function.name == "browser_control"
         assert get_tool_runtime_context() is context
-        target = str(args["target"])
+        target = str(call.arguments["target"])
         hook_calls.append(("before", target))
-        result = await func(**args)
+        result = await call_next(call.arguments)
         hook_calls.append(("after", target))
         return result
 
-    function.tool_hooks = [*function.tool_hooks, observe]
+    middleware = (*agent.tool_middleware, observe)
+    run = ToolCallContext(run_id="run", session_id="session")
     with tool_runtime_context(context):
-        desktop = await FunctionCall(
-            function=function,
-            arguments={"action": "snapshot", "target": "desktop"},
-        ).aexecute()
-        assert desktop.status == "success"
+        desktop = await execute_tool_call(
+            function,
+            {"action": "snapshot", "target": "desktop"},
+            run,
+            middleware=middleware,
+        )
+        assert not desktop.is_error
         assert worker_requests == []
-        host = await FunctionCall(
-            function=function,
-            arguments={"action": "status", "target": "host"},
-        ).aexecute()
+        host = await execute_tool_call(function, {"action": "status", "target": "host"}, run, middleware=middleware)
 
-    assert host.status == "success"
-    assert json.loads(host.result)["running"] is False
+    assert not host.is_error
+    assert json.loads(host.content)["running"] is False
     assert len(desktop_commands) == len(worker_requests) == 1
     assert worker_requests[0]["kwargs"]["target"] == "host"
     assert hook_calls == [("before", "desktop"), ("after", "desktop"), ("before", "host"), ("after", "host")]
@@ -646,8 +633,7 @@ async def test_browser_primary_placement_binds_positional_arguments(
 ) -> None:
     """Placement binds positional arguments against the actual browser signature."""
     agent, context = _context_agent(tmp_path, "browser", tool_config=_DESKTOP_CONFIG)
-    function = _function(agent, "browser_control")
-    assert function.entrypoint is not None
+    function = offered_function(agent, "browser_control")
     with tool_runtime_context(context):
         result = await function.entrypoint("snapshot", " desktop ")
 
@@ -673,13 +659,10 @@ async def test_browser_invalid_targets_fail_before_worker_lease(
     """Target validation and desktop configuration errors remain local and allocate nothing."""
     agent, context = _context_agent(tmp_path, "browser")
     with tool_runtime_context(context):
-        result = await FunctionCall(
-            function=_function(agent, "browser_control"),
-            arguments={"action": "status", **arguments},
-        ).aexecute()
+        result = await run_offered(agent, "browser_control", {"action": "status", **arguments})
 
-    assert result.status == "failure"
-    assert error in result.error
+    assert result.is_error
+    assert error in result.content
 
 
 @pytest.mark.asyncio
@@ -696,11 +679,12 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
         tool_config={**_DESKTOP_CONFIG, "default_target": "desktop"},
     )
     with tool_runtime_context(context):
-        response = await FunctionCall(
-            function=_function(agent, "browser_control"),
-            arguments={"action": action, "target": "sandbox", "node": "ignored"},
-        ).aexecute()
+        response = await run_offered(
+            agent,
+            "browser_control",
+            {"action": action, "target": "sandbox", "node": "ignored"},
+        )
 
-    assert response.status == "success"
-    assert json.loads(response.result)["actionTable"]
+    assert not response.is_error
+    assert json.loads(response.content)["actionTable"]
     assert len(worker_requests) == 1

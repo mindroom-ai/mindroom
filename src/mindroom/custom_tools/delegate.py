@@ -6,8 +6,7 @@ Each turn runs independently and returns its response as the tool result.
 
 from __future__ import annotations
 
-from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -30,6 +29,7 @@ from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
@@ -38,52 +38,12 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.run import RunContext
-    from agno.tools.function import FunctionCall
-
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-@dataclass(frozen=True)
-class _DirectDelegationProvenance:
-    """Trusted parent identifiers scoped to one executing Agno tool call."""
-
-    run_id: str
-    tool_call_id: str | None
-
-
-_DIRECT_DELEGATION_PROVENANCE: ContextVar[tuple[_DirectDelegationProvenance, ...]] = ContextVar(
-    "direct_delegation_provenance",
-    default=(),
-)
-
-
-async def _capture_direct_delegation_provenance(
-    *,
-    fc: FunctionCall,
-    run_context: RunContext,
-) -> None:
-    """Capture framework-owned parent identity before entering the tool body."""
-    current = _DIRECT_DELEGATION_PROVENANCE.get()
-    _DIRECT_DELEGATION_PROVENANCE.set(
-        (*current, _DirectDelegationProvenance(run_id=run_context.run_id, tool_call_id=fc.call_id)),
-    )
-
-
-async def _clear_direct_delegation_provenance(
-    *,
-    fc: FunctionCall,
-    run_context: RunContext,
-) -> None:
-    """Clear captured provenance from Agno's guaranteed post-call cleanup."""
-    del fc, run_context
-    current = _DIRECT_DELEGATION_PROVENANCE.get()
-    _DIRECT_DELEGATION_PROVENANCE.set(current[:-1])
 
 
 class DelegateTools(Toolkit):
@@ -133,9 +93,6 @@ class DelegateTools(Toolkit):
             derived.process_entrypoint()
             properties = {name: value for name, value in derived.parameters["properties"].items() if name not in hidden}
             delegate_function.parameters = {**derived.parameters, "properties": properties}
-        for function in self.async_functions.values():
-            function.pre_hook = _capture_direct_delegation_provenance
-            function.post_hook = _clear_direct_delegation_provenance
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
@@ -386,8 +343,8 @@ class DelegateTools(Toolkit):
         if refusal:
             return refusal
         owner = self._caller_identity()
-        provenance = _DIRECT_DELEGATION_PROVENANCE.get()
-        parent = provenance[-1] if provenance else None
+        # The parent's run and tool call are the framework's, never the model's arguments.
+        parent = current_tool_call()
         child = prepare_child_turn(
             self._agent_name,
             agent_name,
@@ -400,14 +357,14 @@ class DelegateTools(Toolkit):
             model=model,
             agent_mode=agent_mode,
             previous=continuation,
-            parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
+            parent_tool_call_id=(parent.context.call_id or "") if parent is not None else "",
             persona=persona,
         )
         try:
             result = await run_direct_child_turn(
                 child,
                 owner=owner,
-                parent_run_id=parent.run_id if parent is not None else None,
+                parent_run_id=parent.context.run_id if parent is not None else None,
                 config=config,
                 runtime_paths=self._runtime_paths,
                 refresh_scheduler=self._refresh_scheduler,

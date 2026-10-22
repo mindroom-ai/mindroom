@@ -17,7 +17,7 @@ from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.agent_loop.tools import prepare_run_tools
-from mindroom.agents import apply_tool_approval_capability, create_agent
+from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
@@ -58,8 +58,9 @@ from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_argume
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
+from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -72,6 +73,7 @@ from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1982,9 +1984,11 @@ class _ConfiguredSlackTools(Toolkit):
 
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
-    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
+
+    The name is a built-in's, so the built-in registries it overwrites are restored too.
+    """
+    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=_TOOLKIT,
@@ -2000,10 +2004,7 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
     try:
         yield _ConfiguredSlackTools.runs
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
+        restore_tool_registry_snapshot(snapshot)
 
 
 @pytest.mark.asyncio
@@ -2173,24 +2174,12 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
         """Plugin function that shares the runner's name."""
         return "plugin"
 
-    scheduler = apply_tool_approval_capability(
-        SchedulerTools(),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="scheduler",
-    )
-    plugin = apply_tool_approval_capability(
-        Toolkit(name="plugin", tools=[run_scheduled_call]),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="plugin",
-    )
+    scheduler = gated_functions(SchedulerTools(), config, registered_tool_name="scheduler")
+    plugin = gated_functions(Toolkit(name="plugin", tools=[run_scheduled_call]), config, registered_tool_name="plugin")
 
-    assert scheduler is not None
-    assert plugin is not None
-    assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
-    assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
-    assert plugin.functions["run_scheduled_call"].requires_confirmation is True
+    assert scheduler["run_scheduled_call"].requires_confirmation is not True
+    assert scheduler["schedule_tool_call"].requires_confirmation is True
+    assert plugin["run_scheduled_call"].requires_confirmation is True
 
 
 def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:

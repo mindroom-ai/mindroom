@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from agno.knowledge.chunking.fixed import FixedSizeChunking
-from agno.knowledge.document.base import Document
+from mindroom.knowledge.readers import Document, FixedSizeChunking
 
 
 class SafeFixedSizeChunking(FixedSizeChunking):

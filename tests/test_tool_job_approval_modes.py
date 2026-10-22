@@ -17,7 +17,6 @@ from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools import Toolkit
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
@@ -38,6 +37,7 @@ from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, registe
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     assembled_function,
@@ -288,12 +288,7 @@ class _GatedRun:
         await self.runtime.shutdown()
 
     def agent(self, **budget: float) -> Agent:
-        toolkit = apply_tool_approval_capability(
-            _GatedTools(self.effects, self.gate),
-            self.config,
-            supports_native_tool_approval=True,
-            approvals_as_jobs=True,
-        )
+        toolkit = with_agno_approval_flags(_GatedTools(self.effects, self.gate), self.config, approvals_as_jobs=True)
         model = DelegationModel(
             id="test",
             responses=[

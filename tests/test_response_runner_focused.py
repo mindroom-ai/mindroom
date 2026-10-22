@@ -26,7 +26,6 @@ from agno.media import Image
 from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 
-from mindroom import agents as agents_module
 from mindroom import background_tasks as background_tasks_module
 from mindroom import interactive, response_runner
 from mindroom import reply_lifecycle as rl
@@ -199,6 +198,7 @@ from tests.test_response_turn import (
     _model_switch_execution,
     _streaming_adapter,
 )
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
@@ -4088,11 +4088,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         name="approval-test",
         tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
     )
-    agents_module.apply_tool_approval_capability(
-        toolkit,
-        bot.config,
-        supports_native_tool_approval=True,
-    )
+    with_agno_approval_flags(toolkit, bot.config)
     function = toolkit.functions["synthetic_exempt"]
     tool = ToolExecution(
         tool_call_id="call-exempt",
@@ -4143,11 +4139,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         name="approval-test",
         tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
     )
-    agents_module.apply_tool_approval_capability(
-        toolkit,
-        bot.config,
-        supports_native_tool_approval=True,
-    )
+    with_agno_approval_flags(toolkit, bot.config)
     function = toolkit.functions["scripted_tool"]
     tool = ToolExecution(
         tool_call_id="call-script",

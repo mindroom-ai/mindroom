@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-from agno.tools.function import ToolResult
-
 from mindroom.attachments.storage import register_bytes_attachment
+from mindroom.tool_system.agno_toolkits import ToolResult
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
 

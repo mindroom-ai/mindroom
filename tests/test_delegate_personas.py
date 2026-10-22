@@ -14,7 +14,6 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
 from mindroom import ai as ai_module
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -34,6 +33,7 @@ from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
 from tests.test_delegation_envelopes import _InstructionRecordingModel
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -104,7 +104,7 @@ def _native_parent(
     """A native-path leader whose delegate tool may run itself, scripted with ``responses``."""
     identity = _identity()
     toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity, workspace_root=workspace)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     model = DelegationModel(id="test-parent", responses=responses)
     yield Agent(name="leader", db=storage, tools=[toolkit], model=model), storage

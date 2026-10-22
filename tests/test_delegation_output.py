@@ -12,7 +12,7 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
+from mindroom.agents import build_agent_toolkit
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -37,6 +37,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
 )
 from tests.identity_helpers import entity_ids
+from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -137,7 +138,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         execution_identity=identity,
     )
     assert toolkit is not None
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     bind_toolkit_authority(toolkit, authored_name="delegate")
     output_args: dict[str, object] = (
         {} if mode == "automatic" else {"mindroom_output_path": "../escape.txt" if mode == "invalid" else "report.txt"}

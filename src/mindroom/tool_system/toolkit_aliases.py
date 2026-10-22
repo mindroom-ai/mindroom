@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from agno.tools.function import Function
-    from agno.tools.toolkit import Toolkit
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
 
 
 def apply_toolkit_function_aliases(

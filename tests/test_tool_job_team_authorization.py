@@ -12,9 +12,8 @@ from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.team import Team
 from agno.tools import Toolkit
-from agno.tools.function import FunctionCall
 
-from mindroom.agents import apply_tool_approval_capability, team_background_jobs
+from mindroom.agents import team_background_jobs
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -24,6 +23,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.hooks import HookRegistry
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
@@ -35,9 +35,12 @@ from mindroom.tool_jobs.runtime import (
     JobAccessError,
     register_background_runtime,
 )
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
@@ -48,6 +51,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.history_helpers import FakeModel
 from tests.history_helpers import _agent as history_agent
 from tests.history_helpers import _runtime_paths as history_runtime_paths
+from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     SpanRecorder,
     completed_delegation_job,
@@ -356,7 +360,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path) -> None:
-    """A team leader's job calls go through its tool-hook bridge and land in its reply's call record, as others do."""
+    """A team leader's job calls run through the tool-call policy the loop runs around every call, as others do."""
     config = managed_team_config(tmp_path)
     paths = team_coordinator(tmp_path, config).runtime_paths
     team = replace(completed_delegation_job().owner, agent_name="team", transport_agent_name="team")
@@ -372,9 +376,21 @@ async def test_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path: Path
     try:
         controls = team_background_jobs(DelegationModel(id="leader"), config, paths, team)
         assert controls is not None
-        call = FunctionCall(function=controls.get_async_functions()["job"], arguments={"action": "list"})
+        [job] = adapt_toolkit(controls).functions
+        policy = build_tool_hook_middleware(
+            HookRegistry.empty(),
+            agent_name="team",
+            dispatch_context=ToolDispatchContext(execution_identity=team),
+            config=config,
+            runtime_paths=paths,
+        )
         with tool_runtime_context(context), recording_tool_calls(recorder):
-            await call.aexecute()
+            await execute_tool_call(
+                job,
+                {"action": "list"},
+                ToolCallContext(run_id="team-run", session_id=context.session_id),
+                middleware=(policy,),
+            )
         assert [(kind, name) for kind, name, _arguments, _result in recorder.records] == [
             ("started", "job"),
             ("finished", "job"),
@@ -411,14 +427,8 @@ def test_a_plugin_toolkit_named_job_still_asks_for_approval(tmp_path: Path) -> N
     def run_job() -> str:
         return "ran"
 
-    toolkit = apply_tool_approval_capability(
-        Toolkit(name="job", tools=[run_job]),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="job",
-    )
-    assert toolkit is not None
-    assert toolkit.get_functions()["run_job"].requires_confirmation is True
+    functions = gated_functions(Toolkit(name="job", tools=[run_job]), config, registered_tool_name="job")
+    assert functions["run_job"].requires_confirmation is True
 
 
 @pytest.mark.asyncio

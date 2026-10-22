@@ -11,7 +11,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 
-from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -27,6 +26,7 @@ from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_c
 from tests.identity_helpers import fixture_entity_matrix_id
 from tests.test_delegation_direct_audit import _identity
 from tests.test_tool_hooks import _plugin
+from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -81,7 +81,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
         hook_registry=HookRegistry.from_plugins([_plugin("subagent-policy", [before])]),
     )
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
     parent = Agent(
         name="leader",

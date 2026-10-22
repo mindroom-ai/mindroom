@@ -9,6 +9,7 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import secrets
 from contextlib import suppress
@@ -62,12 +63,10 @@ from mindroom.workers.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agno.tools.function import Function, ToolResult
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
     from mindroom.workers.backend import WorkerBackend
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -744,8 +743,7 @@ def view_file_from_worker(
             raise TypeError(msg)
         response_data = {str(key): value for key, value in data.items()}
         if response_data.get("ok") is True:
-            from agno.tools.function import ToolResult  # noqa: PLC0415
-
+            from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
             from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
 
             try:
@@ -921,6 +919,44 @@ def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -
     return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
+def _worker_argument_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_worker_argument_value(item) for item in value]
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return {key: _worker_argument_value(item) for key, item in value.items()}
+    msg = f"Unsupported worker argument type: {type(value).__name__}"
+    raise TypeError(msg)
+
+
+def _worker_call_arguments(
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    *,
+    entrypoint: Callable[..., object] | None,
+    inert_agent: bool,
+) -> tuple[list[object], dict[str, object]]:
+    """Serialize one call's arguments for the worker, keeping the call shape.
+
+    A function declared to leave its injected ``agent`` unused receives None there, since the primary's run state
+    stays on the primary.
+    """
+    if inert_agent and entrypoint is not None:
+        bound = inspect.signature(entrypoint).bind(*args, **kwargs)
+        if "agent" in bound.arguments:
+            if "agent" in kwargs:
+                kwargs = {**kwargs, "agent": None}
+            else:
+                bound.arguments["agent"] = None
+                args, kwargs = bound.args, bound.kwargs
+    return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
+
+
 def _call_proxy_sync(
     *,
     runtime_paths: RuntimePaths,
@@ -938,10 +974,8 @@ def _call_proxy_sync(
     worker_target: ResolvedWorkerTarget | None = None,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
-    from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
-
     metadata = TOOL_METADATA.get(tool_name)
-    wire_args, wire_kwargs = prepare_worker_call_arguments(
+    wire_args, wire_kwargs = _worker_call_arguments(
         args,
         kwargs,
         entrypoint=function_entrypoint,

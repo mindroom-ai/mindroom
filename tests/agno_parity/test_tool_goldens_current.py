@@ -1,5 +1,6 @@
-"""The current Agno-backed tool system reproduces the tool schema and argument goldens.
+"""The tool goldens cover every registered tool, and Agno reproduces the argument goldens.
 
+The schema goldens are compared on the adapted functions agents offer, in ``tests/tool_system/test_agno_toolkits.py``.
 Deleted together with Agno; owned implementations test against the same fixtures.
 """
 
@@ -51,33 +52,6 @@ def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Conf
 def probe_functions() -> dict[str, Function]:
     """Prepare the argument probes once per worker."""
     return capture_tools.prepare_probe_functions()
-
-
-@pytest.mark.parametrize("tool_name", sorted(SCHEMAS))
-def test_tool_schema_matches_golden(tool_name: str, golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
-    """Each registered tool still reaches the model with its golden definition and instructions."""
-    root, config, runtime_paths = golden_runtime
-    with support.isolated_process(root):
-        if (missing := support.missing_dependencies(tool_name)) is not None:
-            pytest.skip(f"{tool_name} needs {missing}")
-        toolkit = support.build_toolkit(tool_name, config, runtime_paths)
-        assert_same_json(capture_tools.tool_schema(toolkit), SCHEMAS[tool_name])
-
-
-@pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
-def test_all_enabled_tool_schema_matches_golden(
-    tool_name: str,
-    golden_runtime: tuple[Path, Config, RuntimePaths],
-) -> None:
-    """Each registered tool with every function switched on still reaches the model with its golden definition."""
-    root, config, runtime_paths = golden_runtime
-    with support.isolated_process(root):
-        if (missing := support.missing_dependencies(tool_name)) is not None:
-            pytest.skip(f"{tool_name} needs {missing}")
-        assert_same_json(
-            capture_tools.all_enabled_tool_schema(tool_name, config, runtime_paths),
-            ALL_ENABLED_SCHEMAS[tool_name],
-        )
 
 
 def test_schema_golden_covers_every_buildable_registered_tool(

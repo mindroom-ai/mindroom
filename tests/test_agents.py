@@ -38,7 +38,6 @@ from mindroom.agents import (
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
-    get_agent_toolkit_names,
 )
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config import legacy_fields
@@ -82,6 +81,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams.members import materialize_exact_team_members
 from mindroom.tool_system.construction import get_toolkit_construction
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -100,10 +100,12 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -2502,7 +2504,9 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    runtime_toolkits = get_agent_toolkit_names("summary", config)
+    runtime_toolkits = [
+        entry.name for entry in visible_tool_surface(agent_name="summary", config=config).runtime_tool_configs
+    ]
     assert "openclaw_compat" in runtime_toolkits
     assert "matrix_message" in runtime_toolkits
 
@@ -3963,18 +3967,13 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=True,
-    )
+    functions = gated_functions(toolkit, config)
 
-    assert filtered is toolkit
-    assert toolkit.functions["dangerous"].requires_confirmation is True
-    assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
-    assert toolkit.functions["dangerous"].approval_type == "mindroom_policy"
-    assert toolkit.async_functions["dangerous_async"].approval_type == "mindroom_policy"
-    assert toolkit.functions["safe"].requires_confirmation is not True
+    assert functions["dangerous"].requires_confirmation is True
+    assert functions["dangerous_async"].requires_confirmation is True
+    assert functions["dangerous"].approval_type == "mindroom_policy"
+    assert functions["dangerous_async"].approval_type == "mindroom_policy"
+    assert functions["safe"].requires_confirmation is not True
 
 
 def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
@@ -4003,11 +4002,7 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
@@ -4025,11 +4020,7 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
 
     assert filtered is toolkit
     assert set(toolkit.functions) == {"safe"}
@@ -4043,31 +4034,20 @@ def test_native_approval_capability_preserves_tool_authored_confirmation() -> No
         tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=True,
-    )
+    function = gated_functions(toolkit, config)["native_confirmation"]
 
-    assert filtered is toolkit
-    assert toolkit.functions["native_confirmation"].requires_confirmation is True
-    assert toolkit.functions["native_confirmation"].approval_type is None
+    assert function.requires_confirmation is True
+    assert function.approval_type is None
 
 
 def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None:
     """A gated call that can become a managed job asks as its job; a call that must finish in its run still pauses it."""
     config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
 
-    def gated(*, connects: bool = False, **options: bool) -> Function:
+    def gated(*, connects: bool = False, **options: bool) -> ToolFunction:
         toolkit = Toolkit(name="approval-test", tools=[Function(name="gated", entrypoint=lambda: None, **options)])
         toolkit._requires_connect = connects
-        agents_module.apply_tool_approval_capability(
-            toolkit,
-            config,
-            supports_native_tool_approval=True,
-            approvals_as_jobs=True,
-        )
-        return toolkit.functions["gated"]
+        return gated_functions(toolkit, config, approvals_as_jobs=True)["gated"]
 
     job = gated()
     assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
@@ -4129,11 +4109,7 @@ def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
         tools=[Function(name="dangerous", entrypoint=lambda: None)],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
+    filtered = agents_module._hide_unresumable_approval_functions(toolkit, config)
 
     assert filtered is None
 
