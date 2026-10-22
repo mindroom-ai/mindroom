@@ -9,8 +9,9 @@ In MindRoom Chat, the user opens **Connections** in Settings, General, which ope
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
+Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
+When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
+On other homeservers, users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
@@ -72,13 +73,13 @@ Apart from the dashboard rule below, a session authenticates only these paths:
 For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
 Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
-The Connections header links the dashboard for administrators only.
+The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.

@@ -10,7 +10,7 @@ import secrets
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -30,7 +30,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import deployment_origin, normalized_origin
+from mindroom.origins import dashboard_origin, deployment_origin, normalized_origin
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -141,6 +141,7 @@ class _ApiAuthSettings:
     account_id: str | None
     mindroom_api_key: str | None
     public_url: str | None = None
+    dashboard_origin: str | None = None
     platform_sso_url: str | None = None
     platform_sso_secret: str | None = None
     trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
@@ -158,15 +159,26 @@ class ApiAuthState:
 
 def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
+    dashboard = dashboard_origin(runtime_paths)
+    # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
+    if dashboard is not None and not trusted_upstream.enabled:
+        msg = "MINDROOM_DASHBOARD_URL requires trusted upstream auth (MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED)"
+        raise ValueError(msg)
+    public = normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
+    if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
+        msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
+        raise ValueError(msg)
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+        dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
         platform_sso_secret=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_SECRET"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=trusted_upstream,
     )
 
 
@@ -630,7 +642,8 @@ def _is_offsite_candidate(candidate: str) -> bool:
     return candidate.replace("\\", "/").startswith("//")
 
 
-def _request_path_with_query(request: Request) -> str:
+def request_path_with_query(request: Request) -> str:
+    """Return this request's path with its query string, for a redirect back to it."""
     path = request.url.path
     query = request.url.query
     return f"{path}?{query}" if query else path
@@ -683,7 +696,7 @@ def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings,
     origin = normalized_origin(auth_settings.public_url)
     if origin is None:
         return str(request.url)
-    path = sanitize_next_path(next_path or _request_path_with_query(request))
+    path = sanitize_next_path(next_path or request_path_with_query(request))
     return f"{origin}{path}"
 
 
@@ -700,7 +713,7 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
         redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_sso_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
-        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        login_target = sanitize_next_path(next_path or request_path_with_query(request))
         return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
     return None
 
@@ -1035,6 +1048,31 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[s
     return cast("dict[str, Any]", auth_user)
 
 
+def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> bool:
+    """Return whether this request reached the dashboard's own host, which startup keeps apart from the public one."""
+    # Behind a TLS-terminating proxy the request's scheme may differ from the browser's, but its Host header,
+    # port included, does not.
+    dashboard = settings.dashboard_origin
+    return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
+
+
+def dashboard_host_public_origin(request: Request) -> str | None:
+    """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
+    settings = _request_auth_state(request).settings
+    return normalized_origin(settings.public_url) if _reached_dashboard_host(request, settings) else None
+
+
+def dashboard_link(request: Request) -> str:
+    """Return where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`."""
+    return f"{_request_auth_state(request).settings.dashboard_origin or ''}/"
+
+
+def oauth_callback_hostname(request: Request) -> str | None:
+    """Return the host an OAuth flow started here returns to: the public one when started on the dashboard's host."""
+    public = dashboard_host_public_origin(request)
+    return urlsplit(public).hostname if public is not None else request.url.hostname
+
+
 def require_same_origin(
     request: Request,
     expected_origin: str,
@@ -1060,6 +1098,9 @@ def _require_browser_mutation_origin(
     origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
+    # A dashboard on its own host sends that host's origin there.
+    if settings.dashboard_origin is not None and _reached_dashboard_host(request, settings):
+        origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
 

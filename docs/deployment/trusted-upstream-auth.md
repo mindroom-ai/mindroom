@@ -72,6 +72,15 @@ The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
 Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
+## Dashboard On Its Own Host
+
+When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom with the browser's `Host` header unchanged, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
+Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
+The setting needs trusted upstream auth, because only the gateway's signed identity reaches both hosts, and a `MINDROOM_PUBLIC_URL` on another host or port; MindRoom refuses to start otherwise.
+The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
+Accounts connected through the [OAuth framework](../oauth-framework.md) from that host return through the public host's OAuth callback.
+With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
+
 ## Security Boundary
 
 Dashboard configuration is an operator capability.
@@ -84,11 +93,11 @@ A personal OAuth link opened by a browser signed in as anyone other than the req
 
 ## Browser Mutation Protection
 
-Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset.
+Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset; on the `MINDROOM_DASHBOARD_URL` host they must send that origin instead.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the `Origin` matches.
 A validated bearer token skips these checks, but adding a bearer header to a trusted-upstream request does not.
 `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` controls which origins may read credentialed responses and never authorizes cross-origin changes.
-Host the dashboard on the app's public origin, or use its development proxy, which authenticates with a bearer token.
+Host the dashboard on the app's public origin or on [its own host](#dashboard-on-its-own-host), or use its development proxy, which authenticates with a bearer token.
 
 ## Troubleshooting
 
@@ -101,6 +110,6 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
 | `401 Invalid trusted upstream Matrix user id` | The Matrix claim is not a valid Matrix user ID |
 | `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
-| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
+| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin, or from `MINDROOM_DASHBOARD_URL` when set |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](../connections-portal.md#troubleshooting) |

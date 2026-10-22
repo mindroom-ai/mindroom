@@ -5,6 +5,8 @@ from __future__ import annotations
 import ipaddress
 import json
 from contextlib import suppress
+from dataclasses import replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -68,6 +70,13 @@ def local_api_origin(paths: RuntimePaths) -> str:
     return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
 
 
+def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
+    """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
+    if (paths.env_value("MINDROOM_PORT") or "").strip():
+        return paths
+    return replace(paths, process_env=MappingProxyType({**paths.process_env, "MINDROOM_PORT": str(api_port)}))
+
+
 def deployment_origin(public_url: str | None, fallback_url: str) -> str | None:
     """Return the browser origin of this deployment: the configured `MINDROOM_PUBLIC_URL` when set, else the fallback's."""
     return normalized_origin((public_url or "").strip() or fallback_url)
@@ -86,6 +95,12 @@ def parse_browser_origin(value: str) -> str:
         msg = f"Browser origin must be explicit HTTPS, or HTTP on a local address: {value!r}"
         raise ValueError(msg)
     return origin
+
+
+def dashboard_origin(paths: RuntimePaths) -> str | None:
+    """Return the origin `MINDROOM_DASHBOARD_URL` names, where the dashboard is served when not at the public origin."""
+    value = (paths.env_value("MINDROOM_DASHBOARD_URL") or "").strip()
+    return parse_browser_origin(value) if value else None
 
 
 def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:

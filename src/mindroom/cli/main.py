@@ -15,6 +15,7 @@ import typer
 from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
+from mindroom.origins import with_api_port
 
 from .api import is_loopback_host
 from .banner import make_banner
@@ -286,10 +287,13 @@ def _protect_dashboard_from_workers(
     """Give the dashboard API a generated key when dedicated workers could reach it, then reload that runtime."""
     from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
 
-    if ensure_worker_dashboard_api_key(
-        runtime_paths,
-        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
-    ):
+    try:
+        dashboard_has_credential = dashboard_requires_credential(runtime_paths)
+    except ValueError as exc:
+        # Refuse dashboard auth settings MindRoom cannot serve, such as a dashboard URL without trusted upstream auth.
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from None
+    if ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=dashboard_has_credential):
         return activate_cli_runtime(path=config_path, storage_path=storage_path)
     return runtime_paths
 
@@ -329,7 +333,8 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port the API serves on.
+    runtime_paths = with_api_port(activate_cli_runtime(path=config_path, storage_path=storage_path), api_port)
     # Validate again: pairing may have rewritten owner placeholders in the config.
     _load_active_config_or_exit(runtime_paths)
 

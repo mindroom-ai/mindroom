@@ -90,9 +90,12 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 }
 ```
 
-The shipped value is empty, which hides the Computer action.
+When it is empty, as shipped, Chat on a homeserver that binds tokens uses the runtime origin that the room's MindRoom agents publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`; on other homeservers the Computer action stays hidden.
+The iOS app ignores a published `localhost` origin, which on a phone is the phone itself, so for computers there set `MINDROOM_PUBLIC_URL` to an address the phone can reach.
 Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
-Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
+Chat shows the Computer action when an origin is known and the room has a joined MindRoom agent with a worker computer.
+With a configured Computers URL, an agent whose MindRoom does not yet publish its server counts as having one; without one, each agent must publish its own server with `computer: true`.
+With several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.

@@ -187,10 +187,11 @@ Exchange permissions on that mailbox decide what works: reading and changing its
 With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
 A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
 Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again.
+A call with `mailbox` repeats it in every result, errors included.
 
 Automatic replies are always the requester's own.
 Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
-Turning them on names both messages and the external audience, so an approval card shows everything senders get.
+Turning them on names the internal message and an external audience of `internal_only`, `contactsOnly`, or `all`, plus the external message unless the audience is `internal_only`, so an approval card shows everything senders get.
 Outlook Mail asks a requester to connect again when their connection lacks any of the permissions above.
 
 Attachments are workspace files and follow the agent's [`file_access`](../configuration/agents.md) setting.

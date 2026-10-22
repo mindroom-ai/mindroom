@@ -13,7 +13,12 @@ import aiohttp
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE, CALL_MEMBER_EVENT_TYPE, YOLO_WINDOWS_EVENT_TYPE
+from mindroom.matrix.event_types import (
+    BACKGROUND_JOBS_EVENT_TYPE,
+    CALL_MEMBER_EVENT_TYPE,
+    MINDROOM_SERVER_EVENT_TYPE,
+    YOLO_WINDOWS_EVENT_TYPE,
+)
 from mindroom.matrix.room_power import has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
@@ -36,6 +41,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     CALL_MEMBER_EVENT_TYPE: 0,
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
+    MINDROOM_SERVER_EVENT_TYPE: 0,
     # The router publishes the room's !yolo windows; in a personal room an agent created it has no power.
     YOLO_WINDOWS_EVENT_TYPE: 0,
 }

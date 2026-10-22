@@ -14,11 +14,12 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
-    graph_error_payload,
     graph_session,
-    graph_tool_result,
-    next_page_token,
-    page_path,
+    graph_time,
+    mailbox_next_page_token,
+    mailbox_page_path,
+    mailbox_path,
+    mailbox_tool_result,
     path_segment,
     time_zone_name,
 )
@@ -61,8 +62,6 @@ _EVENT_SELECT = (
     "bodyPreview,isOrganizer,responseStatus,isCancelled,type,seriesMasterId"
 )
 _EMAIL = re.compile(r'[^@\s<>,;"]+@[^@\s<>,;"]+\.[^@\s<>,;"]+')
-# Graph may name a mailbox in a next link by id, sign-in name, or OData key, so a token is renamed to the call's form.
-_LINK_MAILBOX = re.compile(r"/(?:me|users/[^/]+|users\([^/]*\))(?=/)", re.IGNORECASE)
 _RESPONSE_ACTIONS = {"accept": "accept", "tentative": "tentativelyAccept", "decline": "decline"}
 
 
@@ -226,26 +225,8 @@ def _interval(value: object) -> int:
     return value
 
 
-def _owner(value: object) -> str | None:
-    """Return the email address or sign-in name of the person whose calendar a call names, or None for the requester."""
-    if value is None:
-        return None
-    address = value.strip() if isinstance(value, str) else ""
-    if (
-        len(address) > 254
-        or not _EMAIL.fullmatch(address)
-        or not address.isprintable()
-        or any(character in "/\\?#" for character in address)
-    ):
-        msg = "calendar_owner must be an email address or sign-in name, such as kim@contoso.com."
-        raise _invalid(msg)
-    return address
-
-
 def _mailbox(owner: object) -> str:
-    """Return the Graph path of the requester's mailbox, or of the calendar owner's when the call names one."""
-    address = _owner(owner)
-    return "/me" if address is None else f"/users/{path_segment(address, 'calendar_owner')}"
+    return mailbox_path(owner, "calendar_owner")
 
 
 def _calendar_path(calendar: object, owner: object = None) -> str:
@@ -259,21 +240,7 @@ def _event_path(event_id: object, owner: object = None) -> str:
 
 def _page_request(page_token: object, owner: object, collection: str) -> _GraphRequest:
     """Return the request a page token continues, only for the listing's own collection in the same mailbox."""
-    mailbox = _mailbox(owner)
-    path = page_path(page_token, collection)
-    if not path.lower().startswith(f"{mailbox.lower()}/"):
-        msg = "page_token must be the next_page_token this function returned for the same calendar_owner."
-        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
-    return _GraphRequest("GET", path)
-
-
-def _next_page(payload: Mapping[str, Any], owner: object) -> str | None:
-    """Return the next page token, naming the mailbox as the call did so the next call can check it."""
-    token = next_page_token(payload)
-    link_mailbox = None if token is None else _LINK_MAILBOX.match(token)
-    if token is None or link_mailbox is None:
-        return token
-    return _mailbox(owner) + token[link_mailbox.end() :]
+    return _GraphRequest("GET", mailbox_page_path(page_token, collection, _mailbox(owner), "calendar_owner"))
 
 
 def _dict(value: object) -> dict[str, Any]:
@@ -285,22 +252,12 @@ def _person(recipient: object) -> dict[str, Any]:
     return {"name": address.get("name"), "email": address.get("address")}
 
 
-def _time(value: object) -> str | None:
-    """Return a Graph dateTimeTimeZone as ISO 8601; in UTC, Graph's default and preference here, that is `...Z`."""
-    moment = _dict(value).get("dateTime")
-    if not isinstance(moment, str):
-        return None
-    zone = _dict(value).get("timeZone")
-    moment = moment.split(".", 1)[0]
-    return f"{moment}Z" if zone in {None, "UTC"} else f"{moment} ({zone})"
-
-
 def _schedule_time(value: object, zone: str) -> str | None:
     """Return a schedule time in the requested zone as a local date and time; any other zone stays visible."""
     moment = _dict(value).get("dateTime")
     if isinstance(moment, str) and _dict(value).get("timeZone") == zone:
         return moment.split(".", 1)[0]
-    return _time(value)
+    return graph_time(value)
 
 
 def _time_of_day(value: object) -> str | None:
@@ -350,8 +307,8 @@ def _event(event: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": event.get("id"),
         "subject": event.get("subject"),
-        "start": _time(event.get("start")),
-        "end": _time(event.get("end")),
+        "start": graph_time(event.get("start")),
+        "end": graph_time(event.get("end")),
         "is_all_day": event.get("isAllDay"),
         "location": _dict(event.get("location")).get("displayName") or None,
         "organizer": _person(event.get("organizer")),
@@ -496,33 +453,20 @@ class OutlookCalendarTools(Toolkit):
 
         Every result of a call that names a calendar owner, errors included, repeats that owner.
         """
-        try:
-            address = _owner(owner)
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-        named = {} if address is None else {"calendar_owner": address}
-        try:
-            request = build()
-        except MicrosoftGraphError as exc:
-            exc.details.update(named)
-            return graph_error_payload(_TOOL_NAME, exc)
 
         def run() -> Mapping[str, object]:
-            try:
-                with graph_session(
-                    self._provider,
-                    self._runtime_paths,
-                    self._credentials_manager,
-                    self._worker_target,
-                    self._config,
-                ) as session:
-                    prepared = request if prepare is None else prepare(session, request)
-                    return {**render(prepared.send(session)), **named}
-            except MicrosoftGraphError as exc:
-                exc.details.update(named)
-                raise
+            request = build()
+            with graph_session(
+                self._provider,
+                self._runtime_paths,
+                self._credentials_manager,
+                self._worker_target,
+                self._config,
+            ) as session:
+                prepared = request if prepare is None else prepare(session, request)
+                return render(prepared.send(session))
 
-        return graph_tool_result(_TOOL_NAME, run)
+        return mailbox_tool_result(_TOOL_NAME, "calendar_owner", owner, run)
 
     def outlook_calendar_list_calendars(
         self,
@@ -558,7 +502,7 @@ class OutlookCalendarTools(Toolkit):
             build,
             lambda payload: {
                 "calendars": [_calendar(calendar) for calendar in _records(payload)],
-                "next_page_token": _next_page(payload, calendar_owner),
+                "next_page_token": mailbox_next_page_token(payload, _mailbox(calendar_owner)),
             },
             owner=calendar_owner,
         )
@@ -613,7 +557,7 @@ class OutlookCalendarTools(Toolkit):
             build,
             lambda payload: {
                 "events": [_event(event) for event in _records(payload)],
-                "next_page_token": _next_page(payload, calendar_owner),
+                "next_page_token": mailbox_next_page_token(payload, _mailbox(calendar_owner)),
             },
             owner=calendar_owner,
         )
