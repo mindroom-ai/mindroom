@@ -18,7 +18,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.resume import forward_resume, resume_history
-from mindroom.delegation.execution import drive_delegation_stream
+from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
@@ -560,6 +560,8 @@ def _attach_blocking_pause_presentation(
             raise RuntimeError(msg)
         pending_by_id[call_id] = tool
 
+    # A delegation still waits for its child, or for its turn after a sibling's, until the driver answers it.
+    answered = answered_delegation_calls(record)
     seen_ids: set[str] = set()
     for tool in (*tuple(record.tools or ()), *paused.tools):
         call_id = tool_execution_call_id(tool)
@@ -570,7 +572,7 @@ def _attach_blocking_pause_presentation(
             continue
         seen_ids.add(call_id)
         presentation.start_tool(tool)
-        if call_id not in pending_by_id:
+        if call_id not in pending_by_id and (not tool.is_paused or call_id in answered):
             presentation.complete_tool(tool)
 
     return replace(
