@@ -37,7 +37,8 @@ def _stages(hooks: Sequence[object]) -> list[str]:
 def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> None:
     """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture.
 
-    Only a run an approval continuation resumes carries the receipt, right after mid-turn compaction.
+    The job definitions project first, so the participation decision and mid-turn compaction see the definitions the
+    request sends. Only a run an approval continuation resumes carries the receipt, right after mid-turn compaction.
     """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -101,15 +102,15 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     )
 
     assert _stages(agent.before_request) == [
+        "job_definitions_hook",
         "participation_hook",
         "mid_turn_compaction_hook",
-        "job_definitions_hook",
     ]
     assert _stages(leader.before_request) == ["mid_turn_compaction_hook"]
     assert _stages(resumed_agent.before_request) == [
+        "job_definitions_hook",
         "mid_turn_compaction_hook",
         "approval_receipt_hook",
-        "job_definitions_hook",
     ]
     assert _stages(resumed_leader.before_request) == ["mid_turn_compaction_hook", "approval_receipt_hook"]
     assert agent.answer_tool_calls is not None

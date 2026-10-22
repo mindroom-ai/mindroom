@@ -2,8 +2,9 @@
 
 An agent that already took part in a thread decides whether to reply again. The decision is asked of the configured
 judgment backend first; when that backend abstains or the conversation holds more than room text, the reply's own
-model answers a non-streaming decision request: the reply's exact messages with the decision prompt appended, the same
-tools, and tool selection disabled, so the provider's prompt cache serves the reply that follows.
+model answers a non-streaming decision request: the reply's request with the decision prompt appended to its exact
+messages and tool selection disabled, so the decision carries the reply's tools and settings, such as deferred tool
+search and native compaction, and the provider's prompt cache serves the reply that follows.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
@@ -19,7 +21,7 @@ from mindroom.hooks.enrichment import is_transient_context, render_transient_con
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, complete
+from mindroom.llm.provider import complete
 from mindroom.logging_config import get_logger
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
 from mindroom.providers.tool_policy import without_provider_tools
@@ -103,7 +105,13 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
         with without_provider_tools():
             turn = await complete(
                 model,
-                ModelRequest(messages=decision_messages, tools=state.tools, tool_choice="none", stream=False),
+                replace(
+                    state.request_template,
+                    messages=decision_messages,
+                    tools=state.tools,
+                    tool_choice="none",
+                    stream=False,
+                ),
             )
         assert state.record.metrics is not None
         identity = model.identity

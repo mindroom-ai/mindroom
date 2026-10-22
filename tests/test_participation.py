@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, RequestOverrides
 from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.participation_hook import parse_decision, participation_hook
 from mindroom.providers.tool_policy import provider_tools_disabled
@@ -24,7 +26,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
-    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.llm.provider import StreamEvent
     from mindroom.llm.runs import RunRecord
     from tests.fakes.scripted_model import ScriptStep
 
@@ -61,6 +63,7 @@ async def _reply(
     messages: Sequence[Message] | None = None,
     *,
     run_id: str = "run-1",
+    request_template: ModelRequest = EMPTY_REQUEST,
 ) -> tuple[list[object], RunRecord]:
     """Run one reply of the ``code`` agent, which offers ``operate``, under the participation gate."""
     return await collect(
@@ -69,6 +72,7 @@ async def _reply(
             list(messages or [Message(role="user", content="Can anyone explain this?")]),
             ctx=context(run_id=run_id),
             hooks=LoopHooks(before_request=(participation_hook(gate, model),)),
+            request_template=request_template,
         ),
     )
 
@@ -118,6 +122,31 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
     assert gate.decided.is_set()
     # The decision prompt is transient: the stored run holds the reply's messages only.
     assert [m.role for m in first.messages] == ["system", "user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_the_decision_request_keeps_every_setting_of_the_reply_request() -> None:
+    """The decision is the reply's request with the prompt appended, tool selection off, and one non-streaming call.
+
+    Deferred tool search, native compaction, portable replay, and request overrides reach the decision as they reach
+    the reply, so the decision shares the reply's prompt cache and replays the history the provider compacted.
+    """
+    model = ScriptedModel([answer(_RESPOND), answer("Useful answer")])
+    template = ModelRequest(
+        messages=(),
+        overrides=RequestOverrides(temperature=0.2, prompt_cache=True),
+        deferred_tool_names=frozenset({"operate"}),
+        portable_replay=True,
+        native_compaction=NativeCompactionReplay(route="route-1", threshold=1000),
+    )
+
+    await _reply(model, ParticipationGate(), request_template=template)
+
+    decision, reply = model.requests
+    assert replace(reply, messages=template.messages, tools=template.tools) == template
+    assert tuple(decision.messages[:-1]) == tuple(reply.messages)
+    assert (decision.tool_choice, decision.stream) == ("none", False)
+    assert replace(decision, messages=reply.messages, tool_choice=reply.tool_choice, stream=reply.stream) == reply
 
 
 @pytest.mark.asyncio

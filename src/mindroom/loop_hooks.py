@@ -1,8 +1,8 @@
 """The hooks an agent or team-leader run or resume installs on the owned loop, in the order the turn applies them.
 
 An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
-turn or resume install the hooks ``_loop_hooks`` composes once: the participation gate, mid-turn compaction, the
-approval receipt, the wait budget of managed tool-job calls, the output-limit answer, portable tool search, the
+turn or resume install the hooks ``_loop_hooks`` composes once: the wait budget of managed tool-job calls, the
+participation gate, mid-turn compaction, the approval receipt, the output-limit answer, portable tool search, the
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn. Only a run an approval continuation resumes carries the
@@ -169,16 +169,19 @@ def _loop_hooks(
 ) -> LoopHooks:
     """Return the hooks of one run or resume, in the order the loop applies them before each request.
 
-    The participation gate decides first, so a reply that stays silent never compacts or requests; the request
-    cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
-    messages, and folds into the scope only when the turn is ``scoped``; with ``approval_receipt``, the receipt
-    projects into the run's first request; the wait budget of ``job_definitions``' managed calls joins their
-    definitions last, as the request is formatted. Queued-message notices follow every tool batch and a resume's
-    entry when ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
-    ``skill_review_capture`` records the final request of run ``run_id``.
+    The request cap is the loop's own and refuses a request before any hook runs; the wait budget of
+    ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
+    compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
+    stays silent never compacts or requests; mid-turn compaction rewrites the live messages, and folds into the
+    scope only when the turn is ``scoped``; with ``approval_receipt``, the receipt projects into the run's first
+    request. Queued-message notices follow every tool batch and a resume's entry when ``queued_notices`` is on; the
+    run hears of the ended jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the final
+    request of run ``run_id``.
     """
     capabilities = model.capabilities
     before_request: list[BeforeRequestHook] = []
+    if job_definitions is not None:
+        before_request.append(job_definitions_hook(job_definitions))
     if participation is not None:
         before_request.append(participation_hook(participation, model))
     before_request.append(
@@ -203,8 +206,6 @@ def _loop_hooks(
     )
     if approval_receipt:
         before_request.append(approval_receipt_hook(capabilities))
-    if job_definitions is not None:
-        before_request.append(job_definitions_hook(job_definitions))
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
