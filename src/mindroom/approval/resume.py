@@ -1,9 +1,9 @@
 """Resume a persisted paused agent run on the owned loop, as an approval or a delegation continues it.
 
-A resume rebuilds the agent, replays the stored history its scope's configured policy selects, restores the paused
-request's native history settings, installs the hooks an agent turn installs, and continues the run with the
-decisions on exactly the calls it waits for. The loop refuses anything but exact coverage of those calls before it
-runs any of them.
+A resume replays the stored history a replay plan selects and continues the paused request with the decisions on
+exactly the calls it waits for; the loop refuses anything but exact coverage of those calls before it runs any of
+them. ``ResumeRunner`` resumes a rebuilt agent, for an approval or a delegated child, and a live turn continuing
+after its delegations calls ``resume_from_session`` with its own plan.
 """
 
 from __future__ import annotations
