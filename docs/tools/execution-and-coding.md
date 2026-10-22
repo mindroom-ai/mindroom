@@ -110,6 +110,7 @@ Prefer [`coding`](#coding) for code-editing agents.
 ```yaml
 agents:
   editor:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file:
           enable_delete_file: true
@@ -232,6 +233,7 @@ Paths follow the agent's [`file_access`](../architecture/security-posture.md#fil
 ```yaml
 agents:
   code:
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - coding
 ```
