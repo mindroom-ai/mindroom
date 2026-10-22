@@ -318,7 +318,7 @@ def _chat_client_factory(
             key = api_key or process_env.get(AZURE_OPENAI_ENV_BY_KEY["api_key"])
             if not (key or settings.azure_ad_token or settings.azure_ad_token_provider):
                 msg = (
-                    "Azure OpenAI authentication not configured. Please provide one of:"
+                    "Azure OpenAI authentication not configured. Please provide one of: "
                     "AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
                 raise ProviderError(msg, provider=route.provider_name, status_code=401, code="missing_api_key")
