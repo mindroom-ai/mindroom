@@ -511,9 +511,10 @@ class MicrosoftSharePointTools(Toolkit):
     ) -> str:
         """Change column values of one SharePoint list item; columns not given stay unchanged.
 
-        The write fails with target_mismatch unless expected_web_url is the list's web_url. Read the list's column
-        names with microsoft_sharepoint_get_list first. This changes a document library file's column values only;
-        change the file itself with the microsoft_files tool.
+        Before calling, tell the requester which item changes and its new values. The write fails with
+        target_mismatch unless expected_web_url is the list's web_url. Read the list's column names with
+        microsoft_sharepoint_get_list first. This changes a document library file's column values only; change the
+        file itself with the microsoft_files tool.
 
         Args:
             site_id: The site's id from microsoft_sharepoint_search_sites or microsoft_sharepoint_get_site.
