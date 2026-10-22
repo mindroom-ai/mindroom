@@ -40,12 +40,11 @@ from mindroom.teams.members import (
     team_label,
 )
 from mindroom.teams.presentation import (
-    NO_TEAM_RESPONSE,
     TeamStreamPresentation,
     finished_run_text,
     format_team_header,
-    format_team_response,
     publish_team_presentation,
+    team_response_text,
 )
 from mindroom.teams.runtime import MemberEvent, continue_team
 from mindroom.teams.storage import (
@@ -629,10 +628,8 @@ async def continue_paused_team_run(
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
             # A resume whose document stays empty, every run's text blank, renders its finished runs, as Agno's did.
-            response_text = presentation.render_body() or format_team_header(members.display_names) + (
-                format_team_response(continued, attempt.records.members)
-                or finished_run_text(continued)
-                or NO_TEAM_RESPONSE
+            response_text = presentation.render_body() or (
+                format_team_header(members.display_names) + team_response_text(continued, attempt.records.members)
             )
             return CompletedApprovalRun(
                 response_text=response_text,
