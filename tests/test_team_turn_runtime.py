@@ -331,7 +331,7 @@ async def _checker_overloaded() -> None:
         ),
     ],
 )
-async def test_a_blocking_team_reply_renders_each_finished_member_run_and_the_consensus_as_main_did(
+async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_consensus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
@@ -946,8 +946,8 @@ async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_onc
 ) -> None:
     """A member that paused on its delegation and resumed within the turn shows once, with what its resumed run wrote.
 
-    Agno continued the paused member's output in place and started its content afresh, so its blocking reply showed
-    only the resumed text; what the member wrote before it paused stays in its stored messages.
+    Agno continued the paused member's output in place and started its content afresh, so Agno's blocking reply
+    showed only the resumed text; what the member wrote before it paused stays in its stored messages.
     """
     team = squad_turn(
         tmp_path,
@@ -980,10 +980,10 @@ async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The leader's continuation starts its content afresh, so a silent continuation leaves its earlier text the reply.
+    """A leader silent after its member's delegation has no content, so the reply is what it wrote before the pause.
 
-    Nobody wrote anything after the member's delegation, so the reply is the text of the leader's own messages, as
-    Agno's blocking reply read a team run without content, and the turn records it.
+    The leader's continuation starts its content afresh and nobody wrote anything after the delegation, so the reply is
+    the text of the leader's own messages, as Agno's blocking reply read a team run without content.
     """
     team = squad_turn(
         tmp_path,
