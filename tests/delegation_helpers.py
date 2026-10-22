@@ -3,6 +3,7 @@
 ``DelegationModel`` is the Agno model double the suites that still drive Agno agents use; the owned path's tests
 script one ``ScriptedModel`` per agent through ``ScriptedAgents``, run agent replies through ``respond`` and team
 replies through ``respond_team``, and continue their pauses through ``resume`` and ``resume_team``.
+``pause_parent`` stops a parent at its stored pause, for tests that drive the delegation driver themselves.
 """
 
 from __future__ import annotations
@@ -432,7 +433,7 @@ async def pause_parent(
         config=config,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
-        model_name="default",
+        model_name=config.get_agent(agent_name).model or "default",
         store=store,
         session=session,
         scope=HistoryScope(kind="agent", scope_id=agent_name),

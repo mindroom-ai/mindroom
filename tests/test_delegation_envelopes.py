@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _leader_and_child(*, gate: str | None = None) -> Config:
+def _leader_and_child() -> Config:
     return Config(
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
@@ -59,7 +59,6 @@ def _leader_and_child(*, gate: str | None = None) -> Config:
         },
         defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
-        tool_approval={"rules": [{"match": gate, "action": "require_approval"}] if gate else []},
     )
 
 
@@ -141,12 +140,14 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     async def unused_child(*_args: object, **_kwargs: object) -> str:
         pytest.fail("The child must not start before its audit exists")
 
-    parent_model = ScriptedModel([calls(tool_call("run_subagent", "delegate", agent_name="child", task="Inspect"))])
-    ScriptedAgents({}, by_session={identity.session_id: parent_model}).install(monkeypatch)
-    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
-    monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
+    parent = None
     if native:
+        parent_model = ScriptedModel([calls(tool_call("run_subagent", "delegate", agent_name="child", task="Inspect"))])
+        ScriptedAgents({}, by_session={identity.session_id: parent_model}).install(monkeypatch)
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
+    monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
+    if parent is not None:
         # The parent's run stored its pause; the driver owns the delegation from there.
         operation = drive_delegations(
             parent.record,
@@ -177,7 +178,7 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text())["status"] == "cancelled"
-    if native:
+    if parent is not None:
         retained = parent.store.get_run("parent-run")
         assert retained is not None
         child = DelegationState.from_metadata(retained.metadata).children[0]
