@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,7 +18,7 @@ from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
@@ -126,6 +127,41 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
     saved = catalog.store.get_run("run")
     assert saved is not None
     assert saved.messages[0].tool_calls[0]["id"] == "bash-1"
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_changed(tmp_path: Path) -> None:
+    """A state one Bash call changes and the next restores is stored restored, though a checkpoint stored the change."""
+    catalog = await _stored_catalog(tmp_path)
+    store = catalog.store
+    assert store is not None
+    session = catalog.session
+    session.session_state["cwd"] = "/repo"
+    store.save_session_fields(session, "session_state")
+    # As in a turn, the run's tools change the session's own state in place.
+    catalog.run = replace(catalog.run, session_state=session.session_state)
+    persist = persist_to(store, session)
+    checkpoint = BatchCheckpoint(catalog)
+    record = _record()
+    messages = [Message(role="user", content="do work"), _assistant("bash-1")]
+
+    await _capture(checkpoint, record, messages)
+    await checkpoint.persist("bash-1")
+    session.session_state["cwd"] = "/repo/sub"
+    checkpoint.complete("bash-1", "moved")
+    messages = [*messages, _assistant("bash-2")]
+    await _capture(checkpoint, record, messages)
+    await checkpoint.persist("bash-2")
+    fields = store.read_session_fields("session")
+    assert fields is not None
+    assert fields.session_state == {"cwd": "/repo/sub"}
+    session.session_state["cwd"] = "/repo"
+    record.status = RunStatus.completed
+    await persist(record)
+
+    fields = store.read_session_fields("session")
+    assert fields is not None
+    assert fields.session_state == {"cwd": "/repo"}
 
 
 @pytest.mark.asyncio

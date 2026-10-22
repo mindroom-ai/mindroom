@@ -18,9 +18,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
-from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import AttemptUsage, add_usage, is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -124,7 +123,7 @@ async def _retried(
     carried: MessageMetrics | None = None
     while True:
         visible = False
-        attempt_usage: MessageMetrics | None = None
+        usage = AttemptUsage()
         try:
             events = inner.stream(request)
             async with closing_async_stream(events):
@@ -133,13 +132,14 @@ async def _retried(
                         event = await _next_event(events, idle_timeout_seconds, identity.provider_name)
                     except StopAsyncIteration:
                         return
-                    if isinstance(event, UsageReported) and event.final:
-                        attempt_usage = add_usage(attempt_usage, event.usage)
+                    usage.observe(event)
                     visible = visible or is_visible_output(event)
                     yield with_carried_usage(event, carried)
         except ProviderError as error:
             if visible or (delay := _retry_delay(error, budget, identity.id)) is None:
                 raise
+            if (report := usage.settle()) is not None:
+                yield report
             if delay:
                 await asyncio.sleep(delay)
-        carried = add_usage(carried, attempt_usage)
+        carried = add_usage(carried, usage.settled)

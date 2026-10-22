@@ -952,6 +952,37 @@ async def test_persist_to_retries_a_changed_session_state_whose_write_failed(sto
     assert _loaded_ids(store) == ["r1", "r2", "r3"]
 
 
+@pytest.mark.asyncio
+async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_last_wrote(
+    store: ConversationStore,
+) -> None:
+    """The terminal save compares with the state the store holds for the session: as loaded, or as a write left it.
+
+    A state the turn left alone keeps another writer's, and one a field save stored changed mid-turn and the turn
+    then restored is stored restored.
+    """
+    _seed(store, [_run("r1")])
+    seeded = _loaded(store)
+    seeded.session_state = {"cwd": "/repo"}
+    store.save_session_fields(seeded, "session_state")
+    session = _loaded(store)
+    persist = persist_to(store, session)
+    _execute(
+        store,
+        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"cwd": "/other"}'))""",
+    )
+
+    await persist(_run("r2"))
+    assert _loaded(store).session_state == {"cwd": "/other"}
+
+    session.session_state["cwd"] = "/repo/sub"
+    store.save_session_fields(session, "session_state")
+    session.session_state["cwd"] = "/repo"
+    await persist(_run("r3"))
+
+    assert _loaded(store).session_state == {"cwd": "/repo"}
+
+
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
     """Agno 2 columns encoded twice load, and a field save writes them encoded once."""
     store.save_session_fields(_session())

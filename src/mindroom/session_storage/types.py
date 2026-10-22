@@ -36,7 +36,9 @@ class ConversationSession:
     holds it and take a removed run out; a frozen save leaves the session's copy, or its absence, as it was, so the
     session can keep a run a fresh load no longer returns. A delete handed the session takes the deleted runs out.
     ``summary`` is the owner scope's latest summary row, derived on load and never written back.
-    ``session_state`` is the dict the run's tools share and change in place.
+    ``session_state`` is the dict the run's tools share and change in place. ``stored_session_state`` is the state the
+    store holds for the session as far as this session knows: as loaded, then as the store's latest write of that
+    field for this session left it. A run's terminal save writes ``session_state`` back only when the two differ.
     """
 
     session_id: str
@@ -45,6 +47,7 @@ class ConversationSession:
     user_id: str | None = None
     metadata: dict[str, Any] | None = None
     session_state: dict[str, Any] = field(default_factory=dict)
+    stored_session_state: dict[str, Any] = field(default_factory=dict)
     runs: list[AnyRunRecord] = field(default_factory=list)
     summary: ScopeSummary | None = None
     created_at: int = field(default_factory=lambda: int(time()))

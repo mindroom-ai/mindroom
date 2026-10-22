@@ -21,9 +21,8 @@ from mindroom.llm.errors import (
     ProviderError,
 )
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
-from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import AttemptUsage, is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -32,7 +31,6 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import MediaKind, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
-    from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
 
@@ -175,13 +173,12 @@ async def media_fallback_stream(
     remaining = present - known
     first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
     visible = False
-    attempt_usage: MessageMetrics | None = None
+    usage = AttemptUsage()
     try:
         events = inner.stream(first)
         async with closing_async_stream(events):
             async for event in events:
-                if isinstance(event, UsageReported) and event.final:
-                    attempt_usage = add_usage(attempt_usage, event.usage)
+                usage.observe(event)
                 visible = visible or is_visible_output(event)
                 yield event
     except ProviderError as error:
@@ -197,10 +194,12 @@ async def media_fallback_stream(
         status_code=failure.status_code,
         error=redact_sensitive_text(str(failure), max_length=500),
     )
+    if (report := usage.settle()) is not None:
+        yield report
     retry = replace(request, messages=_without_media(request.messages, known | remaining, fallback_prompt))
     events = inner.stream(retry)
     async with closing_async_stream(events):
         async for event in events:
-            yield with_carried_usage(event, attempt_usage)
+            yield with_carried_usage(event, usage.settled)
     if _names_capability_gap(failure, remaining):
         _LEARNED_UNSUPPORTED.setdefault(route, set()).update(remaining)
