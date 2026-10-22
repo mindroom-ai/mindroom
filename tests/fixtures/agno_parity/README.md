@@ -3,7 +3,7 @@
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime, so no golden can be captured again; the owned code's parity tests read them.
 The tool goldens are the exception: `tests.agno_parity.regenerate_tool_goldens` rewrites them from the owned toolkit adapter, so a deliberate tool change regenerates them instead of editing them by hand.
-A deliberate change to model-visible bytes or a provider request edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
+A deliberate change to model-visible bytes, a provider request, or the `io.mindroom.ai_run` metadata edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
 
 ## Provider wire goldens (`providers/`)
 
@@ -238,6 +238,10 @@ Every run with a provider request also has its usage row in `<table>_usage`.
   The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `tool_call_metrics` (`ToolCallMetrics`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), `model_metrics` (`ModelMetrics`), and `session_metrics` (`SessionMetrics`).
 - `history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
+- `events/ai_run.json`: the `io.mindroom.ai_run` Matrix metadata of every run that published one, keyed by run id; a turn stopped by cancelling its task and a turn paused for approval publish none, and a resumed run's entry is the metadata its resume published.
+  `tests/test_ai_run_metadata_goldens.py` rebuilds every entry with the owned builder from the stored run, its member runs, and the prepared history its metadata keeps, except `run-c4`, whose row an edit cut removed.
+  Agno's streamed reply put a zero `cache_write_tokens` that a request reported into the usage of `run-tools`, which the owned usage leaves out like every zero counter; the test pins that one difference.
+  The capture also recorded two turns that Agno's own run cancellation ended with their reply still running, which Stop never caused because it cancels the reply's task first; that file was dropped, so no golden holds a cancelled run's metadata.
 - `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
   `tests/test_openai_compat_goldens.py` sends the same requests through the owned API path and compares the bodies, completion ids and timestamps aside.
 - `storage/<store>__before_<run id>.sql`: the sessions one approval resume reads, dumped just before it ran: the paused run's session and, for a delegation, its child's session in the child's store, with only those sessions' rows in every table keyed by session.
