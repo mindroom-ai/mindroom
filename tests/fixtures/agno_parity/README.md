@@ -2,7 +2,7 @@
 
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime, so no golden can be captured again; the owned code's parity tests read them.
-A deliberate change to model-visible bytes or a provider request edits its golden by hand in the same commit; the storage, run, and history goldens hold data Agno wrote and never change.
+A deliberate change to model-visible bytes or a provider request edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
 
 ## Provider wire goldens (`providers/`)
 
@@ -291,3 +291,9 @@ Each search sends one query through Agno's `search_knowledge_base` tool for an a
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
 Agno renders each document from an unordered set and Chroma returns metadata in hash order, so the result's key order varies between processes; its values and its layout (`indent=2`, `ensure_ascii=False`) do not.
 `content_hash` in each document's `meta_data` becomes `<sha256>`.
+
+## Codec goldens (`codecs.json`)
+
+`codecs.json` maps a case name to what Agno 3.0.9 objects produced for it: the `to_dict()` of messages, media, metrics, tool executions, requirements, and agent and team runs built field by field, the results of Agno's metric addition and accumulation, requirement decisions, and lenient reads, and the names and values of Agno's `RunStatus`.
+`tests/llm/test_codecs.py` builds or reads each case with the owned types and compares the result with the case.
+Dicts keep Agno's key order and its base64 media content, and a case built without an id or a timestamp keeps the random id and capture-time timestamp Agno filled in.
