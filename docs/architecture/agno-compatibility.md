@@ -5,7 +5,7 @@ This page maps each known weakness of that library to its upstream tracking and 
 The policy lives in the Agno Compatibility Policy in `AGENTS.md`.
 Each `# AGNO_COMPAT:` source comment owns its workaround's reason, exact upstream links, removal condition, and test coverage; `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists them.
 The Boundary column of both tables below is the boundary inventory; paths are relative to `src/mindroom/`, and one row can group several markers that share a weakness.
-Workarounds adapt Agno toolkit mechanics only: file access, network destination, output size, and credential policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
+Workarounds adapt Agno mechanics only: file access, network destination, output size, and credential policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
 
 ## Upstream work
 

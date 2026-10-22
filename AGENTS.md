@@ -98,8 +98,8 @@ Design migrations around that assumption rather than adding machinery to coordin
 
 ### Agno Compatibility Policy
 
-- MindRoom owns its run loop, providers, storage, teams, history, and knowledge internals; Agno stays only as the tool library.
-  That covers the `Toolkit`, `Function`, `@tool`, and `ToolResult` authoring API for MindRoom, plugin, and vendor tools, Agno's tool schema generation and argument coercion, the vendor toolkits with MindRoom's per-toolkit overrides, and the knowledge readers and chunkers in `knowledge/readers.py`.
+- MindRoom owns its run loop, providers, storage, teams, and history; Agno stays only as the tool library and the knowledge reader layer.
+  What stays Agno: the `Toolkit`, `Function`, `@tool`, and `ToolResult` authoring API for MindRoom, plugin, and vendor tools, Agno's tool schema generation and argument coercion, the vendor toolkits with MindRoom's per-toolkit overrides, and the knowledge readers and chunkers in `knowledge/readers.py`.
 - The owned loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `adapt_function` in `tool_system/agno_toolkits.py`.
   Only the modules `tests/test_agno_boundary.py` allows import Agno; every other module takes Agno's tool types from `tool_system/agno_toolkits.py`, and none uses Agno's agent, team, model, run, storage, or learning layers.
 - The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
