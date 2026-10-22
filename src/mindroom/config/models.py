@@ -7,7 +7,7 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
@@ -15,6 +15,7 @@ from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import (
     drop_retired_fields,
     drop_retired_model_settings,
+    drop_retired_tool_overrides,
     reject_legacy_defaults_fields,
 )
 from mindroom.config.schema_hints import dashboard_hint
@@ -230,6 +231,12 @@ class ToolConfigEntry(BaseModel):
             msg = "Tool name must not be empty"
             raise ValueError(msg)
         return stripped
+
+    @field_validator("overrides")
+    @classmethod
+    def drop_retired_fields(cls, value: dict[str, object], info: ValidationInfo) -> dict[str, object]:
+        """Ignore retired overrides that older configs still set, with a warning."""
+        return drop_retired_tool_overrides(info.data["name"], value) if "name" in info.data else value
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:

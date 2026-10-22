@@ -277,3 +277,25 @@ def drop_retired_model_settings(value: object) -> object:
     for field in sorted(reasons):
         _warn_retired_field(f"extra_kwargs.{field}", reasons[field])
     return {**model, "extra_kwargs": {key: item for key, item in extra_kwargs.items() if key not in reasons}}
+
+
+# LEGACY_COMPAT: Retired website tool knowledge option.
+# Legacy format: A website tool entry accepted a text knowledge override, which swapped read_url for a knowledge-base
+#   insert that always failed, because config can supply only a string.
+# Last legacy release: v2026.10.454, the newest tag when written; replacement: unreleased, bump both at merge.
+# Handling: Warn once and drop the override, so the tool offers read_url; the tool layer itself rejects the field.
+# Coverage: tests/test_website_tool.py::test_a_retired_knowledge_option_loads_with_one_warning_and_reads_urls.
+_RETIRED_TOOL_OVERRIDE_REASONS = {
+    "website": {"knowledge": "The website tool no longer adds pages to a knowledge base; it always offers read_url"},
+}
+
+
+def drop_retired_tool_overrides(tool_name: str, overrides: dict[str, object]) -> dict[str, object]:
+    """Drop retired overrides that an older entry for ``tool_name`` still sets, warning once per field."""
+    reasons = _RETIRED_TOOL_OVERRIDE_REASONS.get(tool_name, {})
+    retired = reasons.keys() & overrides.keys()
+    if not retired:
+        return overrides
+    for field in sorted(retired):
+        _warn_retired_field(f"tools.{tool_name}.{field}", reasons[field])
+    return {key: item for key, item in overrides.items() if key not in retired}
