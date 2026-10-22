@@ -16,7 +16,7 @@ import pytest
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.provider import TextDelta
+from mindroom.llm.provider import ModelRequest, TextDelta
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
 from mindroom.teams.runtime import MemberEvent, continue_team, run_team
@@ -175,6 +175,30 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     )
     [checker_request] = checker.requests
     assert checker_request.messages[-1].content == "Alice declined."
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
+async def test_a_resumed_member_s_requests_stream_exactly_when_the_resume_does(stream: bool) -> None:
+    # Agno continued each paused member with the team continuation's own ``stream``.
+    paused = _paused_team_approved()
+    leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
+    checker = scripted("checker-model", answer("42", usage(1, 1)))
+
+    _, record = await collect(
+        continue_team(
+            squad(leader, scripted("writer-model"), checker),
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
+            ctx=run_context("team-approved", SQUAD_APPROVED),
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert [request.stream for request in (*checker.requests, *leader.requests)] == [stream, stream]
 
 
 async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_results_as_agno_did() -> None:

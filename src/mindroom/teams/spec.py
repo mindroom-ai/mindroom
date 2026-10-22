@@ -35,7 +35,8 @@ class TeamMember:
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
     and stored ``agent_name``. ``role`` is the roster text the leader reads. ``hooks(resumed)`` builds the hooks of one
     run of this member, or of one resume when ``resumed``, since a hook such as mid-turn compaction keeps state for
-    the run it serves and only a resume carries the approval receipt; ``request_template`` applies to every run.
+    the run it serves and only a resume carries the approval receipt; ``request_template`` applies to every run,
+    which streams exactly when its team run does.
     """
 
     spec: AgentSpec
