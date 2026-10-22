@@ -32,7 +32,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -307,8 +307,14 @@ def _delegate(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
     return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=usage(40, 4))
 
 
-async def _stream(team: _Team, *, mode: TeamMode = TeamMode.COORDINATE, **kwargs: Any) -> list[Any]:  # noqa: ANN401
-    """Stream one team reply as the response runner does and return its chunks."""
+async def _stream(
+    team: _Team,
+    *,
+    mode: TeamMode = TeamMode.COORDINATE,
+    ctx: ResponseTurnContext | None = None,
+    **kwargs: Any,  # noqa: ANN401
+) -> list[Any]:
+    """Stream one team reply as the response runner does and return its chunks; ``ctx`` defaults to ``_ctx``'s."""
     with tool_runtime_context(team.runtime):
         return [
             chunk
@@ -317,7 +323,7 @@ async def _stream(team: _Team, *, mode: TeamMode = TeamMode.COORDINATE, **kwargs
                 message="Hello",
                 orchestrator=team.orchestrator,
                 execution_identity=team.identity,
-                ctx=_ctx(team),
+                ctx=ctx or _ctx(team),
                 mode=mode,
                 user_id=REQUESTER_ID,
                 configured_team_name="squad",
@@ -508,6 +514,33 @@ async def test_a_member_tool_addresses_the_team_history_scope(
     _, [member] = _stored_runs(team)
     assert member.tools is not None
     assert member.tools[0].result == "team:squad"
+
+
+@pytest.mark.asyncio
+async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_no_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Transient turn context is sent with the leader's request, and neither the team run nor a member run stores it."""
+    del probe
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Draft it"), answer("Done.", usage(50, 5))],
+        writer=[answer("Drafted.")],
+    )
+    transient = "Sample transient turn context."
+    ctx = replace(_ctx(team), transient_enrichment_items=(EnrichmentItem(key="sample", text=transient),))
+
+    await _stream(team, ctx=ctx)
+
+    assert [message.role for message in team.leader.requests[0].messages if transient in str(message.content)] == [
+        "user",
+    ]
+    record, members = _stored_runs(team)
+    assert len(members) == 1
+    assert all(transient not in json.dumps(run.to_dict()) for run in [record, *members])
 
 
 @pytest.mark.asyncio

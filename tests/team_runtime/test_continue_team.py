@@ -221,6 +221,63 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
     assert len(writer.requests) == 1
 
 
+async def test_parallel_coordinate_delegations_resume_only_the_paused_member_and_the_leader_reads_both() -> None:
+    """Two delegations in one leader step: the writer completes and the checker pauses; the resume runs the checker only.
+
+    The writer's delegation keeps its answer and the checker's becomes Agno's member-results message, so the leader's
+    resumed request reads both members' results.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-write", member_id="writer", task="Write 6 times 7."),
+            tool_call("delegate_task_to_member", "call-check", member_id="checker", task="Multiply 6 by 7."),
+            metrics=usage(10, 2),
+        ),
+        answer("Both say 42.", usage(10, 2)),
+    )
+    writer = scripted("writer-model", answer("Six times seven is 42."))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, writer, checker)
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.status is RunStatus.paused
+    assert paused.tools is not None
+    assert [(tool.tool_call_id, tool.result) for tool in paused.tools] == [
+        ("call-write", "Six times seven is 42."),
+        ("call-check", MEMBER_PAUSED_RESULT.format(name="Checker")),
+    ]
+
+    events, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
+    assert [member.agent_id for member in member_records(events)] == ["checker"]
+    assert (len(writer.requests), len(checker.requests)) == (1, 2)
+    expected = [
+        ("call-write", "Six times seven is 42."),
+        ("call-check", "Member results after human-in-the-loop resolution:\n[Checker]: 42"),
+    ]
+    assert record.tools is not None
+    assert [(tool.tool_call_id, tool.result) for tool in record.tools] == expected
+    [request] = leader.requests[1:]
+    assert [
+        (message.tool_call_id, message.content) for message in request.messages if message.role == "tool"
+    ] == expected
+
+
 async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() -> None:
     leader = scripted(
         "leader-model",
