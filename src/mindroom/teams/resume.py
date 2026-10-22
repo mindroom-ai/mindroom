@@ -313,10 +313,9 @@ def drive_team_delegations(
 ) -> AsyncIterator[TeamRunEvent]:
     """Pass the run's events through; when it ends paused on a member's delegation, run the children and continue it.
 
-    The driver sees the team run as a parent and ``resume`` continues it with the children's results. Member ids
-    are their config names on the owned loop, which the driver needs as the callers of the members' delegations.
-    ``paused`` is the stored pause a saved approval resumes, whose members already own the delegation calls it
-    waits on; a turn's run announces its members' calls in ``events``.
+    The driver sees the team run as a parent, runs a member's delegations as that member, and ``resume`` continues
+    the run with the children's results. ``paused`` is the stored pause a saved approval resumes, whose members
+    already own the delegation calls it waits on; a turn's run announces its members' calls in ``events``.
     """
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
@@ -332,7 +331,6 @@ def drive_team_delegations(
         decisions=decisions,
         denial_reasons=denial_reasons,
         approval_calls=approval_calls,
-        member_config_names={member.spec.id: member.spec.id for member in resume.spec.members},
     )
     owners = _delegation_owners(paused) if paused is not None else {}
     return _tag_member_delegation_events(cast("AsyncIterator[TeamRunEvent]", driven), owners)

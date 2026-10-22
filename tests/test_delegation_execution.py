@@ -579,7 +579,10 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path, monkeyp
 
 @pytest.mark.asyncio
 async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path: Path) -> None:
-    """A team member's gated delegation is carded and gated as ``member_id:call_id``, never as the bare call id."""
+    """A team member's gated delegation is carded and gated as ``member_id:call_id``, never as the bare call id.
+
+    The member's id is its config name, so the card is asked for the member and its gate is keyed by it.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=(), gate_delegation=True)
     identity = _leader_identity()
@@ -590,7 +593,7 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
             tool_args={"agent_name": "code", "task": "Write report"},
             external_execution_required=True,
         ),
-        member_agent_id="member",
+        member_agent_id="code",
     )
     response = RunRecord(
         run_id="parent-run",
@@ -616,7 +619,6 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         "config": config,
         "runtime_paths": paths,
         "execution_identity": identity,
-        "member_config_names": {"member": "leader"},
         "on_event": events.append,
     }
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
@@ -629,15 +631,15 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         )
         asked = await execution.advance_delegation_call(requirement, state=state, previous_state=previous, **options)
         assert asked is None
-        assert state.pending_agent_name == "leader"
-        assert state.pending_tools[0]["tool_call_id"] == "member:call"
-        assert RunRequirement.from_dict(state.pending_requirements[0]).tool_execution.tool_call_id == "member:call"
+        assert state.pending_agent_name == "code"
+        assert state.pending_tools[0]["tool_call_id"] == "code:call"
+        assert RunRequirement.from_dict(state.pending_requirements[0]).tool_execution.tool_call_id == "code:call"
         assert persisted[-1].pending_tools == state.pending_tools
 
         # The answer to that card is kept as the gate of the same key, which settles the call without a child.
         response.metadata = {DELEGATION_STATE_KEY: state.to_dict()}
-        decisions = {"member:call": False}
-        denial_reasons = {"member:call": "No"}
+        decisions = {"code:call": False}
+        denial_reasons = {"code:call": "No"}
         state, previous, _own = execution.prepare_delegation_state(
             response,
             agent_name="leader",
@@ -645,7 +647,7 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
-        assert state.gates == {"member:call": False}
+        assert state.gates == {"code:call": False}
         denied = await execution.advance_delegation_call(
             requirement,
             state=state,

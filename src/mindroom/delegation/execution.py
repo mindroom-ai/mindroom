@@ -128,7 +128,6 @@ class _DelegationOptions(TypedDict):
     decisions: NotRequired[dict[str, bool] | None]
     denial_reasons: NotRequired[dict[str, str | None] | None]
     approval_calls: NotRequired[Sequence[ApprovalCall]]
-    member_config_names: NotRequired[Mapping[str, str] | None]
 
 
 _RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child", default=None)
@@ -1019,7 +1018,6 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     decisions: dict[str, bool] | None = None,
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
-    member_config_names: Mapping[str, str] | None = None,
     on_event: ResumeEvents | None = None,
     background: ToolJobRuntime | None = None,
 ) -> str | None:
@@ -1043,12 +1041,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
     if on_event is not None:
         on_event(ToolStarted(deepcopy(tool)))
-    caller = agent_name
-    if requirement.member_agent_id is not None:
-        caller = (member_config_names or {}).get(requirement.member_agent_id, "")
-        if not caller:
-            msg = "Delegation requirement has no frozen member config identity"
-            raise RuntimeError(msg)
+    # A team member's id is its config name on the owned loop, so its delegations run as that member.
+    caller = agent_name if requirement.member_agent_id is None else requirement.member_agent_id
     caller_identity = replace(execution_identity, agent_name=caller)
     resolve_result = partial(_resolve_delegation_requirement, requirement, on_event=on_event)
     retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
@@ -1404,7 +1398,6 @@ async def drive_delegations[R: AnyRunRecord](
     decisions: dict[str, bool] | None = None,
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
-    member_config_names: Mapping[str, str] | None = None,
     on_event: ResumeEvents | None = None,
 ) -> R:
     """Advance one durable parent; sequential children preserve completed sibling results.
@@ -1469,7 +1462,6 @@ async def drive_delegations[R: AnyRunRecord](
                 decisions=decisions,
                 denial_reasons=denial_reasons,
                 approval_calls=approval_calls,
-                member_config_names=member_config_names,
                 on_event=on_event,
                 background=background,
             )
