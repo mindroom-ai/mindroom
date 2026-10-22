@@ -715,7 +715,7 @@ class TestVoiceHandler:
         assert result == "turn on the lights"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "timeout", "empty"])
+    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "errored", "timeout", "empty"])
     @pytest.mark.parametrize("unavailable_mention", [False, True])
     async def test_cleanup_failure_preserves_recognized_transcript(
         self,
@@ -743,9 +743,12 @@ class TestVoiceHandler:
                     message = "cleanup construction failed"
                     raise RuntimeError(message)
 
-            async def arun(self, *_args: object, **_kwargs: object) -> None:
+            async def arun(self, *_args: object, **_kwargs: object) -> RunOutput | None:
                 if failure_stage == "empty":
-                    return
+                    return None
+                if failure_stage == "errored":
+                    # Agno returns a provider failure, such as a bad API key, as an errored run carrying the error.
+                    return RunOutput(content="Error code: 401 - invalid x-api-key", status=RunStatus.error)
                 if failure_stage == "timeout":
                     raise TimeoutError
                 message = "cleanup provider failed"
@@ -766,21 +769,6 @@ class TestVoiceHandler:
             )
 
         assert result == expected
-
-    @pytest.mark.asyncio
-    async def test_a_failed_normalizer_run_keeps_the_transcription(self) -> None:
-        """Agno returns a provider failure as the run's content, which must never replace what the user said."""
-        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
-        failed = RunOutput(
-            content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
-            status=RunStatus.error,
-        )
-        with (
-            patch("mindroom.voice.handler.model_loading.get_model_instance"),
-            patch("mindroom.voice.handler.Agent") as agent_class,
-        ):
-            agent_class.return_value.arun = AsyncMock(return_value=failed)
-            assert await _process_transcription("recognized speech", config) == "recognized speech"
 
     @pytest.mark.asyncio
     async def test_cleanup_cancellation_propagates(self) -> None:
