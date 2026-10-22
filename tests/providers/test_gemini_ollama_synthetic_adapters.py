@@ -113,13 +113,13 @@ def _completed(events: list[StreamEvent]) -> TurnCompleted:
 # ---------------------------------------------------------------------------
 
 
-def test_gemini_rejects_unknown_and_dropped_extra_kwargs(tmp_path: Path) -> None:
-    """Agno-only Gemini features fail at build time with the accepted keys listed."""
-    config = ModelConfig(**_config(GEMINI, url_context=True))
+def test_gemini_rejects_unknown_extra_kwargs(tmp_path: Path) -> None:
+    """A key the Gemini adapter does not take fails at build time with the accepted keys listed."""
+    config = ModelConfig(**_config(GEMINI, url_contxt=True))
 
     with pytest.raises(
         ValueError,
-        match=r"Unsupported extra_kwargs for provider 'google': url_context\. Accepted keys: ",
+        match=r"Unsupported extra_kwargs for provider 'google': url_contxt\. Accepted keys: ",
     ):
         gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
 

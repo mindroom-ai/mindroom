@@ -1408,8 +1408,8 @@ async def test_kimi_borrows_the_login_token_for_every_request(tmp_path: Path, mo
 def test_unknown_extra_kwargs_are_rejected_with_the_valid_keys(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 
-    with pytest.raises(ValueError, match="Unsupported extra_kwargs for provider 'openai': background") as info:
-        build_provider(ModelConfig(**{**_OPENAI_RESPONSES, "extra_kwargs": {"background": True}}), runtime)
+    with pytest.raises(ValueError, match="Unsupported extra_kwargs for provider 'openai': reasoning_efort") as info:
+        build_provider(ModelConfig(**{**_OPENAI_RESPONSES, "extra_kwargs": {"reasoning_efort": "high"}}), runtime)
 
     assert "reasoning_effort" in str(info.value)
     with pytest.raises(ValueError, match="extra_body"):

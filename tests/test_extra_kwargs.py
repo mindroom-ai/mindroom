@@ -5,13 +5,16 @@ from __future__ import annotations
 import importlib
 import json
 from copy import deepcopy
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 import yaml
+from structlog.testing import capture_logs
 
+from mindroom.config import legacy_fields
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -21,13 +24,13 @@ from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
-from mindroom.providers.anthropic.settings import ClaudeSettings
+from mindroom.providers.anthropic.settings import ACCEPTED_KEYS, ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.adapter import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaSettings
-from mindroom.providers.openai.build import ProviderRuntime
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -789,8 +792,118 @@ async def test_zai_without_a_key_never_sends_the_openai_key(tmp_path: Path, chat
 
 
 def test_the_openai_family_builder_rejects_keys_its_route_does_not_take(tmp_path: Path) -> None:
-    """An Agno-only or misspelled setting fails at construction and names the keys the route accepts."""
-    model_config = ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"name": "ZAI"})
+    """A misspelled setting fails at construction and names the keys the route accepts."""
+    model_config = ModelConfig(provider="zai", id="glm-5.3", extra_kwargs={"temprature": 0.2})
 
-    with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': name\. Accepted keys: "):
+    with pytest.raises(ValueError, match=r"Unsupported extra_kwargs for provider 'zai': temprature\. Accepted keys: "):
         build_openai_provider(model_config, ProviderRuntime(runtime_paths=_runtime_paths(tmp_path)))
+
+
+# --- Retired Agno fields --------------------------------------------------------------------------------------
+
+_RETIRED_FIELD_WARNING = "Ignoring a retired config field; remove it from the config"
+
+
+def _load_with_retired_field_warnings(models: dict[str, dict[str, Any]]) -> tuple[Config, list[str]]:
+    """Load ``models`` in a fresh process state and return the config with the fields it warned about."""
+    legacy_fields._warn_retired_field.cache_clear()
+    with capture_logs() as logs:
+        config = Config.model_validate({"models": models})
+    return config, [log["field"] for log in logs if log["event"] == _RETIRED_FIELD_WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_retired_agno_field_loads_with_one_warning_and_the_model_answers(
+    tmp_path: Path,
+    chat_wire: Wire,
+) -> None:
+    """``retries`` on two OpenAI models warns once, leaves their settings, and the model still answers."""
+    retrying = {"provider": "openai", "id": "gpt-6-luna", "api": "chat_completions"}
+    config, warned = _load_with_retired_field_warnings(
+        {
+            "default": {**retrying, "extra_kwargs": {"retries": 3, "seed": 7}},
+            "helper": {**retrying, "extra_kwargs": {"retries": 1}},
+        },
+    )
+
+    assert warned == ["extra_kwargs.retries"]
+    assert config.models["default"].extra_kwargs == {"seed": 7}
+    assert config.models["helper"].extra_kwargs == {}
+    turn = await complete(
+        build_model_provider(config, _runtime_paths(tmp_path, OPENAI_API_KEY="sk-test")),
+        ModelRequest(messages=[Message(role="user", content="Hi")], stream=False),
+    )
+    assert turn.message.content == "ok"
+    [request] = chat_wire.requests
+    body = json.loads(request.content)
+    assert body["seed"] == 7
+    assert "retries" not in body
+
+
+@pytest.mark.parametrize(
+    ("provider", "field"),
+    [
+        ("synthetic", "retry_with_guidance"),
+        ("groq", "cache_response"),
+        ("kimi", "modalities"),
+        ("openai", "background"),
+        ("anthropic", "skills"),
+        ("vertexai_claude", "auth_token"),
+        ("google", "url_context"),
+    ],
+)
+def test_retired_agno_fields_load_with_one_warning_on_the_providers_that_took_them(provider: str, field: str) -> None:
+    """A field the provider's Agno model class took loads with one warning and leaves the model's other keys."""
+    config, warned = _load_with_retired_field_warnings(
+        {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True, "other": 1}}},
+    )
+
+    assert warned == [f"extra_kwargs.{field}"]
+    assert config.models["default"].extra_kwargs == {"other": 1}
+
+
+@pytest.mark.parametrize(
+    ("provider", "field"),
+    [("openai", "retriez"), ("openai", "skills"), ("groq", "audio"), ("anthropic", "url_context")],
+    ids=["typo", "claude-only", "chat-only", "gemini-only"],
+)
+def test_keys_no_agno_class_of_the_provider_took_still_fail_at_build(
+    tmp_path: Path,
+    provider: str,
+    field: str,
+) -> None:
+    """A typo or another provider's Agno field loads without a warning and fails at build with the accepted keys."""
+    config, warned = _load_with_retired_field_warnings(
+        {"default": {"provider": provider, "id": "m", "extra_kwargs": {field: True}}},
+    )
+
+    assert warned == []
+    with pytest.raises(
+        ValueError,
+        match=rf"Unsupported extra_kwargs for provider '{provider}': {field}\. Accepted keys: ",
+    ):
+        build_model_provider(config, _runtime_paths(tmp_path))
+
+
+def _accepted_keys(provider: str) -> frozenset[str]:
+    """Return every ``extra_kwargs`` key some route of ``provider`` accepts, from the settings its adapter parses."""
+    if provider in ACCEPTED_KEYS:
+        return ACCEPTED_KEYS[provider]
+    settings_types = {
+        "google": [GeminiSettings],
+        "gemini": [GeminiSettings],
+        "ollama": [OllamaSettings],
+        "synthetic": [SyntheticSettings],
+    }.get(provider, [ChatSettings, ResponsesSettings])
+    return frozenset(field.name for settings_type in settings_types for field in fields(settings_type))
+
+
+def test_no_route_accepts_a_retired_agno_field_of_its_provider() -> None:
+    """Config load drops a retired field only where no route would take it, so no accepted setting is lost."""
+    providers = frozenset(ACCEPTED_KEYS) | OPENAI_FAMILY_PROVIDERS | {"google", "gemini", "ollama", "synthetic"}
+
+    for retired in legacy_fields._RETIRED_MODEL_SETTINGS:
+        scope = providers if retired.providers is None else retired.providers
+        assert scope <= providers
+        for provider in scope:
+            assert not retired.fields & _accepted_keys(provider), provider
