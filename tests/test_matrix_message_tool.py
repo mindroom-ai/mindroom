@@ -692,15 +692,15 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
         ),
         test_runtime_paths(tmp_path),
     )
-    team_turn = _make_context(
+    context = _make_context(
         storage_path=tmp_path,
         attachment_ids=("att_member",),
         thread_id="$ctx-thread:localhost",
         resolved_thread_id=None,
     )
-    # A member's call sees the team's turn context, naming the member as the running agent.
+    # A member's tool call runs under the team's turn context with the member named as the running agent.
     member_call = replace(
-        team_turn,
+        context,
         agent_name="general",
         transport_agent_name="squad",
         config=config,
