@@ -31,6 +31,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
+from mindroom.providers.anthropic.wire import supports_prefill
 from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -357,6 +358,20 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
     assert [(block["type"], block["text"]) for block in turns[-1]["content"]] == [("text", "continue")]
     # Two assistant turns share one message only without the earlier turn's thinking.
     assert [(block["type"], block["text"]) for block in turns[-2]["content"]] == [("text", "A"), ("text", "B")]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "prefill"),
+    [
+        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", True),
+        ("global.anthropic.claude-opus-4-6-v1:0", False),
+        ("claude-sonnet-4@20250514", True),
+        ("claude-sonnet-4-6", False),
+    ],
+)
+def test_prefill_support_reads_the_model_behind_bedrock_and_vertex_ids(model_id: str, *, prefill: bool) -> None:
+    """Bedrock's region prefix and version suffix and Vertex's snapshot suffix do not hide which model answers."""
+    assert supports_prefill(model_id) is prefill
 
 
 @pytest.mark.asyncio

@@ -123,17 +123,13 @@ _STOP_REASONS: dict[str, StopReason] = {
 
 
 def _core_model_id(model_id: str) -> str:
-    """Strip the provider-specific decorations of a Claude model id.
+    """Strip the route decorations that hide which Claude model an id names from the prefix and alias checks.
 
-    Handles ``anthropic/claude-sonnet-4-6`` (LiteLLM), ``us.anthropic.claude-sonnet-4-6-v1:0`` (Bedrock),
-    and ``claude-sonnet-4@20250514`` (Vertex AI).
+    A Bedrock id such as ``us.anthropic.claude-opus-4-6-v1:0`` loses its region and ``anthropic.`` prefix, and a
+    Vertex AI id such as ``claude-sonnet-4@20250514`` its snapshot. A Bedrock version suffix never changes a
+    check, because every prefix ends before it and no Bedrock id is a bare alias.
     """
-    core_id = model_id.rsplit("/", 1)[-1]
-    core_id = core_id.split("anthropic.")[-1] if "anthropic." in core_id else core_id
-    core_id = core_id.split("@", 1)[0]
-    if ":0" in core_id:
-        core_id = core_id.split("-v")[0] if "-v" in core_id else core_id.split(":")[0]
-    return core_id
+    return model_id.rsplit("anthropic.", 1)[-1].split("@", 1)[0]
 
 
 def supports_prefill(model_id: str) -> bool:
