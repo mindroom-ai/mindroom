@@ -77,8 +77,14 @@ _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
-# The Graph external audience each choice sets. Agno turns an argument of "none" into None before the tool runs,
-# so Graph's "none" is offered as internal_only.
+# AGNO_COMPAT: Tool-call argument parsing turns the strings none, null, true, and false into None and booleans.
+# Reason: Agno 3.0.9 get_function_call rewrites any string argument equal to one of them, ignoring case and spaces,
+# before the tool runs, so an external_audience of Graph's "none" always arrived as no audience; the choice that sets
+# Graph's "none" is therefore named internal_only.
+# Upstream issue: Tracking gap; a search of agno-agi/agno issues found none (checked October 22, 2026).
+# Upstream PR: None identified.
+# Remove when: Agno passes string arguments through unchanged; internal_only can stay as the choice's name.
+# Coverage: tests/test_outlook_mail_tool.py::test_every_choice_reaches_the_tool_through_agnos_argument_parsing
 _EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
 # Graph writes these values in either case; reads report them as the setter takes them.
 _READ_STATUSES = {status.casefold(): status for status in _AUTOMATIC_REPLY_STATUSES}
@@ -812,8 +818,8 @@ class OutlookMailTools(Toolkit):
 
         status is disabled, alwaysEnabled, or scheduled; scheduled_start and scheduled_end, ending in Z for UTC,
         apply only to scheduled. external_audience says which senders outside the organization get external_message:
-        internal_only for none of them, contactsOnly, or all. The messages come back as plain text, and every value
-        is one outlook_mail_set_automatic_replies takes.
+        internal_only for none of them, contactsOnly, or all; status and external_audience come back as
+        outlook_mail_set_automatic_replies takes them. The messages come back as plain text.
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
