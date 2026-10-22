@@ -477,7 +477,7 @@ async def _continue_child(
         decisions = None
         denial_reasons = None
         approval_calls = ()
-    return await drive_delegations(
+    return await _drive_delegations(
         persisted,
         store=runner.store,
         session=runner.session,
@@ -1382,7 +1382,7 @@ def prepare_delegation_state(
     return state, previous_state, own
 
 
-async def drive_delegations[R: AnyRunRecord](
+async def _drive_delegations[R: AnyRunRecord](
     response: R,
     *,
     store: ConversationStore | None,
@@ -1514,7 +1514,7 @@ async def drive_delegation_stream[R: AnyRunRecord](
     paused = cast("R", record)
 
     async def drive(on_event: Callable[[object], None]) -> R:
-        return await drive_delegations(
+        return await _drive_delegations(
             paused,
             store=store,
             session=session,

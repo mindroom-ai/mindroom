@@ -37,7 +37,7 @@ from mindroom.knowledge.search import (
     KnowledgeSource,
     KnowledgeSourceDescription,
     _format_search_hits,
-    knowledge_search_tool_description,
+    _knowledge_search_tool_description,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.providers.openai.chat_wire import function_definition
@@ -361,7 +361,7 @@ def test_search_function_definition_is_the_golden_tool(memory_search_available: 
         for tool in request["tools"]
         if tool["function"]["name"] == KNOWLEDGE_SEARCH_TOOL_NAME
     ][:1]
-    expected_description = knowledge_search_tool_description(
+    expected_description = _knowledge_search_tool_description(
         (source.description,),
         memory_search_available=memory_search_available,
     )

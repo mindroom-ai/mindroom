@@ -57,7 +57,7 @@ class KnowledgeSource:
     index: _KnowledgeIndex
 
 
-def knowledge_search_tool_description(
+def _knowledge_search_tool_description(
     sources: Sequence[KnowledgeSourceDescription],
     *,
     memory_search_available: bool,
@@ -200,7 +200,7 @@ class AgentKnowledge:
             return await self._search_tool_result(query)
 
         function = Function.from_callable(search_knowledge_base, name=KNOWLEDGE_SEARCH_TOOL_NAME)
-        function.description = knowledge_search_tool_description(
+        function.description = _knowledge_search_tool_description(
             tuple(source.description for source in self.sources),
             memory_search_available=memory_search_available,
         )

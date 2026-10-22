@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 # Keep extraction behavior-neutral for per-logger routing and emitted logger fields.
 logger = get_logger("mindroom.ai")
 
-type AgentBuilder = Callable[[], tuple[ResolvedRuntimeModel, AgentBuild]]
-type BuiltAgent = tuple[ResolvedRuntimeModel, AgentBuild]
+type _AgentBuilder = Callable[[], tuple[ResolvedRuntimeModel, AgentBuild]]
+type _BuiltAgent = tuple[ResolvedRuntimeModel, AgentBuild]
 
 # Agent construction is synchronous and must stay off the event loop, but the
 # default executor is shared with hundreds of unrelated offloads.  Keeping the
@@ -47,14 +47,14 @@ def _log_secondary_agent_error(agent_name: str, error: Exception) -> None:
     )
 
 
-def _run_agent_build_in_context(context: contextvars.Context, build_agent: AgentBuilder) -> BuiltAgent:
+def _run_agent_build_in_context(context: contextvars.Context, build_agent: _AgentBuilder) -> _BuiltAgent:
     """Run one synchronous agent build inside its captured dispatch context."""
     return context.run(build_agent)
 
 
 async def _drain_unreturned_agent_build(
-    build_future: asyncio.Future[BuiltAgent],
-    build_call: Future[BuiltAgent],
+    build_future: asyncio.Future[_BuiltAgent],
+    build_call: Future[_BuiltAgent],
     *,
     agent_name: str,
 ) -> None:
@@ -87,11 +87,11 @@ async def _drain_unreturned_agent_build(
         _log_secondary_agent_error(agent_name, error)
 
 
-async def build_agent_off_loop(build_agent: AgentBuilder, *, agent_name: str) -> BuiltAgent:
+async def build_agent_off_loop(build_agent: _AgentBuilder, *, agent_name: str) -> _BuiltAgent:
     """Build one agent off-loop, letting a cancelled build finish before the cancellation propagates."""
     context = contextvars.copy_context()
-    build_call: Future[BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
-    build_future: asyncio.Future[BuiltAgent] = asyncio.wrap_future(build_call)
+    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
+    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
     try:
         return await asyncio.shield(build_future)
     except asyncio.CancelledError:
@@ -102,7 +102,7 @@ async def build_agent_off_loop(build_agent: AgentBuilder, *, agent_name: str) ->
 async def _prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
-    build_agent: AgentBuilder,
+    build_agent: _AgentBuilder,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:
@@ -119,13 +119,13 @@ async def _prepare_prompt_branches(
 
     context = contextvars.copy_context()
     _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-    build_call: Future[BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
-    build_future: asyncio.Future[BuiltAgent] = asyncio.wrap_future(build_call)
+    build_call: Future[_BuiltAgent] = _AGENT_BUILD_EXECUTOR.submit(_run_agent_build_in_context, context, build_agent)
+    build_future: asyncio.Future[_BuiltAgent] = asyncio.wrap_future(build_call)
     build_future.add_done_callback(
         lambda _future: _mark_pipeline_timing(pipeline_timing, "agent_build_ready"),
     )
 
-    async def _agent_branch() -> BuiltAgent | Exception:
+    async def _agent_branch() -> _BuiltAgent | Exception:
         try:
             return await asyncio.shield(build_future)
         except Exception as error:
@@ -154,7 +154,7 @@ async def _prepare_prompt_branches(
 async def prepare_prompt_branches(
     *,
     prepare_memory: Callable[[], Awaitable[MemoryPromptParts]],
-    build_agent: AgentBuilder,
+    build_agent: _AgentBuilder,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None,
 ) -> tuple[MemoryPromptParts, ResolvedRuntimeModel, AgentBuild]:

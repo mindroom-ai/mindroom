@@ -24,7 +24,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
-from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import ApprovalCall, EventJournalStore, ToolJobStore, approval_arguments_digest
 from mindroom.event_journal.offloading import ThreadOffload
@@ -784,7 +784,7 @@ class DelegatingLeader:
             scope=_LEADER_SCOPE,
             user_id=self.identity.requester_id,
         )
-        return await drive_delegations(
+        return await _drive_delegations(
             record,
             store=self.store,
             session=self.session,

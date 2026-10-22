@@ -102,7 +102,7 @@ async def test_closed_stream_observes_driver_failure(
         finally:
             await stream.aclose()  # type: ignore[attr-defined]
 
-    monkeypatch.setattr(execution, "drive_delegations", drive)
+    monkeypatch.setattr(execution, "_drive_delegations", drive)
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     try:
         if consumer_failure is None:
@@ -125,7 +125,7 @@ async def test_exhausted_stream_propagates_driver_failure(monkeypatch: pytest.Mo
         message = "Driver failed"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(execution, "drive_delegations", drive)
+    monkeypatch.setattr(execution, "_drive_delegations", drive)
     stream = _stream()
     assert await anext(stream) == ContentDelta("partial output")
     with pytest.raises(RuntimeError, match="Driver failed"):
@@ -158,7 +158,7 @@ async def test_cancelled_stream_drains_its_continuation_task(  # noqa: PLR0915
             cleanup_finished.set()
         return response
 
-    monkeypatch.setattr(execution, "drive_delegations", drive)
+    monkeypatch.setattr(execution, "_drive_delegations", drive)
     stream = _stream()
 
     async def consume() -> None:
@@ -264,7 +264,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
             user_id=identity.requester_id,
         )
         with pytest.raises(failure, match="Consumer stopped"):
-            await execution.drive_delegations(
+            await execution._drive_delegations(
                 paused,
                 store=store,
                 session=session,

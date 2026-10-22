@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
+from mindroom.delegation.execution import _drive_delegations, drive_delegation_stream
 from mindroom.delegation.state import DelegationState
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -111,7 +111,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
             config.agents["leader"].delegate_to = []
         decisions = None
         if rejection == "policy":
-            response = await drive_delegations(response, **options)
+            response = await _drive_delegations(response, **options)
             assert response.status is RunStatus.paused
             state = DelegationState.from_metadata(response.metadata)
             decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}

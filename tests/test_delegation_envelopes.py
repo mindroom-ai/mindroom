@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.records import DelegationRecordOwner
 from mindroom.delegation.state import DelegationState
@@ -149,7 +149,7 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
     if parent is not None:
         # The parent's run stored its pause; the driver owns the delegation from there.
-        operation = drive_delegations(
+        operation = _drive_delegations(
             parent.record,
             store=parent.store,
             session=parent.session,
