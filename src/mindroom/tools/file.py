@@ -72,6 +72,8 @@ class _MindRoomFileTools(AgnoFileTools):
         **kwargs: object,
     ) -> None:
         self.restrict_to_base_dir = file_access == "workspace"
+        # Without a workspace the base dir is only the process working directory, which workspace access refuses.
+        self.has_workspace = bool(base_dir)
         self.shared_directory_roots = shared_directory_roots
         super().__init__(
             base_dir=base_dir,

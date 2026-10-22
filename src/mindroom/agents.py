@@ -957,6 +957,7 @@ def _render_tool_execution_environment(
     worker_routed_tool_names: tuple[str, ...],
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
+    has_workspace: bool,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
@@ -970,7 +971,11 @@ def _render_tool_execution_environment(
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
     file_access_description = {
-        "workspace": "agent workspace and attachments only",
+        "workspace": (
+            "agent workspace and attachments only"
+            if has_workspace
+            else "this agent has no workspace, so path tools in the primary runtime reach only attachments"
+        ),
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
@@ -1665,6 +1670,7 @@ def _build_agent_role_context(
             worker_routed_tool_names=worker_routed_tool_names,
             worker_scope=agent_runtime.execution.execution_scope,
             file_access=config.resolve_entity(agent_name).file_access,
+            has_workspace=agent_runtime.tool_base_dir is not None,
             unconfined_tool_names=_unconfined_tool_names(
                 (*local_tool_names, *worker_routed_tool_names),
                 requires_primary_runtime=False,

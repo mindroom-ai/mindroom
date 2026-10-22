@@ -136,6 +136,29 @@ def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
     assert tool.read_file(str(other / "secret.md")).startswith("Error")
 
 
+def test_tools_without_a_workspace_reach_only_their_shares(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a workspace, a share stays reachable by absolute path while the working directory is refused."""
+    _workspace, share, other = _layout(tmp_path)
+    monkeypatch.chdir(other)
+    roots = (_root(share, writable=True),)
+    file_tool = file_tools()(file_access="workspace", shared_directory_roots=lambda: roots)
+    coding_tool = CodingTools(file_access="workspace", shared_directory_roots=lambda: roots)
+
+    assert file_tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
+    assert not file_tool.replace_file_chunk(str(share / "summary.md"), 1, 1, "edited").startswith("Error")
+    assert (share / "summary.md").read_text(encoding="utf-8") == "hello\nedited\n"
+    assert coding_tool.write_file(str(share / "new.md"), "x").startswith("Wrote")
+    assert coding_tool.ls(str(share)) == f"{share / 'new.md'}\n{share / 'summary.md'}"
+    refusals = [
+        file_tool.read_file("secret.md"),
+        file_tool.read_file(str(other / "secret.md")),
+        file_tool.list_files(),
+        coding_tool.read_file("secret.md"),
+        coding_tool.ls(),
+    ]
+    assert all(refusal.startswith("Error: this agent has no workspace") for refusal in refusals)
+
+
 def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:
     """Unrestricted file access already reaches shares by path, so writes are not narrowed."""
     workspace, share, _other = _layout(tmp_path)

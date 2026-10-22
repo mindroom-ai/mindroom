@@ -116,17 +116,16 @@ def _stream(message: dict[str, Any]) -> str:
 
 def _coder_config(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     *,
     context_window: int | None = None,
     compaction: CompactionConfig | None = None,
 ) -> Config:
-    """A Claude coding agent whose file tool writes into the test directory."""
-    # Without a configured workspace the file tool writes relative to the working directory.
-    monkeypatch.chdir(tmp_path)
+    """A Claude coding agent whose file tool writes into its workspace below the test directory."""
     return bind_runtime_paths(
         Config(
-            agents={"coder": AgentConfig(display_name="Coder", model="claude", tools=["file"])},
+            agents={
+                "coder": AgentConfig(display_name="Coder", model="claude", tools=["file"], memory_backend="file"),
+            },
             models={
                 "claude": ModelConfig(
                     provider="anthropic",
@@ -143,20 +142,19 @@ def _coder_config(
 
 
 @pytest.fixture
-def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
-    """A Claude coding agent whose file tool writes into the test directory."""
-    return _coder_config(tmp_path, monkeypatch)
+def config(tmp_path: Path) -> Config:
+    """A Claude coding agent whose file tool writes into its workspace below the test directory."""
+    return _coder_config(tmp_path)
 
 
 @pytest.fixture
-def compacting_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+def compacting_config(tmp_path: Path) -> Config:
     """The same agent with a context window that one cut-off response's output overfills, so its retry is compacted.
 
     Naming the summary model keeps compaction in MindRoom instead of Claude's native compaction.
     """
     return _coder_config(
         tmp_path,
-        monkeypatch,
         context_window=30_000,
         compaction=CompactionConfig(model="claude", reserve_tokens=4096),
     )
