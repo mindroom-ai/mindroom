@@ -30,7 +30,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.loop_hooks import leader_loop_hooks
+from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members, team_label
@@ -472,21 +472,21 @@ async def continue_paused_team_run(
                 storage=storage,
                 records=attempt.records,
                 hooks=leader_loop_hooks(
-                    config=config,
-                    runtime_paths=runtime_paths,
+                    HookTurn(
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        model_name=model_name,
+                        store=storage.store,
+                        session=storage.session,
+                        scope=storage.scope,
+                        scoped=True,
+                        native_compaction=native.native_compaction if native is not None else None,
+                        prompt_id=None,
+                    ),
                     entity_name=configured_team_name,
                     scope_id=built.spec.id,
                     model=built.spec.model,
-                    model_name=model_name,
                     history_settings=settings,
-                    store=storage.store,
-                    session=storage.session,
-                    scope=storage.scope,
-                    scoped=True,
-                    native_compaction=native.native_compaction if native is not None else None,
-                    prompt_id=None,
-                    lifecycle=None,
-                    turn_recorder=None,
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
                 ),

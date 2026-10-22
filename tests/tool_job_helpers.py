@@ -34,7 +34,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -454,16 +454,18 @@ async def run_built_turn(
     name = build.spec.id
     hooks = agent_loop_hooks(
         build,
-        config=config,
-        runtime_paths=runtime_paths,
+        HookTurn(
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name="default",
+            store=None,
+            session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
+            scope=None,
+            scoped=False,
+            native_compaction=None,
+            prompt_id=None,
+        ),
         agent_name=name,
-        model_name="default",
-        store=None,
-        session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
-        scope=None,
-        scoped=False,
-        native_compaction=None,
-        prompt_id=None,
     )
     finished = [
         event.record
@@ -737,16 +739,18 @@ class DelegatingLeader:
         )
         hooks = agent_loop_hooks(
             build,
-            config=self.config,
-            runtime_paths=self.paths,
+            HookTurn(
+                config=self.config,
+                runtime_paths=self.paths,
+                model_name="default",
+                store=self.store,
+                session=self.session,
+                scope=_LEADER_SCOPE,
+                scoped=False,
+                native_compaction=None,
+                prompt_id=None,
+            ),
             agent_name="leader",
-            model_name="default",
-            store=self.store,
-            session=self.session,
-            scope=_LEADER_SCOPE,
-            scoped=False,
-            native_compaction=None,
-            prompt_id=None,
         )
         events = run_agent(
             replace(build.spec, system_message=prompt_for_turn(build)),

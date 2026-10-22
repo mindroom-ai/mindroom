@@ -18,9 +18,10 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
-from mindroom.loop_hooks import leader_loop_hooks
+from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
+from mindroom.teams.storage import team_history_settings
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -475,21 +476,21 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         assert built.leader_jobs is not None
         assert built.leader_jobs.team
         hooks = leader_loop_hooks(
-            config=config,
-            runtime_paths=runtime_paths,
+            HookTurn(
+                config=config,
+                runtime_paths=runtime_paths,
+                model_name="default",
+                store=None,
+                session=None,
+                scope=None,
+                scoped=False,
+                native_compaction=None,
+                prompt_id=None,
+            ),
             entity_name="pair",
             scope_id=built.spec.id,
             model=built.spec.model,
-            model_name="default",
-            history_settings=config.resolve_entity("pair").history_settings,
-            store=None,
-            session=None,
-            scope=None,
-            scoped=False,
-            native_compaction=None,
-            prompt_id=None,
-            lifecycle=None,
-            turn_recorder=None,
+            history_settings=team_history_settings(config, "pair"),
             tool_middleware=built.leader_middleware,
             jobs=built.leader_jobs,
         )

@@ -83,6 +83,7 @@ Matrix sync callback
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, model-switch continuation, empty-run retry, interrupt recording) |
+| `loop_hooks.py` | The hooks every run or resume installs on the owned loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
@@ -96,7 +97,6 @@ Matrix sync callback
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval/resume.py` | Resuming a persisted paused agent run on the owned loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |
-| `loop_hooks.py` | The hooks an agent's or a team leader's run or resume, a team member's included, installs on the owned loop, composed once in the order the turn applies them |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval/manager.py` | Matrix-backed tool approval runtime state |

@@ -43,7 +43,7 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.loop_hooks import leader_loop_hooks
+from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
@@ -373,21 +373,23 @@ def _leader_run(
         spec=built.spec,
         storage=storage,
         hooks=leader_loop_hooks(
-            config=config,
-            runtime_paths=runtime_paths,
+            HookTurn(
+                config=config,
+                runtime_paths=runtime_paths,
+                model_name=prepared.runtime_model_name,
+                store=storage.store if storage is not None else None,
+                session=storage.session if storage is not None else None,
+                scope=storage.scope if storage is not None else None,
+                scoped=storage is not None and plan is not None and plan.add_history_to_context,
+                native_compaction=native.native_compaction if native is not None else None,
+                prompt_id=prepared.turn.prompt.id,
+                lifecycle=compaction_lifecycle,
+                turn_recorder=turn_recorder,
+            ),
             entity_name=configured_team_name,
             scope_id=built.spec.id,
             model=built.spec.model,
-            model_name=prepared.runtime_model_name,
             history_settings=team_history_settings(config, configured_team_name),
-            store=storage.store if storage is not None else None,
-            session=storage.session if storage is not None else None,
-            scope=storage.scope if storage is not None else None,
-            scoped=storage is not None and plan is not None and plan.add_history_to_context,
-            native_compaction=native.native_compaction if native is not None else None,
-            prompt_id=prepared.turn.prompt.id,
-            lifecycle=compaction_lifecycle,
-            turn_recorder=turn_recorder,
             tool_middleware=built.leader_middleware,
             jobs=built.leader_jobs,
         ),

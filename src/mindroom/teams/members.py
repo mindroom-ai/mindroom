@@ -19,7 +19,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.session_context import resolve_bound_team_scope_context
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.providers.registry import build_model_provider
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.formation import (
@@ -348,16 +348,18 @@ def _team_member(
         hooks=partial(
             agent_loop_hooks,
             as_member,
-            config=config,
-            runtime_paths=runtime_paths,
+            HookTurn(
+                config=config,
+                runtime_paths=runtime_paths,
+                model_name=model_name,
+                store=None,
+                session=None,
+                scope=None,
+                scoped=False,
+                native_compaction=None,
+                prompt_id=None,
+            ),
             agent_name=build.spec.id,
-            model_name=model_name,
-            store=None,
-            session=None,
-            scope=None,
-            scoped=False,
-            native_compaction=None,
-            prompt_id=None,
             queued_notices=False,
         ),
         request_template=build.request_template,

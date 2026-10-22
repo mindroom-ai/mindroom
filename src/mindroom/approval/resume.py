@@ -20,7 +20,7 @@ from mindroom.history.request_messages import build_resume_request, replayed_his
 from mindroom.llm.events import RunFinished
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import DENIED_WITHOUT_REASON
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -198,16 +198,18 @@ class ResumeRunner:
             user_id=self.user_id,
             hooks=agent_loop_hooks(
                 build,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
+                HookTurn(
+                    config=self.config,
+                    runtime_paths=self.runtime_paths,
+                    model_name=self.model_name,
+                    store=self.store,
+                    session=self.session,
+                    scope=self.scope,
+                    scoped=plan.add_history_to_context,
+                    native_compaction=native_compaction,
+                    prompt_id=None,
+                ),
                 agent_name=self.agent_name,
-                model_name=self.model_name,
-                store=self.store,
-                session=self.session,
-                scope=self.scope,
-                scoped=plan.add_history_to_context,
-                native_compaction=native_compaction,
-                prompt_id=None,
             ),
             persist=persist_to(self.store, self.session),
             request_template=replace(

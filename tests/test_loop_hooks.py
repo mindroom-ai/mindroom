@@ -11,7 +11,7 @@ from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.config.main import Config
 from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.llm.provider import Capabilities, ModelRequest
-from mindroom.loop_hooks import agent_loop_hooks, leader_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_jobs.execution import JobActor
@@ -55,11 +55,9 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         tool_jobs=JobActor(name="general", team=False, depth=0, tools={}),
     )
 
-    agent = agent_loop_hooks(
-        build,
+    turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
-        agent_name="general",
         model_name="default",
         store=None,
         session=None,
@@ -67,26 +65,22 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         scoped=False,
         native_compaction=None,
         prompt_id=None,
+    )
+
+    agent = agent_loop_hooks(
+        build,
+        turn,
+        agent_name="general",
         participation=ParticipationGate(),
         skill_review_capture=SkillReviewCapture(),
         run_id="run",
     )
     leader = leader_loop_hooks(
-        config=config,
-        runtime_paths=runtime_paths,
+        turn,
         entity_name=None,
         scope_id="squad",
         model=model,
-        model_name="default",
         history_settings=settings,
-        store=None,
-        session=None,
-        scope=None,
-        scoped=False,
-        native_compaction=None,
-        prompt_id=None,
-        lifecycle=None,
-        turn_recorder=None,
         tool_middleware=(_middleware,),
         jobs=JobActor(name="squad", team=True, depth=0, tools={}),
     )

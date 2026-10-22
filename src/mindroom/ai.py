@@ -63,7 +63,7 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import (
     ConversationRef,
@@ -765,19 +765,21 @@ def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, sto
     plan = prepared.prepared_history.replay_plan
     return agent_loop_hooks(
         prepared.build,
-        config=run_context.config,
-        runtime_paths=run_context.runtime_paths,
+        HookTurn(
+            config=run_context.config,
+            runtime_paths=run_context.runtime_paths,
+            model_name=prepared.runtime_model_name,
+            store=storage.store,
+            session=storage.session,
+            scope=storage.scope,
+            scoped=storage.store is not None and plan is not None and plan.add_history_to_context,
+            native_compaction=native.native_compaction if native is not None else None,
+            prompt_id=prepared.turn.prompt.id,
+            lifecycle=run_context.compaction_lifecycle,
+            turn_recorder=run_context.turn_recorder,
+        ),
         agent_name=run_context.agent_name,
-        model_name=prepared.runtime_model_name,
-        store=storage.store,
-        session=storage.session,
-        scope=storage.scope,
-        scoped=storage.store is not None and plan is not None and plan.add_history_to_context,
-        native_compaction=native.native_compaction if native is not None else None,
-        prompt_id=prepared.turn.prompt.id,
         participation=ctx.participation,
-        lifecycle=run_context.compaction_lifecycle,
-        turn_recorder=run_context.turn_recorder,
         skill_review_capture=ctx.skill_review_capture,
         run_id=attempt.run_id,
     )

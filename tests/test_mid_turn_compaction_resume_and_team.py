@@ -34,7 +34,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
@@ -233,16 +233,18 @@ async def _pause(agent: _Resumable) -> RunRecord:
         ctx=RunContext(run_id=str(uuid4()), session_id="session-1", session_state=agent.session.session_state),
         hooks=agent_loop_hooks(
             build,
-            config=agent.config,
-            runtime_paths=agent.runtime_paths,
+            HookTurn(
+                config=agent.config,
+                runtime_paths=agent.runtime_paths,
+                model_name="default",
+                store=agent.store,
+                session=agent.session,
+                scope=_SCOPE,
+                scoped=agent.replays_history,
+                native_compaction=None,
+                prompt_id=turn.prompt.id,
+            ),
             agent_name="test_agent",
-            model_name="default",
-            store=agent.store,
-            session=agent.session,
-            scope=_SCOPE,
-            scoped=agent.replays_history,
-            native_compaction=None,
-            prompt_id=turn.prompt.id,
         ),
         persist=persist_to(agent.store, agent.session),
         request_template=replace(build.request_template, stream=False),
