@@ -5,7 +5,6 @@
       "agents": {
         "assistant": {
           "display_name": "Assistant",
-          "learning": false,
           "role": "Answer questions about the team handbook.",
           "tools": [
             "dynamic_workflow"
@@ -21,7 +20,6 @@
           "instructions": [
             "Name your sources."
           ],
-          "learning": false,
           "role": "Research topics in depth.",
           "tools": [
             "calculator"

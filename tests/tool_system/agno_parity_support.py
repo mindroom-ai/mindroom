@@ -1,10 +1,11 @@
-"""Build registered tools the way the C3 tool goldens were captured, so the owned adapter can be compared to them.
+"""Build registered tools the way the C3 tool goldens were captured from Agno 3.0.9, and read them as the goldens do.
 
 `tests/fixtures/agno_parity/README.md` describes the goldens.
-`tests/agno_parity/capture_tools.py` captures them with this same setup, so capture and comparison cannot drift: one
-agent of a config shaped like `mindroom config init` output, dummy credentials for tools that need settings, offline
-replacements for SDK clients that contact their service while constructing, and a hidden host environment that refuses
-network connections.
+The capture used this same setup: one agent of a config shaped like `mindroom config init` output, dummy credentials
+for tools that need settings, offline replacements for SDK clients that contact their service while constructing, and
+a hidden host environment that refuses network connections.
+The parity tests compare what they build with the goldens through `golden_entry` and `argument_outcome`, and
+`tests.agno_parity.regenerate_tool_goldens` rewrites the goldens through the same two functions.
 """
 
 from __future__ import annotations
@@ -20,21 +21,32 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
+from agno.tools import Toolkit
 from packaging.version import Version
 
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dependencies import check_deps_installed, optional_dependency_environment
 from mindroom.tool_system.dynamic_toolkits import defer_toolkit
+from mindroom.tool_system.invocation import (
+    MISSING_TOOL_ERROR_TEXT,
+    ToolArgumentError,
+    ToolCallContext,
+    execute_tool_call,
+    parse_tool_arguments,
+)
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
+from tests.agno_parity import tool_argument_probes as probes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
+    from typing import Any
 
-    from agno.tools import Toolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "tools"
 SCHEMAS_PATH = FIXTURE_DIR / "schemas.json"
@@ -252,3 +264,60 @@ def normalize_version(value: object) -> object:
 def normalize_error_text(text: str) -> str:
     """Replace the pydantic version in error links, which changes with every pydantic upgrade."""
     return _PYDANTIC_ERROR_URL.sub(_PYDANTIC_ERROR_URL_PLACEHOLDER, text)
+
+
+def golden_entry(toolkit: Toolkit, adapted: AdaptedToolkit) -> dict[str, object]:
+    """Return the golden entry of one built toolkit: Agno's toolkit settings, then each function as the adapter reports it.
+
+    The functions are in Agno's async-run order, which the adapter keeps. ``show_result`` comes from Agno's function
+    because the owned loop never reads it: it never echoes a tool result, so a function that sets it asks for nothing.
+    """
+    agno_functions = toolkit.get_async_functions().values()
+    entry = {
+        "instructions": toolkit.instructions,
+        "add_instructions": toolkit.add_instructions,
+        "functions": [
+            {
+                "name": function.name,
+                "description": function.description,
+                "parameters": function.parameters,
+                "strict": function.strict,
+                "requires_confirmation": function.requires_confirmation,
+                "external_execution": function.external_execution,
+                "approval_type": function.approval_type,
+                "stop_after_tool_call": function.stop_after_tool_call,
+                "show_result": agno_function.show_result,
+            }
+            for function, agno_function in zip(adapted.functions, agno_functions, strict=True)
+        ],
+    }
+    normalized = normalize_version(entry)
+    assert isinstance(normalized, dict)
+    return normalized
+
+
+def probe_functions() -> dict[str, ToolFunction]:
+    """Adapt the argument probes as one toolkit, keyed by function name."""
+    toolkit = Toolkit(name="probes", tools=list(probes.PROBES))
+    return {function.name: function for function in adapt_toolkit(toolkit).functions}
+
+
+def golden_call_context() -> ToolCallContext:
+    """Return the call context the argument goldens run under."""
+    return ToolCallContext(run_id="run-1", session_id="session-1", user_id="@user:localhost")
+
+
+async def argument_outcome(case: Mapping[str, Any], functions: Mapping[str, ToolFunction]) -> dict[str, object]:
+    """Resolve and run one golden tool call as the owned loop does; return what the probe body or the model saw."""
+    outcome: dict[str, object] = {"function": case["function"], "raw_arguments": case["raw_arguments"]}
+    function = functions.get(case["function"])
+    if function is None:
+        return {**outcome, "error_text": MISSING_TOOL_ERROR_TEXT}
+    parsed = parse_tool_arguments(case["raw_arguments"], function)
+    if isinstance(parsed, ToolArgumentError):
+        return {**outcome, "error_text": normalize_error_text(parsed.error_text)}
+    outcome["arguments"] = parsed
+    result = await execute_tool_call(function, parsed, golden_call_context())
+    if result.is_error:
+        return {**outcome, "error_text": normalize_error_text(result.content)}
+    return {**outcome, "kwargs": json.loads(result.content)}

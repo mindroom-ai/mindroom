@@ -9,7 +9,6 @@
           "instructions": [
             "Explain each command before running it."
           ],
-          "learning": false,
           "memory_backend": "file",
           "role": "Operate the build machine.",
           "tools": [

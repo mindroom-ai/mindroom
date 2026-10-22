@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - pydantic resolves the annotations at wrap time.
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -20,7 +21,6 @@ from agno.tools.function import ToolResult
 from mindroom.llm.media import File, Image
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
 from mindroom.tool_system.invocation import (
-    MISSING_TOOL_ERROR_TEXT,
     ToolArgumentError,
     ToolCall,
     ToolCallContext,
@@ -32,7 +32,6 @@ from mindroom.tool_system.invocation import (
     run_tool_call,
 )
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
-from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -48,9 +47,7 @@ def _functions(*tools: Callable[..., object]) -> dict[str, ToolFunction]:
 
 
 def _context(**overrides: object) -> ToolCallContext:
-    values: dict[str, object] = {"run_id": "run-1", "session_id": "session-1", "user_id": "@user:localhost"}
-    values.update(overrides)
-    return ToolCallContext(**values)
+    return replace(support.golden_call_context(), **overrides)
 
 
 async def _run(function: ToolFunction, raw_arguments: str, **context: object) -> ToolOutcome:
@@ -62,30 +59,14 @@ async def _run(function: ToolFunction, raw_arguments: str, **context: object) ->
 @pytest.fixture(scope="module")
 def probe_functions() -> dict[str, ToolFunction]:
     """Adapt the argument probes once per worker."""
-    return _functions(*probes.PROBES)
-
-
-async def run_golden_case(case: dict[str, Any], functions: dict[str, ToolFunction]) -> dict[str, object]:
-    """Resolve and run one golden tool call as the owned loop will; return what the probe body or the model saw."""
-    outcome: dict[str, object] = {"function": case["function"], "raw_arguments": case["raw_arguments"]}
-    function = functions.get(case["function"])
-    if function is None:
-        return {**outcome, "error_text": MISSING_TOOL_ERROR_TEXT}
-    parsed = parse_tool_arguments(case["raw_arguments"], function)
-    if isinstance(parsed, ToolArgumentError):
-        return {**outcome, "error_text": support.normalize_error_text(parsed.error_text)}
-    outcome["arguments"] = parsed
-    result = await execute_tool_call(function, parsed, _context())
-    if result.is_error:
-        return {**outcome, "error_text": support.normalize_error_text(result.content)}
-    return {**outcome, "kwargs": json.loads(result.content)}
+    return support.probe_functions()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case_id", sorted(ARGUMENTS))
 async def test_argument_case_matches_golden(case_id: str, probe_functions: dict[str, ToolFunction]) -> None:
     """Each raw tool call decodes, coerces, runs, or fails with the stored arguments and text the golden records."""
-    outcome = await run_golden_case(ARGUMENTS[case_id], probe_functions)
+    outcome = await support.argument_outcome(ARGUMENTS[case_id], probe_functions)
 
     assert json.loads(json.dumps(outcome)) == ARGUMENTS[case_id]
 

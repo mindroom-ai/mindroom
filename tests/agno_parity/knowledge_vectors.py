@@ -1,4 +1,4 @@
-"""Deterministic embedding vectors shared by the knowledge golden capture and the owned parity tests."""
+"""Deterministic embedding vectors the knowledge goldens were captured with, which their parity tests reuse."""
 
 from __future__ import annotations
 

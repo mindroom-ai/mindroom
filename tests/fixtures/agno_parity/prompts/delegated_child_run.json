@@ -14,7 +14,6 @@
             "researcher"
           ],
           "display_name": "Assistant",
-          "learning": false,
           "memory_backend": "file",
           "role": "Answer questions about the team handbook.",
           "tools": [
@@ -31,7 +30,6 @@
           "instructions": [
             "Name your sources."
           ],
-          "learning": false,
           "role": "Research topics in depth.",
           "tools": [
             "calculator"
