@@ -19,7 +19,6 @@
           "knowledge_bases": [
             "handbook"
           ],
-          "learning": false,
           "memory_backend": "file",
           "role": "Answer questions about the team handbook.",
           "tools": [
@@ -33,7 +32,6 @@
         },
         "researcher": {
           "display_name": "Researcher",
-          "learning": false,
           "role": "Research topics in depth."
         }
       },

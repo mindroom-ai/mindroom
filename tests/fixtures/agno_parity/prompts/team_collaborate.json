@@ -8,7 +8,6 @@
           "instructions": [
             "Number every step."
           ],
-          "learning": false,
           "role": "Break work into ordered steps.",
           "tools": [
             "calculator"
@@ -16,7 +15,6 @@
         },
         "writer": {
           "display_name": "Writer",
-          "learning": false,
           "role": "Write clear announcements."
         }
       },

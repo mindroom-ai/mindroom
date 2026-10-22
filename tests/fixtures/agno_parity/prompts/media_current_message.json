@@ -5,7 +5,6 @@
       "agents": {
         "assistant": {
           "display_name": "Assistant",
-          "learning": false,
           "role": "Answer questions about the team handbook.",
           "tools": [
             "calculator"

@@ -9,7 +9,6 @@
           "instructions": [
             "Explain each command before running it."
           ],
-          "learning": false,
           "memory_backend": "file",
           "minimal_instructions": [
             "Prefer read-only commands."

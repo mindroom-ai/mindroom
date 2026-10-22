@@ -141,7 +141,6 @@ Normalization:
 
 Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
 Structured-output helpers are captured on each of Agno's three structured-output paths: on `anthropic`, which receives the schema as `response_format`; on `vertexai_claude`, which Agno asks for JSON in the system message with `{"type": "json_object"}`; and on `cerebras`, which receives `{"type": "json_schema", "json_schema": {"name", "schema"}}` and no JSON prompt.
-Agent scenarios set `learning: false`, because Agno Learning is retired with Agno and its prompt block and tools have no owned equivalent.
 
 ## Tool goldens (`tools/`)
 

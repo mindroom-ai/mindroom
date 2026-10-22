@@ -456,7 +456,6 @@
           "instructions": [
             "Answer in at most three paragraphs."
           ],
-          "learning": false,
           "role": "Answer questions about the team handbook.",
           "tools": [
             "calculator"

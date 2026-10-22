@@ -5,7 +5,6 @@
       "agents": {
         "assistant": {
           "display_name": "Assistant",
-          "learning": false,
           "participation": {
             "instructions": "Reply only when the message asks about the handbook."
           },
