@@ -18,7 +18,7 @@ from uuid import uuid4
 from pydantic import validate_call
 
 from mindroom.agent_loop.model_loop import EndRun, LoopHooks, SendRequest, run_model_loop
-from mindroom.agent_loop.output_limit import output_limit_policy
+from mindroom.agent_loop.output_limit import output_limit_answers
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
@@ -336,7 +336,7 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
 
     return LoopHooks(
         before_request=(within_budget, offer_definitions),
-        answer_tool_calls=output_limit_policy() if review.model.capabilities.claude_family else None,
+        answer_tool_calls=output_limit_answers(review.model.capabilities),
     )
 
 

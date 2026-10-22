@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom import response_runner
+from mindroom import loop_hooks, response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
@@ -362,7 +362,7 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
     real_run_team = envelope.run_team
-    real_compaction_hook = envelope.mid_turn_compaction_hook
+    real_compaction_hook = loop_hooks.mid_turn_compaction_hook
 
     def capture_run_team(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         captured["hooks"] = kwargs["hooks"]
@@ -373,7 +373,7 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
         return real_compaction_hook(**kwargs)
 
     monkeypatch.setattr(envelope, "run_team", capture_run_team)
-    monkeypatch.setattr(envelope, "mid_turn_compaction_hook", capture_compaction_hook)
+    monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
 
     await team.stream()
 

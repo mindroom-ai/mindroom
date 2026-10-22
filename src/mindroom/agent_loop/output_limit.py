@@ -15,7 +15,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import AnswerToolCalls
-    from mindroom.llm.provider import StopReason
+    from mindroom.llm.provider import Capabilities, StopReason
 
 logger = get_logger(__name__)
 
@@ -60,4 +60,9 @@ def output_limit_policy() -> AnswerToolCalls:
     return answer
 
 
-__all__ = ["CUT_OFF_TOOL_CALL_RESULT", "output_limit_policy"]
+def output_limit_answers(capabilities: Capabilities) -> AnswerToolCalls | None:
+    """Return the output-limit policy of one run on a Claude-family model, and None on any other model."""
+    return output_limit_policy() if capabilities.claude_family else None
+
+
+__all__ = ["CUT_OFF_TOOL_CALL_RESULT", "output_limit_answers", "output_limit_policy"]

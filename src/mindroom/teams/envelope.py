@@ -18,8 +18,6 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
-from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.prompt import model_note_for
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_loop.tools import prepare_run_tools
@@ -27,7 +25,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
-from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -41,7 +38,7 @@ from mindroom.execution_preparation import (
     render_prepared_team_messages_text,
 )
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook, without_fold_records
+from mindroom.history.mid_turn_compaction import without_fold_records
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_request, build_resume_request, replayed_history
@@ -65,7 +62,7 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
-from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.loop_hooks import agent_loop_hooks, leader_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.providers.pipeline.request_log import provider_model_params
@@ -119,7 +116,7 @@ from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.timing import emit_timing_event
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.notices import append_turn_start_job_note, job_notice_hook
+from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
@@ -130,6 +127,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall, Persist
     from mindroom.approval.resume import ResumeEvents
     from mindroom.config.main import Config, ResolvedRuntimeModel
@@ -599,65 +597,6 @@ def _persist_into(records: TeamRunRecords | None, storage: _TeamStorage | None) 
     return persist
 
 
-def _leader_hooks(
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    entity_name: str | None,
-    scope_id: str,
-    spec: TeamSpec,
-    runtime_model_name: str,
-    storage: _TeamStorage | None,
-    scoped: bool,
-    prepared_history: PreparedHistoryState | None,
-    prompt_id: str | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    turn_recorder: TurnRecorder | None,
-    leader_middleware: tuple[ToolMiddleware, ...],
-    leader_jobs: JobActor | None,
-) -> LoopHooks:
-    """Return the leader's hooks in the order the turn applies them: mid-turn compaction, then the approval receipt.
-
-    The request cap is the loop's own; the queued-message notice follows every tool batch and a resume's entry, as
-    for an agent's turn, and so does the notice of the team's ended jobs. A fold appends a summary row to the team
-    scope only when this request replays it.
-    """
-    model = spec.model
-    capabilities = model.capabilities
-    native = prepared_history.native_history if prepared_history is not None else None
-    notice_text = config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
-    return LoopHooks(
-        before_request=(
-            mid_turn_compaction_hook(
-                config=config,
-                runtime_paths=runtime_paths,
-                entity_name=entity_name if entity_name in config.teams else None,
-                scope_id=scope_id,
-                is_team=True,
-                model_name=runtime_model_name,
-                model=model,
-                history_settings=_team_history_settings(config, entity_name),
-                store=storage.store if storage is not None else None,
-                session=storage.session if storage is not None and scoped else None,
-                scope=storage.scope if storage is not None and scoped else None,
-                native_compaction=native.native_compaction if native is not None else None,
-                deferred_tool_names=frozenset(),
-                prompt_id=prompt_id,
-                lifecycle=compaction_lifecycle,
-                turn_recorder=turn_recorder,
-            ),
-            approval_receipt_hook(capabilities),
-        ),
-        answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
-        tool_middleware=leader_middleware,
-        after_tool_batch=(
-            ai_runtime.queued_notice_after_tool_batch(notice_text),
-            *(() if leader_jobs is None else (job_notice_hook(leader_jobs.name),)),
-        ),
-        on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),),
-    )
-
-
 @dataclass(frozen=True)
 class _LeaderRun:
     """How the leader of one prepared team turn runs: where it stores, the hooks around its loop, its request settings."""
@@ -713,21 +652,24 @@ def _leader_run(
     return _LeaderRun(
         spec=built.spec,
         storage=storage,
-        hooks=_leader_hooks(
+        hooks=leader_loop_hooks(
             config=config,
             runtime_paths=runtime_paths,
             entity_name=configured_team_name,
             scope_id=built.spec.id,
-            spec=built.spec,
-            runtime_model_name=prepared.runtime_model_name,
-            storage=storage,
+            model=built.spec.model,
+            model_name=prepared.runtime_model_name,
+            history_settings=_team_history_settings(config, configured_team_name),
+            store=storage.store if storage is not None else None,
+            session=storage.session if storage is not None else None,
+            scope=storage.scope if storage is not None else None,
             scoped=storage is not None and plan is not None and plan.add_history_to_context,
-            prepared_history=history,
+            native_compaction=native.native_compaction if native is not None else None,
             prompt_id=prepared.turn.prompt.id,
-            compaction_lifecycle=compaction_lifecycle,
+            lifecycle=compaction_lifecycle,
             turn_recorder=turn_recorder,
-            leader_middleware=built.leader_middleware,
-            leader_jobs=built.leader_jobs,
+            tool_middleware=built.leader_middleware,
+            jobs=built.leader_jobs,
         ),
         request_template=ModelRequest(
             messages=(),
@@ -2099,21 +2041,24 @@ async def continue_paused_team_run(
                 spec=built.spec,
                 storage=storage,
                 records=attempt.records,
-                hooks=_leader_hooks(
+                hooks=leader_loop_hooks(
                     config=config,
                     runtime_paths=runtime_paths,
                     entity_name=configured_team_name,
                     scope_id=built.spec.id,
-                    spec=built.spec,
-                    runtime_model_name=model_name,
-                    storage=storage,
+                    model=built.spec.model,
+                    model_name=model_name,
+                    history_settings=settings,
+                    store=storage.store,
+                    session=storage.session,
+                    scope=storage.scope,
                     scoped=True,
-                    prepared_history=PreparedHistoryState(native_history=native),
+                    native_compaction=native.native_compaction if native is not None else None,
                     prompt_id=None,
-                    compaction_lifecycle=None,
+                    lifecycle=None,
                     turn_recorder=None,
-                    leader_middleware=built.leader_middleware,
-                    leader_jobs=built.leader_jobs,
+                    tool_middleware=built.leader_middleware,
+                    jobs=built.leader_jobs,
                 ),
                 request_template=ModelRequest(
                     messages=(),

@@ -1,8 +1,10 @@
-"""The hooks an agent run or resume installs on the owned loop, in the order the turn applies them.
+"""The hooks an agent or team-leader run or resume installs on the owned loop, in the order the turn applies them.
 
-An agent turn, an approval resume, a delegated child's resume, and a team member's run or resume all run the same
-policy around the loop: the participation gate, mid-turn compaction, the approval receipt, the output-limit answer,
-portable tool search, the tool-call middleware, the queued-message notices, and the skill-review capture.
+An agent turn, an approval resume, a delegated child's resume, a team member's run or resume, and a team leader's
+turn or resume all run the same policy around the loop: the participation gate, mid-turn compaction, the approval
+receipt, the wait budget of managed tool-job calls, the output-limit answer, portable tool search, the tool-call
+middleware, the queued-message and tool-job notices, and the skill-review capture. ``agent_loop_hooks`` and
+``leader_loop_hooks`` name what an agent's and a leader's run differ by; ``_loop_hooks`` composes the policy once.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.agent_loop.output_limit import output_limit_policy
+from mindroom.agent_loop.output_limit import output_limit_answers
 from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
@@ -26,12 +28,14 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
-    from mindroom.history.types import CompactionLifecycle, HistoryScope
-    from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.history.types import CompactionLifecycle, HistoryScope, ResolvedHistorySettings
+    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
     from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.skill_learning.capture import SkillReviewCapture
+    from mindroom.tool_jobs.execution import JobActor
+    from mindroom.tool_system.invocation import ToolMiddleware
 
 
 def agent_loop_hooks(
@@ -54,18 +58,135 @@ def agent_loop_hooks(
     run_id: str | None = None,
     queued_notices: bool = True,
 ) -> LoopHooks:
-    """Return the hooks of one agent run or resume, in the order the loop applies them before each request.
+    """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
+
+    The run compacts as ``agent_name``, in ``scope`` when one is given and under its own name otherwise, and a
+    top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
+    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
+    """
+    jobs = build.tool_jobs
+    return _loop_hooks(
+        config=config,
+        runtime_paths=runtime_paths,
+        model=build.spec.model,
+        model_name=model_name,
+        entity_name=agent_name,
+        scope_id=scope.scope_id if scope is not None else agent_name,
+        is_team=False,
+        history_settings=build.history_settings,
+        store=store,
+        session=session,
+        scope=scope,
+        scoped=scoped,
+        native_compaction=native_compaction,
+        deferred_tool_names=build.request_template.deferred_tool_names,
+        prompt_id=prompt_id,
+        lifecycle=lifecycle,
+        turn_recorder=turn_recorder,
+        tool_middleware=build.tool_middleware,
+        participation=participation,
+        job_definitions=jobs,
+        # A delegated child cannot collect jobs; its caller hears when they end. A team member hears of its
+        # own jobs too: the notice reaches only the member whose account posts an ad hoc team's replies.
+        job_notices_for=jobs.name if jobs is not None and jobs.depth == 0 else None,
+        queued_notices=queued_notices,
+        skill_review_capture=skill_review_capture,
+        run_id=run_id,
+    )
+
+
+def leader_loop_hooks(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entity_name: str | None,
+    scope_id: str,
+    model: ModelProvider,
+    model_name: str,
+    history_settings: ResolvedHistorySettings,
+    store: ConversationStore | None,
+    session: ConversationSession | None,
+    scope: HistoryScope | None,
+    scoped: bool,
+    native_compaction: NativeCompactionReplay | None,
+    prompt_id: str | None,
+    lifecycle: CompactionLifecycle | None,
+    turn_recorder: TurnRecorder | None,
+    tool_middleware: tuple[ToolMiddleware, ...],
+    jobs: JobActor | None,
+) -> LoopHooks:
+    """Return the hooks of one team leader's turn or resume.
+
+    The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity for an ad hoc
+    team, under the team's ``history_settings``. It has no participation gate, deferred tools, job definitions, or
+    skill-review capture; it owns the turn's queued-message notices and hears of its team's ended ``jobs``.
+    """
+    return _loop_hooks(
+        config=config,
+        runtime_paths=runtime_paths,
+        model=model,
+        model_name=model_name,
+        entity_name=entity_name if entity_name in config.teams else None,
+        scope_id=scope_id,
+        is_team=True,
+        history_settings=history_settings,
+        store=store,
+        session=session,
+        scope=scope,
+        scoped=scoped,
+        native_compaction=native_compaction,
+        deferred_tool_names=frozenset(),
+        prompt_id=prompt_id,
+        lifecycle=lifecycle,
+        turn_recorder=turn_recorder,
+        tool_middleware=tool_middleware,
+        participation=None,
+        job_definitions=None,
+        job_notices_for=jobs.name if jobs is not None else None,
+        queued_notices=True,
+        skill_review_capture=None,
+        run_id=None,
+    )
+
+
+def _loop_hooks(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model: ModelProvider,
+    model_name: str,
+    entity_name: str | None,
+    scope_id: str,
+    is_team: bool,
+    history_settings: ResolvedHistorySettings,
+    store: ConversationStore | None,
+    session: ConversationSession | None,
+    scope: HistoryScope | None,
+    scoped: bool,
+    native_compaction: NativeCompactionReplay | None,
+    deferred_tool_names: frozenset[str],
+    prompt_id: str | None,
+    lifecycle: CompactionLifecycle | None,
+    turn_recorder: TurnRecorder | None,
+    tool_middleware: tuple[ToolMiddleware, ...],
+    participation: ParticipationGate | None,
+    job_definitions: JobActor | None,
+    job_notices_for: str | None,
+    queued_notices: bool,
+    skill_review_capture: SkillReviewCapture | None,
+    run_id: str | None,
+) -> LoopHooks:
+    """Return the hooks of one run or resume, in the order the loop applies them before each request.
 
     The participation gate decides first, so a reply that stays silent never compacts or requests; the request
     cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
     messages, and folds into the scope only when ``scoped`` says the run replays the scope's stored history; the
-    approval receipt projects into the first request of a resumed run only; the wait budget of the agent's managed
-    calls joins their definitions last, as the request is formatted. Queued-message notices follow every tool batch
-    and a resume's entry unless ``queued_notices`` is off, as for a team member, whose leader owns the turn's
-    notices; a top-level agent hears of its ended jobs after each batch; ``skill_review_capture`` records the final
-    request of run ``run_id``.
+    approval receipt projects into the first request of a resumed run only; the wait budget of
+    ``job_definitions``' managed calls joins their definitions last, as the request is formatted. Queued-message
+    notices follow every tool batch and a resume's entry when ``queued_notices`` is on; the run hears of the ended
+    jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the final request of run
+    ``run_id``.
     """
-    model = build.spec.model
     capabilities = model.capabilities
     before_request: list[BeforeRequestHook] = []
     if participation is not None:
@@ -74,38 +195,36 @@ def agent_loop_hooks(
         mid_turn_compaction_hook(
             config=config,
             runtime_paths=runtime_paths,
-            entity_name=agent_name,
-            scope_id=scope.scope_id if scope is not None else agent_name,
-            is_team=False,
+            entity_name=entity_name,
+            scope_id=scope_id,
+            is_team=is_team,
             model_name=model_name,
             model=model,
-            history_settings=build.history_settings,
+            history_settings=history_settings,
             store=store,
             session=session if scoped else None,
             scope=scope if scoped else None,
             native_compaction=native_compaction,
-            deferred_tool_names=build.request_template.deferred_tool_names,
+            deferred_tool_names=deferred_tool_names,
             prompt_id=prompt_id,
             lifecycle=lifecycle,
             turn_recorder=turn_recorder,
         ),
     )
     before_request.append(approval_receipt_hook(capabilities))
-    jobs = build.tool_jobs
-    if jobs is not None:
-        before_request.append(job_definitions_hook(jobs))
+    if job_definitions is not None:
+        before_request.append(job_definitions_hook(job_definitions))
     notice_text = config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
-    deferred = build.request_template.deferred_tool_names
     return LoopHooks(
         before_request=tuple(before_request),
-        answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
-        rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
-        tool_middleware=build.tool_middleware,
+        answer_tool_calls=output_limit_answers(capabilities),
+        rewrite_tool_calls=(
+            resolve_call_tool_calls if deferred_tool_names and not capabilities.native_tool_search else None
+        ),
+        tool_middleware=tool_middleware,
         after_tool_batch=(
             *((ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else ()),
-            # A delegated child cannot collect jobs; its caller hears when they end. A team member hears of its
-            # own jobs too: the notice reaches only the member whose account posts an ad hoc team's replies.
-            *((job_notice_hook(jobs.name),) if jobs is not None and jobs.depth == 0 else ()),
+            *((job_notice_hook(job_notices_for),) if job_notices_for is not None else ()),
         ),
         on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),) if queued_notices else (),
         on_loop_end=(
@@ -116,4 +235,4 @@ def agent_loop_hooks(
     )
 
 
-__all__ = ["agent_loop_hooks"]
+__all__ = ["agent_loop_hooks", "leader_loop_hooks"]
