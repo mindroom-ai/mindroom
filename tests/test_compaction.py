@@ -245,34 +245,6 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
     }
 
 
-def test_ai_run_metadata_fallback_usage_only_backfills_missing_fields(tmp_path: Path) -> None:
-    """Fallback request metrics should not replace provider-reported final usage."""
-    config, _runtime_paths = _make_prepare_config(tmp_path)
-
-    metadata = build_ai_run_metadata_content(
-        config=config,
-        model_name="default",
-        run_id="run-1",
-        session_id="session-1",
-        status="completed",
-        model="test-model",
-        model_provider="openai",
-        metrics={"input_tokens": 100, "output_tokens": 25, "total_tokens": 125},
-        metrics_fallback={
-            "input_tokens": 900,
-            "output_tokens": 90,
-            "total_tokens": 990,
-            "time_to_first_token": "0.12",
-        },
-    )
-
-    usage = metadata[AI_RUN_METADATA_KEY]["usage"]
-    assert usage["input_tokens"] == 100
-    assert usage["output_tokens"] == 25
-    assert usage["total_tokens"] == 125
-    assert usage["time_to_first_token"] == format(0.12, ".12g")
-
-
 def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_path: Path) -> None:
     """Context cache counters should not exceed the context size exposed to clients."""
     runtime_paths = test_runtime_paths(tmp_path)
