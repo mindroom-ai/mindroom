@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 
 import nio
 import pytest
-from agno.agent import Agent
 
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, journal
@@ -31,7 +30,7 @@ from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import _response_recovery_bot
-from tests.test_turn_store import _ReplayCaptureModel, _seeded_storage, _store, _store_with_storage
+from tests.test_turn_store import _next_request, _seeded_storage, _store, _store_with_storage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -169,7 +168,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     tmp_path: Path,
     callback_first: bool,
 ) -> None:
-    """Reopened Agno history is sanitized whichever callback runs first."""
+    """Reopened history is sanitized before the survivor's reply, whichever callback runs first."""
     principal = journal_store.principal("agent@alice")
     target = MessageTarget.resolve(ROOM, "$thread", "$survivor")
     scope = HistoryScope(kind="agent", scope_id="agent")
@@ -211,7 +210,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     reopened = TurnStore(store.deps)
     await reopened.warm()
     bot = _response_recovery_bot(journal_store, reopened)
-    model = _ReplayCaptureModel(id="test", name="test", provider="test")
+    requests: list[str] = []
     survivor_delivered = asyncio.Event()
 
     async def survivor(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
@@ -223,19 +222,13 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         )
         recovered_storage = storage_factory()
         await remove_redacted_history_like_next_response(reopened, target, recovered_storage, scope=scope)
-        answer = await Agent(
-            id="agent",
-            db=recovered_storage,
-            model=model,
-            add_history_to_context=True,
-        ).arun(event.body, session_id=target.session_id)
-        assert answer.content == "captured"
+        requests.append(_next_request(recovered_storage, target.session_id, scope, event.body))
         await principal.enqueue_matrix_delivery(
             delivery_id="$survivor",
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
-            payload={"msgtype": "m.text", "body": answer.content},
+            payload={"msgtype": "m.text", "body": "captured"},
             settle_source_event_ids=("$survivor",),
         )
         survivor_delivered.set()
@@ -252,9 +245,9 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         await asyncio.wait_for(survivor_delivered.wait(), timeout=5)
     finally:
         await dispatcher.stop()
-    assert len(model.requests) == 1
-    assert "keep prompt" in model.requests[0]
-    assert "deleted prompt" not in model.requests[0]
+    assert len(requests) == 1
+    assert "keep prompt" in requests[0]
+    assert "deleted prompt" not in requests[0]
     assert not await principal.is_pending("$survivor")
     assert not await principal.is_pending(REDACTION)
     assert await principal.load_matrix_delivery(delivery_id="$survivor", stage=DeliveryStage.FINAL) is not None

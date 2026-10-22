@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
+from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from mcp.types import CallToolResult, TextContent
@@ -33,6 +34,7 @@ from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -455,6 +457,26 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
 
 def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> None:
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
+
+
+@pytest.mark.asyncio
+async def test_gateway_calls_share_the_detached_session(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway calls belong to no conversation, so a tool that keys state by session sees one session across them."""
+
+    def session(run_context: RunContext | None = None) -> str:
+        """Return the session the call runs under."""
+        return "no run context" if run_context is None else run_context.session_id
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[session]))
+
+    results = [
+        await gateway.invoke_tool(context, toolkit="calculator", function="session", arguments={}) for _ in range(2)
+    ]
+
+    assert results == [{"result": DETACHED_SESSION_ID}, {"result": DETACHED_SESSION_ID}]
 
 
 @pytest.mark.asyncio

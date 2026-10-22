@@ -11,9 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import nio
 import pytest
-from agno.media import Audio
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
 from mindroom import interactive
 from mindroom.coalescing.batch import tagged_coalesced_prompt
@@ -30,6 +27,8 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, Inbound
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.types import HistoryScope
+from mindroom.llm.media import Audio
+from mindroom.llm.runs import RunRecord
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
@@ -39,6 +38,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
+from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_store import TurnStore
@@ -1997,10 +1997,13 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
+                run_id="run-primary",
                 session_id=session_id,
                 metadata={
                     "matrix_event_id": "$primary:example.com",
@@ -2126,10 +2129,12 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={
@@ -2263,10 +2268,12 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
-    storage.get_session.return_value = AgentSession(
+    storage.load_session.return_value = ConversationSession(
         session_id=session_id,
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-selection",
                 session_id=session_id,
                 metadata={

@@ -3,130 +3,94 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from agno.agent import Agent
-from agno.db.sqlite import SqliteDb
-from agno.run.agent import RunContentEvent
+from agno.tools import Toolkit
 
 from mindroom.ai import stream_agent_response
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.llm.errors import ProviderUnavailable
+from mindroom.llm.events import ContentDelta
+from mindroom.llm.provider import TextDelta
+from mindroom.providers.pipeline import retry as provider_stream_retry
+from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
-from tests.test_openai_responses_stream import _created, _event, _response
-from tests.test_provider_stream_retry import _answer as _chat_answer
-from tests.test_provider_stream_retry import _chunk, _model, _overload, _Provider
-from tests.test_responses_stream_retry import _answer as _responses_answer
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
-
     from mindroom.ai import AIStreamChunk
-    from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+    from mindroom.llm.runs import AnyRunRecord
 
-type _API = Literal["chat_completions", "responses"]
-
-
-def _tool_stream(api: _API, step: int) -> str:
-    call_id = f"call_step_{step}"
-    arguments = json.dumps({"step": step})
-    if api == "chat_completions":
-        return (
-            _chunk(
-                {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": "record_step",
-                                "arguments": arguments,
-                            },
-                        },
-                    ],
-                },
-            )
-            + _chunk({}, "tool_calls")
-            + "data: [DONE]\n\n"
-        )
-    item = {
-        "type": "function_call",
-        "id": f"fc_{step}",
-        "call_id": call_id,
-        "name": "record_step",
-        "arguments": arguments,
-        "status": "completed",
-    }
-    return (
-        _created(f"resp_step_{step}")
-        + _event("response.output_item.added", output_index=0, item={**item, "arguments": "", "status": "in_progress"})
-        + _event("response.function_call_arguments.delta", output_index=0, item_id=f"fc_{step}", delta=arguments)
-        + _event("response.output_item.done", output_index=0, item=item)
-        + _event("response.completed", response=_response(f"resp_step_{step}", "completed", [item]))
-    )
+SESSION_ID = "retry-session"
 
 
-def _answer(api: _API, content: str) -> str:
-    return _chat_answer(content) if api == "chat_completions" else _responses_answer(content)
+class _StepTools(Toolkit):
+    """One tool whose effects the tests count, so a replayed call would show."""
+
+    actions: ClassVar[list[int]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="steps", tools=[self.record_step])
+
+    def record_step(self, step: int) -> str:
+        """Perform one recorded action.
+
+        Args:
+            step: The step to perform.
+
+        """
+        type(self).actions.append(step)
+        return f"step-{step}-done"
+
+
+@pytest.fixture
+def steps() -> Iterator[type[_StepTools]]:
+    """Register the step toolkit for the test."""
+    _StepTools.actions.clear()
+    with registered_toolkit("retry_steps", _StepTools):
+        yield _StepTools
+
+
+def _overload() -> Await:
+    """The provider fails the request with a retryable overload before the model said anything."""
+    return raising(ProviderUnavailable("overloaded", provider="Synthetic", status_code=529))
 
 
 def _install_agent(
-    model: MindRoomOpenAIChat | MindRoomOpenAIResponses,
-    api: _API,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    actions: list[int],
-) -> tuple[Config, list[Agent]]:
+    turns: Sequence[Sequence[ScriptStep]],
+) -> tuple[Config, ScriptedModel]:
+    """Configure the worker agent on the scripted model inside the production request pipeline."""
     config = bind_runtime_paths(
         Config(
-            agents={"worker": AgentConfig(display_name="Worker")},
-            models={"default": ModelConfig(provider="openai", id="test-model", api=api, api_key="test-key")},
+            agents={"worker": AgentConfig(display_name="Worker", tools=["retry_steps"])},
+            models={"default": ModelConfig(provider="openai", id="test-model", api_key="test-key")},
         ),
         test_runtime_paths(tmp_path),
     )
     config.memory.backend = "none"
-    agents: list[Agent] = []
-
-    def record_step(step: int) -> str:
-        """Perform one recorded action."""
-        actions.append(step)
-        return f"step-{step}-done"
-
-    def create_agent(*_args: object, **kwargs: object) -> Agent:
-        database = kwargs["history_storage"]
-        assert isinstance(database, SqliteDb)
-        agent = Agent(
-            id="worker",
-            name="worker",
-            model=model,
-            tools=[record_step],
-            db=database,
-            session_id="retry-session",
-            add_history_to_context=True,
-            store_history_messages=False,
-            telemetry=False,
-            retries=0,
-        )
-        agents.append(agent)
-        return agent
-
-    monkeypatch.setattr("mindroom.ai.create_agent", create_agent)
-    return config, agents
+    model = ScriptedModel([list(turn) for turn in turns])
+    install_agent_model(
+        monkeypatch,
+        wrap_provider(model, idle_timeout_seconds=None, media_fallback_prompt="", request_log=None),
+    )
+    return config, model
 
 
 def _stream(config: Config, run_id: str) -> AsyncIterator[AIStreamChunk]:
     return stream_agent_response(
-        make_turn_context("worker", session_id="retry-session", run_id=run_id, requester_id="@user:localhost"),
+        make_turn_context("worker", session_id=SESSION_ID, run_id=run_id, requester_id="@user:localhost"),
         prompt="Perform both steps." if run_id == "first" else "Give a follow-up answer.",
         runtime_paths=runtime_paths_for(config),
         config=config,
@@ -134,23 +98,24 @@ def _stream(config: Config, run_id: str) -> AsyncIterator[AIStreamChunk]:
     )
 
 
-def _stored_runs(agent: Agent) -> list[RunOutput]:
-    assert isinstance(agent.db, SqliteDb)
-    storage = SqliteDb(db_file=agent.db.db_file, session_table=agent.db.session_table_name)
-    session = storage.load_session("retry-session", "agent")
+def _text(chunks: Sequence[AIStreamChunk]) -> str:
+    return "".join(chunk.text for chunk in chunks if isinstance(chunk, ContentDelta))
+
+
+def _stored_runs(config: Config) -> list[AnyRunRecord]:
+    storage = create_session_storage("worker", config, runtime_paths_for(config), execution_identity=None)
+    session = storage.load_session(SESSION_ID, "agent")
     assert session is not None
-    assert session.runs is not None
     return session.runs
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api", ["chat_completions", "responses"])
 @pytest.mark.parametrize("finish", ["recover", "user_stop", "sync_restart"])
-async def test_post_tool_backoff_preserves_turn_history_and_followup(  # noqa: PLR0915
-    api: _API,
+async def test_post_tool_backoff_preserves_turn_history_and_followup(
     finish: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    steps: type[_StepTools],
 ) -> None:
     """Retry or cancel the third model request without replaying either completed tool."""
     waiting, release = asyncio.Event(), asyncio.Event()
@@ -160,82 +125,75 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(  # noqa: P
         await release.wait()
 
     monkeypatch.setattr(provider_stream_retry, "asyncio", SimpleNamespace(sleep=wait, timeout=asyncio.timeout))
-    overload = (_created() if api == "responses" else "") + _overload()
-    attempts = [_tool_stream(api, 1), _tool_stream(api, 2), overload]
+    turns: list[list[ScriptStep]] = [
+        calls(tool_call("record_step", "call_step_1", step=1)),
+        calls(tool_call("record_step", "call_step_2", step=2)),
+        [_overload()],
+    ]
     if finish == "recover":
-        attempts.append(_answer(api, "Recovered"))
-    attempts.append(_answer(api, "Follow-up"))
-    provider = _Provider(attempts)
-    actions: list[int] = []
-    async with _model(provider, tmp_path, api=api) as model:
-        config, agents = _install_agent(model, api, tmp_path, monkeypatch, actions)
+        turns.append(answer("Recovered"))
+    turns.append(answer("Follow-up"))
+    config, model = _install_agent(tmp_path, monkeypatch, turns)
 
-        async def consume() -> list[AIStreamChunk]:
-            return [chunk async for chunk in _stream(config, "first")]
+    async def consume() -> list[AIStreamChunk]:
+        return [chunk async for chunk in _stream(config, "first")]
 
-        task = asyncio.create_task(consume())
-        try:
-            async with asyncio.timeout(10):
-                await waiting.wait()
-                assert actions == [1, 2]
-                assert len(provider.requests) == 3
-                if finish == "recover":
-                    release.set()
-                    chunks = await task
-                    assert (
-                        "".join(chunk.content or "" for chunk in chunks if isinstance(chunk, RunContentEvent))
-                        == "Recovered"
-                    )
-                    assert provider.requests[2] == provider.requests[3]
-                else:
-                    request_task_cancel(task, cancel_source=finish)
-                    with pytest.raises(asyncio.CancelledError, match=finish):
-                        await task
-                    release.set()
-                assert len(agents) == 1
-                runs = _stored_runs(agents[0])
-                assert len(runs) == 1
-                if finish != "recover":
-                    assert runs[0].metadata["mindroom_original_status"] == "cancelled"
-                saved = " ".join(str(message.content) for message in runs[0].messages or [])
-                assert "step-1-done" in saved
-                assert "step-2-done" in saved
-                before_followup = len(provider.requests)
-                followup = [chunk async for chunk in _stream(config, "followup")]
-                assert (
-                    "".join(chunk.content or "" for chunk in followup if isinstance(chunk, RunContentEvent))
-                    == "Follow-up"
-                )
-                assert len(provider.requests) == before_followup + 1
-                assert len(_stored_runs(agents[-1])) == 2
-                assert actions == [1, 2]
-        finally:
-            release.set()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+    task = asyncio.create_task(consume())
+    try:
+        async with asyncio.timeout(10):
+            await waiting.wait()
+            assert steps.actions == [1, 2]
+            assert len(model.requests) == 3
+            if finish == "recover":
+                release.set()
+                chunks = await task
+                assert _text(chunks) == "Recovered"
+                assert model.requests[2] == model.requests[3]
+            else:
+                request_task_cancel(task, cancel_source=finish)
+                with pytest.raises(asyncio.CancelledError, match=finish):
+                    await task
+                release.set()
+            runs = _stored_runs(config)
+            assert len(runs) == 1
+            if finish != "recover":
+                assert runs[0].metadata is not None
+                assert runs[0].metadata["mindroom_original_status"] == "cancelled"
+            saved = " ".join(str(message.content) for message in runs[0].messages)
+            assert "step-1-done" in saved
+            assert "step-2-done" in saved
+            before_followup = len(model.requests)
+            followup = [chunk async for chunk in _stream(config, "followup")]
+            assert _text(followup) == "Follow-up"
+            assert len(model.requests) == before_followup + 1
+            assert len(_stored_runs(config)) == 2
+            assert steps.actions == [1, 2]
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("api", ["chat_completions", "responses"])
 async def test_partial_stream_failure_stays_one_durable_turn(
-    api: _API,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    steps: type[_StepTools],
 ) -> None:
-    """The outer turn driver retains partial output without starting a fresh model run."""
-    partial = (
-        _chunk({"content": "Partial"}) if api == "chat_completions" else _responses_answer("Partial", complete=False)
+    """A request that fails after visible output is not retried, and the turn keeps its partial output once."""
+    del steps
+    config, model = _install_agent(
+        tmp_path,
+        monkeypatch,
+        [[TextDelta("Partial"), _overload()], answer("Must not run")],
     )
-    provider = _Provider([partial + _overload(), _answer(api, "Must not run")])
-    async with _model(provider, tmp_path, api=api) as model:
-        config, agents = _install_agent(model, api, tmp_path, monkeypatch, [])
-        chunks = [chunk async for chunk in _stream(config, "first")]
 
-    assert len(provider.requests) == 1
-    assert len(agents) == 1
-    text = "".join(chunk.content or "" for chunk in chunks if isinstance(chunk, RunContentEvent))
-    assert text.count("Partial") == 1
-    runs = _stored_runs(agents[0])
+    chunks = [chunk async for chunk in _stream(config, "first")]
+
+    assert len(model.requests) == 1
+    assert _text(chunks).count("Partial") == 1
+    runs = _stored_runs(config)
     assert len(runs) == 1
+    assert runs[0].metadata is not None
     assert runs[0].metadata["mindroom_original_status"] == "error"
     assert "Partial" in str(runs[0].content)

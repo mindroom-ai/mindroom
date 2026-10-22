@@ -8,7 +8,9 @@ execution with one scripted model per agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
@@ -25,11 +27,13 @@ from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
+from mindroom.history.storage import new_scope_session
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -134,6 +138,14 @@ def _child_record(child: DelegationChild, config: Config, paths: RuntimePaths) -
     record = create_session_storage("code", config, paths, _child_identity(child)).get_run(child.run_id)
     assert isinstance(record, RunRecord)
     return record
+
+
+def _distinct_markers(paused: PausedAttempt) -> int:
+    """Return how many tool markers a pause shows, after checking that each names a different call."""
+    call_ids = [entry.tool_call_id for entry in paused.tool_trace]
+    assert len(call_ids) == len(set(call_ids)), call_ids
+    assert paused.response_text.count("🔧") == len(call_ids)
+    return len(call_ids)
 
 
 @pytest.mark.asyncio
@@ -246,6 +258,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             config.agents["leader"].delegate_to = []
         observed_ids: set[str] = set()
         result: CompletedApprovalRun | PausedAttempt = paused
+        shown = _distinct_markers(paused)
         for index in range(siblings):
             assert isinstance(result, PausedAttempt)
             stored = _parent_record(config, paths, identity, "parent-run")
@@ -269,12 +282,16 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             if isinstance(result, CompletedApprovalRun):
                 break
             require_ordered_pause_presentation(result, show_tool_calls=True)
+            # A sibling answered on an earlier entry keeps its one completed marker; nothing restarts or repeats.
+            shown = _distinct_markers(result)
             assert any(
                 entry.tool_call_id == call_id and entry.type == "tool_call_completed" for entry in result.tool_trace
             )
             assert len(report.written) == (index + 1 if outcome == "approve" else 0)
         assert isinstance(result, CompletedApprovalRun)
         assert result.response_text.endswith("parent result")
+        # The last entry announces no call the last pause had not shown.
+        assert result.response_text.count("🔧") == shown
         assert report.written == (["written"] * siblings if outcome == "approve" else [])
         resumed = _parent_record(config, paths, identity, "parent-run")
         assert resumed.status is RunStatus.completed
@@ -288,6 +305,66 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
         # Every delegation's requirement holds its child's answer as the external result the parent continued with.
         assert all(requirement.external_execution_result for requirement in resumed.requirements or ())
         assert all(not tool.is_paused for tool in resumed.tools or ())
+
+
+@pytest.mark.asyncio
+async def test_a_completed_sibling_keeps_its_result_when_the_policy_changes_before_the_next_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling answered on an earlier entry is never authorized again; only the call still waiting meets the change."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(
+                *(
+                    tool_call("run_subagent", f"delegate-{index}", agent_name="code", task="Write report")
+                    for index in range(2)
+                ),
+            ),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(_child_script(nested=False, retry=False, siblings=2))
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    executor = approval_executor(config, paths)
+
+    with registered_report_tool() as report:
+        result = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        for index, revoke in enumerate((False, True)):
+            assert isinstance(result, PausedAttempt)
+            if revoke:
+                config.agents["leader"].delegate_to = []
+            state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+            call_id = str(state.pending_tools[0]["tool_call_id"])
+            result = await resume(
+                executor,
+                result,
+                _saved_approval_calls(state),
+                agent_name="leader",
+                identity=identity,
+                config=config,
+                runtime_paths=paths,
+                decisions={call_id: True},
+                denial_reasons={call_id: None},
+                approval_id=f"card-{index}",
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    resumed = _parent_record(config, paths, identity, "parent-run")
+    answers = {message.tool_call_id: str(message.content) for message in resumed.messages if message.role == "tool"}
+    assert "child result" in answers["delegate-0"]
+    assert "Cannot delegate" in answers["delegate-1"]
 
 
 @pytest.mark.asyncio
@@ -636,6 +713,61 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
 
     assert DelegationState.from_metadata(storage.get_run("parent-run").metadata).children == []  # type: ignore[union-attr]
     assert _record_files(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_turn_continues_after_its_delegation_with_streamed_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent's continuation streams even when its turn does not, as Agno's delegation continuation did."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "fresh", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Report written")])}).install(monkeypatch)
+
+    text = await respond(
+        "leader",
+        "delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=_leader_identity(),
+        run_id="parent-run",
+    )
+
+    assert "Parent done" in text
+    assert [request.stream for request in leader.requests] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path) -> None:
+    """The driver saves the parent as it was handed over; a change made while the lane is busy never lands in that write."""
+    paths = _runtime_paths(tmp_path)
+    store = create_session_storage("leader", _config(paths), paths, _leader_identity())
+    session = new_scope_session(session_id="parent", scope_id="leader", is_team=False)
+    parent = RunRecord(run_id="parent-run", session_id="parent", status=RunStatus.paused, content="as handed over")
+    lane_held = threading.Event()
+    release = threading.Event()
+
+    def hold_the_lane(_store: ConversationStore) -> None:
+        lane_held.set()
+        release.wait(timeout=30)
+
+    holder = asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))
+    assert await asyncio.to_thread(lane_held.wait, 30)
+    saving = asyncio.create_task(execution.persist_delegation_state(store, session, parent, DelegationState()))
+    await asyncio.sleep(0)
+    parent.content = "changed while the lane was busy"
+    release.set()
+    await holder
+    await saving
+
+    stored = store.get_run("parent-run")
+    assert stored is not None
+    assert stored.content == "as handed over"
+    assert DELEGATION_STATE_KEY in (stored.metadata or {})
 
 
 @pytest.mark.asyncio

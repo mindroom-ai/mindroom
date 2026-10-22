@@ -22,8 +22,9 @@ from mindroom.llm.messages import Message
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.history.types import HistoryScope, ScopeSummary
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.types import ConversationSession
 
 _PROMPT_ROLES = frozenset({"system", "developer"})
 
@@ -76,6 +77,29 @@ def scope_history_messages(
     if max_tool_calls_from_history is not None:
         history = filter_tool_calls(history, max_tool_calls_from_history)
     return project_history_media_for_replay(history)
+
+
+def replayed_history(
+    session: ConversationSession | None,
+    scope: HistoryScope | None,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+) -> tuple[list[Message], ScopeSummary | None]:
+    """Return the stored history a request of ``scope`` replays under ``plan``, and the scope summary it follows.
+
+    A request without a scope or session, or whose plan replays nothing, sends its own messages only.
+    """
+    if session is None or scope is None or plan is None or not plan.add_history_to_context:
+        return [], None
+    history = scope_history_messages(
+        session.runs,
+        scope=scope,
+        num_history_runs=plan.num_history_runs,
+        num_history_messages=plan.num_history_messages,
+        max_tool_calls_from_history=settings.max_tool_calls_from_history,
+        system_message_role=settings.system_message_role,
+    )
+    return history, session.summary
 
 
 def _selected_messages(
@@ -206,5 +230,6 @@ __all__ = [
     "build_request",
     "build_resume_request",
     "filter_tool_calls",
+    "replayed_history",
     "scope_history_messages",
 ]

@@ -32,7 +32,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -353,8 +353,11 @@ async def invoke_tool(
         if require_current_config is not None:
             target = _guard_dispatch(target, require_current_config)
         # Each invocation is its own run: it belongs to no conversation and shares no session state.
-        invocation_id = f"mcp-gateway:{uuid4().hex}"
-        call_context = ToolCallContext(run_id=invocation_id, session_id=invocation_id, user_id=context.requester_id)
+        call_context = ToolCallContext(
+            run_id=f"mcp-gateway:{uuid4().hex}",
+            session_id=DETACHED_SESSION_ID,
+            user_id=context.requester_id,
+        )
         try:
             value = await run_with_tool_execution_identity(
                 context.execution_identity,

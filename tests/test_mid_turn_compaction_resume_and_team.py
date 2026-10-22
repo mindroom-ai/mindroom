@@ -21,12 +21,12 @@ from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner, resume_history
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import TurnMessages, build_request
+from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import CompactionOutcome
@@ -57,15 +57,10 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
     SESSION_ID,
     TEAM_SCOPE,
     ProbeToolkit,
-    SquadTurn,
-    blocking_reply,
+    TeamTurn,
     member_approval,
-    resume_approval,
     squad_probe,
     squad_turn,
-    stored_runs,
-    stream_reply,
-    turn_context,
 )
 from tests.test_mid_turn_compaction import _SCOPE, _TOOL_RESULT, _seeded_storage, _SummaryCalls, _ToolLoopModel
 
@@ -178,7 +173,6 @@ class _Resumable:
             session=session,
             scope=_SCOPE,
             user_id=None,
-            stream=False,
         )
 
 
@@ -230,7 +224,9 @@ async def _pause(agent: _Resumable) -> RunRecord:
     build = agent.build
     turn = TurnMessages(prompt=Message(role="user", content="Do the task"))
     plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
-    history, summary = resume_history(agent.session, _SCOPE, build, plan) if agent.replays_history else ([], None)
+    history, summary = (
+        replayed_history(agent.session, _SCOPE, build.history_settings, plan) if agent.replays_history else ([], None)
+    )
     store_record = persist_to(agent.store, agent.session)
 
     async def persist(record: RunRecord) -> None:
@@ -442,7 +438,7 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
 # ---------------------------------------------------------------------------
 
 
-def _seed_team_history(team: SquadTurn) -> None:
+def _seed_team_history(team: TeamTurn) -> None:
     runs = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
     seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=runs))
 
@@ -490,21 +486,21 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     _seed_team_history(team)
 
     if stream:
-        chunks = await stream_reply(team)
+        chunks = await team.stream()
         text = chunks[-1].content
     else:
-        text = await blocking_reply(team)
+        text = await team.respond()
 
     assert text.endswith("All parts done")
     assert summary_calls.inputs
-    compacted = _first_compacted(team.leader)
+    compacted = _first_compacted(team.models["default"])
     [summary] = _summaries(compacted.messages)
     assert summary.from_history is True
     contents = _contents(compacted)
     # The fold leaves the turn's prompt in place and puts the summary of everything else after it.
     assert "Hello" in contents[contents.index(str(summary.content)) - 1]
     assert not any("team question" in content or "team answer" in content for content in contents)
-    record, members = stored_runs(team)
+    record, members = team.stored_runs()
     rows = summary_rows_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
     assert log_of(team.storage, TEAM_SCOPE.key, SESSION_ID) == [
         "run:past-1",
@@ -543,16 +539,15 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     )
     lifecycle = RecordingCompactionLifecycle()
 
-    await stream_reply(
-        team,
-        ctx=replace(turn_context(), matrix_run_metadata=_SEEDED_METADATA),
+    await team.stream(
+        ctx=team.ctx(matrix_run_metadata=_SEEDED_METADATA),
         compaction_lifecycle=lifecycle,
     )
 
     assert summary_calls.inputs
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
     assert "call-1" in team.recorder.folded_tool_call_ids
-    record, _members = stored_runs(team)
+    record, _members = team.stored_runs()
     assert record.metadata is not None
     assert record.metadata["room_topic"] == "kept"
     # The folded usage is this run's own; the fold records seeded from the earlier run are gone.
@@ -584,22 +579,21 @@ async def test_team_approval_resume_after_mid_turn_compaction(
     )
     _seed_team_history(team)
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await stream_reply(team, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
     assert summary_calls.inputs
     assert ProbeToolkit.calls == []
-    paused_request = team.leader.requests[-1]
-    before = len(team.leader.requests)
+    paused_request = team.models["default"].requests[-1]
+    before = len(team.models["default"].requests)
 
-    result = await resume_approval(
-        team,
+    result = await team.resume(
         raised.value.paused,
         approved=True,
-        calls_=(member_approval("call-touch", "dangerous"),),
+        approvals=(member_approval("call-touch", "dangerous"),),
     )
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
-    resumed = team.leader.requests[before]
+    resumed = team.models["default"].requests[before]
     [summary] = _summaries(resumed.messages)
     [paused_summary] = _summaries(paused_request.messages)
     assert summary.content == paused_summary.content
@@ -632,10 +626,10 @@ async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
         max_tool_calls_per_turn=2,
     )
 
-    await stream_reply(team)
+    await team.stream()
 
     # The cap allows the limit plus two requests, so it refuses the fifth.
-    assert len(team.leader.requests) == 4
+    assert len(team.models["default"].requests) == 4
     assert summary_calls.inputs == []
 
 
@@ -658,13 +652,13 @@ async def test_team_member_loop_compacts_run_locally(
         context_window=4000,
     )
 
-    chunks = await stream_reply(team)
+    chunks = await team.stream()
 
     assert chunks[-1].content.endswith("The writer dug.")
     assert summary_calls.inputs
-    compacted = _first_compacted(team.writer)
+    compacted = _first_compacted(team.models["writer-model"])
     assert [message.from_history for message in _summaries(compacted.messages)] == [False]
-    _record, [member] = stored_runs(team)
+    _record, [member] = team.stored_runs()
     assert member.status is RunStatus.completed
 
 
@@ -712,7 +706,7 @@ class _PerTaskLoop(ScriptedModel):
         )
 
 
-def _two_writer_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[SquadTurn, _PerTaskLoop]:
+def _two_writer_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TeamTurn, _PerTaskLoop]:
     """Return the squad whose leader hands the writer two tasks at once, each outgrowing the writer's window."""
     team = squad_turn(
         tmp_path,
@@ -741,12 +735,12 @@ async def test_parallel_delegations_to_one_member_both_compact(
     """Two concurrent runs of one member each compact their own loop."""
     team, writer = _two_writer_runs(tmp_path, monkeypatch)
 
-    chunks = await stream_reply(team)
+    chunks = await team.stream()
 
     assert chunks[-1].content.endswith("Both done")
     assert summary_calls.inputs
     assert writer.compacted_tasks() == ["Task A", "Task B"]
-    _record, members = stored_runs(team)
+    _record, members = team.stored_runs()
     assert sorted(str(member.content) for member in members) == ["Task A done", "Task B done"]
 
 
@@ -772,12 +766,12 @@ async def test_a_member_run_whose_compaction_failed_leaves_its_sibling_run_compa
 
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_task_a)
 
-    chunks = await stream_reply(team)
+    chunks = await team.stream()
 
     assert chunks[-1].content.endswith("Both done")
     # Task A's run tried once and then stopped; Task B's run, which outgrew its window after that, still compacted.
     assert len(failed) == 1
     assert summary_calls.inputs
     assert writer.compacted_tasks() == ["Task B"]
-    _record, members = stored_runs(team)
+    _record, members = team.stored_runs()
     assert sorted(str(member.content) for member in members) == ["Task A done", "Task B done"]

@@ -9,8 +9,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
 from mindroom.config.plugin import PluginEntryConfig
@@ -22,6 +20,8 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
@@ -50,14 +50,14 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             tool_args={"cmd": "date +%s.%N"},
             tool_call_id="call-1",
         )
-        yield ToolCallStartedEvent(tool=tool)
-        yield ToolCallStartedEvent(
+        yield ToolStarted(tool=tool)
+        yield ToolStarted(
             tool=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
             ),
         )
-        yield ToolCallCompletedEvent(
+        yield ToolCompleted(
             tool=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},

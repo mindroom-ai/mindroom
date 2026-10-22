@@ -1,15 +1,18 @@
-"""The ``squad`` team turn harness: a writer and a checker behind the production team envelope, on scripted models.
+"""Team turns on scripted providers: the team runtime seam and the drivers the team suites share.
 
-``squad_turn`` builds the team's config, its scripted providers by model name, its store, and its tool runtime;
-``stream_reply`` and ``blocking_reply`` run one reply through ``team_response_stream`` and ``team_response``, and
-``resume_approval`` resumes a member's approval through ``continue_paused_team_run``. ``ProbeToolkit`` is the
-members' tool, which records its calls and the history scope a member's call addresses.
+``install_team_models`` is the team runtime seam. Every provider the production builders build, the members' and the
+leader's, is the ``ScriptedModel`` of its configured model name, so a turn runs the real member builds,
+``build_team_spec``, ``run_team``, the presentation, and the conversation store. ``TeamTurn`` holds one team's config,
+its scripted models, its tool runtime, and its orchestrator, and drives ``team_response``, ``team_response_stream``, and
+``continue_paused_team_run`` as the response runner calls them. ``squad_turn`` builds the ``squad`` team of a writer
+and a checker that the team runtime, compaction, and history suites share; ``ProbeToolkit`` is its members' tool.
 """
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -20,7 +23,11 @@ from mindroom import agents
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.session_context import (
+    create_scope_session_storage,
+    resolve_bound_history_owner,
+    resolve_bound_team_scope_context,
+)
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
@@ -29,6 +36,7 @@ from mindroom.teams import envelope
 from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -50,13 +58,14 @@ from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_ca
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -70,22 +79,28 @@ TEAM_SCOPE = HistoryScope(kind="team", scope_id="squad")
 
 
 class ProbeToolkit(Toolkit):
-    """Two member tools the tests watch: one records its calls, one reports the history scope its runtime context names."""
+    """The member tools the team suites watch: calls are recorded, and a waiting call runs until it is cancelled."""
 
     calls: ClassVar[list[str]] = []
     scopes: ClassVar[list[str | None]] = []
+    active_models: ClassVar[list[str | None]] = []
+    waiting: ClassVar[asyncio.Event] = asyncio.Event()
 
     def __init__(self) -> None:
-        super().__init__(name="probe", tools=[self.touch, self.scope, self.dig])
+        super().__init__(name="probe", tools=[self.touch, self.scope, self.dig, self.model])
 
-    async def touch(self, label: str) -> str:
-        """Record one call.
+    async def touch(self, label: str, wait: bool = False) -> str:
+        """Record one call; a waiting call then runs until it is cancelled.
 
         Args:
             label: What to record.
+            wait: Whether the call keeps running after it is recorded.
 
         """
         type(self).calls.append(label)
+        if wait:
+            type(self).waiting.set()
+            await asyncio.Event().wait()
         return f"touched {label}"
 
     async def scope(self) -> str:
@@ -99,10 +114,17 @@ class ProbeToolkit(Toolkit):
         """Return one large result, so a member's tool loop outgrows its context window."""
         return "r" * 4000
 
+    async def model(self) -> str:
+        """Report the model the running turn's tool context names."""
+        context = get_tool_runtime_context()
+        name = context.active_model_name if context is not None else None
+        type(self).active_models.append(name)
+        return name or "no model"
+
 
 @contextmanager
 def registered_probe() -> Iterator[type[ProbeToolkit]]:
-    """Register the probe toolkit and restore the registries afterwards."""
+    """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the registries afterwards."""
     original_registry = TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
 
@@ -118,6 +140,8 @@ def registered_probe() -> Iterator[type[ProbeToolkit]]:
 
     ProbeToolkit.calls.clear()
     ProbeToolkit.scopes.clear()
+    ProbeToolkit.active_models.clear()
+    ProbeToolkit.waiting = asyncio.Event()
     try:
         yield ProbeToolkit
     finally:
@@ -134,38 +158,249 @@ def squad_probe() -> Iterator[type[ProbeToolkit]]:
         yield toolkit
 
 
+def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ScriptedModel]) -> None:
+    """Install the team runtime seam: each member's and the leader's provider is the scripted model of its model name.
+
+    ``models`` is read at every build, so a test may replace a model between a pause and its resume.
+    """
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
+    monkeypatch.setattr(envelope, "build_model_provider", lambda _config, _paths, name, **_kwargs: models[name])
+
+
+def authored_team_config(
+    agents_: Mapping[str, Mapping[str, Any]],
+    *,
+    teams: Mapping[str, Mapping[str, Any]] | None = None,
+    models: Sequence[str] = ("default",),
+) -> dict[str, Any]:
+    """Return an authored config of these agents and teams, each model name a test provider, without default tools."""
+    return {
+        "defaults": {"tools": []},
+        "agents": {name: dict(agent) for name, agent in agents_.items()},
+        "teams": {name: dict(team) for name, team in (teams or {}).items()},
+        "memory": {"backend": "none"},
+        "models": {
+            name: {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}} for name in models
+        },
+        "timezone": "UTC",
+    }
+
+
+def delegate(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
+    """Return a leader turn that hands ``task`` to one member in coordinate mode."""
+    return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=usage(40, 4))
+
+
+def rendered(chunk: TeamStreamChunk) -> str:
+    """Return the text one streamed chunk shows."""
+    return chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk
+
+
 @dataclass
-class SquadTurn:
-    """One team turn's config, its scripted models by model name, its recorder, store, and runtime."""
+class TeamTurn:
+    """One team's config, scripted models by model name, tool runtime, orchestrator, and turn recorder."""
 
     config: Config
     runtime_paths: RuntimePaths
     models: dict[str, ScriptedModel]
-    recorder: TurnRecorder
-    storage: ConversationStore
     identity: ToolExecutionIdentity
     runtime: ToolRuntimeContext
     orchestrator: SimpleNamespace
+    member_names: tuple[str, ...]
+    team_name: str | None
+    mode: TeamMode
+    scope: HistoryScope
+    recorder: TurnRecorder = field(default_factory=lambda: TurnRecorder(user_message="Hello"))
 
     @property
-    def leader(self) -> ScriptedModel:
-        """Return the leader's scripted model."""
-        return self.models["default"]
-
-    @property
-    def writer(self) -> ScriptedModel:
-        """Return the writer's scripted model."""
-        return self.models["writer-model"]
-
-    @property
-    def checker(self) -> ScriptedModel:
-        """Return the checker's scripted model."""
-        return self.models["checker-model"]
+    def storage(self) -> ConversationStore:
+        """The store of the team's history scope."""
+        owner = resolve_bound_history_owner(self.member_names)
+        assert owner is not None
+        return create_scope_session_storage(
+            agent_name=owner,
+            scope=self.scope,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=self.identity,
+        )
 
     def member_ids(self) -> list[MatrixID]:
-        """Return the members' Matrix ids, as a team reply names them."""
+        """Return the members' Matrix ids, as the streaming entry receives them."""
         ids = entity_ids(self.config, self.runtime_paths)
-        return [ids["writer"], ids["checker"]]
+        return [ids[name] for name in self.member_names]
+
+    def ctx(self, **overrides: Any) -> ResponseTurnContext:  # noqa: ANN401
+        """Return the turn context the runner passes for a reply to ``EVENT_ID`` in the thread."""
+        ctx = make_turn_context(
+            self.team_name or "team",
+            session_id=SESSION_ID,
+            run_id="run-1",
+            correlation_id="correlation-1",
+            reply_to_event_id=EVENT_ID,
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            requester_id=REQUESTER_ID,
+        )
+        return replace(ctx, **overrides)
+
+    def stored_runs(self, session_id: str = SESSION_ID) -> tuple[TeamRunRecord, list[RunRecord]]:
+        """Return the session's one team row and its member rows."""
+        session = self.storage.load_session(session_id, "team")
+        assert session is not None
+        [record] = [run for run in session.runs if isinstance(run, TeamRunRecord)]
+        return record, [run for run in session.runs if isinstance(run, RunRecord)]
+
+    async def stream(
+        self,
+        *,
+        message: str = "Hello",
+        ctx: ResponseTurnContext | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> list[TeamStreamChunk]:
+        """Stream one team reply as the response runner does and return its chunks."""
+        kwargs.setdefault("mode", self.mode)
+        kwargs.setdefault("user_id", REQUESTER_ID)
+        kwargs.setdefault("agent_ids", self.member_ids())
+        with tool_runtime_context(self.runtime):
+            return [
+                chunk
+                async for chunk in team_response_stream(
+                    message=message,
+                    orchestrator=self.orchestrator,
+                    execution_identity=self.identity,
+                    ctx=ctx or self.ctx(),
+                    configured_team_name=self.team_name,
+                    turn_recorder=self.recorder,
+                    **kwargs,
+                )
+            ]
+
+    async def respond(
+        self,
+        *,
+        message: str = "Hello",
+        ctx: ResponseTurnContext | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> str:
+        """Run one blocking team reply and return its text."""
+        kwargs.setdefault("mode", self.mode)
+        kwargs.setdefault("user_id", REQUESTER_ID)
+        kwargs.setdefault("agent_names", list(self.member_names))
+        with tool_runtime_context(self.runtime):
+            return await team_response(
+                message=message,
+                orchestrator=self.orchestrator,
+                execution_identity=self.identity,
+                ctx=ctx or self.ctx(),
+                configured_team_name=self.team_name,
+                turn_recorder=self.recorder,
+                **kwargs,
+            )
+
+    async def reply(self, *, stream: bool, **kwargs: Any) -> str:  # noqa: ANN401
+        """Run one reply on either path and return the text it ended with: the last streamed chunk, or the reply."""
+        if not stream:
+            return await self.respond(**kwargs)
+        chunks = await self.stream(**kwargs)
+        return rendered(chunks[-1]) if chunks else ""
+
+    async def resume(
+        self,
+        paused: PausedAttempt,
+        *,
+        approved: bool,
+        approvals: Sequence[ApprovalCall],
+        session_id: str = SESSION_ID,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> CompletedApprovalRun | PausedAttempt:
+        """Resume ``paused`` with every saved approval call approved or denied, as an approval from ``session_id`` does."""
+        call_ids = [call.tool_call_id for call in approvals]
+        kwargs.setdefault("decisions", dict.fromkeys(call_ids, approved))
+        kwargs.setdefault("denial_reasons", dict.fromkeys(call_ids, "Declined by requester"))
+        kwargs.setdefault("model_name", "default")
+        kwargs.setdefault("show_tool_calls", False)
+        kwargs.setdefault("progress", None)
+        with tool_runtime_context(self.runtime):
+            return await continue_paused_team_run(
+                member_names=self.member_names,
+                mode=self.mode,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=self.identity,
+                session_id=session_id,
+                run_id=paused.run_id,
+                user_id=REQUESTER_ID,
+                configured_team_name=self.team_name or self.member_names[0],
+                refresh_scheduler=None,
+                approval_calls=approvals,
+                history_scope=self.scope,
+                prior_tool_trace=paused.tool_trace,
+                prior_presentation_state=paused.response_presentation_state,
+                **kwargs,
+            )
+
+
+def build_team_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authored: Mapping[str, Any],
+    *,
+    members: Sequence[str],
+    team_name: str | None = None,
+    scripts: Mapping[str, Sequence[Sequence[ScriptStep]]] | None = None,
+    mode: TeamMode = TeamMode.COORDINATE,
+) -> TeamTurn:
+    """Build one team of ``members`` over ``authored``, every configured model scripted by ``scripts`` or left empty.
+
+    ``team_name`` names the configured team the turn runs as, or None for an ad hoc team of ``members``; every agent
+    of the config runs, and the requester may address every responder in the room.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
+    with_current_room_member_access(config)
+    models = {name: ScriptedModel([list(turn) for turn in (scripts or {}).get(name, ())]) for name in config.models}
+    install_team_models(monkeypatch, models)
+    runtime = make_test_tool_runtime_context(
+        agent_name=team_name or members[0],
+        target=MessageTarget(
+            room_id=ROOM_ID,
+            source_thread_id=THREAD_ID,
+            resolved_thread_id=THREAD_ID,
+            reply_to_event_id=EVENT_ID,
+            session_id=SESSION_ID,
+        ),
+        requester_id=REQUESTER_ID,
+        client=SimpleNamespace(user_id=f"@mindroom_{team_name or members[0]}:localhost"),
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        correlation_id="correlation-1",
+        membership_turn_id=EVENT_ID,
+    )
+    identity = build_execution_identity_from_runtime_context(runtime)
+    bound = resolve_bound_team_scope_context(
+        member_names=members,
+        config=config,
+        team_name=team_name,
+        execution_identity=identity,
+    )
+    assert bound is not None
+    orchestrator = _team_orchestrator(config, runtime_paths)
+    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
+    return TeamTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        models=models,
+        identity=identity,
+        runtime=runtime,
+        orchestrator=orchestrator,
+        member_names=tuple(members),
+        team_name=team_name,
+        mode=mode,
+        scope=bound.scope,
+    )
 
 
 def squad_turn(
@@ -180,29 +415,22 @@ def squad_turn(
     approval_rules: Sequence[ApprovalRuleConfig] = (),
     context_window: int | None = None,
     max_tool_calls_per_turn: int | None = None,
-) -> SquadTurn:
+) -> TeamTurn:
     """Build the ``squad`` team of a writer and a checker whose models are scripted providers.
 
-    ``helper`` scripts the ``helper`` agent, outside the team, that the writer may then delegate to. A
-    ``context_window`` turns on compaction with a ``summary`` model, which the test supplies.
+    The leader's model is ``default``, the writer's ``writer-model``, the checker's ``checker-model``, and every
+    member offers ``PROBE_TOOL``. ``helper`` scripts the ``helper`` agent, outside the team, that the writer may then
+    delegate to. A ``context_window`` turns on compaction with a ``summary`` model, which the test supplies.
     """
-    authored = {
-        "defaults": {"tools": []},
-        "agents": {
+    authored = authored_team_config(
+        {
             "writer": {"display_name": "Writer", "role": "Writes.", "model": "writer-model", "tools": [PROBE_TOOL]},
             "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": [PROBE_TOOL]},
             "helper": {"display_name": "Helper", "role": "Helps.", "model": "helper-model", "tools": [PROBE_TOOL]},
         },
-        "teams": {
-            "squad": {"display_name": "Squad", "role": "Answers.", "agents": ["writer", "checker"], "mode": mode},
-        },
-        "memory": {"backend": "none"},
-        "models": {
-            name: {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}}
-            for name in ("default", "writer-model", "checker-model", "helper-model")
-        },
-        "timezone": "UTC",
-    }
+        teams={"squad": {"display_name": "Squad", "role": "Answers.", "agents": ["writer", "checker"], "mode": mode}},
+        models=("default", "writer-model", "checker-model", "helper-model"),
+    )
     if helper is not None:
         authored["agents"]["writer"]["delegate_to"] = ["helper"]
     if max_tool_calls_per_turn is not None:
@@ -212,133 +440,23 @@ def squad_turn(
             model["context_window"] = context_window
         authored["models"]["summary"] = {"provider": "openai", "id": "summary-model", "context_window": 100_000}
         authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
-    with_current_room_member_access(config)
-    with_responder_access(config, "helper", users=[REQUESTER_ID])
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        team_name="squad",
+        scripts={"default": leader, "writer-model": writer, "checker-model": checker, "helper-model": helper or ()},
+        mode=TeamMode(mode),
+    )
+    with_responder_access(team.config, "helper", users=[REQUESTER_ID])
     if approval_rules:
-        config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
-    models = {
-        "default": ScriptedModel([list(turn) for turn in leader]),
-        "writer-model": ScriptedModel([list(turn) for turn in writer]),
-        "checker-model": ScriptedModel([list(turn) for turn in checker]),
-        "helper-model": ScriptedModel([list(turn) for turn in helper or ()]),
-    }
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
-    monkeypatch.setattr(envelope, "build_model_provider", lambda _config, _paths, name, **_kwargs: models[name])
-    runtime = make_test_tool_runtime_context(
-        agent_name="squad",
-        target=MessageTarget(
-            room_id=ROOM_ID,
-            source_thread_id=THREAD_ID,
-            resolved_thread_id=THREAD_ID,
-            reply_to_event_id=EVENT_ID,
-            session_id=SESSION_ID,
-        ),
-        requester_id=REQUESTER_ID,
-        client=SimpleNamespace(user_id="@mindroom_squad:localhost"),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-        correlation_id="correlation-1",
-        membership_turn_id=EVENT_ID,
-    )
-    identity = build_execution_identity_from_runtime_context(runtime)
-    storage = create_scope_session_storage(
-        agent_name="checker",
-        scope=TEAM_SCOPE,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-    orchestrator = _team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("writer", "checker", "helper")}
-    return SquadTurn(
-        config,
-        runtime_paths,
-        models,
-        TurnRecorder(user_message="Hello"),
-        storage,
-        identity,
-        runtime,
-        orchestrator,
-    )
-
-
-def turn_context() -> ResponseTurnContext:
-    """Return the turn context of one reply to the requester's message in the squad's thread."""
-    return make_turn_context(
-        "squad",
-        session_id=SESSION_ID,
-        run_id="run-1",
-        correlation_id="correlation-1",
-        reply_to_event_id=EVENT_ID,
-        room_id=ROOM_ID,
-        thread_id=THREAD_ID,
-        requester_id=REQUESTER_ID,
-    )
-
-
-def delegate(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
-    """Return a leader turn that delegates ``task`` to one member."""
-    return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=usage(40, 4))
-
-
-async def stream_reply(
-    team: SquadTurn,
-    *,
-    mode: TeamMode = TeamMode.COORDINATE,
-    ctx: ResponseTurnContext | None = None,
-    **kwargs: Any,  # noqa: ANN401
-) -> list[Any]:
-    """Stream one team reply as the response runner does and return its chunks; ``ctx`` defaults to ``turn_context``'s."""
-    with tool_runtime_context(team.runtime):
-        return [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=team.member_ids(),
-                message="Hello",
-                orchestrator=team.orchestrator,
-                execution_identity=team.identity,
-                ctx=ctx or turn_context(),
-                mode=mode,
-                user_id=REQUESTER_ID,
-                configured_team_name="squad",
-                turn_recorder=team.recorder,
-                **kwargs,
-            )
-        ]
-
-
-async def blocking_reply(team: SquadTurn, *, mode: TeamMode = TeamMode.COORDINATE, **kwargs: Any) -> str:  # noqa: ANN401
-    """Run one blocking team reply and return its text."""
-    with tool_runtime_context(team.runtime):
-        return await team_response(
-            agent_names=["writer", "checker"],
-            mode=mode,
-            message="Hello",
-            orchestrator=team.orchestrator,
-            execution_identity=team.identity,
-            ctx=turn_context(),
-            user_id=REQUESTER_ID,
-            configured_team_name="squad",
-            turn_recorder=team.recorder,
-            **kwargs,
-        )
-
-
-def stored_runs(team: SquadTurn) -> tuple[TeamRunRecord, list[RunRecord]]:
-    """Return the stored team run and its member runs."""
-    session = team.storage.load_session(SESSION_ID, "team")
-    assert session is not None
-    [record] = [run for run in session.runs if isinstance(run, TeamRunRecord)]
-    members = [run for run in session.runs if isinstance(run, RunRecord)]
-    return record, members
+        team.config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
+    return team
 
 
 def member_approval(call_id: str, label: str) -> ApprovalCall:
-    """Return the approval of the checker's ``touch`` call with ``label``."""
+    """Return the approval of the squad checker's ``touch`` call with ``label``."""
     return ApprovalCall(
         tool_call_id=call_id,
         tool_name="touch",
@@ -349,33 +467,23 @@ def member_approval(call_id: str, label: str) -> ApprovalCall:
     )
 
 
-async def resume_approval(
-    team: SquadTurn,
-    paused: PausedAttempt,
-    *,
-    approved: bool,
-    calls_: Sequence[ApprovalCall],
-) -> CompletedApprovalRun | PausedAttempt:
-    """Approve or deny ``calls_`` and resume the paused team run as a saved approval does."""
-    with tool_runtime_context(team.runtime):
-        return await continue_paused_team_run(
-            member_names=("writer", "checker"),
-            mode=TeamMode.COORDINATE,
-            config=team.config,
-            runtime_paths=team.runtime_paths,
-            execution_identity=team.identity,
-            session_id=SESSION_ID,
-            run_id=paused.run_id,
-            user_id=REQUESTER_ID,
-            configured_team_name="squad",
-            model_name="default",
-            decisions=dict.fromkeys((call.tool_call_id for call in calls_), approved),
-            denial_reasons=dict.fromkeys((call.tool_call_id for call in calls_), "Declined by requester"),
-            refresh_scheduler=None,
-            approval_calls=calls_,
-            history_scope=TEAM_SCOPE,
-            prior_tool_trace=paused.tool_trace,
-            prior_presentation_state=paused.response_presentation_state,
-            show_tool_calls=False,
-            progress=None,
-        )
+__all__ = [
+    "EVENT_ID",
+    "PROBE_TOOL",
+    "REQUESTER_ID",
+    "ROOM_ID",
+    "SESSION_ID",
+    "TEAM_SCOPE",
+    "THREAD_ID",
+    "ProbeToolkit",
+    "TeamTurn",
+    "authored_team_config",
+    "build_team_turn",
+    "delegate",
+    "install_team_models",
+    "member_approval",
+    "registered_probe",
+    "rendered",
+    "squad_probe",
+    "squad_turn",
+]

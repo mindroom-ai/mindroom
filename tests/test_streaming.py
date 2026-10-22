@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
 from mindroom import reply_lifecycle as rl
@@ -35,6 +33,8 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.matrix import message_builder
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
@@ -190,9 +190,9 @@ async def test_lifecycle_suspension_captures_last_committed_presentation(config:
     gateway = _FakeGateway()
 
     async def suspended_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="I checked the input.")
+        yield ContentDelta("I checked the input.")
         await gateway.wait_for_ops(1)
-        yield ToolCallStartedEvent(
+        yield ToolStarted(
             tool=ToolExecution(
                 tool_call_id="call-1",
                 tool_name="inspect",
@@ -259,15 +259,14 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     gateway = _FakeGateway()
 
     async def scripted_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="")
+        yield ContentDelta("")
         await gateway.wait_for_ops(1)
         yield "Hello"
         await gateway.wait_for_ops(2)
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
+        yield ToolStarted(tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}))
         await gateway.wait_for_ops(3)
-        yield ToolCallCompletedEvent(
+        yield ToolCompleted(
             tool=ToolExecution(tool_name="search_web", tool_args={"q": "mindroom"}, result="ok"),
-            content="ok",
         )
         await gateway.wait_for_ops(4)
         yield " Done."
@@ -1220,9 +1219,9 @@ async def test_a_resumed_stream_continues_below_the_stopped_text(config: Config)
     gateway = _FakeGateway()
 
     async def continuation() -> AsyncIterator[object]:
-        yield RunContentEvent(content="The second half.")
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}))
-        yield ToolCallCompletedEvent(
+        yield ContentDelta("The second half.")
+        yield ToolStarted(tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}))
+        yield ToolCompleted(
             tool=ToolExecution(tool_call_id="call-2", tool_name="search_web", tool_args={}, result="ok"),
         )
 
@@ -1267,7 +1266,7 @@ async def test_stopping_a_resumed_stream_keeps_the_stopped_text(config: Config) 
     gateway = _FakeGateway()
 
     async def stopped_continuation() -> AsyncIterator[object]:
-        yield RunContentEvent(content="The second")
+        yield ContentDelta("The second")
         await gateway.wait_for_ops(1)
         raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
 
@@ -1299,7 +1298,7 @@ async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config
         return await gateway.edit(*args, **kwargs)  # type: ignore[arg-type]
 
     async def failing_continuation() -> AsyncIterator[object]:
-        yield RunContentEvent(content="The second")
+        yield ContentDelta("The second")
         message = "Provider failed"
         raise RuntimeError(message)
 
@@ -1401,7 +1400,7 @@ async def test_a_resumed_final_event_only_answer_lands_below_the_stopped_text(co
     gateway = _FakeGateway()
 
     async def final_only() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="The second half.")
+        yield RunFinished(RunRecord(run_id="run-final", content="The second half."))
 
     with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
         outcome = await _run_resumed_stream(config, final_only())

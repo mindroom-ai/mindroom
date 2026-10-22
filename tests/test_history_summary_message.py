@@ -48,14 +48,11 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
     EVENT_ID,
     SESSION_ID,
     TEAM_SCOPE,
-    SquadTurn,
+    TeamTurn,
     delegate,
     member_approval,
-    resume_approval,
     squad_probe,
     squad_turn,
-    stream_reply,
-    turn_context,
 )
 
 if TYPE_CHECKING:
@@ -194,7 +191,7 @@ _LEGACY_SYSTEM_SUFFIX = (
 )
 
 
-def _seeded_squad(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **scripts: Any) -> SquadTurn:  # noqa: ANN401
+def _seeded_squad(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **scripts: Any) -> TeamTurn:  # noqa: ANN401
     """Return the squad whose team scope holds two earlier runs and a summary, scripted as ``scripts`` says."""
     team = squad_turn(tmp_path, monkeypatch, **scripts)
     session = seed_session(
@@ -213,9 +210,9 @@ def _contents(messages: Sequence[Message]) -> list[str]:
     return [str(message.content) for message in messages]
 
 
-async def _paused_on_the_checker(team: SquadTurn) -> PausedAttempt:
+async def _paused_on_the_checker(team: TeamTurn) -> PausedAttempt:
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await stream_reply(team, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
     return raised.value.paused
 
 
@@ -235,9 +232,9 @@ async def test_a_team_turn_replays_the_summary_before_its_history_and_outside_an
 ) -> None:
     team = _seeded_squad(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))])
 
-    await stream_reply(team)
+    await team.stream()
 
-    request = team.leader.requests[0].messages
+    request = team.models["default"].requests[0].messages
     [summary] = _owned_summaries(request)
     assert [message.role for message in request].count("system") == 1
     assert request[0].role == "system"
@@ -259,9 +256,9 @@ async def test_a_team_turn_whose_plan_replays_no_history_sends_no_summary(
     team = _seeded_squad(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))])
     spent = ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
 
-    await stream_reply(team, ctx=replace(turn_context(), scheduled_history_budget=spent))
+    await team.stream(ctx=team.ctx(scheduled_history_budget=spent))
 
-    request = team.leader.requests[0].messages
+    request = team.models["default"].requests[0].messages
     assert _owned_summaries(request) == []
     assert not set(_PAST) & set(_contents(request))
     assert "Hello" in str(request[-1].content)
@@ -284,9 +281,9 @@ async def test_a_team_summary_only_plan_replays_the_summary_without_runs(
     seed_summary(team.storage, session, TEAM_SCOPE, _SUMMARY)
     team.config.models["default"].context_window = 8_000
 
-    await stream_reply(team)
+    await team.stream()
 
-    request = team.leader.requests[0].messages
+    request = team.models["default"].requests[0].messages
     assert len(_owned_summaries(request)) == 1
     assert not any("long long" in content for content in _contents(request))
     assert "Hello" in str(request[-1].content)
@@ -301,13 +298,13 @@ async def test_a_team_resume_replays_the_summary_once_behind_the_paused_request(
     """The leader's resumed request keeps the summary and history its paused request saw, once, as its prefix."""
     team = _seeded_squad(tmp_path, monkeypatch, **_CHECKER_PAUSES)
     paused = await _paused_on_the_checker(team)
-    [paused_request] = team.leader.requests
+    [paused_request] = team.models["default"].requests
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
-    await resume_approval(team, paused, approved=True, calls_=(member_approval("call-touch", "dangerous"),))
+    await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
-    [resumed] = team.leader.requests
+    [resumed] = team.models["default"].requests
     [summary] = _owned_summaries(resumed.messages)
     assert summary.content == _owned_summaries(paused_request.messages)[0].content
     assert _contents(resumed.messages)[: len(paused_request.messages)] == _contents(paused_request.messages)
@@ -333,13 +330,13 @@ async def test_a_team_continued_within_its_turn_replays_the_summary_only_under_a
         ],
         helper=[answer("Helper found it.")],
     )
-    ctx = turn_context()
+    ctx = team.ctx()
     if not replays:
         ctx = replace(ctx, scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID))
 
-    await stream_reply(team, ctx=ctx)
+    await team.stream(ctx=ctx)
 
-    first, continued = team.leader.requests
+    first, continued = team.models["default"].requests
     assert len(_owned_summaries(first.messages)) == int(replays)
     assert len(_owned_summaries(continued.messages)) == int(replays)
     assert (set(_PAST) <= set(_contents(continued.messages))) is replays
@@ -365,8 +362,8 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
-    await resume_approval(team, paused, approved=True, calls_=(member_approval("call-touch", "dangerous"),))
+    await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
-    [resumed] = team.leader.requests
+    [resumed] = team.models["default"].requests
     assert _owned_summaries(resumed.messages) == []
     assert resumed.messages[0].content == f"{system.content}{_LEGACY_SYSTEM_SUFFIX}"

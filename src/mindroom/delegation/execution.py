@@ -12,7 +12,8 @@ from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions
+from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import (
@@ -164,6 +165,36 @@ def has_delegation_state(response: AnyRunRecord) -> bool:
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
 
 
+def _delegation_call(requirement: RunRequirement) -> bool:
+    tool = requirement.tool_execution
+    return tool.tool_name in DELEGATION_TOOL_NAMES and bool(tool.external_execution_required)
+
+
+def answered_delegation_calls(response: AnyRunRecord) -> dict[str, str]:
+    """Return, by call id, the answer each delegation call of a paused run already holds."""
+    return {
+        call_id: answer
+        for requirement in response.requirements or ()
+        if _delegation_call(requirement)
+        and (call_id := requirement.tool_execution.tool_call_id) is not None
+        and (answer := requirement.external_execution_result) is not None
+    }
+
+
+def _awaiting_answers[R: AnyRunRecord](response: R) -> R:
+    """Return ``response`` with its delegation calls waiting again, for the continuation that answers them.
+
+    The loop answers an external call only from the results it is handed, under its exact-coverage check.
+    """
+    return replace(
+        response,
+        requirements=[
+            replace(requirement, external_execution_result=None) if _delegation_call(requirement) else requirement
+            for requirement in response.requirements or ()
+        ],
+    )
+
+
 async def persist_delegation_state(
     store: ConversationStore | None,
     session: ConversationSession,
@@ -179,9 +210,12 @@ async def persist_delegation_state(
     if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
+    # The copy is taken before the lane is awaited, so the row lands as it was handed over, whatever the driver
+    # changes on the record while the lane is busy.
+    handed_over = deepcopy(response)
     await run_session_storage_operation(
         lambda: store,
-        lambda opened: opened.save_run(session, response, record_usage=False),
+        lambda opened: opened.save_run(session, handed_over, record_usage=False),
     )
 
 
@@ -318,7 +352,7 @@ async def _execute_child(
     if session is None:
         msg = "Delegated run's session is no longer available"
         raise RuntimeError(msg)
-    toolkit_owners = {(child.child_agent_name, name): owner for name, owner in build.tool_owners.items()}
+    toolkit_owners = tool_owners_by_agent(build)
     validate_approval_tool_owners(toolkit_owners, approved_calls, local_approval_requirements(persisted))
     runner = ResumeRunner(
         build=build,
@@ -400,6 +434,14 @@ async def _start_child_envelope(
     return _ChildOutcome(response, toolkit_owners)
 
 
+async def _observed_child_events(events: AsyncIterator[RunEvent]) -> AsyncIterator[RunEvent]:
+    """Pass a child's resume through its audit and progress observers; its events are this context's own."""
+    async with closing_async_stream(events):
+        async for event in events:
+            await observe_child_event(event)
+            yield event
+
+
 async def _continue_child(
     runner: ResumeRunner,
     run_child: ChildResponseRunner,
@@ -417,19 +459,7 @@ async def _continue_child(
     """Apply child decisions and drive any further nested delegations."""
 
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-        # The child's events are this context's own; the audit and progress observers read them here.
-        events = runner.events(paused, resume)
-        record: RunRecord | None = None
-        async with closing_async_stream(events):
-            async for event in events:
-                await observe_child_event(event)
-                if isinstance(event, RunFinished):
-                    assert isinstance(event.record, RunRecord)
-                    record = event.record
-        if record is None:
-            msg = "Delegated continuation did not yield its retained outcome"
-            raise RuntimeError(msg)
-        return record
+        return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, record_type=RunRecord)
 
     if not has_delegation_state(persisted):
         if decisions is None:
@@ -592,14 +622,15 @@ def _resolve_delegation_requirement(
     *,
     output_request: ToolOutputFileRequest | None = None,
 ) -> str:
-    """Return one external call's finished result and close its live tool trace, including rejections.
+    """Answer one external call with its finished result and close its live tool trace, including rejections.
 
-    The requirement itself stays unresolved: the parent's continuation answers it with this result, through the
-    loop's own decision check.
+    The answer stays on the parent's requirement, as Agno's driver stored it, so a later entry never advances the
+    call again; the parent's continuation hands every answer to the loop's own decision check.
     """
     result = _finalize_delegation_output(result, output_request)
+    requirement.set_external_execution_result(result)
     if on_event is not None:
-        on_event(ToolCompleted(replace(requirement.tool_execution, result=result, external_execution_required=False)))
+        on_event(ToolCompleted(replace(requirement.tool_execution, external_execution_required=False)))
     return result
 
 
@@ -1410,10 +1441,17 @@ async def drive_delegations[R: AnyRunRecord](
             for requirement in response.requirements or ()
             if requirement.needs_confirmation and requirement.tool_execution.tool_call_id not in decided
         ]
-        if not external and not ordinary and any(not item.is_resolved() for item in response.requirements or ()):
+        if (
+            not external
+            and not ordinary
+            and any(
+                not item.is_resolved() and item.tool_execution.tool_call_id not in decided
+                for item in response.requirements or ()
+            )
+        ):
             return response
         persist = partial(persist_delegation_state, store, session, response)
-        results: dict[str, str] = {}
+        # Calls answered on an earlier entry keep their answers; only the calls still waiting advance.
         for requirement in external:
             result = await advance_delegation_call(
                 requirement,
@@ -1437,7 +1475,6 @@ async def drive_delegations[R: AnyRunRecord](
             )
             if result is None:
                 return response
-            results[requirement.tool_execution.tool_call_id or ""] = result
         # Ask for ordinary calls last, so the approval that covers them belongs to the continuation that runs them.
         if ordinary:
             state.pending_requirements = [requirement.to_dict() for requirement in ordinary]
@@ -1445,7 +1482,11 @@ async def drive_delegations[R: AnyRunRecord](
             await persist(state)
             return response
         await persist(state)
-        response = await continue_parent(response, replace(own, external_results=results), on_event)
+        response = await continue_parent(
+            _awaiting_answers(response),
+            replace(own, external_results=answered_delegation_calls(response)),
+            on_event,
+        )
         own = ResumeDecisions()
         state.clear_pending()
         await persist_delegation_state(store, session, response, state)

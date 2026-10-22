@@ -5,68 +5,72 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput, ToolCallCompletedEvent
-from agno.run.base import RunStatus
 
-from mindroom.ai import run_delegated_child_response
+from mindroom import agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.records import DelegationRecordOwner
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.runs import RunStatus
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import (
-    DelegationModel,
-    _call,
+    ScriptedAgents,
     _deferred_call,
     _delegate_runtime_context,
     _runtime_paths,
+    approval_executor,
+    pause_parent,
+    respond,
+    resume,
+    stored_run,
+    system_prompts,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity, _only_run
-from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.delegation.records import DelegationMetadata, DelegationRecordHandle
+    from mindroom.delegation.state import DelegationChild
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-@dataclass
-class _InstructionRecordingModel(DelegationModel):
-    """Keep every child system prompt and offered function names, including its first resumed model request."""
+def _leader_and_child() -> Config:
+    return Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child"),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+    )
 
-    system_prompts: list[str] = field(default_factory=list)
 
-    offered: list[list[str]] = field(default_factory=list)
-
-    @property
-    def authored_prompts(self) -> list[str]:
-        """Each request's system message before the runtime sections that follow an authored subagent's prompt."""
-        return [prompt.split("\n\n<your_role>", 1)[0] for prompt in self.system_prompts]
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])
-        self.offered.append(sorted(str(tool.get("function", tool).get("name")) for tool in tools))
-        if not self.responses:
-            msg = "Child provider unavailable."
-            raise RuntimeError(msg)
-        response = await super().ainvoke(*_args, **kwargs)
-        self.system_prompts.append(
-            "\n".join(str(message.content) for message in self.seen_messages if message.role == "system"),
-        )
-        return response
+def _child_tools(child: DelegationChild, config: Config, paths: RuntimePaths) -> list[ToolExecution]:
+    """Return every tool call the ``child`` agent's store recorded, across its own and its nested runs."""
+    store = create_session_storage("child", config, paths, child_execution_identity(child))
+    return [
+        tool
+        for session_id, _updated in store.list_updated_sessions("agent", "child", since=-1)
+        for run in store.list_runs(session_id)
+        for tool in run.tools or ()
+    ]
 
 
 @pytest.mark.asyncio
@@ -75,18 +79,10 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real child envelope must complete its audit with its actual final response."""
-    config = Config(
-        agents={
-            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
-            "child": AgentConfig(display_name="Child"),
-        },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-    )
+    config = _leader_and_child()
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = DelegationModel(id="test", responses=[ModelResponse(content="Child completed the work.")])
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    ScriptedAgents({"child": ScriptedModel([answer("Child completed the work.")])}).install(monkeypatch)
     identity = _identity()
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
 
@@ -111,31 +107,10 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     native: bool,
 ) -> None:
     """Cancelling a durable startup write cannot strand an audit without its locator."""
-    config = Config(
-        agents={
-            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
-            "child": AgentConfig(display_name="Child"),
-        },
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-    )
+    config = _leader_and_child()
     paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
     identity = _identity()
-    toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    if native:
-        with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
-    storage = create_session_storage("leader", config, paths, identity)
-    parent = Agent(
-        name="leader",
-        db=storage,
-        tools=[toolkit],
-        model=DelegationModel(
-            id="test-parent",
-            responses=[
-                ModelResponse(tool_calls=[_call("run_subagent", "delegate", agent_name="child", task="Inspect")]),
-            ],
-        ),
-    )
     created = asyncio.Event()
     release = threading.Event()
     loop = asyncio.get_running_loop()
@@ -162,89 +137,96 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
             raise TimeoutError(msg)
         return handle
 
-    monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
-    try:
+    async def unused_child(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("The child must not start before its audit exists")
+
+    parent = None
+    if native:
+        parent_model = ScriptedModel([calls(tool_call("run_subagent", "delegate", agent_name="child", task="Inspect"))])
+        ScriptedAgents({}, by_session={identity.session_id: parent_model}).install(monkeypatch)
         with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            if native:
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                operation = drive_delegations(
-                    parent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    agent_name="leader",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                )
-            else:
-                operation = toolkit.run_subagent(agent_name="child", task="Inspect")
-            task = asyncio.create_task(operation)
-            try:
-                await asyncio.wait_for(created.wait(), timeout=10)
-                task.cancel()
-            finally:
-                release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
+    monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
+    if parent is not None:
+        # The parent's run stored its pause; the driver owns the delegation from there.
+        operation = drive_delegations(
+            parent.record,
+            store=parent.store,
+            session=parent.session,
+            continue_parent=parent.runner.continue_run,
+            agent_name="leader",
+            run_child=unused_child,
+            config=config,
+            runtime_paths=paths,
+            execution_identity=identity,
+        )
+    else:
+        toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+        operation = toolkit.run_subagent(agent_name="child", task="Inspect")
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(created.wait(), timeout=10)
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-        run = _only_run(tmp_path)
-        assert run["status"] == "cancelled"
-        receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
-        assert len(receipts) == 1
-        assert json.loads(receipts[0].read_text())["status"] == "cancelled"
-        if native:
-            retained = storage.get_run(response.run_id)
-            assert isinstance(retained, RunOutput)
-            child = DelegationState.from_metadata(retained.metadata).children[0]
-            assert child.status == "cancelled"
-            assert child.record_locator
-        else:
-            handle_path = next((paths.storage_root / "subagent_sessions").glob("*.json"))
-            child_payload = json.loads(handle_path.read_text())["child"]
-            assert child_payload["status"] == "cancelled"
-            assert child_payload["record_locator"]
-    finally:
-        release.set()
+    run = _only_run(tmp_path)
+    assert run["status"] == "cancelled"
+    receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())["status"] == "cancelled"
+    if parent is not None:
+        retained = parent.store.get_run("parent-run")
+        assert retained is not None
+        child = DelegationState.from_metadata(retained.metadata).children[0]
+        assert child.status == "cancelled"
+        assert child.record_locator
+    else:
+        handle_path = next((paths.storage_root / "subagent_sessions").glob("*.json"))
+        child_payload = json.loads(handle_path.read_text())["child"]
+        assert child_payload["status"] == "cancelled"
+        assert child_payload["record_locator"]
 
 
-def _continuation_responses(continuation: str) -> list[ModelResponse]:
-    """Plan provider events for approval, nested work, deferred tools, and failures."""
-    responses = [ModelResponse(tool_calls=[_call("add", "approved-add", a=1, b=2)])]
+def _provider_unavailable() -> list[ScriptStep]:
+    async def fail() -> None:
+        msg = "Child provider unavailable."
+        raise ProviderError(msg, provider="Synthetic")
+
+    return [Await(fail)]
+
+
+def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
+    """Script the child's requests for approval, nested work, deferred tools, and failures."""
+    turns = [calls(tool_call("add", "approved-add", a=1, b=2))]
     if continuation == "model_switch":
-        responses.insert(
+        turns.insert(
             0,
-            ModelResponse(
-                tool_calls=[
-                    _call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall"),
-                ],
-            ),
+            calls(tool_call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall")),
         )
     if continuation == "nested_deferred_tool":
-        responses.insert(
-            0,
-            ModelResponse(tool_calls=[_call("run_subagent", "nested", agent_name="child", task="Add then list files")]),
-        )
+        turns.insert(0, calls(tool_call("run_subagent", "nested", agent_name="child", task="Add then list files")))
     if continuation in {"deferred_tool", "nested_deferred_tool"}:
-        responses.append(ModelResponse(tool_calls=[_deferred_call("list-files", "list_files")]))
+        turns.append(calls(_deferred_call("list-files", "list_files")))
     if continuation == "preparation_error":
         # The continuation after this switch rebuilds the child, whose model preparation then fails.
-        responses.append(
-            ModelResponse(
-                tool_calls=[_call("switch_thread_model", "switch-model", model_name="default", when="next-turn")],
-            ),
-        )
+        turns.append(calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="next-turn")))
     if continuation == "nested_subagent":
-        responses.extend(
+        turns.extend(
             [
-                ModelResponse(tool_calls=[_call("run_subagent", "nested", agent_name="child", task="Check the sum")]),
-                ModelResponse(content="Nested check finished."),
+                calls(tool_call("run_subagent", "nested", agent_name="child", task="Check the sum")),
+                answer("Nested check finished."),
             ],
         )
     if continuation == "nested_deferred_tool":
-        responses.append(ModelResponse(content="Nested check finished."))
-    if continuation != "provider_error":
-        responses.append(ModelResponse(content="Child finished the requested work."))
-    return responses
+        turns.append(answer("Nested check finished."))
+    turns.append(
+        _provider_unavailable() if continuation == "provider_error" else answer("Child finished the requested work."),
+    )
+    return turns
 
 
 @pytest.mark.asyncio
@@ -288,85 +270,66 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
     )
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = _InstructionRecordingModel(id="test", responses=_continuation_responses(continuation))
-    models_loaded: list[str] = []
+    identity = _identity()
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add then inspect files")),
+            answer("Parent finished."),
+        ],
+    )
+    model = ScriptedModel(_continuation_turns(continuation))
+    child_models: list[str] = []
 
-    def load_model(*_args: object) -> _InstructionRecordingModel:
-        assert isinstance(_args[2], str)
-        models_loaded.append(_args[2])
-        if continuation == "preparation_error" and len(model.system_prompts) >= 2:
+    def build(
+        _config: Config,
+        _paths: RuntimePaths,
+        model_name: str,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> ModelProvider:
+        assert execution_identity is not None
+        if execution_identity.session_id == identity.session_id:
+            return parent
+        child_models.append(model_name)
+        if continuation == "preparation_error" and len(model.requests) >= 2:
             msg = "Child model preparation failed."
             raise RuntimeError(msg)
         return model
 
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
-    identity = _identity()
-    toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
-    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
-    storage = create_session_storage("leader", config, paths, identity)
-    parent = Agent(
-        name="leader",
-        db=storage,
-        tools=[toolkit],
-        model=DelegationModel(
-            id="test-parent",
-            responses=[
-                ModelResponse(
-                    tool_calls=[_call("run_subagent", "delegate", agent_name="child", task="Add then inspect files")],
-                ),
-                ModelResponse(content="Parent finished."),
-            ],
-        ),
-    )
-    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-        paused = await drive_delegations(
-            parent,
-            response,
-            run_child=run_delegated_child_response,
-            agent_name="leader",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
+    monkeypatch.setattr(agents, "_build_agent_model_provider", build)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    reply = await respond("leader", "Delegate", **options, run_id="parent-run")
+    paused = stored_run("leader", "parent-run", **options)
+    state = DelegationState.from_metadata(paused.metadata)
+    if approval:
+        assert isinstance(reply, PausedAttempt)
+        assert paused.status is RunStatus.paused
+        assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
+        approval_calls = tuple(
+            ApprovalCall(
+                tool_call_id=str(tool["tool_call_id"]),
+                tool_name=str(tool["tool_name"]),
+                invoking_agent="child",
+                toolkit_name="calculator",
+                expires_at_ns=2**62,
+                arguments_digest=approval_arguments_digest(tool["tool_args"]),
+            )
+            for tool in state.pending_tools
         )
-        state = DelegationState.from_metadata(paused.metadata)
-        events: list[object] = []
-        completed = paused
-        if approval:
-            assert paused.status == RunStatus.paused
-            persisted = storage.get_run(paused.run_id)
-            assert isinstance(persisted, RunOutput)
-            decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-            assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
-            approval_calls = tuple(
-                ApprovalCall(
-                    tool_call_id=str(tool["tool_call_id"]),
-                    tool_name=str(tool["tool_name"]),
-                    invoking_agent="child",
-                    toolkit_name="calculator",
-                    expires_at_ns=2**62,
-                    arguments_digest=approval_arguments_digest(tool["tool_args"]),
-                )
-                for tool in state.pending_tools
-            )
-            completed = await drive_delegations(
-                parent,
-                persisted,
-                run_child=run_delegated_child_response,
-                agent_name="leader",
-                config=config,
-                runtime_paths=paths,
-                execution_identity=identity,
-                decisions=decisions,
-                denial_reasons=dict.fromkeys(decisions),
-                approval_calls=approval_calls,
-                on_event=events.append,
-            )
+        result = await resume(
+            approval_executor(config, paths),
+            reply,
+            approval_calls,
+            agent_name="leader",
+            **options,
+            decisions={call.tool_call_id: True for call in approval_calls},
+        )
+        assert isinstance(result, CompletedApprovalRun)
 
-    assert completed.status == RunStatus.completed
+    completed = stored_run("leader", "parent-run", **options)
+    assert completed.status is RunStatus.completed
     if continuation == "model_switch":
         assert state.children[0].model_name == "alternate"
-        assert models_loaded == ["default", "alternate", "alternate"]
+        assert child_models == ["default", "alternate", "alternate"]
     child_id = state.children[0].delegation_id
     run_path = next(tmp_path.glob(f"agents/child/workspace/.mindroom/delegations/*/{child_id}/run.json"))
     if continuation in {"provider_error", "preparation_error"}:
@@ -376,17 +339,14 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         assert settled.result
         assert any("failed" in str(tool.result) for tool in completed.tools or () if tool.tool_name == "run_subagent")
         return
-    assert model.responses == []
+    assert model.turns == []
     assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."
-    approved = next(
-        event.tool
-        for event in events
-        if isinstance(event, ToolCallCompletedEvent) and event.tool is not None and event.tool.tool_name == "add"
-    )
+    [approved] = [tool for tool in _child_tools(state.children[0], config, paths) if tool.tool_name == "add"]
     assert not approved.tool_call_error
     assert "3" in str(approved.result)
-    assert model.system_prompts
-    assert all("UNSUPPORTED_INTERACTIVE_MARKER" not in prompt for prompt in model.system_prompts)
+    prompts = system_prompts(model)
+    assert prompts
+    assert all("UNSUPPORTED_INTERACTIVE_MARKER" not in prompt for prompt in prompts)
     if continuation in {"deferred_tool", "nested_deferred_tool"}:
         events = [
             json.loads(line)

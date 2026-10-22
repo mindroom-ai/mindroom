@@ -14,8 +14,6 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.media import Image
-from agno.models.message import Message
-from agno.models.response import ModelResponse
 from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
@@ -115,7 +113,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -361,12 +359,12 @@ _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_t
 
 
 def _notice_messages(
-    messages: list[Message],
+    messages: list[OwnedMessage],
     *,
     marker: bool | str | None = None,
     response_turn_id: str | None = None,
-) -> list[Message]:
-    matches: list[Message] = []
+) -> list[OwnedMessage]:
+    matches: list[OwnedMessage] = []
     for message in messages:
         provider_data = message.provider_data
         if not isinstance(provider_data, dict):
@@ -383,7 +381,7 @@ def _notice_messages(
 
 
 def _notice_count(
-    messages: list[Message],
+    messages: list[OwnedMessage],
     *,
     marker: bool | str | None = None,
     response_turn_id: str | None = None,
@@ -397,69 +395,12 @@ def _notice_count(
     )
 
 
-def _queued_notice_message(
-    response_turn_id: str,
-    *,
-    marker: bool | str = True,
-    content: str = QUEUED_MESSAGE_NOTICE_TEXT,
-    from_history: bool = False,
-) -> Message:
-    return Message(
-        role="user",
-        content=content,
-        provider_data={
-            _QUEUED_NOTICE_MARKER_KEY: marker,
-            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
-        },
-        from_history=from_history,
-    )
-
-
 def _queued_notice_storage(tmp_path: Path) -> ConversationStore:
     return create_state_storage(
         "queued_notice",
         tmp_path,
         session_table="queued_notice_sessions",
     )
-
-
-class _FakeResponseModel:
-    async def aresponse(self, messages: list[Message], **_kwargs: object) -> ModelResponse:
-        del messages
-        return ModelResponse(content="ok")
-
-    async def aresponse_stream(self, messages: list[Message], **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        del messages
-        yield ModelResponse(content="ok")
-
-    async def _aprocess_model_response(self, **_kwargs: object) -> None:
-        return
-
-    async def aprocess_response_stream(self, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        return
-        yield  # pragma: no cover - unreachable, keeps this an async generator
-
-
-class _FakeModel(_FakeResponseModel):
-    def format_function_call_results(
-        self,
-        messages: list[Message],
-        function_call_results: list[Message],
-        _compress_tool_results: bool = False,
-        **_kwargs: object,
-    ) -> None:
-        messages.extend(function_call_results)
-
-    def _handle_function_call_media(
-        self,
-        messages: list[Message],
-        function_call_results: list[Message],
-        send_media_to_model: bool = True,
-    ) -> None:
-        if not send_media_to_model:
-            return
-        if any(message.images or message.videos or message.audio or message.files for message in function_call_results):
-            messages.append(Message(role="user", content="Take note of the following content"))
 
 
 async def _after_batch(

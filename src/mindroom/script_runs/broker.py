@@ -35,7 +35,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -653,7 +653,7 @@ class ScriptToolBroker:
                 # A script run is its own run: its calls share no conversation or session state.
                 call_context = ToolCallContext(
                     run_id=run.run_id,
-                    session_id=run.run_id,
+                    session_id=DETACHED_SESSION_ID,
                     user_id=run.owner_user_id,
                     call_id=call.call_id,
                 )

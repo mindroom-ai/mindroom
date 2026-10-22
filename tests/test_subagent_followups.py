@@ -10,34 +10,34 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
-from agno.team import Team
 
-from mindroom.ai import run_delegated_child_response
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import sessions
-from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.state import DelegationState
-from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.llm.runs import RunStatus
+from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import (
-    DelegationModel,
-    _call,
+    ScriptedAgents,
     _delegate_runtime_context,
     _runtime_paths,
     _saved_approval_calls,
+    approval_executor,
+    respond,
+    respond_team,
+    resume,
+    resume_team,
+    stored_run,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
-from tests.tool_approval_helpers import with_agno_approval_flags
 from tests.tool_job_helpers import tool_job_runtime
 
 if TYPE_CHECKING:
@@ -58,6 +58,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=execution == "excluded", exclude_toolkits=["delegate"]),
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"], tools=["calculator"])},
+        teams={"squad": TeamConfig(display_name="Squad", role="Delegates.", agents=["leader"], mode="coordinate")},
         defaults=DefaultsConfig(tools=[]),
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
@@ -73,15 +74,18 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
-    child_model = DelegationModel(
-        id="child",
-        responses=[
-            ModelResponse(content="First answer: cobalt"),
-            ModelResponse(tool_calls=[_call("add", "sum", a=1, b=2)]),
-            ModelResponse(content="Follow-up answer: cobalt, 3"),
+    child = ScriptedModel(
+        [
+            answer("First answer: cobalt"),
+            calls(tool_call("add", "sum", a=1, b=2)),
+            answer("Follow-up answer: cobalt, 3"),
         ],
     )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: child_model)
+    parent = ScriptedModel([])
+    leader = ScriptedModel([])
+    ScriptedAgents({"leader": child}, by_session={identity.session_id: parent}, team=leader).install(monkeypatch)
+    entity = "squad" if execution == "team" else "leader"
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
 
     async def invoke(name: str, **args: object) -> str:
         toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity)
@@ -89,60 +93,27 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             if name == "run_subagent":
                 return await toolkit.run_subagent(task=str(args["task"]), model=model)
             return await toolkit.continue_subagent(subagent_id=str(args["subagent_id"]), message=str(args["message"]))
-        with_agno_approval_flags(
-            toolkit,
-            config,
-            registered_tool_name="delegate",
-        )
-        storage = create_session_storage("leader", config, paths, identity)
-        parent = Agent(
-            id="leader",
-            name="Leader",
-            db=storage,
-            tools=[toolkit],
-            model=DelegationModel(
-                id="parent",
-                responses=[
-                    ModelResponse(tool_calls=[_call(name, "delegation", **args)]),
-                    ModelResponse(content="Parent done"),
-                ],
-            ),
-        )
-        if execution == "team":
-            parent = Team(
-                id="squad",
-                name="Squad",
-                db=storage,
-                members=[parent],
-                model=DelegationModel(
-                    id="team",
-                    responses=[
-                        ModelResponse(
-                            tool_calls=[_call("delegate_task_to_member", "member", member_id="leader", task="Work")],
-                        ),
-                        ModelResponse(content="Team done"),
-                    ],
-                ),
-            )
-        options = {
-            "agent_name": "squad" if execution == "team" else "leader",
-            "member_config_names": {"leader": "leader"},
-            "config": config,
-            "runtime_paths": paths,
-            "execution_identity": identity,
-        }
+        parent.turns = [calls(tool_call(name, "delegation", **args)), answer("Parent done")]
+        leader.turns = [
+            calls(tool_call("delegate_task_to_member", "member", member_id="leader", task="Work")),
+            answer("Team done"),
+        ]
+        run_id = f"{name}-run"
         runtime = await tool_job_runtime(tmp_path) if execution == "excluded" else None
         if runtime is not None:
             pin_background_tool_jobs(config, paths)
             register_background_runtime(paths, runtime)
         try:
-            response = await parent.arun("Work", session_id=identity.session_id, user_id=identity.requester_id)
-            response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
+            reply = (
+                await respond_team("squad", "Work", **options, run_id=run_id)
+                if execution == "team"
+                else await respond("leader", "Work", **options, run_id=run_id)
+            )
             pause_count = 0
-            while response.status == RunStatus.paused:
+            while isinstance(reply, PausedAttempt):
                 pause_count += 1
                 assert pause_count <= 2
-                state = DelegationState.from_metadata(response.metadata)
+                state = DelegationState.from_metadata(stored_run(entity, run_id, **options).metadata)
                 assert state.pending_agent_name == "leader"
                 if state.pending_child_id is not None:
                     paused_child = state.children[0]
@@ -159,23 +130,29 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
                     )
                     assert restored.status == "paused"
                     assert restored.model_name == (model or "default")
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    **options,
-                    decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
-                    approval_calls=_saved_approval_calls(state),
-                    denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
-                )
+                approvals = _saved_approval_calls(state)
+                decisions = {call.tool_call_id: True for call in approvals}
+                if execution == "team":
+                    resumed = await resume_team("squad", reply, approvals, **options, decisions=decisions)
+                else:
+                    resumed = await resume(
+                        approval_executor(config, paths),
+                        reply,
+                        approvals,
+                        agent_name="leader",
+                        **options,
+                        decisions=decisions,
+                    )
+                reply = resumed if isinstance(resumed, PausedAttempt) else resumed.response_text
             assert pause_count == (2 if name == "continue_subagent" else 0)
-            assert response.status == RunStatus.completed
+            record = stored_run(entity, run_id, **options)
+            assert record.status is RunStatus.completed
             if runtime is not None:
                 assert await runtime.list_jobs(owner=identity, depth=0) == []
             if execution == "team":
-                child = DelegationState.from_metadata(response.metadata).children[0]
-                return f"{child.result}\nSubagent ID: {child.subagent_id}"
-            return next(str(tool.result) for tool in response.tools or () if tool.tool_name == name)
+                delegated = DelegationState.from_metadata(record.metadata).children[0]
+                return f"{delegated.result}\nSubagent ID: {delegated.subagent_id}"
+            return next(str(tool.result) for tool in record.tools or () if tool.tool_name == name)
         finally:
             if runtime is not None:
                 await runtime.shutdown()
@@ -195,10 +172,11 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         assert f"Subagent ID: {subagent_id}" in second
         assert "Follow-up answer: cobalt, 3" in second
 
-    history = "\n".join(str(message.content) for message in child_model.seen_messages)
+    history = "\n".join(str(message.content) for message in child.requests[-1].messages)
     assert "Remember this secret word: cobalt" in history
     assert "First answer: cobalt" in history
     assert "Recall the word and add 1 + 2" in history
+    assert child.turns == []
     records = [
         json.loads(path.read_text()) for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
     ]

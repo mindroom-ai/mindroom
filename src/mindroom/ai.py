@@ -11,14 +11,14 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
+from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
-from mindroom.approval.resume import forward_resume, resume_history
-from mindroom.delegation.execution import drive_delegation_stream
+from mindroom.approval.resume import forward_resume, resume_from_session
+from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
@@ -36,7 +36,7 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.mid_turn_compaction import without_fold_records
-from mindroom.history.request_messages import build_request, build_resume_request
+from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import ScopeSessionContext, open_resolved_scope_session_context
 from mindroom.history.storage import new_scope_session
@@ -560,6 +560,8 @@ def _attach_blocking_pause_presentation(
             raise RuntimeError(msg)
         pending_by_id[call_id] = tool
 
+    # A delegation still waits for its child, or for its turn after a sibling's, until the driver answers it.
+    answered = answered_delegation_calls(record)
     seen_ids: set[str] = set()
     for tool in (*tuple(record.tools or ()), *paused.tools):
         call_id = tool_execution_call_id(tool)
@@ -570,7 +572,7 @@ def _attach_blocking_pause_presentation(
             continue
         seen_ids.add(call_id)
         presentation.start_tool(tool)
-        if call_id not in pending_by_id:
+        if call_id not in pending_by_id and (not tool.is_paused or call_id in answered):
             presentation.complete_tool(tool)
 
     return replace(
@@ -805,14 +807,7 @@ def _start_agent_run(
         events,
         store=storage.store,
         session=storage.session,
-        continue_parent=partial(
-            _continue_turn_run,
-            run_context,
-            attempt,
-            storage=storage,
-            terminal=terminal,
-            stream=stream,
-        ),
+        continue_parent=partial(_continue_turn_run, run_context, attempt, storage=storage, terminal=terminal),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -832,38 +827,27 @@ async def _continue_turn_run(
     *,
     storage: _AttemptStorage,
     terminal: _TerminalRecord,
-    stream: bool,
 ) -> RunRecord:
     """Continue this attempt's paused run with its delegations' results, under the attempt's hooks and store.
 
-    The resume replays the scope's history as the attempt did and reuses the paused run's stored system message.
+    The resume replays the scope's history as the attempt did and reuses the paused run's stored system message. It
+    streams its requests even when the turn does not, as Agno's delegation continuation did.
     """
     prepared = run_context.prepared_run
-    history, summary = resume_history(
-        storage.session,
-        storage.scope,
-        prepared.build,
-        prepared.prepared_history.replay_plan,
-    )
-    events = resume_agent(
+    events = resume_from_session(
         prepared.spec,
         paused,
-        build_resume_request(paused=paused.messages, summary=summary, history=history),
-        approved=decisions.approved,
-        denied=decisions.denied,
-        external_results=decisions.external_results,
-        ctx=RunContext(
-            run_id=attempt.run_id,
-            session_id=run_context.session_id,
-            user_id=run_context.turn.requester_id,
-            metadata=deepcopy(paused.metadata),
-            session_state=storage.session.session_state,
-        ),
+        decisions,
+        session=storage.session,
+        scope=storage.scope,
+        settings=prepared.build.history_settings,
+        plan=prepared.prepared_history.replay_plan,
+        user_id=run_context.turn.requester_id,
         hooks=_agent_loop_hooks(run_context, attempt, storage),
         persist=_persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=replace(run_context.request_template, stream=True),
     )
-    return await forward_resume(events, on_event)
+    return await forward_resume(events, on_event, record_type=RunRecord)
 
 
 @timed("model_request_to_completion")
@@ -1009,7 +993,7 @@ def _replayed_history(
     """Return the stored history this request replays under the resolved plan, and the scope summary it follows."""
     if scope_context is None:
         return [], None
-    return resume_history(scope_context.session, scope_context.scope, build, plan)
+    return replayed_history(scope_context.session, scope_context.scope, build.history_settings, plan)
 
 
 @timed("system_prompt_assembly")
@@ -1291,11 +1275,6 @@ async def _prepare_agent_run_context(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
     )
-
-
-def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str], str | None]:
-    """Return the authored toolkit of each of the agent's functions, keyed as approvals look them up."""
-    return {(agent_name, name): toolkit for name, toolkit in build.tool_owners.items()}
 
 
 async def run_delegated_child_response(
@@ -1673,7 +1652,7 @@ async def ai_response(  # noqa: C901
                 record,
                 fallback_session_id=session_id,
                 fallback_run_id=attempt.run_id,
-                toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
+                toolkit_owners=tool_owners_by_agent(prepared_run.build),
             )
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
@@ -2145,7 +2124,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 record,
                 fallback_session_id=session_id,
                 fallback_run_id=attempt.run_id,
-                toolkit_owners=_toolkit_owners(agent_name, prepared_run.build),
+                toolkit_owners=tool_owners_by_agent(prepared_run.build),
             )
             if paused_attempt is None:
                 raise pause_without_approval_error(record, entity_label="agent")
