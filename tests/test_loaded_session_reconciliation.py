@@ -270,17 +270,16 @@ async def test_an_approval_resume_whose_run_a_cut_removed_leaves_it_out_of_its_l
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
     identity = _identity("code")
-    holder: list[ConversationStore] = []
+    store = _store("code", config, paths)
 
     async def redact() -> None:
-        _cut(holder[0], "parent-run")
+        _cut(store, "parent-run")
 
     ScriptedAgents(
         {"code": ScriptedModel([calls(tool_call("multiply", "call-1", a=6, b=7)), [Await(redact), *answer("42.")]])},
     ).install(monkeypatch)
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="code")):
         paused = await pause_parent("code", "Multiply", config=config, runtime_paths=paths, identity=identity)
-        holder.append(paused.store)
         session = paused.store.load_session(SESSION, "agent")
         assert session is not None
         assert [run.run_id for run in session.runs] == ["parent-run"]
