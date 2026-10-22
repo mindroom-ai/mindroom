@@ -4258,7 +4258,10 @@ class TestTeamCompletion:
         self,
         team_app_client: TestClient,
     ) -> None:
-        """An API team leader runs under a Matrix leader's hooks, so a cut-off delegation is answered and never runs."""
+        """The output-limit policy answers an API team leader's cut-off delegation, which then never runs.
+
+        The API and Matrix leaders get their hooks from one builder, whose hook set ``tests/test_loop_hooks.py`` pins.
+        """
         cut_off = calls(tool_call("delegate_task_to_member", "call-cut", member_id="general", task="Write it all"))
         cut_off[-1] = replace(cut_off[-1], stop_reason="output_limit")
         member = ScriptedModel([])

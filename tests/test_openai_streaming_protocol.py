@@ -109,8 +109,6 @@ class TestToolCallDeltas:
         first_text = format_stream_tool_event(ToolStarted(first), tool_state)
         second_text = format_stream_tool_event(ToolStarted(second), tool_state)
 
-        assert first_text is not None
-        assert second_text is not None
         assert '<tool id="1" state="start">' in first_text
         assert '<tool id="2" state="start">' in second_text
 
@@ -119,7 +117,6 @@ class TestToolCallDeltas:
         tool_state = ToolStreamState()
         completed = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-9", result="ok")
         text = format_stream_tool_event(ToolCompleted(completed), tool_state)
-        assert text is not None
         assert '<tool id="1" state="done">' in text
 
     def test_tool_payload_is_escaped(self) -> None:
@@ -132,7 +129,6 @@ class TestToolCallDeltas:
             result="</tool><i>boom</i>",
         )
         text = format_stream_tool_event(ToolCompleted(completed), tool_state)
-        assert text is not None
         assert "</tool><b>pwn</b>" not in text
         assert "&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in text
         assert "&lt;/tool&gt;&lt;i&gt;boom&lt;/i&gt;" in text
