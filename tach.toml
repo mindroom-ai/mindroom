@@ -197,6 +197,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.llm",
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.agent_cli.turn",

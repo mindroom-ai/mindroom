@@ -241,14 +241,15 @@ class ConversationStore:
 
         Writing ``session_state`` records a copy of it as ``session.stored_session_state``.
         """
-        state = copy.deepcopy(session.session_state) if "session_state" in fields else None
+        state = session_state_snapshot(session.session_state) if "session_state" in fields else None
         self._save_fields(session, metadata="metadata" in fields, state=state)
 
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
         """Write ``state`` as the session's ``session_state`` and record it as ``session.stored_session_state``.
 
-        ``state`` is a snapshot of the run's state that the caller took before awaiting the database's lane, as the
-        run's tools change the live state in place meanwhile. The session keeps it, so the caller must not change it.
+        ``state`` is a ``session_state_snapshot`` of the run's state that the caller took before awaiting the
+        database's lane, as the run's tools change the live state in place meanwhile. The session keeps it, so the
+        caller must not change it.
         """
         self._save_fields(session, metadata=False, state=state)
 
@@ -474,7 +475,7 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     async def persist(record: AnyRunRecord) -> None:
         data = record.to_dict()
         row_type = run_type(record)
-        state = copy.deepcopy(session.session_state)
+        state = session_state_snapshot(session.session_state)
 
         def operation(opened: ConversationStore) -> None:
             opened._save_run_dict(session, data, row_type=row_type, record_usage=True)
@@ -484,6 +485,17 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
         await run_session_storage_operation(lambda: store, operation)
 
     return persist
+
+
+def session_state_snapshot(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a private copy of a live ``session_state``, as its row would hold it.
+
+    Tools change the live state in place, on the event loop and in the threads sync tools run in, while saves run in
+    the database's lane, so a copy that walks the dict in Python, as ``copy.deepcopy`` does, can fail with
+    "dictionary changed size during iteration". The C JSON encoder reads the whole state without running Python code,
+    so no other thread changes it mid-read.
+    """
+    return json.loads(json.dumps(state))
 
 
 def _tables(connection: sqlite3.Connection) -> set[str]:
@@ -520,7 +532,8 @@ def _ensure_session_row(
     ``session.stored_session_state`` once its transaction commits, or None when the row existed.
     """
     owner_column = "team_id" if session.kind == "team" else "agent_id"
-    state = copy.deepcopy(session.session_state)
+    # One encode reads the live state, as ``session_state_snapshot`` does, and the created row's copy decodes from it.
+    session_data = json.dumps({"session_state": session.session_state})
     cursor = connection.execute(
         f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, user_id, "  # noqa: S608
         "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
@@ -530,13 +543,13 @@ def _ensure_session_row(
             session.kind,
             session.owner_id,
             session.user_id,
-            json.dumps({"session_state": state}),
+            session_data,
             _json_or_null(session.metadata),
             session.created_at,
             session.created_at,
         ),
     )
-    return state if cursor.rowcount else None
+    return json.loads(session_data)["session_state"] if cursor.rowcount else None
 
 
 def _record_stored_state(session: ConversationSession, state: dict[str, Any] | None) -> None:
@@ -808,4 +821,5 @@ __all__ = [
     "open_conversation_store",
     "persist_to",
     "runs_without",
+    "session_state_snapshot",
 ]
