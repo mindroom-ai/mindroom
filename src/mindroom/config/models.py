@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serial
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import drop_retired_fields, reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    drop_retired_fields,
+    drop_retired_model_settings,
+    reject_legacy_defaults_fields,
+)
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
@@ -771,6 +775,12 @@ class ModelConfig(BaseModel):
         default=None,
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_fields(cls, data: object) -> object:
+        """Ignore Agno model fields that older configs still set in ``extra_kwargs``, with a warning."""
+        return drop_retired_model_settings(data)
 
     @field_validator("display_name")
     @classmethod
