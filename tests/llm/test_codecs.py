@@ -253,7 +253,7 @@ def test_message_from_dict_keeps_media_scalars_agno_reader_dropped() -> None:
 def test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads() -> None:
     message = Message.from_dict(agno("message_model_dump_with_non_persisted_flags"))
 
-    assert (message.add_to_agent_memory, message.temporary) == (False, True)
+    assert message.add_to_agent_memory is False
 
 
 # --- tool executions and requirements --------------------------------------------------------------------------

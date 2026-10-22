@@ -38,9 +38,8 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 class Message:
     """One message in a model conversation.
 
-    ``from_history`` marks a copy replayed from a stored run (never stored again),
-    ``add_to_agent_memory=False`` marks a message sent to the model but never stored, and
-    ``temporary`` marks one removed from the request list after a single request.
+    ``from_history`` marks a copy replayed from a stored run (never stored again), and
+    ``add_to_agent_memory=False`` marks a message sent to the model but never stored.
     """
 
     role: str
@@ -65,7 +64,6 @@ class Message:
     created_at: int = field(default_factory=_now)
     from_history: bool = False
     add_to_agent_memory: bool = True
-    temporary: bool = False
 
     def get_content_string(self) -> str:
         """Return the text of ``content``: the first text block of a block list, else its JSON."""
@@ -128,11 +126,12 @@ class Message:
         # LEGACY_COMPAT: Agno 3 message dicts carry keys the owned Message dropped.
         # Legacy format: ``run_data`` messages, summary-row segments, and tool-job payloads written by the
         # Agno-backed runtime may hold ``audio_output``, ``image_output``, ``video_output``, ``file_output``,
-        # ``citations``, ``references``, ``checkpoint_status``, ``checkpoint_created_at``, and media
+        # ``citations``, ``references``, ``checkpoint_status``, ``checkpoint_created_at``, ``temporary``, and media
         # ``media_reference``/``external`` entries.
         # Last legacy release: v2026.10.454; replacement: unreleased.
         # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
-        # Coverage: tests/llm/test_codecs.py::test_message_from_dict_ignores_agno_only_keys
+        # Coverage: tests/llm/test_codecs.py::test_message_from_dict_ignores_agno_only_keys,
+        #   tests/llm/test_codecs.py::test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads
         metrics = data.get("metrics")
         identifier = data.get("id")
         created_at = data.get("created_at")
@@ -159,7 +158,6 @@ class Message:
             created_at=created_at if isinstance(created_at, int) else _now(),
             from_history=data.get("from_history", False),
             add_to_agent_memory=data.get("add_to_agent_memory", True),
-            temporary=data.get("temporary", False),
         )
 
 
