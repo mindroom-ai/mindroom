@@ -99,7 +99,7 @@ def _signed_headers(key: Any, name: str) -> dict[str, str]:  # noqa: ANN401
 
 @pytest.fixture
 def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
-    """Serve the real API with signed users and agents with shell/python tools."""
+    """Serve the real API with signed users and agents that use Agent Keys (shell or python and `egress_credentials`)."""
     key = _trust_signed_users(monkeypatch)
     env = {
         **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
@@ -133,13 +133,13 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
                 "Personal assistant",
                 private="user_agent",
                 users=("@alice:example.org", "@bob:example.org"),
-                tools=("shell", "python"),
+                tools=("shell", "python", "egress_credentials"),
             ),
             "shared_dev": _agent_config(
                 "Shared Dev",
                 "Team agent",
                 users=("@alice:example.org", "@bob:example.org"),
-                tools=("shell", "python"),
+                tools=("shell", "python", "egress_credentials"),
                 worker_scope="shared",
                 credential_managers=["@bob:example.org", "@carol:example.org"],
             ),
@@ -265,10 +265,13 @@ def _agent_config(
     *,
     private: str | None = None,
     users: tuple[str, ...] = ("@alice:example.org",),
-    tools: tuple[str, ...] = ("shell",),
+    tools: tuple[str, ...] = ("shell", "egress_credentials"),
     **extra: Any,  # noqa: ANN401
 ) -> dict[str, Any]:
-    """Return a config entry for an agent that `users` may use, private per `private` when given."""
+    """Return a config entry for an agent that `users` may use, private per `private` when given.
+
+    By default the agent uses Agent Keys: it has a shell and the `egress_credentials` tool, which opts it in.
+    """
     return {
         "display_name": display_name,
         "role": role,
@@ -541,8 +544,10 @@ def test_every_route_is_a_404_while_the_broker_is_off(
     assert stores_opened == []
 
 
-def test_lists_only_usable_shell_or_python_agents(egress_portal: dict[str, Any]) -> None:
-    """Only agents with shell or python tools that the user may use appear."""
+def test_lists_only_usable_agents_that_opted_into_agent_keys(egress_portal: dict[str, Any]) -> None:
+    """Only agents the user may use that have shell or python and the `egress_credentials` tool appear."""
+    egress_portal["payload"]["agents"]["shell_only"] = _agent_config("Shell Only", "No opt-in", tools=("shell",))
+    _republish(egress_portal)
     response = _listing(egress_portal, "alice")
     agent_names = {a["agent_name"] for a in response.json()["agents"]}
     assert agent_names == {"personal", "shared_dev"}
@@ -581,7 +586,7 @@ def test_listing_reports_scope_scope_agents_and_managers(egress_portal: dict[str
 
 
 def test_scope_agents_name_only_the_requesters_agents_that_can_use_the_store(egress_portal: dict[str, Any]) -> None:
-    """An agent without a shell never uses brokered keys, and one the requester may not use is not theirs."""
+    """An agent without a shell or the `egress_credentials` tool never uses brokered keys, nor one not the requester's."""
     portal = egress_portal
     agents = portal["payload"]["agents"]
     agents["notes"] = _agent_config("Notes", "Private helper", private="user")
@@ -589,8 +594,9 @@ def test_scope_agents_name_only_the_requesters_agents_that_can_use_the_store(egr
         "Calc",
         "Private helper without a shell",
         private="user",
-        tools=("calculator",),
+        tools=("calculator", "egress_credentials"),
     )
+    agents["shell"] = _agent_config("Shell", "Private helper without the tool", private="user", tools=("shell",))
     agents["bobs"] = _agent_config("Bobs", "Private helper of Bob", private="user", users=("@bob:example.org",))
     _republish(portal)
 
@@ -893,8 +899,6 @@ def test_portal_catalog_survives_egress_state_that_cannot_be_read(
 def test_portal_catalog_lists_the_egress_tool_only_while_the_broker_is_on(egress_portal: dict[str, Any]) -> None:
     """An agent that lists the Egress Credentials tool shows it among its tools only while the broker is on."""
     portal = egress_portal
-    portal["payload"]["agents"]["personal"]["tools"].append("egress_credentials")
-    _republish(portal)
 
     def personal_tools() -> list[str]:
         response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])

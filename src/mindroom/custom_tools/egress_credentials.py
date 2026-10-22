@@ -1,5 +1,6 @@
 """Egress broker credential status tool for MindRoom agents.
 
+Listing this tool is what opts an agent into Agent Keys: only its shell and python calls get the broker env.
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
 credentials for, which of them have a key or a connected account in this

@@ -210,7 +210,7 @@ describe("egress credentials page", () => {
     render(<EgressCredentials />);
     expect(
       await screen.findByText(
-        "No agents with shell or python access are available to you.",
+        "None of the agents available to you use Agent Keys.",
       ),
     ).toBeInTheDocument();
   });

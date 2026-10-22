@@ -16,7 +16,7 @@ from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import EgressService
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker import secrets
+from mindroom.egress_broker import env, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.user_services import save_user_service
 from mindroom.tool_system import sandbox_proxy
@@ -56,7 +56,7 @@ def egress_config_file(tmp_path: Path) -> Generator[Path, None, None]:
             "test_agent": {
                 "display_name": "Test Agent",
                 "role": "A test agent",
-                "tools": ["shell"],
+                "tools": ["shell", "egress_credentials"],
                 "instructions": ["Test instruction"],
                 "rooms": ["test_room"],
                 "worker_scope": "shared",
@@ -256,6 +256,11 @@ def _agent(tools: list[str], **extra: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"display_name": "Agent", "role": "", "tools": tools, "include_default_tools": False, **extra}
 
 
+def _keys_agent(tools: list[str], **extra: Any) -> dict[str, Any]:  # noqa: ANN401
+    """Return an agent with exactly `tools` and the `egress_credentials` tool, which opts it into Agent Keys."""
+    return _agent([*tools, "egress_credentials"], **extra)
+
+
 def _key_targets(client: TestClient, agent_name: str | None = None) -> tuple[list[str], bool]:
     response = client.get("/api/egress-broker/services", params=_scope_params(agent_name))
     assert response.status_code == 200, response.text
@@ -266,17 +271,19 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool. Every scope the panel selects gets the same answer.
+    without a command tool or without the `egress_credentials` tool. Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
         egress_config_file,
         {
-            "preset_team": _agent(["openclaw_compat"], worker_scope="shared"),
-            "calculator_team": _agent(["calculator"], worker_scope="shared"),
-            "per_user": _agent(["shell"], worker_scope="user"),
-            "per_agent": _agent(["python"], worker_scope="user_agent"),
-            "mine": _agent(["shell"], private={"per": "user_agent"}),
-            "notes": _agent(["calculator"]),
+            "preset_team": _keys_agent(["openclaw_compat"], worker_scope="shared"),
+            "calculator_team": _keys_agent(["calculator"], worker_scope="shared"),
+            "shell_team": _agent(["shell"], worker_scope="shared"),
+            "per_user": _keys_agent(["shell"], worker_scope="user"),
+            "per_agent": _keys_agent(["python"], worker_scope="user_agent"),
+            "mine": _keys_agent(["shell"], private={"per": "user_agent"}),
+            "notes": _keys_agent(["calculator"]),
+            "coder": _agent(["shell"]),
         },
     )
 
@@ -288,14 +295,14 @@ def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environm
     egress_config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An agent uses the broker when it has any tool the sandbox proxy gives the broker environment.
+    """An agent with `egress_credentials` uses the broker when it has any tool the sandbox proxy gives the broker env.
 
     Both read one list, so a tool added there makes its agents eligible without a second edit.
     """
-    assert egress_status.EXECUTION_ENV_TOOL_NAMES is sandbox_proxy.EXECUTION_ENV_TOOL_NAMES
+    assert env.EXECUTION_ENV_TOOL_NAMES is sandbox_proxy.EXECUTION_ENV_TOOL_NAMES
     tools = sorted({*EXECUTION_ENV_TOOL_NAMES, "calculator"})
-    monkeypatch.setattr(egress_status, "EXECUTION_ENV_TOOL_NAMES", frozenset(tools))
-    agents = {f"{tool}_team": _agent([tool], worker_scope="shared") for tool in tools}
+    monkeypatch.setattr(env, "EXECUTION_ENV_TOOL_NAMES", frozenset(tools))
+    agents = {f"{tool}_team": _keys_agent([tool], worker_scope="shared") for tool in tools}
 
     assert _key_targets(_client_with_agents(egress_config_file, agents)) == (sorted(agents), False)
 
@@ -303,16 +310,20 @@ def test_services_listing_names_agents_by_the_tools_that_get_the_broker_environm
 @pytest.mark.parametrize(
     ("agents", "has_personal_agents"),
     [
-        ({"per_user": _agent(["shell"], worker_scope="user")}, True),
-        ({"per_agent": _agent(["python"], worker_scope="user_agent")}, True),
-        ({"mine": _agent(["shell"], private={"per": "user_agent"})}, True),
+        ({"per_user": _keys_agent(["shell"], worker_scope="user")}, True),
+        ({"per_agent": _keys_agent(["python"], worker_scope="user_agent")}, True),
+        ({"mine": _keys_agent(["shell"], private={"per": "user_agent"})}, True),
         (
-            {"team": _agent(["shell"], worker_scope="shared"), "notes": _agent(["calculator"], worker_scope="user")},
+            {
+                "team": _keys_agent(["shell"], worker_scope="shared"),
+                "notes": _keys_agent(["calculator"], worker_scope="user"),
+            },
             False,
         ),
-        ({"coder": _agent(["shell"])}, False),
+        ({"coder": _keys_agent(["shell"])}, False),
+        ({"per_user": _agent(["shell"], worker_scope="user")}, False),
     ],
-    ids=["user", "user_agent", "private", "shared-and-calculator", "unscoped"],
+    ids=["user", "user_agent", "private", "shared-and-calculator", "unscoped", "user-without-egress-tool"],
 )
 def test_services_listing_says_whether_an_agent_with_per_user_keys_reaches_the_broker(
     egress_config_file: Path,
@@ -381,14 +392,14 @@ def test_services_listing_says_whether_the_personal_page_is_served(
 
 def test_services_listing_says_whether_an_agent_without_a_scope_reaches_the_broker(egress_config_file: Path) -> None:
     """All agents without a scope share the global keys, so one of them reaching the broker is enough."""
-    client = _client_with_agents(egress_config_file, {"coder": _agent(["openclaw_compat"]), "notes": _agent([])})
+    client = _client_with_agents(egress_config_file, {"coder": _keys_agent(["openclaw_compat"]), "notes": _agent([])})
 
     assert _key_targets(client) == ([], True)
 
 
 def test_services_listing_follows_the_default_worker_scope(egress_config_file: Path) -> None:
     """An agent without a worker scope of its own takes the default one, which decides where its keys live."""
-    agents = {"inherits": _agent(["shell"]), "team": _agent(["shell"], worker_scope="shared")}
+    agents = {"inherits": _keys_agent(["shell"]), "team": _keys_agent(["shell"], worker_scope="shared")}
 
     assert _key_targets(_client_with_agents(egress_config_file, agents, worker_scope="user_agent")) == (["team"], False)
     assert _key_targets(_client_with_agents(egress_config_file, agents, worker_scope="shared")) == (

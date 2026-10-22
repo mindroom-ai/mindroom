@@ -1,4 +1,4 @@
-"""Tests that worker-routed shell and python calls carry the running egress broker's env, and no broker code while it is off."""
+"""Tests that worker-routed shell and python calls of Agent Keys agents carry the running broker's env, and no others do."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import pkgutil
 import socket
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import unquote, urlsplit
 
@@ -39,6 +40,16 @@ _GITHUB = {
     "rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}],
     "placeholder_env": {"GH_TOKEN": _PLACEHOLDER},
 }
+# The tools of an agent that uses Agent Keys: `egress_credentials` opts it in.
+_KEYS_AGENT_TOOLS = ("shell", "python", "egress_credentials")
+
+
+def _config(*tools: str) -> Config:
+    """Return a config with the GitHub service and a `code` agent that has exactly `tools`."""
+    return Config(
+        agents={"code": {"display_name": "Code", "tools": list(tools), "include_default_tools": False}},
+        egress_broker={"services": {"github": _GITHUB}},
+    )
 
 
 def _identity() -> ToolExecutionIdentity:
@@ -226,7 +237,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
         if module.name not in _CONFIG_LEVEL_BROKER_MODULES:
             # A None entry makes any import of that module raise.
             monkeypatch.setitem(sys.modules, f"mindroom.egress_broker.{module.name}", None)
-    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
 
@@ -244,7 +255,7 @@ async def test_call_proxy_sync_merges_broker_env_for_shell_only(
     payloads: list[dict[str, Any]],
 ) -> None:
     """Shell calls get the broker env on top of their own env, with placeholders from the live config; file calls do not."""
-    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     save_secret(manager, target, "github", "s3cret")
@@ -268,7 +279,7 @@ async def test_unscoped_shell_call_signs_routed_worker_key(
     payloads: list[dict[str, Any]],
 ) -> None:
     """An unscoped target has no key of its own, so the token carries the key the call was routed to."""
-    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
     assert target.worker_key is None
@@ -285,7 +296,7 @@ async def test_static_runner_shell_call_signs_unscoped_worker_key(
     payloads: list[dict[str, Any]],
 ) -> None:
     """On the shared static runner no worker key is routed, so the token carries the agent's unscoped key."""
-    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
@@ -304,7 +315,7 @@ async def test_broker_git_config_appends_to_call_git_config(
     payloads: list[dict[str, Any]],
 ) -> None:
     """Git config entries the call already carries survive; the broker's proxy entries are appended after them."""
-    config = Config(egress_broker={"services": {"github": _GITHUB}})
+    config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     call_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
@@ -321,3 +332,43 @@ async def test_broker_git_config_appends_to_call_git_config(
     ]
     assert env["GIT_CONFIG_VALUE_0"] == ""
     assert env["GIT_CONFIG_VALUE_1"] == env["HTTPS_PROXY"]
+
+
+@pytest.mark.usefixtures("dedicated_routing")
+@pytest.mark.parametrize("tool_name", ["shell", "python"])
+@pytest.mark.asyncio
+async def test_agent_without_the_egress_credentials_tool_gets_no_broker_env(
+    runtime_paths: RuntimePaths,
+    payloads: list[dict[str, Any]],
+    tool_name: str,
+) -> None:
+    """Without `egress_credentials` an agent's calls go out without brokered credentials, as with the broker off."""
+    config = _config("shell", "python")
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    save_secret(manager, target, "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
+            _call(runtime_paths, tool_name, target, manager, {"KEEP": "me"})
+    [payload] = payloads
+    assert payload["execution_env"] == {"KEEP": "me"}
+
+
+@pytest.mark.usefixtures("dedicated_routing")
+@pytest.mark.parametrize("agent_name", [None, "removed"], ids=["no-agent", "unknown-agent"])
+@pytest.mark.asyncio
+async def test_call_without_a_configured_agent_gets_no_broker_env(
+    runtime_paths: RuntimePaths,
+    payloads: list[dict[str, Any]],
+    agent_name: str | None,
+) -> None:
+    """A call whose agent the config does not name cannot have opted in, so it gets no broker env."""
+    config = _config(*_KEYS_AGENT_TOOLS)
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    save_secret(manager, target, "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
+            _call(runtime_paths, "shell", replace(target, routing_agent_name=agent_name), manager, {"KEEP": "me"})
+    [payload] = payloads
+    assert payload["execution_env"] == {"KEEP": "me"}

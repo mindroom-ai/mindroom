@@ -24,7 +24,6 @@ from mindroom.api.egress_status import (
     PutSecretRequest,
     audit_logs_response,
     effective_services,
-    egress_agent_scope,
     egress_oauth_status,
     egress_service_status,
     oauth_provider_of_service,
@@ -32,7 +31,7 @@ from mindroom.api.egress_status import (
     require_egress_broker_enabled,
     rule_summaries,
 )
-from mindroom.egress_broker.env import personal_page_served
+from mindroom.egress_broker.env import egress_agent_scope, personal_page_served
 from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.egress_broker.user_services import ServiceSource, service_source

@@ -25,14 +25,12 @@ from mindroom.api.connection_agents import (
 from mindroom.api.egress_status import (
     RESTRICT_ONLY_KEY_REFUSAL,
     AuditLogsResponse,
-    EgressAgentScope,
     EgressRuleSummary,
     EgressSourceStatus,
     PresetsResponse,
     PutSecretRequest,
     audit_logs_response,
     effective_services,
-    egress_agent_scope,
     egress_oauth_status,
     egress_service_status,
     oauth_provider_of_service,
@@ -44,6 +42,7 @@ from mindroom.api.egress_status import (
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.config.egress_broker import EgressService
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (

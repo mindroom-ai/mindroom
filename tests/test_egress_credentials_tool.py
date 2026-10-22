@@ -438,9 +438,8 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     """The tool builds through the registry with runtime paths and worker target injected."""
     metadata = TOOL_METADATA["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
-    assert (
-        metadata.description
-        == "See which API keys and connected accounts this agent can use through the egress broker and where to add them"
+    assert metadata.description == (
+        "Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use"
     )
     assert metadata.category is ToolCategory.INTEGRATIONS
     assert metadata.status is ToolStatus.AVAILABLE

@@ -688,7 +688,7 @@ export function EgressCredentials() {
         {!agents && !error && <p role="status">Loading your API keys…</p>}
         {agents?.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No agents with shell or python access are available to you.
+            None of the agents available to you use Agent Keys.
           </p>
         )}
         {agents && agents.length > 0 && (

@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
 from mindroom.egress_broker.presets import EGRESS_PRESETS
@@ -71,24 +70,6 @@ def effective_services(
     reads the credential store, so async callers run this in a thread.
     """
     return effective_config(config.egress_broker, manager, target).services
-
-
-type EgressAgentScope = Literal["user", "user_agent", "shared", "unscoped"]
-
-
-def egress_agent_scope(config: Config, agent_name: str) -> EgressAgentScope | None:
-    """Return whose store an agent's egress services and keys live in, or None when it never reaches the broker.
-
-    Brokered traffic only comes from a tool the sandbox proxy gives the broker environment (`EXECUTION_ENV_TOOL_NAMES`)
-    among the agent's resolved tools, presets and defaults included. The store is one `user_agent` agent's own per
-    requester, every `user` agent's of a requester, everyone's on a `shared` agent, or the global one all agents
-    without a worker scope share (`unscoped`).
-    Both egress APIs decide here which agents use the broker.
-    """
-    entity = config.resolve_entity(agent_name)
-    if EXECUTION_ENV_TOOL_NAMES.isdisjoint(entity.available_tools):
-        return None
-    return "unscoped" if entity.execution_scope is None else entity.execution_scope
 
 
 class EgressRuleLocation(BaseModel):
