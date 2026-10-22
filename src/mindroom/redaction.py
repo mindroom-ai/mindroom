@@ -71,6 +71,9 @@ _PRIVATE_KEY_PATTERN = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?)-----.*?(?:-----END (?P=label)-----|\Z)",
     re.DOTALL | re.IGNORECASE,
 )
+# An egress broker token: `mrb1.`, a base64url claims payload (the smallest the broker mints is over 200 characters),
+# and a 43-character HMAC-SHA256, so dotted names such as `mrb1.example.com` stay visible.
+_BROKER_TOKEN_PATTERN = r"mrb1\.[A-Za-z0-9_-]{100,}+\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"  # noqa: S105
 _TOKEN_LIKE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>("
     r"(?:sk|pk)-[A-Za-z0-9._-]+"
@@ -79,7 +82,7 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
-    r"|mrb1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    rf"|{_BROKER_TOKEN_PATTERN}"
     r"))(?![A-Za-z0-9])",
 )
 _TOKEN_LIKE_MARKERS = (
@@ -118,6 +121,7 @@ _REVIEW_TOKEN_PATTERN = re.compile(
     r"|github_pat_[A-Za-z0-9_]{30,}+"
     r"|AIza[0-9A-Za-z_-]{30,}+"
     r"|eyJ[A-Za-z0-9_-]{8,}+\.eyJ[A-Za-z0-9_-]{8,}+\.[A-Za-z0-9_-]*+"
+    rf"|{_BROKER_TOKEN_PATTERN}"
     r")(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])",
 )
 # Only the `sk-` and `pk-` prefixes also start ordinary kebab-case names such as pod, image, or branch

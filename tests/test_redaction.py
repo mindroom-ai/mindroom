@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom import redaction
 from mindroom.egress_broker.env import broker_execution_env
+from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
@@ -166,7 +167,7 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
 
 def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
     """Worker proxies carry their token as the proxy URL user name, so printing the proxy settings must not show it."""
-    broker_token = ".".join(["mrb1", _fake_token("", 24), _fake_token("", 16)])
+    broker_token = _minted_broker_token()
     vault_token = _fake_token("", 32)
     broker_env = broker_execution_env(
         broker_url="http://broker:8768",
@@ -186,6 +187,12 @@ def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
     assert broker_token not in redacted
     assert vault_token not in redacted
     assert "HTTPS_PROXY=http://***@broker:8768" in redacted
+
+
+@pytest.mark.parametrize("name", ["mrb1.example.com", "mrb1.tar.gz", "mrb1.2.3"])
+def test_dotted_names_that_start_like_a_broker_token_stay_visible(name: str) -> None:
+    """Only the broker's real token shape is hidden, not a host, file, or version that starts with `mrb1.`."""
+    assert redact_sensitive_text(f"fetch {name} now") == f"fetch {name} now"
 
 
 @pytest.mark.parametrize("run", ["x" * 64_000, "9x" * 32_000], ids=["letters", "mixed"])
@@ -1089,6 +1096,20 @@ def _fake_token(prefix: str, length: int) -> str:
     return prefix + "".join(("A", "b", "3", "Z")[index % 4] for index in range(length))
 
 
+def _minted_broker_token() -> str:
+    claims = WorkerClaims(
+        worker_key="worker-alice-code",
+        worker_scope="user_agent",
+        routing_agent_name="code",
+        tenant_id=None,
+        account_id=None,
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+    )
+    return TokenSigner(b"k" * 32).mint(claims, now=0)
+
+
 def _fake_jwt() -> str:
     return ".".join([_fake_token("eyJ", 12), _fake_token("eyJ", 16), _fake_token("s", 10)])
 
@@ -1128,6 +1149,7 @@ def test_review_copy_numbers_each_distinct_token() -> None:
         _fake_token("github_pat_", 40),
         _fake_token("AIza", 35),
         _fake_jwt(),
+        _minted_broker_token(),
     ],
 )
 def test_review_copy_hides_known_token_formats(token: str) -> None:
