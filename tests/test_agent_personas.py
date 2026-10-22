@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.llm.provider import ModelRequest
@@ -107,11 +108,6 @@ def _function_names(build: AgentBuild) -> list[str]:
     return sorted(prepare_run_tools(build.spec).functions)
 
 
-def _toolkit_names(build: AgentBuild) -> set[str]:
-    """Return the authored toolkits whose functions ``build`` offers."""
-    return {owner for owner in build.tool_owners.values() if owner is not None}
-
-
 def _system_prompt(build: AgentBuild) -> str:
     content = prompt_for_turn(build).content
     assert isinstance(content, str)
@@ -133,15 +129,16 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
 async def _persona_request(
     runtime: ToolRuntimeContext,
     monkeypatch: pytest.MonkeyPatch,
-    persona: SubagentPersona,
+    persona: SubagentPersona | None,
     prompt: str,
+    agent_mode: AgentMode = "standard",
 ) -> ModelRequest:
     """Run one reply of the helper agent presenting ``persona`` and return the request the model received."""
     model = ScriptedModel([answer("Done.")])
     install_agent_model(monkeypatch, model)
     with tool_runtime_context(runtime):
         await ai_response(
-            replace(_turn_context(), persona=persona),
+            replace(_turn_context(), persona=persona, agent_mode=agent_mode),
             prompt=prompt,
             runtime_paths=runtime.runtime_paths,
             config=runtime.config,
@@ -149,6 +146,32 @@ async def _persona_request(
         )
     [request] = model.requests
     return request
+
+
+async def _minimal_system_message(
+    runtime: ToolRuntimeContext,
+    monkeypatch: pytest.MonkeyPatch,
+    persona: SubagentPersona | None,
+) -> str:
+    """Return the system message the model received on one minimal-mode reply of the helper agent."""
+    request = await _persona_request(runtime, monkeypatch, persona, "the task", agent_mode="minimal")
+    return str(request.messages[0].content)
+
+
+def _roster(system_message: str) -> str:
+    """Return the bootstrap line naming the toolkits a minimal agent calls through mindroom-agent."""
+    rosters = [line for line in system_message.splitlines() if line.startswith("Toolkits callable")]
+    assert len(rosters) == 1, system_message
+    return rosters[0]
+
+
+# F3 renders minimal mode's bootstrap prompt and context documents from ``AgentBuild.surface``.
+# Each marked test pins that presentation for an authored persona; F3 turns it green and drops the mark.
+_PENDING_F3 = pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="F3 renders minimal mode's bootstrap prompt and context documents from AgentBuild.surface",
+)
 
 
 @pytest.mark.asyncio
@@ -267,7 +290,9 @@ def test_minimal_persona_cli_lists_only_its_named_toolkits(tmp_path: Path) -> No
 
     assert build.surface.mode == "minimal"
     assert build.surface.deferred == ()
-    assert "read_file" not in _function_names(build)
+    # The catalog behind Bash holds every function the build owns, whichever ones its spec offers the model.
+    assert "run_shell_command" in build.tool_owners
+    assert "read_file" not in build.tool_owners
 
 
 def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
@@ -288,6 +313,7 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
     assert "read_file" in _function_names(persona)
 
 
+@_PENDING_F3
 def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path) -> None:
     """A minimal copy that keeps delegate sees itself listed as a target without its configured role."""
     runtime = _runtime(tmp_path, tools=["shell", "delegate"], delegate_to=["helper"])
@@ -295,8 +321,9 @@ def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path)
     build = _child(runtime, ["shell", "delegate"], agent_mode="minimal")
 
     assert build.surface.mode == "minimal"
-    assert "delegate" in _toolkit_names(build)
-    assert "Configured role" not in "\n".join((*build.surface.context_documents, build.prompt.role or ""))
+    documents = "\n".join(build.surface.context_documents)
+    assert "Configured role" not in documents
+    assert "Yourself, run as a fresh copy." in documents
 
 
 def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
@@ -309,16 +336,19 @@ def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
     assert "Configured role" not in str(toolkit.instructions)
 
 
-def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+@_PENDING_F3
+async def test_minimal_persona_inheriting_tools_lists_only_callable_toolkits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persona that inherits its caller's tools lists only the toolkits that survived approval filtering."""
     runtime = _runtime(tmp_path, tools=["shell", {"file": {"include_tools": ["save_file"]}}])
     runtime.config.tool_approval.rules.append(ApprovalRuleConfig(match="save_file", action="require_approval"))
 
-    build = _child(runtime, None, agent_mode="minimal")
+    system_message = await _minimal_system_message(runtime, monkeypatch, inline_persona("P", None, None, None))
 
-    assert build.surface.mode == "minimal"
-    assert "shell" in _toolkit_names(build)
-    assert "file" not in _toolkit_names(build)
+    assert "file" not in _roster(system_message)
 
 
 def test_persona_with_tools_never_advertises_knowledge_search(tmp_path: Path) -> None:
@@ -475,8 +505,9 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
     assert "read_file" in names
 
 
-def test_minimal_persona_offers_only_the_skills_it_names(tmp_path: Path) -> None:
-    """A minimal persona's build carries the skills it names and none of its caller's others."""
+@_PENDING_F3
+def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -> None:
+    """A minimal persona reads the skills it names on demand, like any minimal agent."""
     runtime = _runtime(tmp_path, tools=["shell"], memory_backend="file")
     identity = build_execution_identity_from_runtime_context(runtime)
     _write_skills(runtime, "scripted", "other")
@@ -492,9 +523,9 @@ def test_minimal_persona_offers_only_the_skills_it_names(tmp_path: Path) -> None
     )
 
     assert build.surface.mode == "minimal"
-    skills_block = build.prompt.skills_block or ""
-    assert "<name>scripted</name>" in skills_block
-    assert "<name>other</name>" not in skills_block
+    documents = build.surface.context_documents
+    assert "scripted\nscripted body" in documents
+    assert not any(document.startswith("other\n") for document in documents)
 
 
 def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None:
@@ -508,15 +539,24 @@ def test_persona_with_tools_gets_no_tool_search_guidance(tmp_path: Path) -> None
     assert "calculator" not in instructions
 
 
-def test_minimal_persona_roster_lists_the_toolkits_it_built(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+@_PENDING_F3
+async def test_minimal_persona_roster_lists_the_toolkits_it_built(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A minimal persona's bootstrap lists the toolkits it can call, deferred ones it named included."""
     runtime = _runtime(tmp_path, tools=["shell", "file", {"calculator": {"defer": True}}])
 
-    build = _child(runtime, ["shell", "calculator"], agent_mode="minimal")
+    system_message = await _minimal_system_message(
+        runtime,
+        monkeypatch,
+        inline_persona("P", ["shell", "calculator"], None, None),
+    )
 
-    assert build.surface.mode == "minimal"
-    assert {"shell", "calculator"} <= _toolkit_names(build)
-    assert "file" not in _toolkit_names(build)
+    roster = _roster(system_message)
+    assert "calculator" in roster
+    assert "file" not in roster
 
 
 def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
@@ -632,19 +672,29 @@ async def test_persona_skips_memory_recall(tmp_path: Path, monkeypatch: pytest.M
     assert "the task" in str(request.messages[-1].content)
 
 
-def test_minimal_persona_prompt_replaces_only_the_configured_identity(tmp_path: Path) -> None:
-    """A minimal persona's authored prompt replaces the agent's identity, and its context never holds the configured one."""
+@pytest.mark.asyncio
+@_PENDING_F3
+async def test_minimal_persona_prompt_replaces_only_the_bootstrap_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A minimal persona's authored prompt replaces the bootstrap's identity line and keeps its runtime lines."""
     runtime = _runtime(tmp_path, tools=["shell"])
-    build = _child(runtime, None, prompt="Authored minimal prompt", agent_mode="minimal")
-    assert build.surface.mode == "minimal"
-    assert build.prompt.description == "Authored minimal prompt"
-    assert "You are Helper" not in (build.prompt.role or "")
-    assert "Configured role" not in "\n".join(build.surface.context_documents)
-    assert "Configured rule" not in "\n".join((*build.surface.context_documents, *build.prompt.instructions))
+    prompt = "Authored minimal prompt"
+
+    system_message = await _minimal_system_message(runtime, monkeypatch, inline_persona(prompt, None, None, None))
+
+    assert system_message.startswith(f"{prompt}\n")
+    assert "You are Helper" not in system_message
+    assert "Bash starts in your workspace." in system_message
+    assert "mindroom-agent --help" in system_message
+    documents = "\n".join(_child(runtime, None, prompt=prompt, agent_mode="minimal").surface.context_documents)
+    assert "Configured role" not in documents
+    assert "Configured rule" not in documents
 
 
 def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
-    """Configured agents keep their built prompt and their own minimal identity line."""
+    """Configured agents keep their built prompt, in either mode, with no authored identity in front of it."""
     runtime = _runtime(tmp_path, tools=["shell"])
     standard = agents.create_agent(
         "helper",
@@ -668,6 +718,20 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
     assert "Configured role" in (standard.prompt.role or "")
     assert minimal.surface.mode == "minimal"
     assert minimal.prompt.description is None
+
+
+@pytest.mark.asyncio
+@_PENDING_F3
+async def test_minimal_agent_without_persona_keeps_its_own_identity_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured agent in minimal mode opens its bootstrap with its own identity line."""
+    runtime = _runtime(tmp_path, tools=["shell"])
+
+    system_message = await _minimal_system_message(runtime, monkeypatch, None)
+
+    assert system_message.startswith("You are Helper (helper) in minimal mode.")
 
 
 def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
