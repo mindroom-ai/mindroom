@@ -35,9 +35,8 @@ ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(enco
 def expected_entry(golden: dict[str, Any]) -> dict[str, object]:
     """Return a golden entry as the adapter reports it: instructions only when Agno adds them.
 
-    Each function keeps every recorded field but ``show_result``, which the owned loop does not read; no tool sets it.
+    Each function keeps every recorded field but ``show_result``, which the owned loop does not read.
     """
-    assert all(function["show_result"] is False for function in golden["functions"])
     return {
         "instructions": golden["instructions"] if golden["add_instructions"] else None,
         "functions": [
@@ -95,6 +94,8 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
     assert_same_json(adapted_entry(adapted), expected_entry(SCHEMAS[tool_name]))
     # The adapter carries only toolkit instructions, so no registered function may set instructions of its own.
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+    # The owned loop never echoes a tool result, so a function that sets show_result asks for nothing.
+    assert not any(function.show_result for function in toolkit.get_async_functions().values())
 
 
 @pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
@@ -113,6 +114,7 @@ def test_adapted_all_enabled_tool_matches_golden(
         adapted = adapt_toolkit(toolkit)
     assert_same_json(adapted_entry(adapted), expected_entry(golden))
     assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+    assert not any(function.show_result for function in toolkit.get_async_functions().values())
 
 
 def test_adapting_leaves_the_shared_function_untouched() -> None:
