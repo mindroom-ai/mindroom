@@ -164,7 +164,7 @@ def outlook_calendar_oauth_provider() -> OAuthProvider:
     return microsoft_oauth_provider(
         provider_id="outlook_calendar",
         display_name="Outlook Calendar",
-        scopes=("Calendars.ReadWrite",),
+        scopes=("Calendars.ReadWrite", "Calendars.ReadWrite.Shared"),
         status_capabilities=("read and change Outlook calendar events",),
     )
 

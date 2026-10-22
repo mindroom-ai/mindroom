@@ -12555,7 +12555,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `microsoft_sharepoint` | SharePoint sites, list items, and site pages the requester can open | `microsoft_sharepoint` | `Sites.ReadWrite.All` |
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
-| `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
+| `outlook_calendar` | The requester's Outlook calendars and events, and calendars others shared with or delegated to them | `outlook_calendar` | `Calendars.ReadWrite`, `Calendars.ReadWrite.Shared` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
@@ -12754,6 +12754,15 @@ Deleting a meeting the requester only attends removes it from their calendar wit
 Responding to a meeting also takes the organizer's email from the event as `expected_organizer`, so an approval card shows who receives the response, and fails with `target_mismatch`, naming the real organizer, when it differs.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
+
+Listing calendars and events, reading an event, and creating, changing, and deleting events also take an optional `calendar_owner`: the email address or sign-in name of another person whose calendar the requester can open in Outlook because that person shared it with them or made them a delegate.
+Reading needs at least read access to that calendar and writing needs edit or delegate access; otherwise Microsoft Graph answers `forbidden` or `not_found`.
+Calendar IDs, event IDs, and page tokens from such a call belong to that person's mailbox, so follow-up calls pass the same `calendar_owner`, and a page token from another mailbox fails with `invalid_page_token`.
+A calendar shared with the requester can also appear in their own calendar list, with that person as owner, and its ID works without `calendar_owner`.
+On another person's calendar, that person organizes a new event, and Outlook sends its invitations, updates, and cancellations in that person's name, sent by the requester on their behalf.
+A call with `calendar_owner` shows it on its approval card and repeats it in its result.
+Responding to invitations covers only the requester's own invitations, and free/busy already looks up other people.
+`Calendars.ReadWrite.Shared` needs no administrator consent; calendar connections made before the tool requested it lack it, so each requester reconnects once.
 
 ## To Do
 
