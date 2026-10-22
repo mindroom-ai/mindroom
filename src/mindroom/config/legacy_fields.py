@@ -250,8 +250,8 @@ _RETIRED_MODEL_SETTINGS = (
             },
         ),
         providers=frozenset({"google", "gemini"}),
-        reason="Gemini built-in tools other than search were retired with Agno's Gemini model, as were its request "
-        "overrides and metrics switch",
+        reason="Gemini built-in tools other than search, request overrides, function declarations, and the metrics "
+        "switch were retired with Agno's Gemini model",
     ),
 )
 
