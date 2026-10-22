@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import httpx
 import pytest
+from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import (
@@ -146,6 +147,13 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert requested == ["google"]
 
 
+def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
+    """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
+    adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
+
+    assert adapter._client_params() == {"api_key": "test-key", "http_options": {"timeout": 12500}}
+
+
 @pytest.mark.asyncio
 async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_path: Path) -> None:
     """Authored settings reach the request; overrides replace them, and disabling thinking keeps the authored config.
@@ -205,6 +213,41 @@ async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(t
     calls, results = (sent["body"]["contents"][index]["parts"] for index in (1, 2))
     assert [part["functionCall"].get("id") for part in calls] == [None, "call-123"]
     assert [part["functionResponse"].get("id") for part in results] == [None, "call-123"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_leaves_out_a_stored_turn_without_text_or_calls(tmp_path: Path) -> None:
+    """An assistant turn that kept only its reasoning sends no content, so the user turns around it merge."""
+    messages = (
+        Message(role="user", content="Hi"),
+        Message(role="assistant", reasoning_content="Nothing to add."),
+        Message(role="user", content="Still there?"),
+    )
+
+    sent, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    assert sent["body"]["contents"] == [{"role": "user", "parts": [{"text": "Hi"}, {"text": "Still there?"}]}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_undecodable_tool_arguments_as_empty(tmp_path: Path) -> None:
+    """Stored arguments that are not JSON, such as a call cut off mid-stream, replay as empty arguments, as in Agno."""
+    messages = (
+        Message(role="user", content="Weather?"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": "call-1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Par'}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="call-1", tool_name="get_weather", content="Missing city."),
+    )
+
+    sent, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    assert sent["body"]["contents"][1]["parts"] == [
+        {"functionCall": {"id": "call-1", "name": "get_weather", "args": {}}},
+    ]
 
 
 @pytest.mark.asyncio
@@ -286,6 +329,23 @@ async def test_gemini_decision_requests_fail_on_tools_they_cannot_inspect(
             tmp_path,
             gemini_sse(_gemini_chunk({"text": "{}"})),
         )
+
+
+@pytest.mark.asyncio
+async def test_gemini_decision_requests_fail_on_client_body_overrides(tmp_path: Path) -> None:
+    """Body overrides authored on the SDK client can carry native tools too, so a decision refuses to send them."""
+    sent: list[httpx.Request] = []
+    http_options = {
+        "extra_body": {"tools": [{"googleSearch": {}}]},
+        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(sent.append)),
+    }
+    config = _config(GEMINI, client_params={"http_options": http_options})
+    adapter = gemini_adapter.build_provider(ModelConfig(**config), runtime_paths_for(tmp_path))
+
+    with without_provider_tools(), pytest.raises(ValueError, match="body overrides"):
+        [event async for event in adapter.stream(_request(tools=[WEATHER], tool_choice="none"))]
+
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -528,6 +588,45 @@ async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: P
         "UsageReported",
         "TurnCompleted",
     ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_blocked_prompt_ends_the_turn_without_output(tmp_path: Path) -> None:
+    """A streamed prompt Gemini blocks returns feedback and no candidate, which ends the turn empty, as in Agno."""
+    blocked = {
+        "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
+        "usageMetadata": {"promptTokenCount": 9, "totalTokenCount": 9},
+    }
+
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(blocked))
+
+    completed = _completed(events)
+    assert [type(event).__name__ for event in events] == ["StreamProgress", "TurnCompleted"]
+    assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_empty_text_parts_add_no_deltas_but_keep_their_signature(tmp_path: Path) -> None:
+    """Gemini can stream an empty thought and close with an empty text part that carries the thought signature."""
+    response = gemini_sse(
+        _gemini_chunk({"text": "", "thought": True}, finish=None, usage=False),
+        _gemini_chunk({"text": "Hi"}, finish=None, usage=False),
+        _gemini_chunk({"text": "", "thoughtSignature": "c2ln"}),
+    )
+
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, response)
+
+    message = _completed(events).message
+    assert [type(event).__name__ for event in events] == [
+        "StreamProgress",
+        "TextDelta",
+        "StreamProgress",
+        "UsageReported",
+        "TurnCompleted",
+    ]
+    assert (message.content, message.reasoning_content) == ("Hi", None)
+    assert message.provider_data is not None
+    assert message.provider_data["thought_signature"] == "c2ln"
 
 
 @pytest.mark.asyncio
@@ -801,6 +900,40 @@ async def test_gemini_upload_transport_failure_is_retryable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing", "status", "state", "error_type"),
+    [("lookup", 500, "INTERNAL", ProviderUnavailable), ("upload", 429, "RESOURCE_EXHAUSTED", RateLimited)],
+)
+async def test_gemini_files_api_failures_are_provider_errors(
+    failing: str,
+    status: int,
+    state: str,
+    error_type: type[ProviderError],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Files API failure other than a missing file or a name clash fails the request as the provider's error."""
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    failing_url = {
+        "lookup": f"{_GEMINI_API}v1beta/{_upload_name('audio/ogg', b'OggS-voice')}",
+        "upload": f"{_GEMINI_API}upload/v1beta/files",
+    }[failing]
+    error = {"code": status, "message": "The Files API request failed.", "status": state}
+    # The server answers a URL in ``remote`` before routing it, so this Files API call fails.
+    server = _MediaServer(remote={failing_url: httpx.Response(status, json={"error": error})})
+
+    with pytest.raises(error_type) as raised:
+        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert raised.value.retryable
+    assert raised.value.status_code == status
+    assert server.uploads == []
+    assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
 async def test_gemini_on_vertex_inlines_local_media_and_rejects_what_is_too_large(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -866,6 +999,60 @@ async def test_gemini_downloads_remote_images_audio_and_files(tmp_path: Path, mo
         {"inlineData": {"data": base64.urlsafe_b64encode(b"RIFF-speech").decode(), "mimeType": "audio/wav"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"notes").decode(), "mimeType": "text/plain"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_references_an_https_file_of_known_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An HTTPS file with a declared type, such as a tool returns, goes out as a URI that Gemini fetches itself."""
+    url = "https://media.test/report.pdf"
+    message = Message(role="user", content="Read this", files=[File(url=url, mime_type="application/pdf")])
+    server = _MediaServer()
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert server.requests == server.model_requests()
+    assert _user_parts(server) == [
+        {"text": "Read this"},
+        {"fileData": {"fileUri": url, "mimeType": "application/pdf"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_leaves_out_empty_local_attachments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zero-byte local image or audio file adds no part and is never uploaded."""
+    image_path = tmp_path / "blank.png"
+    image_path.write_bytes(b"")
+    audio_path = tmp_path / "silence.ogg"
+    audio_path.write_bytes(b"")
+    message = Message(
+        role="user",
+        content="Look",
+        images=[Image(filepath=str(image_path))],
+        audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")],
+    )
+    server = _MediaServer()
+
+    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
+
+    assert server.requests == server.model_requests()
+    assert _user_parts(server) == [{"text": "Look"}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path) -> None:
+    """Audio without a declared type whose suffix names no known format gets Agno's default type."""
+    audio_path = tmp_path / "memo.m4a"
+    audio_path.write_bytes(b"m4a-memo")
+    message = Message(role="user", content="Transcribe", audio=[Audio(filepath=str(audio_path))])
+
+    request, _ = await run_adapter(
+        GEMINI_VERTEX,
+        _request(message),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert request["body"]["contents"][0]["parts"][1]["inlineData"]["mime_type"] == "audio/mp3"
 
 
 @pytest.mark.asyncio
@@ -954,6 +1141,134 @@ def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> 
         },
     }
     assert schema == original
+
+
+def test_gemini_converts_mcp_tool_schemas_as_agno_did() -> None:
+    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert as Agno's did.
+
+    MCP and plugin tools send their own JSON schemas, so any of these can reach a Gemini request.
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "issue": {"anyOf": [{"type": "string"}, {"type": "integer"}], "description": "Issue key or number."},
+            "limit": {"type": ["integer", "string"]},
+            "labels": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+            "weights": {"type": "object", "additionalProperties": {"type": ["number", "string"]}},
+            "filter": {"type": "object", "properties": {}, "description": "Field filters."},
+            "parent": {"$ref": "#/$defs/Issue", "description": "Parent issue."},
+            "payload": {"description": "Any JSON value."},
+        },
+        "required": ["issue"],
+    }
+
+    assert gemini_wire.convert_schema(schema) == {
+        "type": "OBJECT",
+        "required": ["issue"],
+        "properties": {
+            "issue": {"any_of": [{"type": "STRING"}, {"type": "INTEGER"}], "description": "Issue key or number."},
+            "limit": {"type": "INTEGER"},
+            "labels": {
+                "type": "OBJECT",
+                "properties": {
+                    "example_key": {
+                        "type": "ARRAY",
+                        "description": "Example key-value pair. This object can contain any number of keys with array values.",
+                        "items": {},
+                    },
+                },
+                "description": "Dictionary with array values. Can contain any number of key-value pairs.",
+            },
+            "weights": {
+                "type": "OBJECT",
+                "properties": {
+                    "example_key": {
+                        "type": "NUMBER",
+                        "description": (
+                            "Example key-value pair. This object can contain any number of keys with number values"
+                            " (supports union types: number, string)."
+                        ),
+                    },
+                },
+                "description": (
+                    "Dictionary with number values (supports union types: number, string)."
+                    " Can contain any number of key-value pairs."
+                ),
+            },
+            "filter": {"type": "OBJECT", "description": "Field filters."},
+            "parent": {"description": "Parent issue."},
+            "payload": {"description": "Any JSON value."},
+        },
+    }
+
+
+class Extraction(BaseModel):
+    """An output model with a dict field."""
+
+    aliases: dict[str, list[str]]
+
+
+class Topic(BaseModel):
+    """An output model that refers to itself."""
+
+    name: str
+    subtopics: list[Topic] = []
+
+
+@pytest.mark.parametrize(
+    ("output_model", "expected"),
+    [
+        (
+            Extraction,
+            {
+                "type": "OBJECT",
+                "title": "Extraction",
+                "description": "An output model with a dict field.",
+                "required": ["aliases"],
+                "properties": {
+                    "aliases": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "example_key": {
+                                "type": "ARRAY",
+                                "description": (
+                                    "Example key-value pair. This object can contain any number of keys with array"
+                                    " values."
+                                ),
+                                "items": {},
+                            },
+                        },
+                        "description": "Dictionary with array values. Can contain any number of key-value pairs.",
+                    },
+                },
+            },
+        ),
+        (
+            Topic,
+            {
+                "type": "OBJECT",
+                "title": "Topic",
+                "description": "An output model that refers to itself.",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "STRING", "title": "Name"},
+                    "subtopics": {
+                        "type": "ARRAY",
+                        "title": "Subtopics",
+                        "items": {"type": "OBJECT", "description": "Circular reference to #/$defs/Topic"},
+                    },
+                },
+            },
+        ),
+    ],
+    ids=["dict-field", "self-reference"],
+)
+def test_gemini_converts_output_models_it_cannot_take_as_a_class(
+    output_model: type[BaseModel],
+    expected: dict[str, Any],
+) -> None:
+    """Gemini cannot take a model with dict fields or self references as a class, so its schema is converted."""
+    assert gemini_wire.response_schema(output_model) == expected
 
 
 # ---------------------------------------------------------------------------
