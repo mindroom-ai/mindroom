@@ -276,11 +276,13 @@ async def _run_approved(
 
 
 def resumed_record[R: AnyRunRecord](paused: R) -> R:
-    """Return the record the resume continues: a copy of ``paused`` whose requirements share their tool entries.
+    """Return the record the resume continues: a copy of ``paused`` whose own requirements share their tool entries.
 
     Agno's continuation replaced each tool entry by the requirement's execution of the same call, so a decision
-    recorded on a requirement shows on the run's tools too; the copy keeps that aliasing. ``paused`` is left as it
-    was, so a refused resume changes nothing.
+    recorded on a requirement shows on the run's tools too; the copy keeps that aliasing. A team run also holds its
+    members' requirements, whose call ids come from other provider requests and may equal a leader call's id; those
+    belong to the member's run and never replace the leader's entries. ``paused`` is left as it was, so a refused
+    resume changes nothing.
     """
     if paused.status is not RunStatus.paused:
         msg = f"Only a paused run can be resumed; run {paused.run_id!r} is {paused.status.value}"
@@ -290,6 +292,7 @@ def resumed_record[R: AnyRunRecord](paused: R) -> R:
         requirement.tool_execution.tool_call_id: requirement.tool_execution
         for requirement in requirements
         if requirement.tool_execution.tool_call_id is not None
+        and (requirement.member_agent_id is None or requirement.member_run_id == paused.run_id)
     }
     tools = [by_call.get(tool.tool_call_id) or deepcopy(tool) for tool in paused.tools or []]
     return replace(
