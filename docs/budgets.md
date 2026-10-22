@@ -67,6 +67,7 @@ Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
 Spend updates within about a minute of a chat reply finishing and within five minutes of other usage, such as voice calls, so a user can go slightly over their cap before the fallback applies.
+With a lot of retained usage, recounting spend takes longer, and updates wait about ten times that long so the recount does not slow replies.
 A reply that already started finishes on its model.
 
 ## Over-Budget Replies
