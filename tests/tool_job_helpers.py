@@ -41,7 +41,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.authorization import toolkit_authority
-from mindroom.tool_jobs.execution import JobActor, job_definitions_hook, job_middleware
+from mindroom.tool_jobs.execution import JobActor, job_definitions_hook, with_job_admission
 from mindroom.tool_jobs.execution_authority import JobTool
 from mindroom.tool_jobs.notices import job_notice_hook
 from mindroom.tool_jobs.runtime import (
@@ -327,7 +327,7 @@ async def call_job_tool(
         actor.tools[name].function,
         arguments,
         context,
-        middleware=(job_middleware(actor, middleware), *middleware),
+        middleware=with_job_admission(actor, middleware),
     )
 
 
@@ -351,7 +351,7 @@ def _job_turn(
     )
     hooks = LoopHooks(
         before_request=(job_definitions_hook(actor),),
-        tool_middleware=(job_middleware(actor, middleware), *middleware),
+        tool_middleware=with_job_admission(actor, middleware),
         after_tool_batch=(job_notice_hook(actor.name),),
     )
     session = ConversationSession(

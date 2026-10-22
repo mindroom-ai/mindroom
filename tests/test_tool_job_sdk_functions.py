@@ -15,7 +15,7 @@ from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.execution import job_middleware
+from mindroom.tool_jobs.execution import with_job_admission
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -156,7 +156,7 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
     run = ToolCallContext(run_id="job-run", session_id="session", call_id="sdk-call")
     job_call = JobCall(tool=job_tool(search), arguments={}, context=run, team=False)
     generated = adapt_function(Function.from_callable(search))
-    admit = job_middleware(job_actor(), ())
+    (admit,) = with_job_admission(job_actor(), ())
     try:
         async with execution_resources():
             with (

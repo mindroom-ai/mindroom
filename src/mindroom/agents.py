@@ -51,7 +51,7 @@ from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
-from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, job_middleware
+from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
@@ -1816,7 +1816,7 @@ def team_background_jobs(
             {},
         ),
     )
-    return LeaderJobs(controls=adapted, middleware=(job_middleware(actor, (hooks,)), hooks), actor=actor)
+    return LeaderJobs(controls=adapted, middleware=with_job_admission(actor, (hooks,)), actor=actor)
 
 
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
@@ -2207,9 +2207,7 @@ def create_agent(
         history_settings=entity_view.history_settings,
         store=store,
         tool_owners=tool_assembly.tool_owners,
-        tool_middleware=tool_middleware
-        if tool_jobs is None
-        else (job_middleware(tool_jobs, tool_middleware), *tool_middleware),
+        tool_middleware=tool_middleware if tool_jobs is None else with_job_admission(tool_jobs, tool_middleware),
         tool_jobs=tool_jobs,
         surface=surface,
     )

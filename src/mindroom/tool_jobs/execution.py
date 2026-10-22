@@ -1,6 +1,6 @@
 """Tool calls that run as background jobs on the owned loop.
 
-``job_middleware`` admits each call one actor makes: it runs in its reply, as a managed job the reply waits for
+``with_job_admission`` admits each call one actor makes: it runs in its reply, as a managed job the reply waits for
 within the call's ``background_after`` budget, or not at all when a job-gated call cannot become a job, which also
 asks for that call's approval as the job's first phase. Inside a managed job every call, a nested agent's included,
 keeps its synchronous leaf owned by the job and is checked as its own call.
@@ -216,17 +216,18 @@ def job_definitions_hook(actor: JobActor) -> BeforeRequestHook:
     return project
 
 
-def job_middleware(actor: JobActor, inner: Sequence[ToolMiddleware]) -> ToolMiddleware:
-    """Return the admission step the loop runs outermost around ``inner``, the rest of the actor's tool-call policy.
+def with_job_admission(actor: JobActor, inner: Sequence[ToolMiddleware]) -> tuple[ToolMiddleware, ...]:
+    """Return the actor's tool-call policy ``inner`` with job admission outermost, the policy the loop runs.
 
     A managed job runs its call through ``inner`` again in the job's own task, on a copy of the call's session
     state, so the reply's state changes only when the reply reads the job's result.
     """
+    rest = tuple(inner)
 
     async def admit(call: ToolCall, call_next: ToolNext) -> object:
-        return await _admit(actor, inner, call, call_next)
+        return await _admit(actor, rest, call, call_next)
 
-    return admit
+    return (admit, *rest)
 
 
 async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCall, call_next: ToolNext) -> object:
@@ -520,7 +521,7 @@ __all__ = [
     "approval_can_run_as_job",
     "assembled_job_tools",
     "job_definitions_hook",
-    "job_middleware",
     "project_definitions",
     "wait_mode",
+    "with_job_admission",
 ]
