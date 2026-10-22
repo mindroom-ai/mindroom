@@ -729,10 +729,11 @@ def test_reply_sends_the_body_as_an_escaped_comment(
     mail.write = _reply_draft()
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
+    # Case does not matter, and naming an address the draft leaves out, such as the requester's own, still sends it.
     result = _payload(
         tools.outlook_mail_reply(
             MESSAGE_ID,
-            ["Sam Example <sam@contoso.com>", "team@contoso.com"],
+            ["Sam Example <sam@contoso.com>", "TEAM@contoso.com", "alex@contoso.com"],
             "Thanks <team> & all\r\nSee you",
             reply_all=reply_all,
         ),
@@ -745,34 +746,35 @@ def test_reply_sends_the_body_as_an_escaped_comment(
     assert (result["sent"], result["recipients"]) == (True, ["Sam Example <sam@contoso.com>", "team@contoso.com"])
 
 
-@pytest.mark.parametrize("field", ["toRecipients", "bccRecipients"])
+@pytest.mark.parametrize(
+    ("field", "recipient", "listed"),
+    [
+        # An outside address the caller did not name, such as the original's reply_to.
+        ("toRecipients", {"emailAddress": {"address": "desk@outside.example"}}, "desk@outside.example"),
+        ("bccRecipients", {"emailAddress": {"address": "desk@outside.example"}}, "desk@outside.example"),
+        # A recipient without an address cannot be matched against the named ones.
+        ("ccRecipients", {"emailAddress": {"name": "Desk"}}, "Desk"),
+    ],
+)
 def test_reply_to_a_recipient_not_named_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     field: str,
+    recipient: dict[str, object],
+    listed: str,
 ) -> None:
     mail = _Graph()
-    # The draft reaches an outside address the caller did not name, such as the original's reply_to.
-    outside = [{"emailAddress": {"address": "desk@outside.example"}}]
-    mail.write = _reply_draft(**{"toRecipients": [], "ccRecipients": [], field: outside})
+    mail.write = _reply_draft(**{"toRecipients": [], "ccRecipients": [], field: [recipient]})
     mail.override = lambda request: httpx.Response(204) if request.method == "DELETE" else None
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=["alex@contoso.com"], body="Thanks"))
 
-    assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
+    assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", [listed])
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
         ("POST", f"{MESSAGE_PATH}/createReply"),
         ("DELETE", DRAFT_PATH),
     ]
-    graph.requests.clear()
-
-    # Naming an address the draft leaves out, such as the requester's own, still sends it.
-    named = ["Desk@Outside.example", "sam@contoso.com"]
-    sent = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=named, body="Thanks"))
-
-    assert (sent["sent"], sent["recipients"]) == (True, ["desk@outside.example"])
-    assert (graph.requests[-1].method, unquote(graph.requests[-1].url.path)) == ("POST", f"{DRAFT_PATH}/send")
 
 
 @pytest.mark.parametrize(

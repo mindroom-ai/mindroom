@@ -101,15 +101,14 @@ def _addresses(recipients: list[Any] | None) -> list[str]:
     return [address for recipient in recipients if (address := _address(recipient))]
 
 
-def _address_set(recipients: list[Any]) -> set[str]:
-    """Return the email addresses of Graph recipients, compared without case."""
-    return {
-        address.casefold()
-        for recipient in recipients
-        if isinstance(recipient, dict)
-        and isinstance(email := recipient.get("emailAddress"), dict)
-        and isinstance(address := email.get("address"), str)
-    }
+def _address_set(recipients: list[Any]) -> set[str | None]:
+    """Return the email addresses of Graph recipients, compared without case, with None for one without an address."""
+    addresses: set[str | None] = set()
+    for recipient in recipients:
+        email = recipient.get("emailAddress") if isinstance(recipient, dict) else None
+        address = email.get("address") if isinstance(email, dict) else None
+        addresses.add(address.casefold() if isinstance(address, str) else None)
+    return addresses
 
 
 def _summary(message: Mapping[str, Any]) -> dict[str, Any]:
