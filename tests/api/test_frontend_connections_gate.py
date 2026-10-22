@@ -52,10 +52,17 @@ def gate_client(
     (portal / "assets" / "portal.js").write_text("portal asset")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: dist)
 
-    def client(*, trusted_upstream: bool, broker_on: bool = True) -> TestClient:
+    def client(
+        *,
+        trusted_upstream: bool,
+        broker_on: bool = True,
+        extra_env: dict[str, str] | None = None,
+        base_url: str = "http://localhost",
+    ) -> TestClient:
         env = trusted_upstream_env() if trusted_upstream else {}
         if broker_on:
             env["MINDROOM_EGRESS_BROKER_PORT"] = "8768"
+        env.update(extra_env or {})
         runtime_paths = constants.resolve_primary_runtime_paths(
             config_path=temp_config_file,
             storage_path=tmp_path / "storage",
@@ -65,7 +72,7 @@ def gate_client(
         main.initialize_api_app(app, runtime_paths)
         config_lifecycle.load_config_into_app(runtime_paths, app)
         app.include_router(frontend.router)
-        return TestClient(app, base_url="http://localhost")
+        return TestClient(app, base_url=base_url, follow_redirects=False)
 
     return client
 
@@ -111,3 +118,27 @@ def test_agent_keys_page_is_absent_while_the_broker_is_off(
         assert response.json()["detail"] == "Agent Keys are not enabled"
     else:
         assert response.status_code == 200
+
+
+_SEPARATE_DASHBOARD = {
+    "MINDROOM_PUBLIC_URL": "https://chat.example.org",
+    "MINDROOM_DASHBOARD_URL": "https://admin.example.org",
+}
+
+
+def test_connections_pages_on_the_dashboard_host_move_to_the_public_origin(
+    gate_client: Callable[..., TestClient],
+) -> None:
+    """Connections sign-in, account links, and MCP consent belong to the public origin, so their pages move there."""
+    admin = gate_client(trusted_upstream=False, extra_env=_SEPARATE_DASHBOARD, base_url="https://admin.example.org")
+    moved = admin.get("/connections/egress", params={"agent": "personal"})
+    assert moved.status_code == 307
+    assert moved.headers["location"] == "https://chat.example.org/connections/egress?agent=personal"
+    dashboard = admin.get("/")
+    assert dashboard.status_code == 200
+    assert dashboard.text == "administrator dashboard"
+
+    public = gate_client(trusted_upstream=False, extra_env=_SEPARATE_DASHBOARD, base_url="https://chat.example.org")
+    served = public.get("/connections")
+    assert served.status_code == 200
+    assert served.text == "connections bundle"

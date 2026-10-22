@@ -67,6 +67,8 @@ export interface ConnectionsIdentity {
   is_administrator: boolean;
   /** The egress broker is on, so the Agent Keys page exists. */
   egress_enabled: boolean;
+  /** Where administrators open the dashboard, on this origin or its own host. */
+  dashboard_url: string;
 }
 
 export interface ConnectionStatus {

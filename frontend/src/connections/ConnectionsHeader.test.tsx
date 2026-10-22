@@ -20,6 +20,7 @@ const identity = (
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
+  dashboard_url: "/",
   ...overrides,
 });
 
@@ -98,6 +99,7 @@ describe("connections header", () => {
           matrix_user_id: "@alice:example.org",
           display_name: "Alice",
           is_administrator: true,
+          dashboard_url: "https://admin.example.org/",
         }),
       ),
     );
@@ -105,7 +107,7 @@ describe("connections header", () => {
     expect(await screen.findByText("Signed in as Alice")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Dashboard" })).toHaveAttribute(
       "href",
-      "/",
+      "https://admin.example.org/",
     );
   });
 

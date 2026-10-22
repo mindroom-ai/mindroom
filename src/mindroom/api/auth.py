@@ -10,7 +10,7 @@ import secrets
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
@@ -30,7 +30,7 @@ from mindroom.matrix.identity import (
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import deployment_origin, normalized_origin
+from mindroom.origins import dashboard_origin, deployment_origin, normalized_origin
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -141,6 +141,7 @@ class _ApiAuthSettings:
     account_id: str | None
     mindroom_api_key: str | None
     public_url: str | None = None
+    dashboard_origin: str | None = None
     platform_sso_url: str | None = None
     platform_sso_secret: str | None = None
     trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
@@ -164,6 +165,7 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+        dashboard_origin=dashboard_origin(runtime_paths),
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
         platform_sso_secret=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_SECRET"),
         trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
@@ -1035,6 +1037,17 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[s
     return cast("dict[str, Any]", auth_user)
 
 
+def dashboard_host_public_origin(request: Request) -> str | None:
+    """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
+    settings = _request_auth_state(request).settings
+    public = normalized_origin(settings.public_url)
+    dashboard = settings.dashboard_origin
+    if dashboard is None or public is None or public == dashboard:
+        return None
+    # Behind a proxy the request's scheme may differ from the browser's, so compare hosts.
+    return public if urlsplit(str(request.base_url)).hostname == urlsplit(dashboard).hostname else None
+
+
 def require_same_origin(
     request: Request,
     expected_origin: str,
@@ -1060,6 +1073,9 @@ def _require_browser_mutation_origin(
     origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
+    # A dashboard served on its own host sends that host's origin.
+    if settings.dashboard_origin is not None and request.headers.get("origin") == settings.dashboard_origin:
+        origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
 
