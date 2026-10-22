@@ -111,8 +111,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
-    from agno.tools.function import Function
-
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import Persist
@@ -140,6 +138,7 @@ if TYPE_CHECKING:
     )
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
+    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 

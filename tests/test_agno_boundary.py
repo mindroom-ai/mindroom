@@ -22,8 +22,6 @@ ALLOWED_MODULES = frozenset(
 KNOWN_VIOLATIONS = frozenset(
     {
         "agent_cli/bash.py",
-        "ai.py",
-        "approval/tool_approval.py",
         "delegation/personas.py",
         "error_handling.py",
         "helper_usage.py",
@@ -35,7 +33,6 @@ KNOWN_VIOLATIONS = frozenset(
         "script_runs/broker.py",
         "script_runs/policy.py",
         "teams/delegate_tools.py",
-        "tool_system/runtime_context.py",
     },
 )
 

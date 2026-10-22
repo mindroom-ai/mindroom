@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from agno.tools.function import Function
     from structlog.stdlib import BoundLogger
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -59,6 +58,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime
+    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
