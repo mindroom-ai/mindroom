@@ -139,7 +139,7 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
 
 
 @pytest.mark.asyncio
-async def test_a_room_default_changed_mid_turn_does_not_reach_the_rebuilt_members(
+async def test_model_changes_made_mid_turn_do_not_reach_the_rebuilt_members(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -157,7 +157,12 @@ async def test_a_room_default_changed_mid_turn_does_not_reach_the_rebuilt_member
         delegate("call-again", "general", "Finish"),
         answer("Finished the task."),
     ]
-    team.models["large"].turns = [[Await(change_the_room_default), *calls(_switch("next-turn"))], answer("Done.")]
+    # The switch writes the thread override at once, and it outranks the room default, so it names a model other
+    # than the pinned one: a rebuild that dropped the pin would run the member on it.
+    team.models["large"].turns = [
+        [Await(change_the_room_default), *calls(_switch("next-turn", model_name="general-model"))],
+        answer("Done."),
+    ]
 
     text = await team.respond(message=PROMPT)
 
