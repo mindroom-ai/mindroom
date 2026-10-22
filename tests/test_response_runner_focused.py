@@ -37,6 +37,7 @@ from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt as approval_receipt
 from mindroom.approval.receipt import messages_with_approval_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -4090,6 +4091,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
     )
     function = gated_functions(toolkit, bot.config)["synthetic_exempt"]
+    assert (function.requires_confirmation, function.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
     tool = ToolExecution(
         tool_call_id="call-exempt",
         tool_name=function.name,
@@ -4140,6 +4142,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
     )
     function = gated_functions(toolkit, bot.config)["scripted_tool"]
+    assert (function.requires_confirmation, function.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
     tool = ToolExecution(
         tool_call_id="call-script",
         tool_name=function.name,
