@@ -98,6 +98,7 @@ _PALETTE = _Palette(title="Sea", primary=_Color.BLUE, swatches=[_Swatch(name="de
 PARSE_CASES = {
     "plain": (_RoutingSuggestion, _ROUTING_JSON),
     "fenced": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}\n```\nAnything else?"),
+    "unclosed_fence": (_RoutingSuggestion, f"Here you go:\n```json\n{_ROUTING_JSON}"),
     "bare_fence": (_RoutingSuggestion, f"```\n{_ROUTING_JSON}\n```"),
     "thinking": (_RoutingSuggestion, f"<think>The handbook agent fits.</think>\n{_ROUTING_JSON}"),
     "empty_thinking": (_RoutingSuggestion, f"<think></think>{_ROUTING_JSON}"),
@@ -106,6 +107,15 @@ PARSE_CASES = {
     "unescaped_quotes": (_RoutingSuggestion, '{"entity_name": "assistant", "reasoning": "It said "hi" first"}'),
     "surrounding_prose": (_RoutingSuggestion, f"I pick: {_ROUTING_JSON} as requested."),
     "split_objects": (_Palette, '{"title": "Sea", "swatches": [{"name": "a", "color": "red"}]} {"primary": "blue"}'),
+    "split_objects_with_escapes": (
+        _Palette,
+        '{"title": "Sea 5\\" {draft} at C:\\\\maps\\\\", "primary": "red"} '
+        '{"swatches": [{"name": "deep", "color": "blue"}]}',
+    ),
+    "split_objects_after_a_placeholder": (
+        _Palette,
+        'Filling in {title}: {"title": "Sea", "primary": "blue"} {"swatches": [{"name": "deep", "color": "blue"}]}',
+    ),
     "split_lists": (
         _Palette,
         '{"title": "Sea", "primary": "red", "swatches": [{"name": "a", "color": "red"}]} '
@@ -126,9 +136,9 @@ def test_parsing_reads_what_agno_read(case: str) -> None:
 
 
 def test_parsing_recovers_common_answer_shapes() -> None:
-    """Fenced, thinking-prefixed, and split answers validate; text without a valid object does not."""
+    """Fenced, unclosed-fence, thinking-prefixed, and split answers validate; text without a valid object does not."""
     expected = _RoutingSuggestion(entity_name="assistant", reasoning="Handbook questions.")
-    for case in ("plain", "fenced", "bare_fence", "thinking", "markdown_keys", "surrounding_prose"):
+    for case in ("plain", "fenced", "unclosed_fence", "bare_fence", "thinking", "markdown_keys", "surrounding_prose"):
         schema, text = PARSE_CASES[case]
         assert parse_structured(text, schema) == expected, case
     schema, text = PARSE_CASES["split_objects"]
@@ -137,6 +147,15 @@ def test_parsing_recovers_common_answer_shapes() -> None:
         primary=_Color.BLUE,
         swatches=[_Swatch(name="a", color=_Color.RED)],
     )
+    deep = [_Swatch(name="deep", color=_Color.BLUE)]
+    schema, text = PARSE_CASES["split_objects_with_escapes"]
+    assert parse_structured(text, schema) == _Palette(
+        title='Sea 5" {draft} at C:\\maps\\',
+        primary=_Color.RED,
+        swatches=deep,
+    )
+    schema, text = PARSE_CASES["split_objects_after_a_placeholder"]
+    assert parse_structured(text, schema) == _Palette(title="Sea", primary=_Color.BLUE, swatches=deep)
     for case in ("invalid_value", "no_json", "wrong_shape"):
         schema, text = PARSE_CASES[case]
         assert parse_structured(text, schema) is None, case

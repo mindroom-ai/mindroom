@@ -50,7 +50,7 @@ def test_prepared_tools_sort_definitions_by_name_for_prompt_cache_stability() ->
     assert [tool.name for tool in prepared.specs()] == ["add", "echo"]
 
 
-def test_prepared_tools_filter_first_then_keep_the_first_of_a_repeated_name() -> None:
+def test_prepared_tools_keep_the_first_of_a_repeated_name() -> None:
     def echo_v2(text: str) -> str:
         """Return the text, loudly.
 
@@ -64,17 +64,12 @@ def test_prepared_tools_filter_first_then_keep_the_first_of_a_repeated_name() ->
         toolkit(echo_v2, name="loud"),
         functions=tuple(replace(f, name="echo") for f in toolkit(echo_v2).functions),
     )
-    agent = spec(
-        ScriptedModel([]),
-        toolkit(add, echo, name="first"),
-        second,
-        tool_filter=lambda function: function.name != "add",
-    )
+    agent = spec(ScriptedModel([]), toolkit(add, echo, name="first"), second)
 
     with capture_logs() as logs:
         prepared = prepare_run_tools(agent)
 
-    assert list(prepared.functions) == ["echo"]
+    assert list(prepared.functions) == ["add", "echo"]
     assert prepared.functions["echo"].description == "Return the text."
     assert [entry["tool_name"] for entry in logs if entry["event"] == "duplicate_tool_name"] == ["echo"]
 

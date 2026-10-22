@@ -20,7 +20,6 @@ from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, T
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
-from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.tools import PlannedCall, PreparedTools, ToolBatch
     from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import MessageMetrics
+    from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -144,7 +143,7 @@ class _Progress:
     stopped: bool = False
 
 
-async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each hook stage a branch
+async def run_model_loop(
     model: ModelProvider,
     messages: list[Message],
     tools: PreparedTools,
@@ -159,14 +158,14 @@ async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each 
 
     ``messages`` is the list the run stores from: every assistant and tool message is appended to it.
     ``record`` collects the loop's text as ``content`` (the loop's requests concatenated, replacing what the record
-    held), its tool executions, its pause requirements, and its usage. ``request_template`` carries the per-run
-    request settings; its messages and tools are replaced per request.
+    held), its tool executions, its pause requirements, and its usage, in the metrics every run record starts with.
+    ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
     Provider errors, tool-call errors other than a tool's own exception, and cancellation propagate after the
     usage a cut-off request already reported is recorded on an assistant message, exactly once.
     """
     identity = model.identity
-    if record.metrics is None:
-        record.metrics = RunMetrics()
+    metrics = record.metrics
+    assert metrics is not None
     state = LoopState(
         messages=messages,
         tools=tools.specs(),
@@ -185,7 +184,7 @@ async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each 
         request = replace(state.request_template, messages=tuple(outbound), tools=state.tools)
         progress.last_request = request
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, record.metrics)
+        events = _stream_turn(model, request, messages, metrics)
         async with closing_async_stream(events):
             async for event in events:
                 if isinstance(event, TurnCompleted):

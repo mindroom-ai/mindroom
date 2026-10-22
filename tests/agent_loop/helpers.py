@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from mindroom.llm.events import RunEvent
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit
     from tests.fakes.scripted_model import ScriptedModel
 
 
@@ -75,7 +75,6 @@ def spec(
     model: ScriptedModel,
     *toolkits: AdaptedToolkit,
     tool_call_limit: int | None = None,
-    tool_filter: Callable[[ToolFunction], bool] | None = None,
 ) -> AgentSpec:
     """Return a spec for the ``code`` agent with the usual system message."""
     return AgentSpec(
@@ -85,7 +84,6 @@ def spec(
         system_message=Message(role="system", content="You are Code."),
         toolkits=toolkits,
         tool_call_limit=tool_call_limit,
-        tool_filter=tool_filter,
     )
 
 
