@@ -59,6 +59,7 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -76,7 +77,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -636,6 +637,12 @@ async def build_call_tools(
     )
     # The call is one run for its tools, which share its session state the way one chat turn's tools do.
     call_context = ToolCallContext(run_id=f"{session_id}:voice", session_id=session_id, user_id=requester_id)
+    connections = _CallConnections()
+    # The first function of a name is the one the call offers, as in a chat turn.
+    owners: dict[str, AdaptedToolkit] = {}
+    for toolkit in build.spec.toolkits:
+        for function in toolkit.functions:
+            owners.setdefault(function.name, toolkit)
     tools: list[RawFunctionTool] = []
     for function in prepare_run_tools(build.spec).functions.values():
         # The build applied the call's function filter to the functions it built, not to ones added beside them.
@@ -651,6 +658,7 @@ async def build_call_tools(
                 agent_name=agent_name,
                 authorize_operation=authorize_operation,
                 usage_owner=usage_owner,
+                connect=functools.partial(connections.connect, owners[function.name]),
             ),
         )
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
@@ -658,7 +666,37 @@ async def build_call_tools(
         tools=tuple(tools),
         instructions=_call_instructions(build),
         execution_identity=execution_identity,
+        close=connections.close,
     )
+
+
+@dataclass
+class _CallConnections:
+    """The connections a realtime call's tools hold, each opened by the first call that needs it and closed with the call.
+
+    Opening one only once a tool needs it leaves nothing to close when the call never starts.
+    """
+
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _connected: list[AdaptedToolkit] = field(default_factory=list, init=False)
+    _closes: list[ToolkitClose] = field(default_factory=list, init=False)
+    _closed: bool = field(default=False, init=False)
+
+    async def connect(self, toolkit: AdaptedToolkit) -> None:
+        """Connect ``toolkit`` for the rest of the call, unless an earlier call did or the call has ended."""
+        if toolkit.connect is None:
+            return
+        async with self._lock:
+            if self._closed or any(connected is toolkit for connected in self._connected):
+                return
+            self._connected.append(toolkit)
+            await connect_toolkits((toolkit,), self._closes)
+
+    async def close(self) -> None:
+        """Close what the call's tools connected once the call ends."""
+        async with self._lock:
+            self._closed = True
+            await close_toolkits(self._closes)
 
 
 async def _run_call_agent(
@@ -962,8 +1000,12 @@ def _wrap_tool_function(
     agent_name: str,
     authorize_operation: _CallAuthorizationGuard,
     usage_owner: HelperUsageOwner,
+    connect: Callable[[], Awaitable[None]],
 ) -> RawFunctionTool:
-    """Wrap one of the build's functions as a livekit raw function tool that runs under the build's policy."""
+    """Wrap one of the build's functions as a livekit raw function tool that runs under the build's policy.
+
+    ``connect`` connects the function's toolkit for the call before the function first runs, when it holds one.
+    """
     from livekit.agents import llm  # noqa: PLC0415
 
     raw_schema = {
@@ -977,6 +1019,7 @@ def _wrap_tool_function(
             if not authorized:
                 return "Call access was revoked before this tool could run."
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
+            await connect()
             try:
                 with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)

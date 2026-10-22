@@ -4484,6 +4484,7 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.types",

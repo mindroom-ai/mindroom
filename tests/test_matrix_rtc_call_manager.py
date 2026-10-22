@@ -534,6 +534,35 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_realtime_call_hands_its_session_the_close_of_its_tools_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A realtime call's tools run outside any agent run, so the call session closes what they connected."""
+    close_tools = AsyncMock()
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            close=close_tools,
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert isinstance(bridge.agent_options, VoiceAgentOptions)
+    assert bridge.agent_options.close_tools is close_tools
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_manager_joins_call_in_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
     """An accepted invite is sufficient room ownership for a calls-enabled agent."""
     client = _client()

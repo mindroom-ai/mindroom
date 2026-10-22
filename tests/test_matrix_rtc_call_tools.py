@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
@@ -91,6 +91,10 @@ _EMPTY_SCHEMA = {"type": "object", "properties": {}}
 async def _authorized_call_operation() -> AsyncIterator[bool]:
     """Model a live admitted caller for call-tool unit tests."""
     yield True
+
+
+async def _unconnected() -> None:
+    """Connect nothing, for a function whose toolkit holds no connection."""
 
 
 def _ready_knowledge() -> AgentKnowledge:
@@ -183,6 +187,7 @@ def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  
         agent_name=AGENT,
         authorize_operation=_authorized_call_operation,
         usage_owner=_USAGE_OWNER,
+        connect=_unconnected,
     )
 
 
@@ -247,6 +252,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         agent_name=AGENT,
         authorize_operation=denied_operation,
         usage_owner=_USAGE_OWNER,
+        connect=_unconnected,
     )
 
     assert await wrapped({"a": 2, "b": 3}) == "Call access was revoked before this tool could run."
@@ -1432,6 +1438,74 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
     assert [call.kwargs["active_model_name"] for call in create_agent_mock.call_args_list] == ["large", "cheap"]
     assert tooling.close is not None
     await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_close_it_with_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that holds a connection for one run is connected once for the call and closed when the call ends."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    log: list[str] = []
+
+    def connecting(toolkit: AdaptedToolkit) -> AdaptedToolkit:
+        async def close() -> None:
+            log.append(f"{toolkit.name} close")
+
+        async def connect() -> Callable[[], Awaitable[None]]:
+            log.append(f"{toolkit.name} connect")
+            return close
+
+        return replace(toolkit, connect=connect)
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    async def query(value: str) -> str:
+        return f"rows for {value}"
+
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    server, database = Toolkit(name="server"), Toolkit(name="database")
+    server.functions = {"lookup": _function(lookup, schema, name="lookup")}
+    database.functions = {"query": _function(query, schema, name="query")}
+    build = _build(server, database)
+    toolkits = tuple(connecting(toolkit) for toolkit in build.spec.toolkits)
+    build = replace(build, spec=replace(build.spec, toolkits=toolkits))
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=build))
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+    )
+    tool_support = SimpleNamespace(
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
+        build_execution_identity=lambda **_kwargs: MagicMock(),
+    )
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    assert log == []
+    assert [await tools["lookup"]({"value": value}) for value in ("a", "b")] == ["found a", "found b"]
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+    # A call the provider sends after the call ended connects nothing, even to a toolkit no call has used yet.
+    assert await tools["query"]({"value": "x"}) == "rows for x"
+    assert log == ["server connect", "server close"]
 
 
 @pytest.mark.asyncio

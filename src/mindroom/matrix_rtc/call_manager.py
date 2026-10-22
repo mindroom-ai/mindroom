@@ -1544,6 +1544,7 @@ class CallManager:
                 voice=realtime_config.voice,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
+                close_tools=tooling.close,
                 on_conversation_turn=transcript.record,
                 on_tools_executed=transcript.record_tool_use,
                 on_session_terminated=on_session_terminated,
