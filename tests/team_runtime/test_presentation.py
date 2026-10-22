@@ -133,6 +133,24 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
     assert restored.tool_tracker.pending_tools == []
 
 
+def test_an_empty_delta_keeps_the_paragraph_break_a_hidden_call_left_for_the_next_text() -> None:
+    """Providers stream empty text deltas; one must not use up the break before the text after a hidden call."""
+    presentation = _presentation(show_tool_calls=False)
+    member_tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={"q": "seats"})
+    leader_tool = ToolExecution(tool_call_id="call-2", tool_name="lookup", tool_args={"q": "total"})
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Looking.")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(member_tool)))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("")))
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ContentDelta("Four seats.")))
+    apply_team_event(presentation, ContentDelta("Summing up."))
+    apply_team_event(presentation, ToolStarted(leader_tool))
+    apply_team_event(presentation, ContentDelta(""))
+    apply_team_event(presentation, ContentDelta("Four in all."))
+
+    assert presentation.per_member["scout"] == "Looking.\n\nFour seats."
+    assert presentation.consensus == "Summing up.\n\nFour in all."
+
+
 def test_a_snapshot_for_other_members_is_refused() -> None:
     presentation = _presentation()
     with pytest.raises(RuntimeError, match="snapshot is invalid"):

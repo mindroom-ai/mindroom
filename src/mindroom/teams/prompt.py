@@ -91,14 +91,15 @@ def render_leader_system_message(
     members: Sequence[TeamMember],
     mode: TeamMode,
     *,
-    tool_instructions: Sequence[str] = (),
-    model_note: str | None = None,
-    additional_context: str | None = None,
+    tool_instructions: Sequence[str],
+    model_note: str | None,
+    additional_context: str,
 ) -> Message:
     """Return the leader's system message for ``members`` in ``mode``.
 
     ``tool_instructions`` are the leader's toolkit instructions in offer order, ``model_note`` the provider family's
-    text (``agent_loop.prompt.model_note_for``), and ``additional_context`` the per-turn context MindRoom adds.
+    text (``agent_loop.prompt.model_note_for``), and ``additional_context`` the per-turn context MindRoom adds: the
+    date context and any appended system enrichment.
     """
     content = (
         "<team>\n"
@@ -111,8 +112,7 @@ def render_leader_system_message(
     )
     content += "".join(f"{instruction}\n" for instruction in tool_instructions)
     content += model_note or ""
-    if additional_context is not None:
-        content += f"<additional_context>\n{additional_context.strip()}\n</additional_context>\n\n"
+    content += f"<additional_context>\n{additional_context.strip()}\n</additional_context>\n\n"
     return Message(role="system", content=content.strip())
 
 

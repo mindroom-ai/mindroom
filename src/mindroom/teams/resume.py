@@ -538,9 +538,7 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.record
-            if continued is None:
-                msg = f"team run {run_id!r} ended without its terminal record"
-                raise RuntimeError(msg)
+            assert continued is not None
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,

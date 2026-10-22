@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, decide_team_formation
 from mindroom.thread_utils import get_agents_in_thread
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -27,7 +27,7 @@ from tests.conftest import (
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Sequence
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -1121,3 +1121,127 @@ class TestRouterTeamFormation:
         )
 
         assert result.outcome is TeamOutcome.REJECT
+
+
+def _formation_config(**agents: AgentConfig) -> Config:
+    return _runtime_bound_config(
+        Config(agents=agents, models={"default": ModelConfig(provider="ollama", id="test-model")}),
+    )
+
+
+def _decide(
+    config: Config,
+    *,
+    room_members: list[str],
+    tagged: Sequence[str] = (),
+    mentioned_in_thread: Sequence[str] = (),
+    sender_visible: Sequence[str] | None = None,
+) -> TeamResolution:
+    """Decide formation in a room whose members are ``room_members``, by agent name."""
+    runtime_paths = runtime_paths_for(config)
+    ids = entity_ids(config, runtime_paths)
+    return decide_team_formation(
+        tagged_agents=[ids[name] for name in tagged],
+        agents_in_thread=[],
+        all_mentioned_in_thread=[ids[name] for name in mentioned_in_thread],
+        room=_matrix_room("!room:localhost", [ids[name].full_id for name in room_members]),
+        runtime_paths=runtime_paths,
+        config=config,
+        is_thread=bool(mentioned_in_thread),
+        available_responders_in_room=None if sender_visible is None else [ids[name] for name in sender_visible],
+    )
+
+
+def test_an_agent_mentioned_twice_is_requested_once() -> None:
+    """One agent named twice in a message forms no team with itself, and joins a team of two once."""
+    config = _formation_config(
+        calculator=AgentConfig(display_name="Calculator", role="Math"),
+        general=AgentConfig(display_name="General", role="General"),
+    )
+
+    alone = _decide(config, room_members=["calculator", "general"], tagged=["calculator", "calculator"])
+    paired = _decide(config, room_members=["calculator", "general"], tagged=["calculator", "general", "calculator"])
+
+    assert alone.outcome is TeamOutcome.NONE
+    assert paired.outcome is TeamOutcome.TEAM
+    assert _agent_names(paired.requested_members, config) == ["calculator", "general"]
+
+
+def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
+    """An explicit request with several members off the room rejects with all their names."""
+    config = _formation_config(
+        calculator=AgentConfig(display_name="Calculator", role="Math"),
+        general=AgentConfig(display_name="General", role="General"),
+        research=AgentConfig(display_name="Research", role="Research"),
+    )
+
+    result = _decide(config, room_members=["calculator"], tagged=["calculator", "general", "research"])
+
+    assert result.outcome is TeamOutcome.REJECT
+    assert result.reason == "Team request includes agents 'general', 'research' that are not available in this room."
+
+
+@pytest.mark.parametrize(
+    ("private_targets", "room_members", "sender_visible", "expected_reason"),
+    [
+        (
+            ["research"],
+            ["code"],
+            None,
+            "Team request cannot be satisfied: "
+            "agent 'code' reaches private agent 'research' via delegation and private delegation is not supported for "
+            "teams; agent 'general' is not available in this room",
+        ),
+        (
+            ["research", "vault"],
+            ["code", "general"],
+            ["code"],
+            "Team request cannot be satisfied: "
+            "agent 'code' reaches private agents 'research', 'vault' via delegation and private delegation is not "
+            "supported for teams; agent 'general' is not available to you in this room",
+        ),
+    ],
+)
+def test_a_mixed_reject_explains_private_delegation_and_unavailability_per_member(
+    private_targets: list[str],
+    room_members: list[str],
+    sender_visible: list[str] | None,
+    expected_reason: str,
+) -> None:
+    """A member that delegates to private agents and one the room or the sender lacks each get their own reason."""
+    config = _formation_config(
+        code=AgentConfig(display_name="Code", role="Coder", delegate_to=private_targets),
+        general=AgentConfig(display_name="General", role="General"),
+        **{
+            name: AgentConfig(
+                display_name=name.title(),
+                role="Private assistant",
+                private=AgentPrivateConfig(per="user", root=f"{name}_data"),
+            )
+            for name in private_targets
+        },
+    )
+
+    result = _decide(config, room_members=room_members, tagged=["code", "general"], sender_visible=sender_visible)
+
+    assert result.outcome is TeamOutcome.REJECT
+    assert result.reason == expected_reason
+
+
+def test_an_implicit_thread_team_whose_members_all_left_the_room_forms_no_team() -> None:
+    """Earlier mentions of agents no longer in the room neither form a team nor reject the message."""
+    config = _formation_config(
+        calculator=AgentConfig(display_name="Calculator", role="Math"),
+        general=AgentConfig(display_name="General", role="General"),
+        research=AgentConfig(display_name="Research", role="Research"),
+    )
+
+    result = _decide(config, room_members=["research"], mentioned_in_thread=["calculator", "general"])
+
+    assert result.outcome is TeamOutcome.NONE
+    assert result.intent is TeamIntent.IMPLICIT_THREAD_TEAM
+    assert result.eligible_members == []
+    assert {member.name: member.status for member in result.member_statuses} == {
+        "calculator": TeamMemberStatus.NOT_IN_ROOM,
+        "general": TeamMemberStatus.NOT_IN_ROOM,
+    }

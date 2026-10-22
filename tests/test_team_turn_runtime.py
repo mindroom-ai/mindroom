@@ -164,6 +164,28 @@ async def test_a_blocking_team_turn_whose_attempts_all_came_back_empty_still_mar
 
 
 @pytest.mark.asyncio
+async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that fails while preparing its first attempt ran nothing in the team session, so it registers none."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(10, 1))])
+
+    with ai_runtime.queued_message_signal_context(None) as notices:
+        assert await team.respond() == f"{HEADER}\n**Team Consensus**:\n\nDone."
+    assert list(notices.storage_targets) == [("squad", SESSION_ID, "team")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(envelope, "prepare_materialized_team_execution", history_unavailable)
+    with ai_runtime.queued_message_signal_context(None) as notices:
+        assert "history unavailable" in await team.respond()
+    assert notices.storage_targets == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_format(
     tmp_path: Path,
@@ -619,13 +641,14 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member that lost the approved toolkit, or an approval naming another call, leaves the paused row untouched."""
+    """A member that lost the approved toolkit, or a decision naming another call, leaves the paused row untouched."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
     team.models["checker-model"] = ScriptedModel([])
 
-    with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
-        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-other", "dangerous"),))
+    for approved in (True, False):
+        with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
+            await team.resume(raised.paused, approved=approved, approvals=(member_approval("call-other", "dangerous"),))
     team.config.agents["checker"].tools = []
     with pytest.raises(ExceptionGroup) as refused:
         await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))

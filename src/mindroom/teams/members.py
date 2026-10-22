@@ -49,8 +49,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
-
 
 @dataclass(frozen=True)
 class ResolvedExactTeamMembers:
@@ -59,7 +57,6 @@ class ResolvedExactTeamMembers:
     requested_agent_names: list[str]
     builds: list[AgentBuild]
     display_names: list[str]
-    materialized_agent_names: set[str]
     failed_agent_names: list[str]
     model_names: dict[str, str] = field(default_factory=dict)
 
@@ -86,12 +83,10 @@ def materialize_exact_requested_team_members(
                 requested_agent_names=requested_agent_names,
                 builds=[],
                 display_names=[],
-                materialized_agent_names=set(),
                 failed_agent_names=missing_agent_names,
             )
 
     builds: list[AgentBuild] = []
-    materialized_agent_names: set[str] = set()
     failed_agent_names: list[str] = []
     for name in requested_agent_names:
         try:
@@ -105,13 +100,11 @@ def materialize_exact_requested_team_members(
             failed_agent_names.append(name)
             continue
         builds.append(build)
-        materialized_agent_names.add(name)
 
     return ResolvedExactTeamMembers(
         requested_agent_names=requested_agent_names,
         builds=builds,
         display_names=[build.spec.name for build in builds],
-        materialized_agent_names=materialized_agent_names,
         failed_agent_names=failed_agent_names,
     )
 
@@ -132,9 +125,6 @@ def materialize_exact_team_members(
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback."""
-    if not requested_agent_names:
-        raise ValueError(NO_AGENTS_RESPONSE)
-
     selected_model_names: dict[str, str] = {}
 
     def _build_member(agent_name: str) -> AgentBuild:
@@ -498,7 +488,6 @@ def build_team_spec(
 
 
 __all__ = [
-    "NO_AGENTS_RESPONSE",
     "BuiltTeam",
     "ResolvedExactTeamMembers",
     "TeamTurnModelSelection",
