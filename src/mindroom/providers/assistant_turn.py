@@ -2,7 +2,7 @@
 """What every adapter does to finish a turn: record the answering model and timings, split ``<think>`` reasoning.
 
 The ``mindroom_model`` provenance key is persisted with every assistant message and read by usage accounting,
-so each adapter stamps it through one function.
+so each adapter stamps it through one function. A turn that arrived whole yields the deltas a stream would have.
 """
 
 from __future__ import annotations
@@ -11,11 +11,12 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.llm.provider import ModelIdentity
+    from mindroom.llm.provider import ModelIdentity, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "finished_assistant_message",
     "split_thinking",
     "stamp_finished_turn",
+    "whole_turn_deltas",
 ]
 
 MODEL_PROVENANCE_KEY = "mindroom_model"
@@ -68,6 +70,26 @@ def finished_assistant_message(
     if usage is not None:
         message.metrics = usage
     return stamp_finished_turn(message, identity, started=started, first_output_at=first_output_at)
+
+
+def whole_turn_deltas(
+    *,
+    reasoning: str | None,
+    content: str | None,
+    tool_calls: Sequence[dict[str, Any]],
+) -> list[StreamEvent]:
+    """Return the deltas of a turn that arrived whole: its reasoning, its text, then each tool call.
+
+    A caller that reads a reply from its deltas, such as a blocking team turn building the leader's consensus,
+    then gets the same reply whether the request streamed or not.
+    """
+    events: list[StreamEvent] = []
+    if reasoning:
+        events.append(ReasoningDelta(reasoning))
+    if content:
+        events.append(TextDelta(content))
+    events.extend(ToolCallReady(call) for call in tool_calls)
+    return events
 
 
 def split_thinking(content: str) -> tuple[str | None, str]:

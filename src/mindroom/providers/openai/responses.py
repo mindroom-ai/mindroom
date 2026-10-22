@@ -11,17 +11,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.provider import (
-    NativeCompactionReplay,
-    ReasoningDelta,
-    StreamProgress,
-    TextDelta,
-    ToolCallReady,
-    TurnCompleted,
-    UsageReported,
-)
+from mindroom.llm.provider import NativeCompactionReplay, StreamProgress, TurnCompleted, UsageReported
 from mindroom.native_compaction import native_compaction_route
-from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.assistant_turn import finished_assistant_message, whole_turn_deltas
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
@@ -57,17 +49,6 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ResponsesSettings
 
 __all__ = ["ResponsesAdapter"]
-
-
-def _turn_deltas(parts: ResponsesTurnParts) -> list[StreamEvent]:
-    """Return the deltas of a turn that arrived whole."""
-    events: list[StreamEvent] = []
-    if parts.reasoning:
-        events.append(ReasoningDelta(parts.reasoning))
-    if parts.content:
-        events.append(TextDelta(parts.content))
-    events.extend(ToolCallReady(call) for call in parts.tool_calls)
-    return events
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -219,7 +200,11 @@ class ResponsesAdapter:
         else:
             parts = await self._completed(client, kwargs, request)
             first_token = time.monotonic()
-            for event in _turn_deltas(parts):
+            for event in whole_turn_deltas(
+                reasoning=parts.reasoning,
+                content=parts.content,
+                tool_calls=parts.tool_calls,
+            ):
                 yield event
         message = finished_assistant_message(
             self.identity,

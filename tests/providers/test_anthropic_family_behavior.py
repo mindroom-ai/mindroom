@@ -163,6 +163,35 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude", "bedrock_claude"])
+async def test_a_whole_reply_yields_the_output_its_stream_would_before_the_turn(tmp_path: Path, route: str) -> None:
+    """A non-streaming reply's thinking, text, and tool calls arrive as the stream's would, then its usage and turn.
+
+    A blocking caller that reads the deltas, such as a team leader's consensus, gets the same reply on both paths.
+    """
+    blocks = [
+        {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
+        {"type": "text", "text": "Looking it up."},
+        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
+    ]
+    tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
+    outputs = (ReasoningDelta, TextDelta, ToolCallReady)
+    streamed = await claude_events(
+        route_provider(route, tmp_path, Wire(sse_reply(blocks, stop_reason="tool_use"))),
+        ModelRequest(messages=_user(), tools=tools),
+    )
+    whole = await claude_events(
+        route_provider(route, tmp_path, Wire(json_reply(blocks, stop_reason="tool_use"))),
+        ModelRequest(messages=_user(), tools=tools, stream=False),
+    )
+
+    assert [event for event in whole if isinstance(event, outputs)] == [
+        event for event in streamed if isinstance(event, outputs)
+    ]
+    assert [type(event) for event in whole] == [ReasoningDelta, TextDelta, ToolCallReady, UsageReported, TurnCompleted]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
 async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
     """Input usage reported at the start is not counted again when the final delta repeats it."""
@@ -239,7 +268,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
         ModelRequest(messages=_user(), stream=stream),
     )
     outputs = [event for event in events if isinstance(event, (TextDelta, ReasoningDelta, ToolCallReady))]
-    assert outputs == ([TextDelta("Hi.")] if stream else [])
+    assert outputs == [TextDelta("Hi.")]
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
     assert completed.message.content == "Hi."

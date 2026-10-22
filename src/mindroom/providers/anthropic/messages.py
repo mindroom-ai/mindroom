@@ -82,7 +82,7 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import stamp_finished_turn
+from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
@@ -232,7 +232,7 @@ class ClaudeProvider:
 
         ``message_start`` reports the input and cache usage as a partial ``UsageReported`` so a stream that
         stops early still settles what Anthropic bills. A request with ``stream=False`` is sent without
-        streaming and yields its usage and finished turn once the response arrives.
+        streaming and yields its output, usage, and finished turn once the response arrives.
         """
         started = time.monotonic()
         messages = await inline_url_media(request.messages, self.http_client)
@@ -248,6 +248,12 @@ class ClaudeProvider:
                     client.beta.messages.create(**kwargs) if prepared.beta else client.messages.create(**kwargs)
                 )
                 message, stop_reason = self._finish(response, request, prepared, started, first_output_at)
+                for output in whole_turn_deltas(
+                    reasoning=message.reasoning_content,
+                    content=message.get_content_string(),
+                    tool_calls=message.tool_calls or (),
+                ):
+                    yield output
                 yield UsageReported(message.metrics)
                 yield TurnCompleted(message=message, stop_reason=stop_reason)
                 return

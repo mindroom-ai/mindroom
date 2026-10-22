@@ -25,7 +25,6 @@ from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
-    ReasoningDelta,
     StreamProgress,
     TextDelta,
     ToolCallReady,
@@ -35,7 +34,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking
+from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking, whole_turn_deltas
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
@@ -283,15 +282,10 @@ def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[Str
 
     Agno's Ollama split only a reply that contains an opening ``<think>`` tag.
     """
-    calls = [event for event in _read_chunk(reply, response) if isinstance(event, ToolCallReady)]
+    _read_chunk(reply, response)
     if "<think>" in reply.content:
         reply.reasoning, reply.content = split_thinking(reply.content)
-    events: list[StreamEvent] = []
-    if reply.reasoning:
-        events.append(ReasoningDelta(reply.reasoning))
-    if reply.content:
-        events.append(TextDelta(reply.content))
-    return [*events, *calls]
+    return whole_turn_deltas(reasoning=reply.reasoning, content=reply.content, tool_calls=reply.tool_calls)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
