@@ -25,7 +25,6 @@ from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResul
 from agno.utils.timer import Timer
 from pydantic import BaseModel
 
-from mindroom.agent_cli.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import (
     run_blocking_until_complete,
@@ -66,6 +65,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
+from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream

@@ -12,11 +12,8 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.tools.function import ToolResult
-
-from mindroom.agent_cli.agno_compat_cli_checkpoint import ProviderBatchCheckpoint
 from mindroom.agent_cli.approval import CliApprovalCall
+from mindroom.agent_cli.checkpoint import BatchCheckpoint
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_run_event, emit_cli_tool_event, project_cli_execution
 from mindroom.agent_cli.json_io import canonical_json, read_json
@@ -38,29 +35,28 @@ from mindroom.agent_cli.session import (
     TurnToolBridge,
 )
 from mindroom.agent_cli.shell_contract import bound_agent_cli_shell_env
-from mindroom.agno_compat_prepared_tools import stop_function_call
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel, task_is_process_shutdown
+from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
+from mindroom.tool_system.agno_toolkits import ToolValue
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.invocation import ToolOutcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
-    from agno.models.response import ModelResponse, ToolExecution
-    from agno.run.requirement import RunRequirement
-    from agno.tools.function import FunctionCall
-
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.agent_tool_calls import (
         PreparedAgentToolBinding,
         PreparedAgentToolCatalog,
@@ -116,16 +112,30 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
     return {"items": selected, "next_cursor": str(end) if end < len(items) else None}
 
 
-def _with_media(content: object, media_results: list[ModelResponse]) -> str | ToolResult:
+def _with_media(content: object, media_results: list[ToolValue]) -> str | ToolValue:
     """Attach media that CLI calls returned during one shell command to its text result."""
     if not media_results:
         return str(content)
-    return ToolResult(
+    return ToolValue(
         content=str(content),
-        images=[item for media in media_results for item in media.images or []],
-        audios=[item for media in media_results for item in media.audios or []],
-        videos=[item for media in media_results for item in media.videos or []],
-        files=[item for media in media_results for item in media.files or []],
+        images=tuple(item for media in media_results for item in media.images),
+        audios=tuple(item for media in media_results for item in media.audios),
+        videos=tuple(item for media in media_results for item in media.videos),
+        files=tuple(item for media in media_results for item in media.files),
+    )
+
+
+def _stopping(result: str | ToolValue) -> ToolOutcome:
+    """Return ``result`` as an outcome that ends the run after its batch, so the next attempt runs the control."""
+    if isinstance(result, str):
+        return ToolOutcome(content=result, stop_after_call=True)
+    return ToolOutcome(
+        content=result.content,
+        images=result.images,
+        audios=result.audios,
+        videos=result.videos,
+        files=result.files,
+        stop_after_call=True,
     )
 
 
@@ -155,14 +165,14 @@ class LiveTurnTools(TurnToolBridge):
             raise ValueError(msg)
         super().__init__(owner)
         self.catalog = catalog
-        self.checkpoint = ProviderBatchCheckpoint(catalog)
+        self.checkpoint = BatchCheckpoint(catalog)
         # Set once the response's grant exists, before any Bash call.
         self.shell_env: AgentCliShellEnv | None = None
         self._authorize = authorize
         self._context = dict(context or {})
         self._output_file_policy = output_file_policy
         # Media from admitted calls, kept per owning Bash window until that window's result is built.
-        self._media: dict[str, list[ModelResponse]] = {}
+        self._media: dict[str, list[ToolValue]] = {}
         self._run_child = run_child
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
@@ -185,7 +195,7 @@ class LiveTurnTools(TurnToolBridge):
         self._response_task: asyncio.Task | None = None
 
     def bind_response_task(self, task: asyncio.Task | None) -> None:
-        """Retain the real response task before Agno creates unmarked children."""
+        """Retain the real response task before the run creates unmarked children."""
         self._response_task = task
 
     def _is_shutdown(self) -> bool:
@@ -381,9 +391,9 @@ class LiveTurnTools(TurnToolBridge):
             msg = "Agent CLI admitted operation failed"
             raise ExceptionGroup(msg, failures)
 
-    async def execute_bash(self, key: ToolKey, arguments: dict[str, object], fc: FunctionCall) -> str | ToolResult:
-        """Own canonical execution and forward the response's cancellation reason."""
-        task = asyncio.create_task(self._execute_bash(key, arguments, fc), name="agent-cli-bash")
+    async def execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> str | ToolValue:
+        """Own canonical execution of provider call ``call_id`` and forward the response's cancellation reason."""
+        task = asyncio.create_task(self._execute_bash(key, arguments, call_id), name="agent-cli-bash")
 
         def cancel() -> None:
             self.revoke()
@@ -392,17 +402,16 @@ class LiveTurnTools(TurnToolBridge):
 
         return await wait_for_future_until_complete(task, on_cancel=cancel)
 
-    async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], fc: FunctionCall) -> str | ToolResult:
+    async def _execute_bash(self, key: ToolKey, arguments: dict[str, object], call_id: str) -> str | ToolValue:
         """Checkpoint exact provider history before any binding, hook or shell IO."""
         async with self._outer:
             self._check_live()
             if self.control_executions:
-                stop_function_call(fc)
-                return "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog."
-            if self._binding_retired or key.toolkit != "shell" or not fc.call_id:
+                return _stopping("Bash cancelled before dispatch: continuation requires a rebuilt tool catalog.")
+            if self._binding_retired or key.toolkit != "shell":
                 msg = "Bash binding is unavailable"
                 raise ValueError(msg)
-            await self.checkpoint.persist(fc)
+            await self.checkpoint.persist(call_id)
             await self._authorize(key, arguments)
             binding = await self.catalog.bind(key)
 
@@ -412,9 +421,9 @@ class LiveTurnTools(TurnToolBridge):
 
             events = self.execute_shell(
                 binding,
-                fc.call_id,
+                call_id,
                 arguments,
-                parent=fc.call_id,
+                parent=call_id,
                 authorize=authorize,
             )
             media_results = []
@@ -428,12 +437,10 @@ class LiveTurnTools(TurnToolBridge):
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
-            result = str(terminal.result or "")
-            if self.control_executions:
-                stop_function_call(fc)
-            result_with_media = _with_media(result, media_results)
-            self.checkpoint.complete(fc, result_with_media)
-            return result_with_media
+            result_with_media = _with_media(str(terminal.result or ""), media_results)
+            self.checkpoint.complete(call_id, result_with_media)
+            # A control tool this command ran ends the run after its batch, so the next attempt runs with it.
+            return _stopping(result_with_media) if self.control_executions else result_with_media
 
     async def execute_shell(
         self,
@@ -545,11 +552,11 @@ class LiveTurnTools(TurnToolBridge):
                             emit_cli_tool_event(event, parent)
                             yield event
                 return
-            if not waiting.needs_confirmation or waiting.needs_user_input or waiting.needs_external_execution:
+            if not waiting.needs_confirmation or waiting.needs_external_execution:
                 msg = "CLI approval contains an unsupported non-confirmation requirement"
                 raise RuntimeError(msg)
             handler = self.catalog.runtime_context.cli_approval_handler
-            if handler is None or parent is None or waiting.tool_execution is None:
+            if handler is None or parent is None:
                 msg = "CLI approval requires its response owner"
                 raise RuntimeError(msg)
             # Native iterator has closed; no catalog mutation lock spans human time.
@@ -560,8 +567,8 @@ class LiveTurnTools(TurnToolBridge):
             )
             resolved = await handler(
                 PausedAttempt(
-                    session_id=self.catalog.session.session_id,
-                    run_id=self.catalog.run_context.run_id,
+                    session_id=self.catalog.run.session_id,
+                    run_id=self.catalog.run.run_id,
                     tools=(waiting.tool_execution,),
                     toolkit_owners={
                         (self.catalog.runtime_context.agent_name, binding.key.function): binding.key.toolkit,
@@ -601,7 +608,7 @@ class LiveTurnTools(TurnToolBridge):
         child_toolkits: dict[str, str | None] = {}
 
         def on_child_event(event: object) -> None:
-            if isinstance(event, ToolCallStartedEvent | ToolCallCompletedEvent) and event.tool is not None:
+            if isinstance(event, ToolStarted | ToolCompleted):
                 child_call_id = str(event.tool.tool_call_id)
                 if child_call_id in child_toolkits:
                     emit_cli_run_event(event, parent=parent, toolkit_name=child_toolkits[child_call_id])
@@ -639,30 +646,13 @@ class LiveTurnTools(TurnToolBridge):
                     (result.approval_agent_name or self.catalog.runtime_context.agent_name, str(tool.tool_name)),
                 )
                 child_toolkits[str(tool.tool_call_id)] = child_toolkit
-                emit_cli_run_event(
-                    ToolCallStartedEvent(
-                        tool=tool,
-                        run_id=result.run_id,
-                        session_id=result.session_id,
-                        agent_id=result.approval_agent_name or self.catalog.runtime_context.agent_name,
-                    ),
-                    parent=parent,
-                    toolkit_name=child_toolkit,
-                )
+                emit_cli_run_event(ToolStarted(tool), parent=parent, toolkit_name=child_toolkit)
                 presentation.start_tool(project_cli_execution(tool, parent=parent, toolkit_name=child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
             resolved = await handler(paused)
             approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name)
-            decisions = {
-                str(item.tool_execution.tool_call_id): bool(item.confirmation)
-                for item in resolved
-                if item.tool_execution is not None
-            }
-            denial_reasons = {
-                str(item.tool_execution.tool_call_id): item.confirmation_note
-                for item in resolved
-                if item.tool_execution is not None
-            }
+            decisions = {str(item.tool_execution.tool_call_id): bool(item.confirmation) for item in resolved}
+            denial_reasons = {str(item.tool_execution.tool_call_id): item.confirmation_note for item in resolved}
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if event.kind == "continuation_required" and event.execution is not None:
@@ -728,7 +718,7 @@ class LiveTurnTools(TurnToolBridge):
         started = False
         status = "failed"
         result: object = "Tool did not return a terminal execution"
-        media_results: list[ModelResponse] = []
+        media_results: list[ToolValue] = []
         try:
             self._check_dispatch()
             await self._authorize(key, arguments)
@@ -827,7 +817,7 @@ class LiveTurnTools(TurnToolBridge):
         self.catalog = catalog
         if context is not None:
             self._context = dict(context)
-        self.checkpoint = ProviderBatchCheckpoint(catalog)
+        self.checkpoint = BatchCheckpoint(catalog)
         self.control_executions = []
         self._binding_retired = False
 

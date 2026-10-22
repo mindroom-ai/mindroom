@@ -6,35 +6,31 @@ import functools
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from agno.agent import Agent
-
-from mindroom.agent_cli.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.approval.tool_approval import approval_gated
 from mindroom.custom_tools.job import is_job_function
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog, cli_dispatch_active
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from agno.run import RunContext
-    from agno.run.agent import RunOutput
-    from agno.session import AgentSession
-    from agno.tools.function import Function
-
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.spec import RunContext
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.agno_toolkits import AdaptedToolkit
-    from mindroom.tool_system.output_files import ToolOutputFilePolicy
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["STANDARD_CLI_NOTE", "CliShellAgent", "standard_cli_eligible", "wrap_native_shell_window"]
+__all__ = ["STANDARD_CLI_NOTE", "bind_standard_cli", "standard_cli_eligible", "wrap_native_shell_window"]
 
 logger = get_logger(__name__)
 
@@ -95,8 +91,8 @@ def _windowed(original: Callable[..., Any]) -> Callable[..., Any]:
     return windowed
 
 
-def _cli_callable(function: Function) -> bool:
-    """Offer only calls that finish inside the shell command, without approval, questions, or run control.
+def _cli_callable(function: ToolFunction) -> bool:
+    """Offer only calls that finish inside the shell command, without approval or run control.
 
     Approval-gated functions were removed already where approvals cannot pause. The job controls stay with the reply:
     a job read through the CLI is never saved as the reply's own call, so it would be reported again.
@@ -104,66 +100,50 @@ def _cli_callable(function: Function) -> bool:
     return not (
         approval_gated(function)
         or is_job_function(function)
-        or function.requires_user_input
         or function.external_execution
         or function.stop_after_tool_call
     )
 
 
-class CliShellAgent(Agent):
-    """Standard agent that binds the response's CLI owner to its own tools each attempt."""
-
-    response_context: ResponseTurnContext | None = None
-    output_file_policy: ToolOutputFilePolicy | None = None
-    delegation_depth: int = 0
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None
-
-    async def aget_tools(
-        self,
-        run_response: RunOutput,
-        run_context: RunContext,
-        session: AgentSession,
-        user_id: str | None = None,
-        check_mcp_tools: bool = True,
-    ) -> list[Any]:
-        """Return the native tools unchanged and offer the safe ones to `mindroom-agent`."""
-        tools = await super().aget_tools(
-            run_response,
-            run_context,
-            session,
-            user_id=user_id,
-            check_mcp_tools=check_mcp_tools,
+async def bind_standard_cli(
+    build: AgentBuild,
+    *,
+    run: RunContext,
+    session: ConversationSession,
+    store: ConversationStore | None,
+    response_context: ResponseTurnContext,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+) -> None:
+    """Offer the build's safe functions to `mindroom-agent` for this attempt; the run's own tools stay as they are."""
+    lifetime = current_cli_lifetime()
+    runtime = get_tool_runtime_context()
+    if lifetime is None or runtime is None or runtime.orchestrator is None:
+        return
+    catalog = PreparedAgentToolCatalog(
+        agent_name=build.spec.id,
+        run=run,
+        runtime_context=runtime,
+        session=session,
+        store=store,
+        middleware=build.tool_middleware,
+        tool_call_limit=build.spec.tool_call_limit,
+    )
+    try:
+        await catalog.prepare(build.spec.toolkits, build.tool_owners, include=_cli_callable)
+        bind_response_owner(
+            catalog,
+            runtime=runtime,
+            lifetime=lifetime,
+            response_context=response_context,
+            run_id=run.run_id,
+            context_documents={},
+            output_file_policy=build.surface.output_file_policy,
+            delegation_depth=delegation_depth,
+            refresh_scheduler=refresh_scheduler,
+            failure_message=str,
         )
-        lifetime = current_cli_lifetime()
-        runtime = get_tool_runtime_context()
-        if lifetime is None or runtime is None or runtime.orchestrator is None or self.response_context is None:
-            return tools
-        catalog = PreparedAgentToolCatalog(self, run_context, run_response, session, runtime)
-        try:
-            await catalog.prepare(tools, include=_cli_callable)
-            owner = lifetime.owner
-            if (
-                owner is not None
-                and owner.catalog.agent is self
-                and owner.catalog.run_context.run_id == run_context.run_id
-            ):
-                # Agno rebuilds the tools with a fresh run context when it continues this paused run, such as
-                # after a subagent returns, so the paused run's catalog retires and CLI calls join the continuation.
-                await owner.retire_binding()
-            bind_response_owner(
-                catalog,
-                runtime=runtime,
-                lifetime=lifetime,
-                response_context=self.response_context,
-                run_id=run_context.run_id,
-                context_documents={},
-                output_file_policy=self.output_file_policy,
-                delegation_depth=self.delegation_depth,
-                refresh_scheduler=self.refresh_scheduler,
-                failure_message=str,
-            )
-        except Exception:
-            # The CLI is optional in standard mode; never fail the response for it.
-            logger.exception("Standard-mode agent CLI is unavailable for this response", agent=self.id)
-            await catalog.close()
-        return tools
+    except Exception:
+        # The CLI is optional in standard mode; never fail the response for it.
+        logger.exception("Standard-mode agent CLI is unavailable for this response", agent=build.spec.id)
+        await catalog.close()

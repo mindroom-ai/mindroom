@@ -1,25 +1,32 @@
-"""Shared scripted provider, shell, and fake integration for minimal-agent tests."""
+"""Shared scripted model, shell, provider batch, and fake integration for minimal-agent tests."""
 
 from __future__ import annotations
 
 import json
 import time
-from types import SimpleNamespace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.models.openai import OpenAIChat
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 from mindroom import agents
+from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
+from mindroom.agent_loop.tools import PlannedCall
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.llm.provider import ModelIdentity, StreamEvent
 
 
 def cli_window() -> str | None:
@@ -93,77 +100,90 @@ def parity():
 """
 
 
+async def capture_bash_batch(
+    owner: LiveTurnTools,
+    *bash_calls: tuple[str, dict[str, object]],
+    history: Sequence[Message] = (),
+) -> None:
+    """Hand the owner's checkpoint one provider batch of Bash calls, as the loop does before it runs any of them."""
+    bash = adapt_toolkit(MinimalBashTools()).functions[0]
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {"id": call_id, "type": "function", "function": {"name": "bash", "arguments": json.dumps(arguments)}}
+            for call_id, arguments in bash_calls
+        ],
+    )
+    catalog = owner.catalog
+    record = catalog.record or RunRecord(
+        run_id=catalog.run.run_id,
+        session_id=catalog.run.session_id,
+        agent_id=catalog.agent_name,
+    )
+    planned = [
+        PlannedCall(
+            call_id=call_id,
+            function=bash,
+            arguments=arguments,
+            execution=ToolExecution(tool_call_id=call_id, tool_name="bash", tool_args=arguments),
+        )
+        for call_id, arguments in bash_calls
+    ]
+    state = LoopState(
+        messages=[*history, assistant],
+        tools=(),
+        run=catalog.run,
+        record=record,
+        request_index=1,
+        loop_start_ids=frozenset(),
+        request_template=EMPTY_REQUEST,
+    )
+    await owner.checkpoint.capture(state, planned)
+
+
+type Step = str | list[tuple[str, dict[str, object]]]
+
+
+@dataclass
 class ScriptedProvider:
-    """Capture actual SDK requests while returning deterministic tool choices."""
+    """Answer each request with the next scripted step, recording every request as the loop sent it.
 
-    def __init__(self) -> None:
-        self.requests = []
-        self.steps = []
+    A step is the reply text, or the ``(function, arguments)`` tool calls of one assistant message; once the script
+    runs out, every request is answered with "done".
+    """
 
-    async def send(self, **request: object) -> object:
-        """Return an SDK-shaped response and retain the exact submitted request."""
+    steps: list[Step] = field(default_factory=list)
+    requests: list[ModelRequest] = field(default_factory=list)
+    identity: ModelIdentity = SYNTHETIC
+    capabilities: Capabilities = field(default_factory=Capabilities)
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the next step as a streamed turn."""
         self.requests.append(request)
         step = self.steps.pop(0) if self.steps else "done"
-
-        async def chunks() -> AsyncIterator[ChatCompletionChunk]:
-            delta = {"role": "assistant"}
-            if isinstance(step, str):
-                delta["content"] = step
-            else:
-                delta["tool_calls"] = [
-                    {
-                        "index": index,
-                        "id": f"provider-{len(self.requests)}-{index}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(arguments)},
-                    }
+        turn = (
+            answer(step)
+            if isinstance(step, str)
+            else calls(
+                *(
+                    tool_call(name, f"provider-{len(self.requests)}-{index}", **arguments)
                     for index, (name, arguments) in enumerate(step)
-                ]
-            yield ChatCompletionChunk(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion.chunk",
-                choices=[{"index": 0, "delta": delta, "finish_reason": None}],
+                ),
             )
-            yield ChatCompletionChunk(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion.chunk",
-                choices=[{"index": 0, "delta": {}, "finish_reason": "stop" if isinstance(step, str) else "tool_calls"}],
-            )
+        )
+        async for event in ScriptedModel(turns=[turn]).stream(request):
+            yield event
 
-        if not request.get("stream"):
-            message = {"role": "assistant", "content": step if isinstance(step, str) else None}
-            if not isinstance(step, str):
-                message["tool_calls"] = [
-                    {
-                        "id": f"provider-{len(self.requests)}-{index}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(arguments)},
-                    }
-                    for index, (name, arguments) in enumerate(step)
-                ]
-            return ChatCompletion(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion",
-                choices=[
-                    {
-                        "index": 0,
-                        "message": message,
-                        "finish_reason": "stop" if isinstance(step, str) else "tool_calls",
-                    },
-                ],
-            )
-        return chunks()
+    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
+        """Append each result as its own tool message, as OpenAI-style wires do."""
+        del messages
+        return list(results)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Replace only the provider network client."""
-        monkeypatch.setattr(
-            OpenAIChat,
-            "get_async_client",
-            lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=self.send))),
-        )
+        """Serve this model to every agent ``create_agent`` builds."""
+        monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args: self)
+
+
+def offered_tools(request: ModelRequest) -> list[str]:
+    """Return the names of the tools one request offered."""
+    return [tool.name for tool in request.tools]

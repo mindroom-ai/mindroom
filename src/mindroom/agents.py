@@ -2012,6 +2012,11 @@ def create_agent(
     )
 
     workspace = agent_runtime.workspace
+    output_file_policy = _agent_tool_output_file_policy(
+        agent_runtime,
+        runtime_paths,
+        config.defaults.tool_output_auto_save_threshold_bytes,
+    )
     # Approval rules hide generated functions, so skill guidance names the skill functions they hide
     # and is left out when they hide all of them.
     hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
@@ -2024,11 +2029,7 @@ def create_agent(
             config,
             runtime_paths,
             workspace_root=workspace.root if workspace is not None else None,
-            output_file_policy=_agent_tool_output_file_policy(
-                agent_runtime,
-                runtime_paths,
-                config.defaults.tool_output_auto_save_threshold_bytes,
-            ),
+            output_file_policy=output_file_policy,
             only=persona.kept_skills if persona is not None else None,
             refused=refused_skills,
         )
@@ -2111,6 +2112,41 @@ def create_agent(
         model_note=model_note_for(provider.capabilities, offers_tools=bool(prepared.functions)),
     )
 
+    surface = AgentSurface(
+        mode=agent_mode,
+        cli_shell=cli_shell,
+        deferred=tool_assembly.cli_deferred,
+        context_documents=tuple(document.body for document in role_context.context_documents),
+        context_files=tuple(role_context.workspace_context_files(agent_runtime.tool_base_dir)),
+        knowledge_sources=()
+        if enabled_knowledge is None
+        else tuple(source.description for source in enabled_knowledge.sources),
+        output_file_policy=output_file_policy,
+    )
+    if agent_mode == "minimal":
+        # A persona's roster names the toolkits it actually built, deferred ones it named included.
+        roster = (
+            [entry.name for entry in visible_tool_surface(agent_name=agent_name, config=config).runtime_tool_configs]
+            if persona is None
+            else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
+        )
+        surface = replace(
+            surface,
+            identity=persona_prompt,
+            toolkit_names=(*roster, *(deferred.name for deferred in tool_assembly.cli_deferred)),
+            memory_root=(
+                agent_runtime.file_memory_root.relative_to(agent_runtime.tool_base_dir)
+                if agent_runtime.file_memory_root is not None and agent_runtime.tool_base_dir is not None
+                else None
+            ),
+            runtime_context=_get_mind_runtime_context(agent_name, runtime_paths),
+            minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
+            interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
+            if include_interactive_questions
+            else "",
+            skills=() if offered_skills is None else offered_skills.skills,
+        )
+
     logger.info(
         "Created agent",
         agent=agent_name,
@@ -2126,16 +2162,7 @@ def create_agent(
         store=store,
         tool_owners=tool_assembly.tool_owners,
         tool_middleware=bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware),
-        surface=AgentSurface(
-            mode=agent_mode,
-            cli_shell=cli_shell,
-            deferred=tool_assembly.cli_deferred,
-            context_documents=tuple(document.body for document in role_context.context_documents),
-            context_files=tuple(role_context.workspace_context_files(agent_runtime.tool_base_dir)),
-            knowledge_sources=()
-            if enabled_knowledge is None
-            else tuple(source.description for source in enabled_knowledge.sources),
-        ),
+        surface=surface,
     )
 
 

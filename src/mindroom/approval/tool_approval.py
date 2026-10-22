@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         ScheduledCallOutcome,
         ScheduledCallRefusal,
     )
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
@@ -181,7 +182,7 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
-def approval_gated(function: Function) -> bool:
+def approval_gated(function: Function | ToolFunction) -> bool:
     """Return whether a call waits for a human decision, by pausing its run or as the first phase of its job."""
     return bool(function.requires_confirmation or function.approval_type == JOB_APPROVAL_TYPE)
 

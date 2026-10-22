@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import ai_runtime
+from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
+from mindroom.agent_cli.events import stream_cli_events
+from mindroom.agent_cli.lifetime import cli_control_executions
+from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import RunContext
@@ -101,7 +105,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_to
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
     from agno.tools.function import Function
@@ -210,6 +214,7 @@ class _PreparedAgentRun:
 
     ``spec`` is the build's spec with this turn's system message; ``history`` and ``summary`` are the stored
     history the request replays under the resolved plan, and ``turn`` is the new input around the prompt.
+    ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
     """
 
     build: AgentBuild
@@ -223,6 +228,7 @@ class _PreparedAgentRun:
     # this snapshot instead of re-resolving, because the per-thread override
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
+    cli_context: Mapping[str, str]
 
     @property
     def prompt_text(self) -> str:
@@ -773,7 +779,7 @@ def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, sto
     )
 
 
-def _start_agent_run(
+async def _start_agent_run(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     *,
@@ -781,27 +787,55 @@ def _start_agent_run(
     terminal: _TerminalRecord,
     stream: bool,
 ) -> AsyncIterator[RunEvent]:
-    """Start one attempt's run on the owned loop, storing its terminal record where the turn's scope stores.
+    """Run one attempt on the owned loop, storing its terminal record where the turn's scope stores.
 
     A run that pauses on delegations is driven on: its children run, and the run continues with their results
-    through ``_continue_turn_run`` until it completes or waits for an approval.
+    through ``_continue_turn_run`` until it completes or waits for an approval. An agent whose shell reaches its
+    other tools through `mindroom-agent` binds this attempt's CLI first; a minimal turn then offers only Bash, and
+    the hidden calls' tool events join the run's own.
     """
     prepared = run_context.prepared_run
+    build = prepared.build
+    run = RunContext(
+        run_id=attempt.run_id,
+        session_id=run_context.session_id,
+        user_id=run_context.turn.requester_id,
+        metadata=run_context.metadata,
+        session_state=storage.session.session_state,
+    )
+    spec, hooks = prepared.spec, _agent_loop_hooks(run_context, attempt, storage)
+    if build.surface.mode == "minimal":
+        spec, hooks = await minimal_attempt(
+            build,
+            spec,
+            hooks,
+            run=run,
+            session=storage.session,
+            store=storage.store,
+            response_context=run_context.turn,
+            context_documents=prepared.cli_context,
+            delegation_depth=run_context.delegation_depth,
+            refresh_scheduler=run_context.refresh_scheduler,
+        )
+    elif build.surface.cli_shell:
+        await bind_standard_cli(
+            build,
+            run=run,
+            session=storage.session,
+            store=storage.store,
+            response_context=run_context.turn,
+            delegation_depth=run_context.delegation_depth,
+            refresh_scheduler=run_context.refresh_scheduler,
+        )
     events = run_agent(
-        prepared.spec,
+        spec,
         attempt.run_input,
-        ctx=RunContext(
-            run_id=attempt.run_id,
-            session_id=run_context.session_id,
-            user_id=run_context.turn.requester_id,
-            metadata=run_context.metadata,
-            session_state=storage.session.session_state,
-        ),
-        hooks=_agent_loop_hooks(run_context, attempt, storage),
+        ctx=run,
+        hooks=hooks,
         persist=_persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=stream),
     )
-    return drive_delegation_stream(
+    driven = drive_delegation_stream(
         events,
         store=storage.store,
         session=storage.session,
@@ -821,6 +855,11 @@ def _start_agent_run(
         delegation_depth=run_context.delegation_depth,
         refresh_scheduler=run_context.refresh_scheduler,
     )
+    if build.surface.mode == "minimal" or build.surface.cli_shell:
+        driven = stream_cli_events(driven)
+    async with closing_async_stream(driven):
+        async for event in driven:
+            yield event
 
 
 async def _continue_turn_run(
@@ -1132,18 +1171,34 @@ async def _prepare_agent_and_prompt(
         runtime_model, build = await build_agent_off_loop(_resolve_model_and_build_agent, agent_name=agent_name)
         _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
-    system_message = prompt_for_turn(
-        build,
-        prompt_parts.session_preamble,
-        _render_system_enrichment_context(ctx.system_enrichment_items) if ctx.system_enrichment_items else "",
-    )
-    transient_turn_context = render_transient_context(
-        (prompt_parts.transient_turn_context, render_enrichment_block(list(ctx.transient_enrichment_items))),
-    )
+    cli_context: Mapping[str, str] = {}
+    if build.surface.mode == "minimal":
+        minimal = minimal_turn(
+            build,
+            session_preamble=prompt_parts.session_preamble,
+            transient_memory=prompt_parts.transient_turn_context,
+            system_enrichment=ctx.system_enrichment_items,
+            transient_enrichment=ctx.transient_enrichment_items,
+        )
+        system_message, transient_turn_context, cli_context = (
+            minimal.system_message,
+            minimal.transient_context,
+            minimal.context_documents,
+        )
+    else:
+        system_message = prompt_for_turn(
+            build,
+            prompt_parts.session_preamble,
+            _render_system_enrichment_context(ctx.system_enrichment_items) if ctx.system_enrichment_items else "",
+        )
+        transient_turn_context = render_transient_context(
+            (prompt_parts.transient_turn_context, render_enrichment_block(list(ctx.transient_enrichment_items))),
+        )
     prepared_execution = await prepare_agent_execution_context(
         ctx,
         scope_context=scope_context,
-        build=build,
+        # A minimal turn's requests offer only Bash, so its history budget is sized with Bash alone.
+        build=presented_build(build) if build.surface.mode == "minimal" else build,
         system_message=system_message,
         prompt=current_turn_prompt,
         transient_context_messages=(
@@ -1188,6 +1243,7 @@ async def _prepare_agent_and_prompt(
         unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_execution.prepared_history,
         runtime_model_name=runtime_model.model_name,
+        cli_context=cli_context,
     )
 
 
@@ -1697,6 +1753,7 @@ async def ai_response(  # noqa: C901
             runtime_model_name=prepared_run.runtime_model_name,
             output_tokens=_reported(record.metrics, "output_tokens"),
             tool_executions=tuple(record.tools or ()),
+            control_executions=cli_control_executions(attempt.run_id),
             completed_tools=tuple(response_tool_trace),
             metadata_content=metadata_content,
         )
@@ -2184,6 +2241,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 runtime_model_name=prepared_run.runtime_model_name,
                 output_tokens=_reported(record.metrics, "output_tokens"),
                 tool_executions=tuple(state.completed_tool_executions),
+                control_executions=cli_control_executions(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),
                 metadata_content=_attempt_metadata(
                     state,

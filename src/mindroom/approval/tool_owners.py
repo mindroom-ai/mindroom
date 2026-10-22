@@ -181,19 +181,18 @@ async def authorize_prepared_tool_call(
     current config to equal it keeps every config-derived toolkit assignment
     valid, so only live membership, worker routing, and function filters change.
     Recovery restores configured toolkits through ``required_approval_tool_names``
-    before rebuilding the Agent.
+    before rebuilding the agent.
     """
     catalog = binding.catalog
     context = catalog.runtime_context
     config = context.current_config
-    # Reserved namespace is assigned only to functions produced by this Agent's
-    # effective tool preparation. Never accept a binding the catalog does not
-    # own or use the namespace to bypass current config/membership/worker checks.
+    # The reserved namespace is assigned only to functions generated for this agent's
+    # build. Never accept a binding the catalog does not own or use the namespace to
+    # bypass current config/membership/worker checks.
     if binding.key.toolkit == "agent" and (
         not catalog.owns(binding)
-        or catalog.agent.id != context.agent_name
+        or catalog.agent_name != context.agent_name
         or binding.function.name != binding.key.function
-        or binding.function.owning_toolkit is not None
         or context.agent_name not in config.agents
     ):
         msg = "Generated CLI function no longer belongs to its prepared Agent"

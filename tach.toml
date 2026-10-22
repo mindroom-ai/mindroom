@@ -180,8 +180,9 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.bash"
 depends_on = [
-    "mindroom.agno_compat_prepared_tools",
     "mindroom.tool_system.tool_access",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.invocation",
 ]
 visibility = [
     "mindroom.agent_cli.minimal_agent",
@@ -191,6 +192,25 @@ visibility = [
 from = ["mindroom.agent_cli.bash"]
 expose = [
     "MinimalBashTools",
+]
+
+[[modules]]
+path = "mindroom.agent_cli.checkpoint"
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.llm",
+    "mindroom.session_storage.lanes",
+]
+visibility = [
+    "mindroom.agent_cli.turn",
+    "mindroom.agent_cli.cli_approval_recovery",
+]
+
+[[interfaces]]
+from = ["mindroom.agent_cli.checkpoint"]
+expose = [
+    "BatchCheckpoint",
+    "save_cli_session",
 ]
 
 [[modules]]
@@ -232,6 +252,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.response_turn",
     "mindroom.tool_system.runtime_context",
+    "mindroom.llm",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -291,7 +312,6 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.lifetime"
 depends_on = [
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.tool_jobs.resources",
 ]
 visibility = [
@@ -398,8 +418,6 @@ depends_on = [
     "mindroom.agent_cli.protocol",
     "mindroom.agent_cli.session",
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
-    "mindroom.agno_compat_prepared_tools",
     "mindroom.cancellation",
     "mindroom.response_turn",
     "mindroom.tool_jobs.resources",
@@ -408,6 +426,10 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.agent_cli.checkpoint",
+    "mindroom.llm",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.invocation",
 ]
 visibility = [
     "mindroom.agent_cli.response_owner",
@@ -766,6 +788,10 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.events",
+    "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.minimal_agent",
 ]
 
 [[modules]]
@@ -946,7 +972,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.ai",
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.helper_usage",
     "mindroom.agents",
     "mindroom.ai_runtime",
@@ -5145,7 +5170,6 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.turn",
-    "mindroom.agno_compat_prepared_tools",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.providers.media_fallback",
     "mindroom.delegation.execution",
@@ -5236,7 +5260,6 @@ expose = [
     "ToolKey",
     "UnknownToolError",
     "function_definition",
-    "function_schema",
     "search_tool_metadata",
     "validate_tool_arguments",
 ]
@@ -7724,17 +7747,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.agno_compat_prepared_tools"
-depends_on = [
-    "mindroom.tool_system.context_bound_streams",
-]
-visibility = [
-    "mindroom.agent_cli.bash",
-    "mindroom.agent_cli.turn",
-    "mindroom.tool_system.agent_tool_calls",
-]
-
-[[modules]]
 path = "mindroom.history.claude_replay_compat"
 depends_on = ["mindroom.history.run_visibility"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
@@ -8555,7 +8567,6 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.cancellation",
     "mindroom.custom_tools.job",
     "mindroom.approval.tool_approval",
@@ -8579,6 +8590,7 @@ depends_on = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.dedicated_threads",
+    "mindroom.tool_system.agent_tool_calls",
 ]
 visibility = [
     # Agent assembly asks which gated functions can ask for their approval as their job.
@@ -8680,8 +8692,6 @@ visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker"
 path = "mindroom.tool_system.agent_tool_calls"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
-    "mindroom.agno_compat_prepared_tools",
     "mindroom.background_tasks",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
@@ -8690,6 +8700,8 @@ depends_on = [
     "mindroom.tool_system.tool_access",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.llm",
+    "mindroom.tool_system.invocation",
 ]
 
 [[interfaces]]
@@ -8701,18 +8713,7 @@ expose = [
     "PreparedAgentToolCatalog",
     "execute_agent_tool_call",
     "execute_agent_shell_call",
-]
-
-[[modules]]
-path = "mindroom.agent_cli.agno_compat_cli_checkpoint"
-depends_on = ["mindroom.session_storage.lanes"]
-visibility = [
-    "mindroom.agent_cli.lifetime",
-    "mindroom.agent_cli.turn",
-    "mindroom.agent_cli.cli_approval_recovery",
-    "mindroom.tool_system.agent_tool_calls",
-    "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.tool_jobs.agno_execution",
+    "cli_dispatch_active",
 ]
 
 [[modules]]
@@ -8732,7 +8733,6 @@ depends_on = [
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.projection",
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.ai",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.state",
@@ -8745,6 +8745,10 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.agent_cli.checkpoint",
+    "mindroom.agent_cli.minimal_agent",
+    "mindroom.agent_loop",
+    "mindroom.llm",
 ]
 visibility = [
     "mindroom.approval.execution",
@@ -8764,7 +8768,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_access",
-    "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
     "mindroom.tool_jobs.settings",
@@ -8788,6 +8791,14 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
+    "mindroom.agent_loop.build",
+    "mindroom.hooks",
+    "mindroom.llm",
+    "mindroom.tool_system.agno_toolkits",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.agent_cli.cli_approval_recovery",
 ]
 
 [[modules]]
