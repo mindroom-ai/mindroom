@@ -47,7 +47,6 @@ class Capabilities:
     structured_output: Literal["native", "json_schema", "json_mode"] = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
-    prompt_cache_breakpoints: bool = False
     native_compaction: bool = False
     approval_receipt_after_response_id: bool = False
     provider_default_sampling: bool = False

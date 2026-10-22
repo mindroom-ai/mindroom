@@ -591,7 +591,6 @@ def claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeS
         structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
-        prompt_cache_breakpoints=settings.cache_system_prompt,
         native_compaction=native_compaction_supported(
             provider=provider,
             model_id=model_id,
