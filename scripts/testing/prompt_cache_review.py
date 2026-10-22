@@ -1,4 +1,4 @@
-"""Review live MindRoom prompt-cache behavior from JSONL logs and session DBs."""
+"""Review live MindRoom prompt-cache behavior from JSONL request logs."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import argparse
 import asyncio
 import json
 import os
-import re
-import sqlite3
 import sys
 from collections import Counter, defaultdict
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import cast
@@ -37,8 +35,6 @@ from mindroom.providers.cache_ladder import (  # noqa: E402
 )
 from mindroom.providers.model_http_client import closing_model_connections  # noqa: E402
 
-DEFAULT_AGENT_DB = "mindroom_dev"
-SQLITE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 type JsonDict = dict[str, object]
 
 
@@ -82,47 +78,6 @@ class RequestRow:
     def total_prefix_chars(self) -> int:
         """Character size of the reusable prefix (tools + system + messages)."""
         return len(self.tools_blob) + len(self.system_prompt) + sum(len(blob) for blob in self.normalized_message_blobs)
-
-
-@dataclass(frozen=True)
-class RunMetrics:
-    """Cache metrics for one persisted run."""
-
-    created_at: datetime | None
-    input_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
-    input_content: str | None
-
-    @property
-    def cache_read_fraction(self) -> float | None:
-        """Return cache-read tokens as a fraction of total prompt tokens."""
-        denominator = self.input_tokens + self.cache_read_tokens
-        if denominator <= 0:
-            return None
-        return self.cache_read_tokens / denominator
-
-
-@dataclass(frozen=True)
-class DbSessionSummary:
-    """Aggregated DB-backed metrics for one session."""
-
-    session_id: str
-    runs: tuple[RunMetrics, ...]
-    run_count: int
-    updated_at: datetime | None
-    latest_run: RunMetrics | None
-    total_input_tokens: int
-    total_cache_read_tokens: int
-    total_cache_write_tokens: int
-
-    @property
-    def aggregate_cache_read_fraction(self) -> float | None:
-        """Return aggregate cache-read tokens as a fraction of total prompt tokens."""
-        denominator = self.total_input_tokens + self.total_cache_read_tokens
-        if denominator <= 0:
-            return None
-        return self.total_cache_read_tokens / denominator
 
 
 @dataclass(frozen=True)
@@ -221,16 +176,6 @@ def parse_args() -> argparse.Namespace:
         help="Specific JSONL request log to inspect. Defaults to the latest file in logs/llm_requests.",
     )
     parser.add_argument(
-        "--db",
-        type=Path,
-        help="Specific SQLite session DB to inspect. Defaults to session-aware DB discovery.",
-    )
-    parser.add_argument(
-        "--agent-db",
-        default=DEFAULT_AGENT_DB,
-        help=f"Agent DB name for default DB discovery. Default: {DEFAULT_AGENT_DB}",
-    )
-    parser.add_argument(
         "--session",
         help="Restrict output to one exact session_id.",
     )
@@ -260,7 +205,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--probe-live",
         action="store_true",
-        help="Run a live Vertex Claude prompt-cache probe through MindRoom's Claude adapter, not JSONL/DB review.",
+        help="Run a live Vertex Claude prompt-cache probe through MindRoom's Claude adapter, not JSONL review.",
     )
     parser.add_argument(
         "--probe-model",
@@ -323,22 +268,18 @@ def main() -> None:
         )
         return
     jsonl_path = args.jsonl or find_latest_jsonl(storage_root)
-    db_path = resolve_db_path(storage_root, args.db, args.agent_db, args.session)
 
     rows, parse_stats = load_request_rows(jsonl_path, session_id_filter=args.session)
     reviews = build_session_reviews(rows)
-    db_summaries = load_db_summaries(db_path) if db_path is not None and db_path.exists() else {}
 
     if args.session:
         reviews = [review for review in reviews if review.session_id == args.session]
 
     print_overview(
         jsonl_path=jsonl_path,
-        db_path=db_path if db_path is not None and db_path.exists() else None,
         parse_stats=parse_stats,
         rows=rows,
         reviews=reviews,
-        db_summaries=db_summaries,
         requested_session=args.session,
         top=args.top,
     )
@@ -358,7 +299,7 @@ def main() -> None:
 
 
 def resolve_storage_root(explicit_root: Path | None) -> Path:
-    """Resolve the storage root used for JSONL and session DB discovery."""
+    """Resolve the storage root whose JSONL request logs the review reads."""
     if explicit_root is not None:
         return explicit_root.expanduser()
 
@@ -397,53 +338,6 @@ def resolve_probe_config_path(explicit_config: Path | None, storage_root: Path) 
         return sibling_config.resolve()
 
     return resolve_runtime_paths(storage_path=storage_root).config_path
-
-
-def default_db_path(storage_root: Path, agent_name: str) -> Path | None:
-    """Return the default session DB path for one agent when it exists."""
-    db_path = storage_root / "agents" / agent_name / "sessions" / f"{agent_name}.db"
-    return db_path if db_path.exists() else None
-
-
-def resolve_db_path(
-    storage_root: Path,
-    explicit_db_path: Path | None,
-    agent_db: str,
-    session_id: str | None,
-) -> Path | None:
-    """Resolve the most relevant session DB path for the requested session."""
-    if explicit_db_path is not None:
-        return explicit_db_path.expanduser()
-
-    default_path = default_db_path(storage_root, agent_db)
-    if session_id is None:
-        return default_path
-
-    if default_path is not None and db_contains_session(default_path, session_id):
-        return default_path
-
-    for db_path in sorted((storage_root / "agents").glob("*/sessions/*.db")):
-        if db_contains_session(db_path, session_id):
-            return db_path
-
-    return default_path
-
-
-def db_contains_session(db_path: Path, session_id: str) -> bool:
-    """Return whether the SQLite DB contains the requested session ID."""
-    if not db_path.exists():
-        return False
-    connection = sqlite3.connect(db_path)
-    try:
-        table_name = detect_session_table_name(connection)
-        cursor = connection.cursor()
-        lookup_query = f"SELECT 1 FROM {validated_sqlite_identifier(table_name)} WHERE session_id = ? LIMIT 1"  # noqa: S608
-        cursor.execute(lookup_query, (session_id,))
-        return cursor.fetchone() is not None
-    except (sqlite3.Error, SystemExit, ValueError):
-        return False
-    finally:
-        connection.close()
 
 
 def load_request_rows(
@@ -1358,96 +1252,16 @@ def format_probe_bool(value: bool | None) -> str:
     return "yes" if value else "no"
 
 
-def load_db_summaries(db_path: Path) -> dict[str, DbSessionSummary]:
-    """Load session summaries and cache metrics from the SQLite session DB."""
-    connection = sqlite3.connect(db_path)
-    try:
-        table_name = detect_session_table_name(connection)
-        cursor = connection.cursor()
-        summary_query = f"SELECT session_id, updated_at, runs FROM {validated_sqlite_identifier(table_name)}"  # noqa: S608
-        cursor.execute(summary_query)
-        summaries: dict[str, DbSessionSummary] = {}
-        for session_id, updated_at_raw, runs_raw in cursor.fetchall():
-            if not isinstance(session_id, str):
-                continue
-            runs_value = parse_nested_json(runs_raw)
-            run_summaries = parse_run_summaries(runs_value)
-            latest_run = run_summaries[-1] if run_summaries else None
-            summaries[session_id] = DbSessionSummary(
-                session_id=session_id,
-                runs=tuple(run_summaries),
-                run_count=len(run_summaries),
-                updated_at=from_unix_timestamp(updated_at_raw),
-                latest_run=latest_run,
-                total_input_tokens=sum(run.input_tokens for run in run_summaries),
-                total_cache_read_tokens=sum(run.cache_read_tokens for run in run_summaries),
-                total_cache_write_tokens=sum(run.cache_write_tokens for run in run_summaries),
-            )
-        return summaries
-    finally:
-        connection.close()
-
-
-def detect_session_table_name(connection: sqlite3.Connection) -> str:
-    """Return the single session table name present in the SQLite DB."""
-    cursor = connection.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_sessions'")
-    table_names = [name for (name,) in cursor.fetchall() if isinstance(name, str)]
-    if len(table_names) != 1:
-        msg = f"Expected exactly one *_sessions table, found {table_names}"
-        raise SystemExit(msg)
-    return table_names[0]
-
-
-def parse_nested_json(value: object) -> object:
-    """Repeatedly decode nested JSON strings until a non-string value remains."""
-    parsed_value = value
-    while isinstance(parsed_value, str):
-        try:
-            parsed_value = json.loads(parsed_value)
-        except json.JSONDecodeError:
-            return None
-    return parsed_value
-
-
-def parse_run_summaries(runs_value: object) -> list[RunMetrics]:
-    """Parse persisted run metrics from the nested session payload."""
-    if not isinstance(runs_value, list):
-        return []
-
-    run_summaries: list[RunMetrics] = []
-    for run in runs_value:
-        run_dict = object_dict(run)
-        if run_dict is None:
-            continue
-        metrics = object_dict(run_dict.get("metrics"))
-        if metrics is None:
-            continue
-        run_summaries.append(
-            RunMetrics(
-                created_at=from_unix_timestamp(run_dict.get("created_at")),
-                input_tokens=coerce_int(metrics.get("input_tokens")),
-                cache_read_tokens=coerce_int(metrics.get("cache_read_tokens")),
-                cache_write_tokens=coerce_int(metrics.get("cache_write_tokens")),
-                input_content=extract_run_input_content(run_dict.get("input")),
-            ),
-        )
-    run_summaries.sort(key=lambda run: run.created_at or datetime.min.replace(tzinfo=UTC))
-    return run_summaries
-
-
 def print_overview(
     *,
     jsonl_path: Path,
-    db_path: Path | None,
     parse_stats: JsonlParseStats,
     rows: list[RequestRow],
     reviews: list[SessionReview],
-    db_summaries: dict[str, DbSessionSummary],
     requested_session: str | None,
     top: int,
 ) -> None:
-    """Print the top-level review overview for JSONL and DB-backed sessions."""
+    """Print the top-level review overview of the logged sessions."""
     missing_session_rows = sum(1 for row in rows if row.session_id is None)
     print(f"JSONL: {jsonl_path}")
     print(
@@ -1461,22 +1275,6 @@ def print_overview(
             print(f"  {shorten_text(row_error, 140)}")
     print(f"Rows with session_id: {len(rows) - missing_session_rows}; rows without session_id: {missing_session_rows}")
     print("Comparisons ignore moving `cache_control` markers and focus on the reusable content prefix.")
-
-    if db_path is not None:
-        print(f"DB: {db_path}")
-        matched_reviews = [review for review in reviews if review.session_id in db_summaries]
-        unique_latest_fractions: dict[str, float | None] = {}
-        for review in matched_reviews:
-            latest_run = db_summaries[review.session_id].latest_run
-            if latest_run is not None:
-                unique_latest_fractions[review.session_id] = latest_run.cache_read_fraction
-        latest_fractions = [fraction for fraction in unique_latest_fractions.values() if fraction is not None]
-        if latest_fractions:
-            over_ninety_count = sum(1 for fraction in latest_fractions if fraction >= 0.9)
-            print(
-                f"Latest DB cache-read fraction >= 90%: {over_ninety_count}/{len(latest_fractions)} matched sessions",
-            )
-
     print()
 
     if not reviews:
@@ -1488,22 +1286,12 @@ def print_overview(
 
     sessions_to_print = reviews if requested_session else reviews[:top]
     for review in sessions_to_print:
-        print_session_review(
-            review,
-            db_summaries.get(review.session_id),
-            show_run_history=requested_session is not None,
-        )
+        print_session_review(review, show_run_history=requested_session is not None)
         print()
 
 
-def print_session_review(
-    review: SessionReview,
-    db_summary: DbSessionSummary | None,
-    *,
-    show_run_history: bool,
-) -> None:
-    """Print one session review row, plus DB metrics when available."""
-    latest_run = db_summary.latest_run if db_summary is not None else None
+def print_session_review(review: SessionReview, *, show_run_history: bool) -> None:
+    """Print one session review row."""
     print(shorten_text(review.session_id, 88))
     print(
         "  "
@@ -1521,38 +1309,6 @@ def print_session_review(
     if show_run_history:
         print(f"  message_counts: {' -> '.join(str(count) for count in review.message_count_trace)}")
     print(f"  preview: {review.latest_preview}")
-    if db_summary is None:
-        print("  db: no matching session in DB")
-        return
-    print(
-        "  "
-        f"db latest={format_percentage(latest_run.cache_read_fraction if latest_run else None)} "
-        f"(input={latest_run.input_tokens if latest_run else 0}, "
-        f"cache_read={latest_run.cache_read_tokens if latest_run else 0}), "
-        f"aggregate={format_percentage(db_summary.aggregate_cache_read_fraction)}, "
-        f"runs={db_summary.run_count}",
-    )
-    if show_run_history and db_summary.runs:
-        for index, run in enumerate(db_summary.runs, start=1):
-            created_at = run.created_at.astimezone().strftime("%H:%M:%S %Z") if run.created_at else "unknown"
-            print(
-                "  "
-                f"run {index}: {created_at}, "
-                f"input={run.input_tokens}, "
-                f"cache_read={run.cache_read_tokens}, "
-                f"cache_write={run.cache_write_tokens}, "
-                f"fraction={format_percentage(run.cache_read_fraction)}",
-            )
-        input_lengths = [len(run.input_content) for run in db_summary.runs if isinstance(run.input_content, str)]
-        if input_lengths:
-            print(f"  db input lengths: {' -> '.join(str(length) for length in input_lengths)}")
-        input_prefix_lengths = [
-            common_prefix_length(previous_run.input_content, current_run.input_content)
-            for previous_run, current_run in pairwise(db_summary.runs)
-            if isinstance(previous_run.input_content, str) and isinstance(current_run.input_content, str)
-        ]
-        if input_prefix_lengths:
-            print(f"  db input common prefixes: {' -> '.join(str(length) for length in input_prefix_lengths)}")
 
 
 def format_message_deltas(counter: Counter[int]) -> str:
@@ -1589,42 +1345,6 @@ def prompt_family_label(system_prompt: str) -> str:
 def coerce_int(value: object) -> int:
     """Coerce a loose numeric value into an integer or zero."""
     return value if isinstance(value, int) else 0
-
-
-def extract_run_input_content(value: object) -> str | None:
-    """Extract the persisted run input content string when present."""
-    value_dict = object_dict(value)
-    if value_dict is None:
-        return None
-    input_content = value_dict.get("input_content")
-    return input_content if isinstance(input_content, str) else None
-
-
-def common_prefix_length(first: str | None, second: str | None) -> int:
-    """Return the shared prefix length between two strings."""
-    if not isinstance(first, str) or not isinstance(second, str):
-        return 0
-    prefix_length = 0
-    for first_char, second_char in zip(first, second):
-        if first_char != second_char:
-            break
-        prefix_length += 1
-    return prefix_length
-
-
-def from_unix_timestamp(value: object) -> datetime | None:
-    """Convert a Unix timestamp into a timezone-aware datetime."""
-    if not isinstance(value, int):
-        return None
-    return datetime.fromtimestamp(value).astimezone()
-
-
-def validated_sqlite_identifier(identifier: str) -> str:
-    """Return a validated SQLite identifier wrapped for direct SQL interpolation."""
-    if not SQLITE_IDENTIFIER_PATTERN.fullmatch(identifier):
-        msg = f"Unsafe SQLite identifier: {identifier!r}"
-        raise ValueError(msg)
-    return f'"{identifier}"'
 
 
 if __name__ == "__main__":
