@@ -188,9 +188,15 @@ def _addresses(recipients: object) -> frozenset[str]:
 
 
 def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSession) -> None:
-    """Refuse a chat send when a member has no email address or one not in addresses, compared without case."""
-    members = _members(_entries(session.json("GET", f"{_chat_path(chat_id)}/members")))
-    if any(not isinstance(email := member["email"], str) or email.casefold() not in addresses for member in members):
+    """Refuse a chat send when a member has no email address or one not in addresses, compared without case.
+
+    It also refuses members that come with a next link, which Graph does not document here, as later pages go unread.
+    """
+    payload = session.json("GET", f"{_chat_path(chat_id)}/members")
+    members = _members(_entries(payload))
+    if "@odata.nextLink" in payload or any(
+        not isinstance(email := member["email"], str) or email.casefold() not in addresses for member in members
+    ):
         msg = "The chat has members recipients does not list; every member is listed here, and nothing was sent."
         raise MicrosoftGraphError(code="recipients_mismatch", message=msg, members=members)
 
