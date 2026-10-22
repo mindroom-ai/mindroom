@@ -11,6 +11,8 @@ from agno.tools import Toolkit
 from mindroom import agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.llm.events import ContentDelta
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -18,17 +20,39 @@ from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, 
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     import pytest
 
+    from mindroom.ai import AIStreamChunk
     from mindroom.cancellation import TaskCancelSource
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import AnyRunRecord
 
 
 def install_agent_model(monkeypatch: pytest.MonkeyPatch, model: ModelProvider) -> None:
     """Answer every agent request of the test with ``model``, whichever configured model the agent resolves."""
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
+
+
+def stored_runs(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    session_id: str,
+    *,
+    agent_name: str = "general",
+) -> list[AnyRunRecord]:
+    """Return the runs the agent's replies stored in the session, none when the session does not exist."""
+    storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=None)
+    session = storage.load_session(session_id, "agent")
+    return [] if session is None else session.runs
+
+
+def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
+    """Return the text deltas a reply streamed, in order."""
+    return [chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)]
 
 
 @contextmanager
@@ -66,7 +90,7 @@ class ProbeTools(Toolkit):
     ``switch_thread_model`` answers as the thread-model tool does and stops the run after it, as that tool does.
     """
 
-    running: ClassVar[asyncio.Event] = asyncio.Event()
+    running: ClassVar[asyncio.Event]
 
     def __init__(self) -> None:
         super().__init__(
@@ -190,4 +214,6 @@ __all__ = [
     "registered_probe_tools",
     "registered_toolkit",
     "stop_turn",
+    "stored_runs",
+    "streamed_text",
 ]

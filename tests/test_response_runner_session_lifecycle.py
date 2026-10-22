@@ -40,7 +40,7 @@ from mindroom.response_runner import (
     _NonStreamingGeneration,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry, strip_visible_tool_markers
@@ -76,7 +76,13 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
-from tests.scripted_agent_helpers import PROBE_TOOL, install_agent_model, raising, registered_probe_tools
+from tests.scripted_agent_helpers import (
+    PROBE_TOOL,
+    install_agent_model,
+    raising,
+    registered_probe_tools,
+    stored_runs,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1932,7 +1938,7 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
     sent_prompt = model.requests[0].messages[-1]
     assert "Describe this image" in str(sent_prompt.content)
     assert "Available attachment IDs: att_1" in str(sent_prompt.content)
-    stored = _persisted_run(create_session_storage("general", config, runtime_paths, execution_identity=None))
+    [stored] = stored_runs(config, runtime_paths, THREAD_SESSION_ID)
     [stored_prompt] = [message for message in stored.messages if message.role == "user"]
     assert stored_prompt.content == sent_prompt.content
 

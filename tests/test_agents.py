@@ -2549,8 +2549,7 @@ def test_get_agent_uses_storage_path_for_sessions(tmp_path: Path) -> None:
 
     agent_root = agent_state_root_path(tmp_path, "general")
     assert build.store is not None
-    db_files = [build.store.path]
-    assert agent_root / "sessions" / "general.db" in db_files
+    assert build.store.path == agent_root / "sessions" / "general.db"
 
 
 def test_get_agent_routes_only_sessions_to_explicit_session_storage(
@@ -2569,9 +2568,7 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     build = _create_agent_for_test("general", config=config)
 
     assert build.store is not None
-    db_files = [build.store.path]
-    assert session_storage_root / "agents" / "general" / "sessions" / "general.db" in db_files
-    assert agent_state_root_path(storage_root, "general") / "sessions" / "general.db" not in db_files
+    assert build.store.path == session_storage_root / "agents" / "general" / "sessions" / "general.db"
 
 
 def test_get_agent_uses_worker_storage_for_sessions(tmp_path: Path) -> None:
@@ -2595,8 +2592,7 @@ def test_get_agent_uses_worker_storage_for_sessions(tmp_path: Path) -> None:
 
     agent_root = agent_state_root_path(tmp_path, "general")
     assert build.store is not None
-    db_files = [build.store.path]
-    assert agent_root / "sessions" / "general.db" in db_files
+    assert build.store.path == agent_root / "sessions" / "general.db"
 
 
 def test_get_agent_uses_shared_worker_storage_without_execution_identity(
@@ -2626,8 +2622,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
 
     agent_root = agent_state_root_path(tmp_path, "general")
     assert build.store is not None
-    db_files = [build.store.path]
-    assert agent_root / "sessions" / "general.db" in db_files
+    assert build.store.path == agent_root / "sessions" / "general.db"
 
 
 def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
@@ -3207,8 +3202,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     agent_root = agent_state_root_path(tmp_path, "general")
     canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     assert build.store is not None
-    db_files = [build.store.path]
-    assert agent_root / "sessions" / "general.db" in db_files
+    assert build.store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
@@ -3242,9 +3236,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     agent_root = agent_state_root_path(shared_root, "general")
     canonical_workspace = agent_workspace_root_path(shared_root, "general")
     assert build.store is not None
-    db_files = [build.store.path]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert not any(path.is_relative_to(dedicated_root) for path in db_files)
+    assert build.store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
@@ -4414,8 +4406,8 @@ def test_config_ignores_retired_learning_mode_with_one_warning(tmp_path: Path) -
 
 
 def test_config_ignores_retired_compress_tool_results_with_one_warning(tmp_path: Path) -> None:
-    """A config that still compresses tool results loads with one warning, and its agents replay them unchanged."""
-    config, _db_files, warnings = _agent_from_config_with_retired_field(
+    """A config that still compresses tool results loads with one warning, and the field leaves the authored config."""
+    config, _, warnings = _agent_from_config_with_retired_field(
         tmp_path,
         "compress_tool_results",
         value=True,

@@ -122,16 +122,16 @@ from tests.scripted_agent_helpers import (
     raising,
     registered_probe_tools,
     stop_turn,
+    stored_runs,
+    streamed_text,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
-    from mindroom.ai import AIStreamChunk
     from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.llm.provider import ModelProvider
-    from mindroom.llm.runs import AnyRunRecord
     from mindroom.response_turn import ResponseTurnContext
 
 
@@ -210,16 +210,6 @@ def _final_only(text: str) -> list[ScriptStep]:
         UsageReported(final),
         TurnCompleted(message=Message(role="assistant", content=text, metrics=final), stop_reason="end"),
     ]
-
-
-def _stored_runs(config: Config, runtime_paths: RuntimePaths, session_id: str = "session1") -> list[AnyRunRecord]:
-    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
-    return [] if session is None else session.runs
-
-
-def _text(chunks: Sequence[AIStreamChunk]) -> list[str]:
-    return [chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)]
 
 
 async def _respond(
@@ -753,15 +743,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_runs_under_the_turns_requester_and_run_id(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """The run carries the requester as its user and the turn's run id, which cancellation and usage need."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, answer("Response"))
 
@@ -772,35 +761,33 @@ class TestUserIdPassthrough:
             streaming=streaming,
         )
 
-        [run] = _stored_runs(config, runtime_paths)
+        [run] = stored_runs(config, runtime_paths, "session1")
         assert (run.run_id, run.user_id, run.content) == ("run-123", "@user:localhost", "Response")
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_user_id_none_when_not_provided(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A turn without a requester runs without a user."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, answer("Response"))
 
         await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths, streaming=False)
 
-        [run] = _stored_runs(config, runtime_paths)
+        [run] = stored_runs(config, runtime_paths, "session1")
         assert run.user_id is None
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
-        del probe
         config_path = tmp_path / "custom-config.yaml"
         config, runtime_paths = _bound(tmp_path, config_path=config_path)
         persist_entity_accounts(config, runtime_paths)
@@ -834,14 +821,13 @@ class TestUserIdPassthrough:
         assert mock_create_agent.call_args.kwargs["supports_native_tool_approval"] is True
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_logs_full_prompt_at_debug(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Routine logs stay content-safe while debug logs retain the prepared prompt."""
-        del probe
         sensitive_marker = "sensitive prompt marker"
         config, runtime_paths = _bound(tmp_path)
         persist_entity_accounts(config, runtime_paths)
@@ -896,14 +882,13 @@ class TestUserIdPassthrough:
         assert all(sensitive_marker not in str(log) for log in logs if log["log_level"] != "debug")
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_uses_raw_prompt_for_memory_and_appends_additional_context(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Raw prompt drives memory lookup; the session preamble and system enrichment follow the build's context."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch)
         enrichment = (EnrichmentItem(key="k", text="enriched system context", cache_policy="stable"),)
@@ -945,15 +930,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("include_openai_compat_guidance", [True, False])
+    @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_derives_current_sender_from_requester(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         include_openai_compat_guidance: bool,
     ) -> None:
         """OpenAI-compatible preparation suppresses the Matrix sender; Matrix turns name it in the prompt."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch)
 
@@ -970,14 +954,13 @@ class TestUserIdPassthrough:
         assert ('from="@alice:example.com"' in prompt) is not include_openai_compat_guidance
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_prepare_agent_and_prompt_labels_an_agent_reply_with_its_author(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A reply an agent wrote for a human stays that agent's words while the human is the requester."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch)
 
@@ -998,15 +981,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_prepares_against_the_runtime_config_path(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Replies build agents against the orchestrator-owned config file and pass the compat guidance through."""
-        del probe
         config_path = tmp_path / "custom-config.yaml"
         config, runtime_paths = _bound(tmp_path, config_path=config_path)
         _install(monkeypatch, answer("Response"))
@@ -1026,15 +1008,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_matrix_reply_keeps_its_current_sender(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Matrix turns preserve the sender who produced the current prompt in what the model reads."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         model = _install(monkeypatch, answer("Response"))
 
@@ -1049,14 +1030,13 @@ class TestUserIdPassthrough:
         assert 'from="@alice:example.com"' in str(request.messages[-1].content)
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_passes_raw_prompt_separately_from_model_prompt(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """The AI entrypoint should preserve the raw user prompt when model_prompt is provided."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, answer("Response"))
 
@@ -1077,16 +1057,15 @@ class TestUserIdPassthrough:
         ("turns", "status"),
         [((answer(""), answer("")), RunStatus.error), ((answer("Answer"),), RunStatus.completed)],
     )
+    @pytest.mark.usefixtures("probe")
     async def test_stream_completion_status_does_not_require_metadata_collector(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         turns: tuple[list[ScriptStep], ...],
         status: RunStatus,
     ) -> None:
         """A typed terminal callback classifies empty output even without wire metadata."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, *turns)
         completed: list[CompletedAttempt] = []
@@ -1106,14 +1085,13 @@ class TestUserIdPassthrough:
         assert all(attempt.metadata_content is None for attempt in completed)
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_raises_cancelled_error_for_cancelled_runs(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A run stopped mid-stream surfaces as task cancellation to the bot."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         model = _install(monkeypatch, [TextDelta("Half done"), stop_turn()])
 
@@ -1123,14 +1101,13 @@ class TestUserIdPassthrough:
         assert len(model.requests) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_persists_interrupted_replay_for_cancelled_runs(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A stopped stream is rewritten into canonical completed replay history with its finished tools."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
@@ -1147,7 +1124,7 @@ class TestUserIdPassthrough:
                 show_tool_calls=False,
             )
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata is not None
         prepared_context = persisted_run.metadata[AI_RUN_METADATA_KEY].pop("prepared_context")
@@ -1182,14 +1159,13 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_surfaces_native_confirmation_pause_without_replay_settlement(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A confirmation pause escapes as an approval suspension and its run stays paused, never settled as text."""
-        del probe
         config, runtime_paths = _bound(tmp_path, approval=True)
         _install(
             monkeypatch,
@@ -1220,20 +1196,19 @@ class TestUserIdPassthrough:
             ("call-0", "tool_call_completed"),
             ("call-1", "tool_call_started"),
         ]
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.paused
         assert stored.metadata is not None
         assert "mindroom_replay_state" not in stored.metadata
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_a_stopped_stream_records_only_this_turns_partial_text(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """The interrupted record of a stopped run holds only this turn's text, never the replayed history."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
         earlier = RunRecord(
@@ -1263,21 +1238,20 @@ class TestUserIdPassthrough:
             )
 
         assert "Earlier answer" in str([message.content for message in model.requests[0].messages])
-        persisted_run = next(run for run in _stored_runs(config, runtime_paths) if run.run_id == "run-123")
+        persisted_run = next(run for run in stored_runs(config, runtime_paths, "session1") if run.run_id == "run-123")
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
             ("assistant", "Half done\n\n(turn stopped before completion)"),
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_with_turn_recorder_defers_interrupted_persistence_to_runner(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Lifecycle-owned calls record the interrupted state and leave the interrupted record to the runner."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
@@ -1296,7 +1270,7 @@ class TestUserIdPassthrough:
                 turn_recorder=recorder,
             )
 
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.cancelled
         assert "mindroom_replay_state" not in (stored.metadata or {})
         snapshot = recorder.interrupted_snapshot()
@@ -1306,14 +1280,13 @@ class TestUserIdPassthrough:
         assert snapshot.run_metadata[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] == ["e1"]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_returns_friendly_error_for_error_status(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A failed run's provider error reaches the user as friendly text, never as a successful reply."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         error = ProviderError("validation failed upstream", provider="Synthetic", status_code=400)
         _install(monkeypatch, [raising(error)])
@@ -1326,7 +1299,7 @@ class TestUserIdPassthrough:
         )
 
         assert response == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         assert stored.metadata["mindroom_original_status"] == "error"
 
@@ -1376,15 +1349,14 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_passes_every_file_to_the_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """The AI layer never drops a file before the provider decides what its model accepts."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         model = _install(monkeypatch, answer("Response"))
         pdf_file = File(filepath=str(tmp_path / "report.pdf"), filename="report.pdf", mime_type="application/pdf")
@@ -1403,15 +1375,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_safeguard_refusal_is_reported_without_a_media_retry(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A refused request with media gets the refusal notice; the request pipeline never resends it without media."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         refused = Message(role="assistant", content="", metrics=usage(5, 0))
         model = ScriptedModel([[UsageReported(usage(5, 0)), TurnCompleted(message=refused, stop_reason="refusal")]])
@@ -1436,14 +1407,13 @@ class TestUserIdPassthrough:
         assert len(model.requests) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A streamed reply's request log names its turn: agent, session, room, thread, event, and prompts."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         debug = DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path))
         model = ScriptedModel([answer("Deferred stream")])
@@ -1480,7 +1450,7 @@ class TestUserIdPassthrough:
             )
         ]
 
-        assert "".join(_text(chunks)) == "Deferred stream"
+        assert "".join(streamed_text(chunks)) == "Deferred stream"
         [log_file] = tmp_path.glob("llm-requests-*.jsonl")
         [entry] = [
             logged
@@ -1501,14 +1471,13 @@ class TestUserIdPassthrough:
         assert entry["messages"][-1]["content"] == prompt.content
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_errored_run_keeps_request_usage(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A run that fails after model requests still reports their tokens in the run metadata."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
@@ -1532,14 +1501,13 @@ class TestUserIdPassthrough:
         assert payload["usage"]["output_tokens"] == 60
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_collects_tool_trace_when_tool_calls_hidden(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """The blocking path still surfaces structured tool metadata when the reply hides its tool calls."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
         tool_trace: list[object] = []
@@ -1558,15 +1526,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_continues_after_next_turn_model_switch(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A next-turn model switch rebuilds the agent and continues the same task under a fresh run id."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, _switch("call-switch", "large", "next-turn"), answer("Finished the task."))
         tool_trace: list[object] = []
@@ -1592,21 +1559,20 @@ class TestUserIdPassthrough:
         assert run_ids[0] == "run-1"
         assert len(run_ids) == 2
         assert run_ids[1] != "run-1"
-        assert [run.run_id for run in _stored_runs(config, runtime_paths)] == run_ids
+        assert [run.run_id for run in stored_runs(config, runtime_paths, "session1")] == run_ids
         if not streaming:
             assert len(tool_trace) == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_rebuilds_with_after_toolcall_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """An after-toolcall switch rebuilds the agent on the new model, which the tools then see as active."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         config.models["large"] = ModelConfig(provider="openai", id="large-model")
         observed_tool_models: list[str | None] = []
@@ -1642,14 +1608,13 @@ class TestUserIdPassthrough:
         assert observed_tool_models == ["default", "large"]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_a_cancelled_continuation_keeps_every_attempts_tools(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A continuation stopped mid-run keeps the switch and its own finished tools in the interrupted state."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
@@ -1676,15 +1641,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_returns_message_after_continuation_limit(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Repeated rejected model switches end with visible fallback text after the continuation limit."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         attempts = TURN_CONTINUATION_LIMIT + 1
         model = _install(
@@ -1707,15 +1671,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_collects_run_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A reply exposes its model, usage, and context metadata, with the context taken from the provider counters."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -1753,15 +1716,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_persists_its_prepared_history_metadata(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A reply stores the same prepared-history metadata it hands its turn recorder."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, answer("Response"))
         recorder = TurnRecorder(user_message="test")
@@ -1774,7 +1736,7 @@ class TestUserIdPassthrough:
             turn_recorder=recorder,
         )
 
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         prepared_context = stored.metadata[AI_RUN_METADATA_KEY]["prepared_context"]
         assert isinstance(prepared_context["tokens"], int)
@@ -1783,14 +1745,13 @@ class TestUserIdPassthrough:
         assert recorder.run_metadata[AI_RUN_METADATA_KEY]["prepared_context"] == prepared_context
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_ai_response_context_counts_anthropic_cache_tokens(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Claude-family cache tokens count toward context occupancy."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -1889,17 +1850,16 @@ class TestUserIdPassthrough:
         ],
         ids=["final-only", "final-differs", "final-empty"],
     )
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_records_the_visible_text_in_turn_recorder(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         turn: list[ScriptStep],
         recorded: str,
         streamed: str,
     ) -> None:
         """The recorder keeps the streamed text the user saw, or the final body when nothing streamed."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, turn)
         recorder = TurnRecorder(user_message="test")
@@ -1917,19 +1877,18 @@ class TestUserIdPassthrough:
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == recorded
-        assert "".join(_text(chunks)) == streamed
+        assert "".join(streamed_text(chunks)) == streamed
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.usefixtures("probe")
     async def test_a_reply_metadata_uses_room_resolved_runtime_model(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Reply metadata reports the room-resolved runtime model and its context window."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -1962,14 +1921,13 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 48000
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_suspends_for_confirmation_pause(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A streamed confirmation pause escapes to the lifecycle suspension handler, its run stored paused."""
-        del probe
         config, runtime_paths = _bound(tmp_path, approval=True)
         _install(monkeypatch, calls(tool_call("dangerous", "call-stream-approval", value=1)))
 
@@ -1995,19 +1953,18 @@ class TestUserIdPassthrough:
         assert raised.value.presentation is not None
         assert raised.value.presentation.response_text.strip() == "🔧 `dangerous` [1] ⏳"
         assert raised.value.presentation.tool_trace[0].tool_call_id == "call-stream-approval"
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.paused
         assert len(stored.requirements or []) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_hidden_streamed_confirmation_pause_preserves_internal_tool_boundary(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """A hidden pause must retain enough internal trace state to separate its continuation."""
-        del probe
         config, runtime_paths = _bound(tmp_path, approval=True)
         _install(
             monkeypatch,
@@ -2116,7 +2073,7 @@ class TestUserIdPassthrough:
         with pytest.raises(asyncio.CancelledError):
             await reply
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         name, preview = running_preview
         assert [(message.role, message.content) for message in persisted_run.messages] == [
@@ -2135,14 +2092,13 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_persists_interrupted_replay_after_external_task_cancel(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """External task cancellation still persists the interrupted turn with its model-facing prompt."""
-        del probe
         config, runtime_paths = _bound(tmp_path)
         first_chunk_seen = asyncio.Event()
 
@@ -2169,7 +2125,7 @@ class TestUserIdPassthrough:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test\n\n<mindroom_message_context>persist me</mindroom_message_context>"),
@@ -2177,14 +2133,13 @@ class TestUserIdPassthrough:
         ]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_reports_request_usage_and_identity(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Streaming metadata reports the request's usage, its time to first token, and the serving model."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -2212,20 +2167,19 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 15
         assert payload["usage"]["time_to_first_token"] == format(0.12, ".12g")
         assert payload["model"]["id"] == "test-model"
-        assert payload["model"]["provider"] == model.identity.provider
+        assert payload["model"]["provider"] == "OpenAI"
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_prefers_latest_request_counters_over_estimate(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Usage sums every request while the context block reads the latest request's counters."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -2272,14 +2226,13 @@ class TestUserIdPassthrough:
         assert isinstance(payload["prepared_context"]["tokens"], int)
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_does_not_backfill_latest_context_cache_from_usage(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
     ) -> None:
         """Missing latest-request cache counters stay unknown instead of reusing cumulative totals."""
-        del probe
         config, runtime_paths = _bound(
             tmp_path,
             Config(
@@ -2321,16 +2274,19 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 1000
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider", ["anthropic", "vertexai_claude"])
+    @pytest.mark.parametrize(
+        ("provider", "stored_provider"),
+        [("anthropic", "Anthropic"), ("vertexai_claude", "VertexAI")],
+    )
+    @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_context_counts_latest_claude_cache_tokens(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[ProbeTools],
         provider: str,
+        stored_provider: str,
     ) -> None:
         """Streaming context includes the cache tokens of the latest Claude request on every Claude route."""
-        del probe
         extra_kwargs = (
             {"api_key": "test-key"} if provider == "anthropic" else {"project_id": "test", "region": "us-east5"}
         )
@@ -2371,7 +2327,7 @@ class TestUserIdPassthrough:
             pass
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
-        assert payload["model"]["provider"] == model.identity.provider
+        assert payload["model"]["provider"] == stored_provider
         assert payload["usage"]["input_tokens"] == 3120
         assert payload["usage"]["cache_read_tokens"] == 29_000
         assert payload["usage"]["cache_write_tokens"] == 510

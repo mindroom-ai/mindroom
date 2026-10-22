@@ -19,15 +19,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.llm.events import ContentDelta
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.scripted_agent_helpers import install_agent_model
+from tests.scripted_agent_helpers import install_agent_model, stored_runs, streamed_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,12 +65,6 @@ def _completed_team_run(run_id: str, content: str | None) -> TeamRunRecord:
     )
 
 
-def _stored_run_ids(config: Config) -> list[str]:
-    storage = create_session_storage("general", config, runtime_paths_for(config), execution_identity=None)
-    session = storage.load_session("session-1", "agent")
-    return [] if session is None else [run.run_id for run in session.runs]
-
-
 async def _respond(config: Config, **kwargs: object) -> str:
     return await ai_response(
         make_turn_context("general", session_id="session-1"),
@@ -93,10 +86,6 @@ async def _stream(config: Config, **kwargs: object) -> list[AIStreamChunk]:
             **kwargs,
         )
     ]
-
-
-def _streamed_text(chunks: list[AIStreamChunk]) -> list[str]:
-    return [chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)]
 
 
 def test_is_empty_completed_run_detects_contentless_completed_runs() -> None:
@@ -234,7 +223,7 @@ async def test_ai_response_retries_once_after_empty_completed_run(
     assert result == "Recovered"
     assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
-    assert len(_stored_run_ids(config)) == 1
+    assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
 
 
 @pytest.mark.asyncio
@@ -252,7 +241,7 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
     assert result == EMPTY_RESPONSE_NOTICE
     assert len(model.requests) == 2
     # The retry's empty run is discarded too; the notice is delivery-only.
-    assert _stored_run_ids(config) == []
+    assert stored_runs(config, runtime_paths_for(config), "session-1") == []
 
 
 @pytest.mark.asyncio
@@ -285,10 +274,10 @@ async def test_stream_agent_response_retries_once_after_empty_completed_stream(
 
     chunks = await _stream(config, pipeline_timing=timing)
 
-    assert _streamed_text(chunks) == ["Recovered"]
+    assert streamed_text(chunks) == ["Recovered"]
     assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
-    assert len(_stored_run_ids(config)) == 1
+    assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
 
 
 @pytest.mark.asyncio
@@ -303,9 +292,9 @@ async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_e
 
     chunks = await _stream(config)
 
-    assert _streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert len(model.requests) == 2
-    assert _stored_run_ids(config) == []
+    assert stored_runs(config, runtime_paths_for(config), "session-1") == []
 
 
 @pytest.mark.asyncio
@@ -320,6 +309,6 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
 
     chunks = await _stream(config, turn_recorder=recorder)
 
-    assert _streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
