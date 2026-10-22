@@ -46,7 +46,7 @@ from mindroom.tool_jobs.results import (
 from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
 from mindroom.tool_system.agno_toolkits import AgnoImage, Toolkit, ToolResult
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.invocation import ToolCallContext
+from mindroom.tool_system.invocation import ToolCallContext, ToolOutcome
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
@@ -892,6 +892,49 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
     try:
         record = await run()
         assert [tool.result for tool in record.tools if tool.tool_call_id == "list-call"] == ["[]"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_key_a_sibling_writes_as_the_job_starts_survives_its_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key a sibling adds right after the job copies the live state is neither deleted nor a conflict."""
+
+    async def change_state(run_context: RunContext) -> str:
+        run_context.session_state["changed"] = 1
+        return "result"
+
+    detached = execution._detached
+
+    def detached_then_a_sibling_writes(call: JobCall) -> JobCall:
+        frozen = detached(call)
+        # An inline sync sibling of the same batch writes between the job's copy and anything read after it.
+        call.context.session_state["sibling"] = "kept"
+        return frozen
+
+    monkeypatch.setattr(execution, "_detached", detached_then_a_sibling_writes)
+    context, runtime = await _managed_context(tmp_path)
+    state: dict[str, object] = {"changed": 0}
+
+    @owned_tool_execution()
+    async def reply() -> ToolOutcome:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                return await call_job_tool(
+                    job_actor(job_tool(change_state)),
+                    "change_state",
+                    call_id="state-call",
+                    run_id="origin",
+                    session_state=state,
+                )
+
+    try:
+        outcome = await reply()
+        assert outcome.content == "result"
+        assert state == {"changed": 1, "sibling": "kept"}
     finally:
         await runtime.shutdown()
 

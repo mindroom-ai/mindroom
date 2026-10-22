@@ -353,7 +353,9 @@ async def _run_managed_call(
         "authority": dict(job_call.tool.authority),
     }
     detached = _detached(job_call)
-    baseline = session_state_snapshot(call.context.session_state)
+    # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
+    # after that copy never reads as deleted by this job.
+    baseline = deepcopy(detached.context.session_state)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(call.function.name, dict(detached.arguments))
     reference = resources.acquire()
