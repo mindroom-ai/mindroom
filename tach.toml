@@ -1281,6 +1281,7 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.runtime_context",
 ]
 visibility = ["mindroom.ai", "mindroom.approval.execution", "mindroom.delegation.execution", "mindroom.teams"]
 
