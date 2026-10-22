@@ -34,12 +34,12 @@ def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
     return ()
 
 
-def _no_workspace_error(raw_path: object) -> str:
+def _no_workspace_error(raw_path: object, *, has_shares: bool) -> str:
     # A path argument left at its default names the working directory.
+    remedy = "Without one, only the agent's shared directories are reachable; give it" if has_shares else "Give it"
     return (
         f"Error: Path '{raw_path or '.'}' requires an agent workspace; file_access is 'workspace'. "
-        "Without one, only the agent's shared directories are reachable; "
-        "give it a workspace with memory_backend: file or a private configuration."
+        f"{remedy} a workspace with memory_backend: file or a private configuration."
     )
 
 
@@ -86,7 +86,9 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             raw_path = bound.arguments.get(path_parameter)
             match = _matching_root(raw_path, toolkit)
             if match is None:
-                return method(*args, **kwargs) if toolkit.has_workspace else _no_workspace_error(raw_path)
+                if toolkit.has_workspace:
+                    return method(*args, **kwargs)
+                return _no_workspace_error(raw_path, has_shares=bool(toolkit.shared_directory_roots()))
             root, relative = match
             if writes and not root.writable:
                 return f"Error: {raw_path} is in a shared directory you can only read."

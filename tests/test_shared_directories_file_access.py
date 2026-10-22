@@ -267,6 +267,26 @@ def test_tools_without_a_workspace_refuse_the_working_directory(
     assert _tree(run) == before
 
 
+def test_refusal_says_shares_stay_reachable_only_when_the_agent_has_some(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside workers, or with no shares, primary-run tools reach no share, so the refusal does not offer one."""
+    _run, share = _run_directory(tmp_path, monkeypatch, share_below=False)
+    with_share = _toolkits_without_a_workspace(share)["file"]
+    without_shares = file_tools()(file_access="workspace")
+
+    assert with_share.read_file("secret.md") == (
+        "Error: Path 'secret.md' requires an agent workspace; file_access is 'workspace'. "
+        "Without one, only the agent's shared directories are reachable; "
+        "give it a workspace with memory_backend: file or a private configuration."
+    )
+    assert without_shares.read_file("secret.md") == (
+        "Error: Path 'secret.md' requires an agent workspace; file_access is 'workspace'. "
+        "Give it a workspace with memory_backend: file or a private configuration."
+    )
+
+
 def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:
     """Unrestricted file access already reaches shares by path, so writes are not narrowed."""
     workspace, share, _other = _layout(tmp_path)
