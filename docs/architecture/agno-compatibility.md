@@ -1,10 +1,11 @@
 # Agno compatibility boundaries
 
-This page maps each known Agno weakness to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
+MindRoom uses Agno only as its tool library, through the toolkit adapter in `tool_system/agno_toolkits.py`, and for the knowledge readers and chunkers in `knowledge/readers.py`.
+This page maps each known weakness of that library to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
 The policy lives in the Agno Compatibility Policy in `AGENTS.md`.
 Each `# AGNO_COMPAT:` source comment owns its workaround's reason, exact upstream links, removal condition, and test coverage; `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists them.
 The Boundary column of both tables below is the boundary inventory; paths are relative to `src/mindroom/`, and one row can group several markers that share a weakness.
-Workarounds adapt Agno mechanics only: approval outcomes, storage ownership, retry limits, provider configuration, request-log context, canonical replay, and OAuth policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
+Workarounds adapt Agno mechanics only: file access, network destination, output size, and credential policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
 
 ## Upstream work
 
@@ -15,7 +16,7 @@ Issue and PR states were checked on September 24, 2026, unless a row gives anoth
 | Agno weakness | Upstream issue / PR | Boundary |
 | --- | --- | --- |
 | Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 21, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`), `custom_tools/microsoft_sharepoint.py` (`microsoft_sharepoint_create_item`, `microsoft_sharepoint_update_item`) |
-| Library loggers install their own stdout handler at INFO with propagation disabled, and every run resets their levels, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
+| Library loggers install their own stdout handler at INFO with propagation disabled, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
 
 ### Tracking gaps
 

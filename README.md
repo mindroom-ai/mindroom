@@ -503,7 +503,7 @@ By building on it, MindRoom inherits instead of reimplements:
 ## Architecture
 
 - **Matrix**: any homeserver (Synapse, Conduit, Dendrite, ...)
-- **Agents**: Python, built on [Agno](https://agno.dev/) and [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio)
+- **Agents**: Python, built on [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio), with [Agno](https://agno.dev/) toolkits
 - **AI models**: Anthropic, OpenAI, Google, Ollama, Bedrock, or any OpenAI-compatible endpoint
 - **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
 - **UI**: web dashboard for administration; [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) (or any Matrix client) for chat

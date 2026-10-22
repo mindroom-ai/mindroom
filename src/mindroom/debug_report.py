@@ -20,11 +20,11 @@ if TYPE_CHECKING:
 _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
-_MAX_AGNO_RUNS = 100
+_MAX_RUNS = 100
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
-# Where the runtime writes Agno session databases under the session root: shared agents, teams, private instances
+# Where the runtime writes conversation databases under the session root: shared agents, teams, private instances
 # (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/ folder is not read.
 _SESSION_DATABASE_GLOBS = (
     "agents/*/sessions/*.db",
@@ -226,12 +226,12 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
     return results
 
 
-def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
-    """Read Agno runs by run ID or session ID from every session database under the session root.
+def _read_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
+    """Read stored runs by run ID or session ID from every conversation database under the session root.
 
     Databases are found by the runtime's path layouts rather than from the config so deleted agents' history is
     included.
-    Only the newest `_MAX_AGNO_RUNS` matching runs across all databases are kept, returned oldest first, and
+    Only the newest `_MAX_RUNS` matching runs across all databases are kept, returned oldest first, and
     `dropped` counts the rest: an unthreaded report matches the room's whole session, which can span months.
     One unreadable database (locked by a live run, corrupt) is isolated: the runs of the others are kept and
     the failure is recorded as `<path>: <error>` in `error`. The status is "error" only when every database
@@ -258,14 +258,14 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     runs: list[dict[str, Any]] = []
     for database in databases:
         try:
-            database_matches, database_runs = _read_agno_database(database, conditions, [*run_ids, *session_ids])
+            database_matches, database_runs = _read_run_database(database, conditions, [*run_ids, *session_ids])
         except (sqlite3.Error, OSError) as error:
             failures.append(f"{database}: {_describe_error(error)}")
             continue
         matches += database_matches
         runs.extend(database_runs)
     # The stable sort keeps each table's rowid order among runs created at the same time.
-    result.items = sorted(runs, key=_run_age)[-_MAX_AGNO_RUNS:]
+    result.items = sorted(runs, key=_run_age)[-_MAX_RUNS:]
     result.dropped = matches - len(result.items)
     if failures:
         result.error = "; ".join(failures)
@@ -280,12 +280,12 @@ def _run_age(run: Mapping[str, Any]) -> float:
     return created_at if isinstance(created_at, int | float) else float("-inf")
 
 
-def _read_agno_database(
+def _read_run_database(
     database: Path,
     conditions: Sequence[str],
     params: Sequence[object],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Return how many runs match and the newest `_MAX_AGNO_RUNS` of each table, oldest first."""
+    """Return how many runs match and the newest `_MAX_RUNS` of each table, oldest first."""
     where = " OR ".join(conditions)
     matches = 0
     runs: list[dict[str, Any]] = []
@@ -299,7 +299,7 @@ def _read_agno_database(
             matches += query(f'SELECT COUNT(*) AS matches FROM "{table}" WHERE {where}', params)[0]["matches"]  # noqa: S608
             rows = query(
                 f'SELECT * FROM "{table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
-                [*params, _MAX_AGNO_RUNS],
+                [*params, _MAX_RUNS],
             )
             runs.extend(
                 {"database": str(database), "table": table, **_decode_json_columns(row)} for row in reversed(rows)
@@ -442,7 +442,7 @@ def build_debug_report(sources: DebugReportSources, ids: _DebugReportIds, *, gen
     tool_call_logs.append(tracking / "tool_calls.jsonl")
     logs_dir = sources.storage_root / "logs"
     results = _read_journal_source(sources, tracking / "event_journal.db", ids)
-    results["agno_runs"] = _read_guarded(lambda: _read_agno_runs(sources.session_root, ids), sources.session_root)
+    results["runs"] = _read_guarded(lambda: _read_runs(sources.session_root, ids), sources.session_root)
     results["tool_calls"] = _read_guarded(
         lambda: _read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
         tracking / "tool_calls.jsonl",
