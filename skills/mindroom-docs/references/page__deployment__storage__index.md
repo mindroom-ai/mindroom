@@ -37,7 +37,7 @@ See [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runti
 
 ### Incompatible session databases
 
-If an upgraded Agno version requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
+If an upgraded MindRoom release requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
 The archive is kept intact for inspection or manual recovery; back it up and delete it when you no longer need it.
 
 ## Event Journal

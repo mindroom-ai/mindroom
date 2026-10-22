@@ -13,7 +13,7 @@ Setup makes one pass: nio owns transport retries, and an administrative failure 
 
 ## Session Storage Recovery
 
-When a session table lacks columns the installed Agno version requires, recovery moves the whole `sessions/` directory aside, so SQLite journals and sidecars stay with their database; see [Incompatible session databases](../deployment/storage.md#incompatible-session-databases) for the operator view.
+When a session table lacks columns the installed MindRoom release requires, recovery moves the whole `sessions/` directory aside, so SQLite journals and sidecars stay with their database; see [Incompatible session databases](../deployment/storage.md#incompatible-session-databases) for the operator view.
 Recovery assumes upgrades run while MindRoom is stopped, so it never overlaps active session writers.
 
 ## Runtime replacement

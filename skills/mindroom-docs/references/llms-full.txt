@@ -4047,7 +4047,7 @@ When ingestion fails, `/api/health` includes a `knowledge_graph` block naming th
 # Skills
 
 Skills are instruction packs: a `SKILL.md` file with optional scripts and reference documents that guide an agent through a task without adding new code capabilities.
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata.
+Skills use OpenClaw-compatible metadata.
 This page covers writing, installing, and allowlisting skills, skills agents keep in their own workspace, and opt-in automatic skill learning.
 
 ## Skill directory structure
@@ -16602,7 +16602,7 @@ Custom events default to 1000 ms.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
-  In compaction hooks, `ctx.messages` holds the raw `agno.models.message.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, citations, reasoning, and metrics.
+  In compaction hooks, `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
@@ -20094,7 +20094,7 @@ See [Bot Runtime Architecture](https://docs.mindroom.chat/architecture/bot-runti
 
 ### Incompatible session databases
 
-If an upgraded Agno version requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
+If an upgraded MindRoom release requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
 The archive is kept intact for inspection or manual recovery; back it up and delete it when you no longer need it.
 
 ## Event Journal
