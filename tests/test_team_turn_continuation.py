@@ -145,25 +145,28 @@ async def test_model_changes_made_mid_turn_do_not_reach_the_rebuilt_members(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The member models a turn starts with are pinned for its continuation."""
-    team = _team(tmp_path, monkeypatch)
-    set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="large")
 
     async def change_the_room_default() -> None:
         set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="default")
 
-    # The room default reaches the member, not the ad hoc team's leader, which runs on ``default``.
-    team.models["default"].turns = [
-        delegate("call-team", "general", "Switch"),
-        answer("Switching."),
-        delegate("call-again", "general", "Finish"),
-        answer("Finished the task."),
-    ]
-    # The switch writes the thread override at once, and it outranks the room default, so it names a model other
-    # than the pinned one: a rebuild that dropped the pin would run the member on it.
-    team.models["large"].turns = [
-        [Await(change_the_room_default), *calls(_switch("next-turn", model_name="general-model"))],
-        answer("Done."),
-    ]
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        # The room default reaches the member, not the ad hoc team's leader, which runs on ``default``.
+        default=[
+            delegate("call-team", "general", "Switch"),
+            answer("Switching."),
+            delegate("call-again", "general", "Finish"),
+            answer("Finished the task."),
+        ],
+        # The switch writes the thread override at once, and it outranks the room default, so it names a model
+        # other than the pinned one: a rebuild that dropped the pin would run the member on it.
+        large=[
+            [Await(change_the_room_default), *calls(_switch("next-turn", model_name="general-model"))],
+            answer("Done."),
+        ],
+    )
+    set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="large")
 
     text = await team.respond(message=PROMPT)
 
@@ -294,6 +297,8 @@ def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
     """A stop landing between the release and the next attempt records no text or calls of the spent attempt.
 
     Its finished calls already carried over through the turn state, so keeping them here would count them twice.
+    No public entry can stop a turn inside that window deterministically, so this drives the private turn holder
+    whose snapshot the stop reads.
     """
     team = _team(tmp_path, monkeypatch)
     members = materialize_team_members(["general"], team.orchestrator, team.identity)
