@@ -12,8 +12,9 @@ from mindroom import agents
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
+from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
@@ -32,9 +33,12 @@ def install_agent_model(monkeypatch: pytest.MonkeyPatch, model: ModelProvider) -
 
 @contextmanager
 def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
-    """Register ``toolkit`` as the tool ``name`` for one test and restore the registries afterwards."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
+    """Register ``toolkit`` as the tool ``name`` for one test and restore every tool registry afterwards.
+
+    Registration also records the tool as a built-in, which later registry resolutions copy back, so the whole
+    registry state is restored rather than only the active registry.
+    """
+    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=name,
@@ -49,10 +53,7 @@ def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
     try:
         yield
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
+        restore_tool_registry_snapshot(snapshot)
 
 
 PROBE_TOOL = "agent_path_probe"
