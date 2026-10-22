@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
 import tempfile
@@ -14,11 +15,14 @@ import typer
 from rich.markup import escape
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_path
+from mindroom.constants import RuntimePaths, env_key_for_provider
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.matrix.health import (
     MSC4186_UNSTABLE_FEATURE,
     matrix_versions_url,
@@ -32,6 +36,8 @@ from mindroom.matrix.provisioning_env import (
     registration_token_from_env,
 )
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.providers.model_http_client import closing_model_connections
+from mindroom.providers.model_loading import model_uses_own_credential
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -40,8 +46,7 @@ from .config import activate_cli_runtime, console, load_config_quiet
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from anthropic import APIStatusError
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError
 
     from mindroom.config.models import ModelConfig
 
@@ -215,9 +220,6 @@ _PROVIDER_VALIDATE_URLS: dict[str, str] = {
 
 def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
     """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
-    # model_loading pulls in the Agno runtime, which doctor only needs once a provider is checked.
-    from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
-
     try:
         return [
             model
@@ -326,20 +328,19 @@ def _validate_provider_key(
 
 
 def _classify_vertexai_claude_error(
-    exc: APIStatusError
+    exc: ProviderError
     | DefaultCredentialsError
     | RefreshError
+    | TransportError
     | RuntimeError
     | TypeError
-    | ValueError
-    | httpx.HTTPError,
+    | ValueError,
 ) -> tuple[bool | None, str]:
     """Classify one Vertex AI Claude validation failure for doctor output."""
-    from anthropic import APIStatusError  # noqa: PLC0415
     from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
 
-    if isinstance(exc, APIStatusError):
-        return False, _vertexai_claude_api_error_detail(exc)
+    if isinstance(exc, ProviderError) and exc.status_code is not None:
+        return False, _vertexai_claude_api_error_detail(exc.status_code, str(exc))
     if isinstance(exc, DefaultCredentialsError):
         return None, str(exc)
     if isinstance(exc, RefreshError):
@@ -347,7 +348,7 @@ def _classify_vertexai_claude_error(
     return None, str(exc)
 
 
-def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
+def _vertexai_claude_api_error_detail(status_code: int, message: str) -> str:
     """Turn a Vertex Claude API error into an actionable doctor message.
 
     Model availability on Vertex is per project and region: a project can have
@@ -356,24 +357,27 @@ def _vertexai_claude_api_error_detail(exc: APIStatusError) -> str:
     wrong for Vertex (current-generation ids are bare, e.g. the anthropic
     default; older ones are dated snapshots with an @ separator).
     """
-    if exc.status_code == httpx.codes.NOT_FOUND:
+    if status_code == httpx.codes.NOT_FOUND:
         return (
             "HTTP 404: model not available in this project/region — verify the Vertex model id form "
             "(bare current-generation id or dated @ snapshot) and that Anthropic models are enabled "
-            f"in the project's Model Garden ({exc.message})"
+            f"in the project's Model Garden ({message})"
         )
-    if exc.status_code == httpx.codes.FORBIDDEN:
-        if "SERVICE_DISABLED" in exc.message:
+    if status_code == httpx.codes.FORBIDDEN:
+        if "SERVICE_DISABLED" in message:
             return "HTTP 403: the Vertex AI API (aiplatform.googleapis.com) is not enabled in this project"
         return "HTTP 403: permission denied — check the credentials' IAM access to Vertex AI in this project"
-    return f"HTTP {exc.status_code}"
+    return f"HTTP {status_code}"
 
 
 def _validate_vertexai_claude_connection(
     model_config: ModelConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
-    """Validate the configured Vertex AI Claude model with the runtime request path."""
+    """Validate the configured Vertex AI Claude model with one tiny request through the runtime's Claude adapter.
+
+    An unreachable endpoint or token service leaves the check inconclusive rather than failed.
+    """
     extra_kwargs = dict(model_config.extra_kwargs or {})
     project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
     region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
@@ -387,45 +391,30 @@ def _validate_vertexai_claude_connection(
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    client_params = dict(extra_kwargs.get("client_params") or {})
-    google_application_credentials = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if "credentials" not in client_params and google_application_credentials is not None:
-        from mindroom.providers.google_adc import load_google_application_credentials  # noqa: PLC0415
+    from google.auth.exceptions import DefaultCredentialsError, RefreshError, TransportError  # noqa: PLC0415
 
-        try:
-            client_params["credentials"] = load_google_application_credentials(str(google_application_credentials))
-        except PermanentStartupError as exc:
-            return False, str(exc)
-    if client_params:
-        extra_kwargs["client_params"] = client_params
+    # The anthropic SDK loads only when a Vertex Claude model is checked.
+    from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
 
-    extra_kwargs.setdefault("project_id", project_id)
-    extra_kwargs.setdefault("region", region)
-    extra_kwargs.setdefault("timeout", 10)
-
-    from agno.models.vertexai.claude import Claude as VertexAIClaude  # noqa: PLC0415
-    from anthropic import APIStatusError  # noqa: PLC0415
-    from google.auth.exceptions import DefaultCredentialsError, RefreshError  # noqa: PLC0415
-
+    probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs}})
+    request = ModelRequest(
+        messages=[Message(role="user", content="Reply with OK.")],
+        overrides=RequestOverrides(max_output_tokens=1, prompt_cache=False, disable_thinking=True),
+        stream=False,
+    )
     try:
-        model = VertexAIClaude(id=model_config.id, **extra_kwargs)
-        request_kwargs = model.get_request_params().copy()
-        request_kwargs["model"] = model_config.id
-        request_kwargs["messages"] = [{"role": "user", "content": "Reply with OK."}]
-        request_kwargs.setdefault("max_tokens", 1)
-        request_kwargs["timeout"] = request_kwargs.get("timeout", 10)
-        client = model.get_client()
-        client.messages.create(
-            **request_kwargs,
-        )
+        provider = build_provider(probe_config, runtime_paths)
+        asyncio.run(closing_model_connections(complete(provider, request)))
+    except PermanentStartupError as exc:
+        return False, str(exc)
     except (
-        APIStatusError,
+        ProviderError,
         DefaultCredentialsError,
         RefreshError,
+        TransportError,
         RuntimeError,
         TypeError,
         ValueError,
-        httpx.HTTPError,
     ) as exc:
         return _classify_vertexai_claude_error(exc)
 

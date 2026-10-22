@@ -39,17 +39,19 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
+    Wire,
+    encoded_response,
     expected_parsed,
     expected_stop_reason,
     golden_request,
     load_golden,
     normalized_parsed,
     normalized_request,
+    sse_response,
 )
-from tests.providers.openai_family_support import encoded_response, write_cli_logins
+from tests.providers.openai_family_support import write_cli_logins
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -74,23 +76,6 @@ _BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "mes
 _SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
 
 
-class _Wire:
-    """Records the requests providers send and answers each from a queue; the last answer repeats."""
-
-    def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
-        self.replies: list[httpx.Response | Callable[[], httpx.Response]] = []
-        self.transport = httpx.MockTransport(self._respond)
-
-    def _respond(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
-        return reply if isinstance(reply, httpx.Response) else reply()
-
-    def body(self, index: int = -1) -> dict[str, Any]:
-        return json.loads(self.requests[index].content)
-
-
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in list(os.environ):
@@ -99,10 +84,10 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
+def wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
     """Answer requests sent through the shared model HTTP client, as the OpenAI-family and Claude routes send."""
-    recorder = _Wire()
-    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", httpx.AsyncClient(transport=recorder.transport).send)
+    recorder = Wire()
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", recorder.client.send)
     return recorder
 
 
@@ -117,13 +102,6 @@ def _bare_adapter(provider: ModelProvider) -> ModelProvider:
     while isinstance(provider, WrappedProvider):
         provider = provider.inner
     return provider
-
-
-def _sse(events: list[dict[str, Any]], *, named: bool = False) -> httpx.Response:
-    lines = "".join(
-        (f"event: {event['type']}\n" if named else "") + f"data: {json.dumps(event)}\n\n" for event in events
-    )
-    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=lines.encode())
 
 
 def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
@@ -183,6 +161,23 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
         ChatAdapter,
         "OpenAI",
         "OpenAI Chat",
+    ),
+    "openai-unset-older-model": (
+        {"provider": "openai", "id": "gpt-4o"},
+        ChatAdapter,
+        "OpenAI",
+        "OpenAI Chat",
+    ),
+    "openai-responses-custom-endpoint": (
+        {
+            "provider": "openai",
+            "id": "reasoning-alias",
+            "api": "responses",
+            "extra_kwargs": {"base_url": "http://x/v1"},
+        },
+        ResponsesAdapter,
+        "OpenAI",
+        "OpenAI Responses",
     ),
     "codex": ({"provider": "codex", "id": "gpt-6.1-sol"}, ResponsesAdapter, "OpenAI Codex", "OpenAI Codex Responses"),
     "openai_codex": (
@@ -285,7 +280,7 @@ async def test_api_key_precedence(
     dashboard_key: str | None,
     expected_key: str,
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     """The key the dashboard saved for the model beats a configured key, which beats the provider's shared key."""
     credentials = get_runtime_shared_credentials_manager(runtime_paths)
@@ -329,7 +324,7 @@ _KEY_HEADERS: dict[str, tuple[dict[str, Any], str, str]] = {
 async def test_the_dashboard_key_reaches_every_keyed_family(
     family: str,
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     """A key the dashboard saved for the model reaches the wire on every family that sends one."""
     fields, header, template = _KEY_HEADERS[family]
@@ -353,13 +348,91 @@ async def test_the_dashboard_key_reaches_every_keyed_family(
     assert wire.requests[0].headers[header] == template.format(key="sk-dashboard")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"provider": "openrouter", "id": "z-ai/glm-5.3"},
+        {"provider": "zai", "id": "glm-5.3"},
+        {"provider": "llama_cpp", "id": "qwen"},
+        {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"},
+    ],
+    ids=lambda fields: fields["provider"],
+)
+async def test_a_configured_key_beats_the_shared_key_on_routes_with_their_own_key_rules(
+    fields: dict[str, Any],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(fields["provider"], {"api_key": "sk-shared"})
+    extra_kwargs = {"client_params": {"transport": wire.transport}} if fields["provider"] == "ollama" else {}
+    config = Config(models={"target": ModelConfig(api_key="sk-config", extra_kwargs=extra_kwargs, **fields)})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-config"
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer tok"
+    assert "x-api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "kimi", "vertexai_claude", "bedrock_claude"])
+async def test_routes_without_api_keys_never_send_a_configured_one(
+    provider: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """CLI-login, Google Cloud, and AWS routes authenticate their own way, so a stray configured key stays local."""
+    logins = write_cli_logins(tmp_path)
+    fields: dict[str, dict[str, Any]] = {
+        "codex": {"id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": logins["<codex_home>"]}},
+        "kimi": {"id": "k3", "extra_kwargs": {"kimi_home": logins["<kimi_home>"]}},
+        "vertexai_claude": {
+            "id": "claude-sonnet-5-5",
+            "extra_kwargs": {
+                "project_id": "p",
+                "region": "us-east5",
+                "client_params": {"credentials": Credentials(token=_GOOGLE_TOKEN)},
+            },
+        },
+        "bedrock_claude": {"id": "anthropic.claude-sonnet-5-5", "extra_kwargs": _BEDROCK_KEYS},
+    }
+    model_config = ModelConfig(provider=provider, api_key="sk-config", **fields[provider])
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert all("sk-config" not in value for value in wire.requests[0].headers.values())
+
+
 # --- One golden per family, through the registry ------------------------------------------------------------
 
 
 _GOLDEN_FAMILIES = sorted(path.name for path in FIXTURE_ROOT.iterdir() if path.is_dir())
 
 
-def _golden_model_config(golden: dict[str, Any], root: Path, wire: _Wire) -> ModelConfig:
+def _golden_model_config(golden: dict[str, Any], root: Path, wire: Wire) -> ModelConfig:
     """Return the golden's model config with what JSON cannot carry: CLI logins, Google credentials, transports."""
     fields = deepcopy(golden["input"]["model_config"])
     extra_kwargs = fields.setdefault("extra_kwargs", {})
@@ -380,20 +453,13 @@ def _golden_model_config(golden: dict[str, Any], root: Path, wire: _Wire) -> Mod
     return ModelConfig(**fields)
 
 
-def _golden_reply(response_raw: dict[str, Any]) -> httpx.Response:
-    if "ndjson" in response_raw:
-        content = b"".join(json.dumps(event).encode() + b"\n" for event in response_raw["ndjson"])
-        return httpx.Response(response_raw["status"], headers=response_raw["headers"], content=content)
-    return encoded_response(response_raw)
-
-
 async def _replay(
     golden: dict[str, Any],
     config: Config,
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> list[StreamEvent]:
-    wire.replies.append(lambda: _golden_reply(golden["response_raw"]))
+    wire.replies.append(lambda _request: encoded_response(golden["response_raw"]))
     provider = build_model_provider(config, runtime_paths)
     return [event async for event in provider.stream(golden_request(golden["input"]))]
 
@@ -404,7 +470,7 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
     family: str,
     tmp_path: Path,
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     """The registry-built provider sends each family's plain turn byte for byte and parses its reply as recorded."""
     golden = load_golden(FIXTURE_ROOT / family / "plain_turn.json")
@@ -425,7 +491,7 @@ async def test_a_golden_of_every_family_replays_through_the_registry(
 async def test_codex_requests_carry_the_configured_default_instructions(
     tmp_path: Path,
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     golden = load_golden(FIXTURE_ROOT / "codex" / "plain_turn.json")
     model = _golden_model_config(golden, tmp_path, wire)
@@ -441,7 +507,7 @@ async def test_codex_requests_carry_the_configured_default_instructions(
 @pytest.mark.asyncio
 async def test_requests_are_logged_under_the_storage_root_with_the_model_settings(
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     """With ``debug.log_llm_requests``, each request and its usage land in the day's log, keyed by the model name."""
     golden = load_golden(FIXTURE_ROOT / "openai_chat" / "plain_turn.json")
@@ -479,7 +545,7 @@ async def test_requests_are_logged_under_the_storage_root_with_the_model_setting
 # --- The refusal and malformed tool-call policies, on real routes -------------------------------------------
 
 
-def _claude_refusal() -> httpx.Response:
+def _claude_refusal(_request: httpx.Request) -> httpx.Response:
     message = {
         "id": "msg_1",
         "type": "message",
@@ -499,13 +565,13 @@ def _claude_refusal() -> httpx.Response:
         },
         {"type": "message_stop"},
     ]
-    return _sse(events, named=True)
+    return sse_response(events, named=True)
 
 
 @pytest.mark.asyncio
 async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     runtime_paths: RuntimePaths,
-    wire: _Wire,
+    wire: Wire,
 ) -> None:
     """A refused Claude turn raises the typed refusal after its usage; neither a retry nor a media-free resend follows."""
     config = Config(models={"claude": ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="sk-test")})
@@ -528,17 +594,19 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     assert (usage_line["input_tokens"], usage_line["output_tokens"]) == (40, 9)
 
 
-def _gemini_malformed() -> httpx.Response:
+def _gemini_malformed(_request: httpx.Request) -> httpx.Response:
     candidate = {"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}
-    return _sse([{"candidates": [candidate]}])
+    return sse_response([{"candidates": [candidate]}])
 
 
-def _gemini_text() -> httpx.Response:
+def _gemini_text(_request: httpx.Request) -> httpx.Response:
     candidate = {"content": {"role": "model", "parts": [{"text": "Sunny."}]}, "finishReason": "STOP", "index": 0}
-    return _sse([{"candidates": [candidate], "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9}}])
+    return sse_response(
+        [{"candidates": [candidate], "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9}}],
+    )
 
 
-def _gemini_config(wire: _Wire) -> Config:
+def _gemini_config(wire: Wire) -> Config:
     client = httpx.AsyncClient(transport=wire.transport)
     extra_kwargs = {"client_params": {"http_options": {"httpx_async_client": client}}}
     model = ModelConfig(provider="google", id="gemini-3.8-flash", api_key="sk-test", extra_kwargs=extra_kwargs)
@@ -549,7 +617,7 @@ def _gemini_config(wire: _Wire) -> Config:
 async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_stored(
     runtime_paths: RuntimePaths,
 ) -> None:
-    wire = _Wire()
+    wire = Wire()
     wire.replies.extend([_gemini_malformed, _gemini_text])
     provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
     messages = [_user("Weather in Paris?")]
@@ -566,7 +634,7 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
 
 @pytest.mark.asyncio
 async def test_a_second_malformed_tool_call_fails_the_request(runtime_paths: RuntimePaths) -> None:
-    wire = _Wire()
+    wire = Wire()
     wire.replies.append(_gemini_malformed)
     provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
 

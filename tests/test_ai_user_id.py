@@ -10,12 +10,10 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent as AgnoAgent
-from agno.db.sqlite import SqliteDb
 from agno.media import File
 from agno.metrics import RunMetrics
 from agno.models.message import Message
-from agno.models.response import ModelResponse, ToolExecution
+from agno.models.response import ToolExecution
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -30,7 +28,6 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
-from agno.tools.function import Function
 from structlog.testing import capture_logs
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
@@ -51,7 +48,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DebugConfig, ModelConfig
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -68,11 +65,10 @@ from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import EnrichmentItem, render_enrichment_block, render_transient_context
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
-from mindroom.llm_request_logging import install_llm_request_logging, stream_with_llm_request_log_context
+from mindroom.llm_request_logging import stream_with_llm_request_log_context
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import (
     _paused_with_committed_presentation,
     _prepare_memory_and_model_context,
@@ -1773,109 +1769,6 @@ class TestUserIdPassthrough:
         ]
         assert mock_agent.arun.call_count == 1
 
-    @pytest.mark.asyncio
-    async def test_stream_agent_response_keeps_request_log_context_for_deferred_model_call(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Streaming request logs must keep the bound context until the deferred model call runs."""
-
-        class _DeferredLoggingModel:
-            def __init__(self) -> None:
-                self.id = "test-model"
-                self.provider = "test"
-                self.system_prompt = None
-                self.temperature = 0.7
-                self.client = None
-                self.async_client = None
-
-            async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-                return ModelResponse(content="ok")
-
-            async def ainvoke_stream(
-                self,
-                *_args: object,
-                **_kwargs: object,
-            ) -> AsyncIterator[ModelResponse]:
-                yield ModelResponse(content="ok")
-
-        class _DeferredLoggingAgent:
-            def __init__(self, model: _DeferredLoggingModel) -> None:
-                self.model = model
-                self.name = "GeneralAgent"
-                self.add_history_to_context = False
-                self.db = None
-
-            async def arun(self, prompt: str | list[Message], **_kwargs: object) -> AsyncIterator[object]:
-                prompt_messages = prompt if isinstance(prompt, list) else [Message(role="user", content=prompt)]
-                async for _chunk in self.model.ainvoke_stream(
-                    messages=prompt_messages,
-                    assistant_message=Message(role="assistant"),
-                    tools=[],
-                ):
-                    pass
-                yield RunContentEvent(content="Deferred stream")
-
-        prepared_prompt = "prepared prompt"
-        model = _DeferredLoggingModel()
-        install_llm_request_logging(
-            model,
-            agent_name="general",
-            debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
-            default_log_dir=tmp_path / "unused",
-        )
-        agent = _DeferredLoggingAgent(model)
-        config = _config().model_copy(
-            update={
-                "debug": DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
-            },
-        )
-
-        with (
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_prompt_result(agent, prompt=prepared_prompt)
-            chunks = [
-                chunk
-                async for chunk in stream_agent_response(
-                    make_turn_context(
-                        "general",
-                        session_id="session1",
-                        correlation_id="$reply:example.com",
-                        reply_to_event_id="$reply:example.com",
-                        room_id="!room:example.com",
-                        thread_id="$thread:example.com",
-                    ),
-                    prompt="raw prompt",
-                    model_prompt="expanded prompt",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=config,
-                )
-            ]
-
-        assert any(isinstance(chunk, RunContentEvent) and chunk.content == "Deferred stream" for chunk in chunks)
-
-        log_files = list(tmp_path.glob("llm-requests-*.jsonl"))
-        assert len(log_files) == 1
-        entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-        assert len(entries) == 1
-        assert entries[0]["agent_id"] == "general"
-        assert entries[0]["session_id"] == "session1"
-        assert entries[0]["room_id"] == "!room:example.com"
-        assert entries[0]["thread_id"] == "$thread:example.com"
-        assert entries[0]["reply_to_event_id"] == "$reply:example.com"
-        assert entries[0]["correlation_id"] == "$reply:example.com"
-        assert entries[0]["current_turn_prompt"] == "raw prompt"
-        assert entries[0]["model_prompt"] == "expanded prompt"
-        assert entries[0]["full_prompt"] == prepared_prompt
-        assert entries[0]["messages"][0]["role"] == "user"
-        logged_content = entries[0]["messages"][0]["content"]
-        if isinstance(logged_content, list):
-            assert len(logged_content) == 1
-            assert logged_content[0]["content"] == prepared_prompt
-        else:
-            assert logged_content == prepared_prompt
-
     @pytest.mark.parametrize(
         ("event", "expected"),
         [
@@ -3329,71 +3222,6 @@ class TestUserIdPassthrough:
 
         assert [entry.tool_call_id for entry in paused.tool_trace] == ["call-stream-approval"]
         assert restored.final_text() == "Before approval.\n\nAfter approval."
-
-    @pytest.mark.asyncio
-    async def test_stream_agent_response_keeps_real_agno_confirmation_run_paused(self, tmp_path: Path) -> None:
-        """Consuming Agno's pause event must not close its stream as a cancelled client."""
-        session_db = tmp_path / "streamed-pause.db"
-
-        def run_shell_command(args: list[str]) -> str:
-            return " ".join(args)
-
-        def new_agent() -> AgnoAgent:
-            return AgnoAgent(
-                id="general",
-                model=SyntheticModel(
-                    id="synthetic",
-                    seed=1,
-                    min_response_chars=20,
-                    max_response_chars=20,
-                    chars_per_second=0,
-                    tool_call_probability=1,
-                ),
-                tools=[
-                    Function(
-                        name="run_shell_command",
-                        entrypoint=run_shell_command,
-                        requires_confirmation=True,
-                    ),
-                ],
-                db=SqliteDb(db_file=str(session_db), session_table="sessions"),
-            )
-
-        agent = new_agent()
-        storage = _SessionStorage()
-        with (
-            patch(
-                "mindroom.ai.open_resolved_scope_session_context",
-                new=lambda **_: _open_agent_scope_context(storage),
-            ),
-            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        ):
-            mock_prepare.return_value = _prepared_prompt_result(agent)
-            with pytest.raises(ResponsePausedForApproval) as raised:
-                async for _chunk in stream_agent_response(
-                    make_turn_context(
-                        "general",
-                        session_id="session1",
-                        requester_id="@user:localhost",
-                        reply_to_event_id="$source",
-                    ),
-                    prompt="Run the action",
-                    runtime_paths=_runtime_paths(tmp_path),
-                    config=_config(),
-                    supports_native_tool_approval=True,
-                ):
-                    pass
-
-        # Agno persists a GeneratorExit cancellation on a detached task, so
-        # give that write a chance to expose an incorrectly closed stream.
-        await asyncio.sleep(0.1)
-        reader = new_agent()
-        session = await reader.aget_session(session_id="session1", user_id="@user:localhost")
-        persisted = None if session is None else session.get_run(raised.value.paused.run_id)
-
-        assert persisted is not None
-        assert persisted.status == RunStatus.paused
-        assert len(persisted.requirements or []) == 1
 
     @pytest.mark.asyncio
     async def test_collected_agent_pause_carries_its_ordered_presentation(self) -> None:

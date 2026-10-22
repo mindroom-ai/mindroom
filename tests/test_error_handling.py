@@ -14,7 +14,6 @@ from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.error_handling import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     MinimalModeUnavailableError,
-    ModelSafeguardRefusalError,
     _extract_provider_from_error,
     get_user_friendly_error_message,
     is_model_safeguard_refusal,
@@ -72,20 +71,9 @@ def test_generic_api_word_not_false_positive() -> None:
     assert "Error:" in message
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        ModelSafeguardRefusalError(
-            message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
-            model_name="Claude",
-            model_id="claude-fable-5-1",
-        ),
-        ModelSafeguardRefusal(provider="Anthropic"),
-    ],
-    ids=["agno", "owned"],
-)
-def test_model_safeguard_refusal_gives_actionable_guidance(error: Exception) -> None:
-    """Explicit safeguard stops from either provider layer should not look like empty model responses."""
+def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
+    """An explicit safeguard stop should not look like an empty model response."""
+    error = ModelSafeguardRefusal(provider="Anthropic")
     assert is_model_safeguard_refusal(error)
 
     message = get_user_friendly_error_message(error, "mind")

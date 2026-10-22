@@ -2,7 +2,6 @@
 
 It streams seeded Lorem Ipsum at a fixed rate and occasionally calls the shell tool, so a response replays
 exactly from the seed and the conversation's user messages.
-``synthetic_model.py`` serves the same plan to the Agno-backed runtime until the owned runtime replaces it.
 """
 
 from __future__ import annotations

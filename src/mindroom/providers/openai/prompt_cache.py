@@ -1,29 +1,12 @@
-"""Preserve the shared agent prefix at the OpenAI Responses wire boundary."""
+"""Keep the shared agent instructions a cacheable prefix of an OpenAI Responses request."""
 
 from __future__ import annotations
 
-import os
-import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
-if TYPE_CHECKING:
-    from agno.models.openai import OpenAIResponses
-
-
-def supports_openai_cache_breakpoints(model: OpenAIResponses) -> bool:
-    """Enable explicit breakpoints only for supported models on the public API."""
-    version_match = re.match(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)", model.id)
-    if version_match is None or (int(version_match[1]), int(version_match[2] or 0)) < (5, 6):
-        return False
-    clients = [client for client in (model.client, model.async_client) if client is not None]
-    if clients:
-        base_urls = [client.base_url for client in clients]
-    else:
-        configured_url = (model.client_params or {}).get("base_url", model.base_url)
-        base_urls = [configured_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"]
-    return all(str(url).rstrip("/") == "https://api.openai.com/v1" for url in base_urls)
+__all__ = ["formatted_input_with_shared_system_prefix"]
 
 
 def formatted_input_with_shared_system_prefix(

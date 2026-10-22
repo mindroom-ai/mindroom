@@ -104,6 +104,109 @@ class PacedBytes(httpx.AsyncByteStream):
             raise httpx.ReadError(msg)
 
 
+class Wire:
+    """Records the requests providers send and answers each from a queue; the last answer repeats.
+
+    A callable answer is called with the request, for replies that depend on it or must be built fresh.
+    """
+
+    def __init__(self, *replies: httpx.Response | Callable[[httpx.Request], httpx.Response]) -> None:
+        self.requests: list[httpx.Request] = []
+        self.replies = list(replies)
+        self.transport = httpx.MockTransport(self.respond)
+        self.client = httpx.AsyncClient(transport=self.transport)
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        """Record ``request`` and return the next answer."""
+        self.requests.append(request)
+        reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return reply if isinstance(reply, httpx.Response) else reply(request)
+
+    def body(self, index: int = -1) -> dict[str, Any]:
+        """Return the JSON body of one recorded request, the last by default."""
+        return json.loads(self.requests[index].content)
+
+
+def _streamed(
+    chunks: list[bytes],
+    content_type: str,
+    *,
+    status: int,
+    pause_seconds: float,
+    drop: bool,
+) -> httpx.Response:
+    headers = {"content-type": content_type}
+    if pause_seconds or drop:
+        return httpx.Response(
+            status,
+            headers=headers,
+            stream=PacedBytes(chunks, pause_seconds=pause_seconds, drop=drop),
+        )
+    return httpx.Response(status, headers=headers, content=b"".join(chunks))
+
+
+def sse_response(
+    events: Sequence[dict[str, Any] | str],
+    *,
+    named: bool = False,
+    status: int = 200,
+    pause_seconds: float = 0.0,
+    drop: bool = False,
+) -> httpx.Response:
+    """Return a server-sent event stream: each dict as JSON data (``named`` adds its ``type`` as the event), a string as is.
+
+    ``pause_seconds`` sends each event after a pause, and ``drop`` ends the stream with a transport error.
+    """
+    chunks = [
+        (
+            f"data: {event}\n\n".encode()
+            if isinstance(event, str)
+            else (f"event: {event['type']}\n" if named else "").encode() + f"data: {json.dumps(event)}\n\n".encode()
+        )
+        for event in events
+    ]
+    return _streamed(chunks, "text/event-stream", status=status, pause_seconds=pause_seconds, drop=drop)
+
+
+def ndjson_response(
+    events: Sequence[dict[str, Any]],
+    *,
+    status: int = 200,
+    pause_seconds: float = 0.0,
+    drop: bool = False,
+) -> httpx.Response:
+    """Return a newline-delimited JSON stream, as Ollama sends; the options are those of ``sse_response``."""
+    chunks = [json.dumps(event).encode() + b"\n" for event in events]
+    return _streamed(chunks, "application/x-ndjson", status=status, pause_seconds=pause_seconds, drop=drop)
+
+
+def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
+    """Build the HTTP response a golden's ``response_raw`` describes: an SSE or ndjson stream, or a JSON body.
+
+    Tests may add ``pause_seconds`` to send each event after a pause, and ``drop_connection`` to end the stream
+    with a transport error instead of EOF.
+    """
+    status, headers = response_raw["status"], response_raw["headers"]
+    if "json" in response_raw:
+        return httpx.Response(status, headers=headers, content=json.dumps(response_raw["json"]).encode())
+    if "ndjson" in response_raw:
+        chunks = [json.dumps(event).encode() + b"\n" for event in response_raw["ndjson"]]
+    else:
+        chunks = [
+            (f"event: {event['event']}\n" if "event" in event else "").encode()
+            + f"data: {data if isinstance(data := event['data'], str) else json.dumps(data)}\n\n".encode()
+            for event in response_raw["sse"]
+        ]
+    if "pause_seconds" in response_raw or "drop_connection" in response_raw:
+        stream = PacedBytes(
+            chunks,
+            pause_seconds=response_raw.get("pause_seconds", 0.0),
+            drop=response_raw.get("drop_connection", False),
+        )
+        return httpx.Response(status, headers=headers, stream=stream)
+    return httpx.Response(status, headers=headers, content=b"".join(chunks))
+
+
 @dataclass(frozen=True)
 class Replay:
     """What the owned adapter sent and produced for one golden."""

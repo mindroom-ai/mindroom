@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -659,23 +660,171 @@ async def test_temperature_override_is_left_to_default_sampling_models(tmp_path:
     assert "temperature" not in built.body()
 
 
-@pytest.mark.asyncio
-async def test_decisions_without_tools_disable_tool_selection(tmp_path: Path) -> None:
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "{}"}, finish_reason="stop")))
-    tool = ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object"})
+_DECISION_TOOL = ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object"})
+_DECISION_ROUTES = {
+    "openai-chat": (_OPENAI_CHAT, "text"),
+    "openai-responses": (_OPENAI_RESPONSES, "responses"),
+    "cerebras": ({"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "k"}, "text"),
+    "groq": ({"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "k"}, "text"),
+    "openrouter": ({"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"}, "text"),
+}
 
+
+def _decision_reply(kind: str) -> dict[str, Any]:
+    if kind == "responses":
+        return _responses_reply(*_text_events("{}"), _completed())
+    return _chat_reply(_chunk({"content": "{}"}, finish_reason="stop"))
+
+
+async def _regular_and_decision_bodies(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    request: ModelRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Send ``request`` once as a reply and once as a decision, returning both wire bodies."""
+    reply_kind = "responses" if model_config.get("api") == "responses" else "text"
+    built = _Built(tmp_path, model_config, _decision_reply(reply_kind))
+    await _turn(built, request)
     with without_provider_tools():
-        await _turn(built, ModelRequest(messages=[_user()], tools=[tool]))
-
-    assert built.body()["tool_choice"] == "none"
+        await _turn(built, request)
+    return built.body(0), built.body(1)
 
 
 @pytest.mark.asyncio
-async def test_decisions_reject_native_search_models(tmp_path: Path) -> None:
-    built = _Built(tmp_path, {**_OPENAI_CHAT, "id": "gpt-6-search-preview"}, _chat_reply())
+@pytest.mark.parametrize("route", sorted(_DECISION_ROUTES))
+@pytest.mark.parametrize("source", ["unset", "request_params", "extra_body"])
+async def test_decisions_disable_tool_selection_after_authored_overrides(
+    tmp_path: Path,
+    route: str,
+    source: str,
+) -> None:
+    """A decision never selects a function, whatever the config authored, and keeps the reply's tool prefix."""
+    model_config = deepcopy(_DECISION_ROUTES[route][0])
+    if source == "request_params":
+        model_config["extra_kwargs"] = {"request_params": {"tool_choice": "required"}}
+    elif source == "extra_body":
+        model_config["extra_kwargs"] = {"request_params": {"extra_body": {"tool_choice": "required"}}}
+    authored = deepcopy(model_config)
 
-    with without_provider_tools(), pytest.raises(ValueError, match="native Chat Completions search"):
-        await _turn(built, ModelRequest(messages=[_user()]))
+    regular, decision = await _regular_and_decision_bodies(
+        tmp_path,
+        model_config,
+        ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]),
+    )
+
+    assert decision["tool_choice"] == "none"
+    assert regular.get("tool_choice") == (None if source == "unset" else "required")
+    assert decision["tools"] == regular["tools"]
+    assert model_config == authored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", ["web_search", "code_interpreter", "mcp", "file_search"])
+async def test_responses_decisions_disable_authored_hosted_tools(tmp_path: Path, tool_type: str) -> None:
+    """Authored hosted tools stay in the request but cannot run, because the decision selects no tool."""
+    model_config = {**_OPENAI_RESPONSES, "extra_kwargs": {"request_params": {"tools": [{"type": tool_type}]}}}
+
+    regular, decision = await _regular_and_decision_bodies(tmp_path, model_config, ModelRequest(messages=[_user()]))
+
+    assert decision["tool_choice"] == "none"
+    assert decision["tools"] == regular["tools"] == [{"type": tool_type}]
+
+
+@pytest.mark.asyncio
+async def test_responses_decisions_keep_the_deferred_tool_search_prefix(tmp_path: Path) -> None:
+    request = ModelRequest(
+        messages=[_user()],
+        tools=[_DECISION_TOOL],
+        deferred_tool_names=frozenset({"get_weather"}),
+    )
+
+    regular, decision = await _regular_and_decision_bodies(tmp_path, _OPENAI_RESPONSES, request)
+
+    assert decision["tool_choice"] == "none"
+    assert decision["tools"] == regular["tools"]
+    assert decision["tools"][0] == {"type": "tool_search"}
+    assert decision["tools"][1]["defer_loading"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "error"),
+    [
+        ({**_OPENAI_CHAT, "id": "gpt-6-search-preview"}, "native Chat Completions search"),
+        ({**_OPENAI_CHAT, "id": "gpt-5-search-api"}, "native Chat Completions search"),
+        (
+            {**_OPENAI_CHAT, "extra_kwargs": {"request_params": {"web_search_options": {}}}},
+            "native Chat Completions search",
+        ),
+        (
+            {**_OPENAI_CHAT, "extra_kwargs": {"request_params": {"extra_body": {"web_search_options": {}}}}},
+            "native Chat Completions search",
+        ),
+        ({**_DECISION_ROUTES["openrouter"][0], "id": "openai/gpt-6-astra:online"}, "OpenRouter search"),
+        (
+            {**_DECISION_ROUTES["openrouter"][0], "extra_kwargs": {"models": ["openai/gpt-6-astra:online"]}},
+            "OpenRouter search",
+        ),
+        (
+            {**_DECISION_ROUTES["openrouter"][0], "extra_kwargs": {"request_params": {"plugins": [{"id": "web"}]}}},
+            "OpenRouter search",
+        ),
+        ({**_DECISION_ROUTES["groq"][0], "id": "groq/compound"}, "Groq Compound"),
+        ({**_DECISION_ROUTES["groq"][0], "id": "compound-beta-mini"}, "Groq Compound"),
+        (
+            {
+                **_DECISION_ROUTES["groq"][0],
+                "extra_kwargs": {"request_params": {"compound_custom": {"tools": {"enabled_tools": ["web_search"]}}}},
+            },
+            "Groq Compound",
+        ),
+        (
+            {
+                **_DECISION_ROUTES["groq"][0],
+                "extra_kwargs": {"request_params": {"extra_body": {"model": "groq/compound"}}},
+            },
+            "Groq Compound",
+        ),
+    ],
+    ids=[
+        "chat-search-preview",
+        "chat-search-api",
+        "chat-web-search-options",
+        "chat-extra-body-web-search-options",
+        "openrouter-online-model",
+        "openrouter-online-fallback-model",
+        "openrouter-web-plugin",
+        "groq-compound",
+        "groq-compound-beta-mini",
+        "groq-compound-custom",
+        "groq-extra-body-compound-model",
+    ],
+)
+async def test_decisions_fail_before_sending_on_routes_whose_hosted_search_always_runs(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    error: str,
+) -> None:
+    built = _Built(tmp_path, model_config, _chat_reply())
+
+    with without_provider_tools(), pytest.raises(ValueError, match=error):
+        await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]))
+
+    assert built.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_openrouter_web_plugin_still_lets_decisions_run_without_tools(tmp_path: Path) -> None:
+    plugins = [{"id": "web", "enabled": False}, {"id": "response-healing"}]
+    model_config = {**_DECISION_ROUTES["openrouter"][0], "extra_kwargs": {"request_params": {"plugins": plugins}}}
+
+    regular, decision = await _regular_and_decision_bodies(
+        tmp_path,
+        model_config,
+        ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]),
+    )
+
+    assert decision == {**regular, "tool_choice": "none"}
 
 
 @pytest.mark.asyncio

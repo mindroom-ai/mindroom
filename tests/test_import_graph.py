@@ -137,7 +137,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
+    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
@@ -433,12 +433,6 @@ print(json.dumps({
         "card_reserve_owner": "mindroom.event_journal.approval_card_state",
         "dispatcher_owner": "mindroom.event_journal.approvals",
     }
-
-
-def test_openai_wire_models_import_only_the_openai_sdk() -> None:
-    """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
-    non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
-    _assert_probe_clean("mindroom.providers.openai_models", non_openai_roots)
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.providers.model_loading import canonical_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import media_fallback_stream
@@ -50,7 +51,7 @@ def stream_idle_timeout_seconds(model_config: ModelConfig, runtime_paths: Runtim
     """
     if model_config.stream_idle_timeout_seconds is not None:
         return model_config.stream_idle_timeout_seconds or None
-    provider = model_config.provider.strip().lower().replace("-", "_")
+    provider = canonical_provider(model_config.provider)
     if provider in _LOCAL_STREAM_PROVIDERS or _sets_base_url(model_config.extra_kwargs):
         return None
     if (variable := _ENDPOINT_VARIABLES.get(provider)) and runtime_paths.env_value(variable):

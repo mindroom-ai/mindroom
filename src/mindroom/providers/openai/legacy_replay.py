@@ -13,7 +13,7 @@ from mindroom.llm.messages import Message
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ["repair_legacy_tool_replay", "split_combined_tool_results"]
+__all__ = ["repair_legacy_responses_span", "repair_legacy_tool_replay", "split_combined_tool_results"]
 
 
 # LEGACY_COMPAT: Combined Gemini tool-result messages.
@@ -82,3 +82,20 @@ def repair_legacy_tool_replay(messages: Sequence[Message]) -> list[Message]:
                 calls.append(call)
         repaired.append(replace(message, tool_calls=calls) if changed else message)
     return repaired
+
+
+# LEGACY_COMPAT: Responses history without reusable ordered provider output.
+# Legacy format: Agno-only Responses spans retain a lossy reasoning tail and original function-call item IDs.
+# Last legacy release: No universal writer cutoff; v2026.9.128 predates ordered capture in v2026.9.129,
+# but current stored, nonportable responses can still omit ordered output.
+# Handling: When ordered output cannot be reused, remove the tail and optional item IDs from request-only copies.
+# Coverage: tests/providers/test_openai_family_requests.py::test_legacy_responses_replay_rebuilds_calls_without_reasoning
+def repair_legacy_responses_span(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]]:
+    """Remove unverifiable replay remnants while preserving normalized call/result links."""
+    if not message.tool_calls:
+        return formatted_span[:1]
+    return [
+        {key: value for key, value in item.items() if key != "id"}
+        for item in formatted_span
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]

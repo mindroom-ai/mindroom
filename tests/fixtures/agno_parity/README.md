@@ -6,13 +6,12 @@ A deliberate change updates the golden in the same commit.
 
 ## Provider wire goldens (`providers/`)
 
-`providers/<family>/<scenario>.json` holds one provider request and its parsed reply.
-`tests/agno_parity/capture_providers.py` writes them and `tests/agno_parity/test_provider_goldens_current.py` proves the current code reproduces each one.
-Regenerate with `.venv/bin/python -m tests.agno_parity.capture_providers [family ...]`; a rerun without code changes rewrites identical files.
+`providers/<family>/<scenario>.json` holds one provider request and its parsed reply, captured from the Agno-backed provider layer before its removal.
+The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay every golden through the request pipeline; a deliberate wire change updates the golden in the same commit.
 
-### How a golden is captured
+### How the goldens were captured
 
-- The model is built by `get_model_instance` from `input.model_config`, so every hook production installs is active: request logging, the Claude prompt-cache ladder and history repairs, stream retry, and media fallback.
+- The model was built by the Agno-backed model loader from `input.model_config`, so every hook production installed was active: request logging, the Claude prompt-cache ladder and history repairs, stream retry, and media fallback.
 - The run-message patches that storage installs (`session_storage/agno_compat_run_messages.py`) are active, which is why every reply carries `provider_data.mindroom_model`.
 - `input.deferred_tool_search` installs the native or portable deferred tool search exactly as `agents.py` does, and `input.portable_replay` calls `configure_portable_replay` as history replay planning does.
 - `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.

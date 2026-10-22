@@ -60,7 +60,6 @@ Matrix sync callback
 | `judgment/cold_cache.py` | Decide from a thread's idle time and an opt-in judge whether the thread moves to the agent's cheap model |
 | `config/cold_cache.py` | Opt-in agent settings for the cold-cache judgment backend |
 | `providers/tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
-| `providers/groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
@@ -222,27 +221,25 @@ Matrix sync callback
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `providers/model_loading.py` | Model instantiation and provider-specific loader selection |
+| `providers/model_loading.py` | Which key a configured model authenticates with: provider spelling, the dashboard key, and the missing-key checks the CLI and dashboard report |
 | `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |
 | `providers/anthropic/repairs.py` | Replay-safe transforms of a Claude request body: citations, tool-result order, tool-search blocks, inline media budgets |
 | `providers/anthropic/prompt_cache.py` | The wire preparation of one Claude request body: history repairs, deferred tool search, tool choice, and the prompt-cache ladder |
-| `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker, the shared system prefix) shared by the Claude adapter, the OpenRouter Claude ladder, and the Agno path |
+| `providers/cache_ladder.py` | The Claude prompt-cache ladder primitives (breakpoint markers, message rungs, the tools marker, the shared system prefix) shared by the Claude adapter and the OpenRouter Claude ladder |
 | `providers/anthropic/native_compaction.py` | Claude native compaction: the compaction edit, the checkpoint replay projection, and the checkpoint recorded on each response |
 | `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
-| `providers/media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
-| `providers/model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
-| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
+| `providers/openai/` | Owned OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses shared-prefix split and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: the malformed tool-call guidance retry, portable deferred tool search, media fallback, stream retry with the idle limit, the typed safeguard refusal, and request logging |
-| `providers/registry.py` | `build_model_provider`: the dashboard key, the family adapter for a configured model, and the request pipeline around it (not wired yet) |
-| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing (not wired yet) |
-| `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API (not wired yet) |
-| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls, and the response plan `synthetic_model.py` serves to the Agno path (not wired yet) |
+| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it |
+| `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
+| `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API |
+| `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls |
 | `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp, timings, `<think>` splitting, one message per tool result |

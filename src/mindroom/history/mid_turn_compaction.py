@@ -46,7 +46,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import checkpoint_items, native_replay_messages
-from mindroom.providers.claude_prompt_cache import claude_loaded_tool_names
+from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.token_budget import estimate_text_tokens, stable_serialize

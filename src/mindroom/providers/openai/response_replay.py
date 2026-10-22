@@ -1,17 +1,26 @@
-"""Capture and replay ordered OpenAI output at the Agno provider boundary."""
+"""Replay a stored Responses turn's ordered output items in place of the formatter's reconstruction.
+
+A turn that produced reasoning keeps its complete ordered output under ``RESPONSE_OUTPUT_KEY`` and hosted
+tool-search items under ``TOOL_SEARCH_ITEMS_KEY`` in the assistant message's ``provider_data``; both keys are
+part of the stored run format.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 from mindroom.native_compaction import checkpoint_items
-from mindroom.providers.agno_compat_openai_responses_items import RESPONSE_OUTPUT_KEY, TOOL_SEARCH_ITEMS_KEY
-from mindroom.providers.legacy_openai_tool_replay import repair_legacy_responses_span
+from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.message import Message
+    from mindroom.llm.messages import Message
+
+__all__ = ["RESPONSE_OUTPUT_KEY", "TOOL_SEARCH_ITEMS_KEY", "formatted_input_with_provider_items"]
+
+TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
+RESPONSE_OUTPUT_KEY = "mindroom_response_output"
 
 
 def formatted_input_with_provider_items(
@@ -23,9 +32,9 @@ def formatted_input_with_provider_items(
 ) -> list[Any]:
     """Replace each replayed assistant span once, preserving canonical tool edits.
 
-    One cursor owns checkpoint, reasoning, and hosted-search insertion. Agno
-    still owns message conversion, media, call-ID mapping, and tool results.
-    Callers supply only the messages after any stored-response continuation.
+    One cursor owns checkpoint, reasoning, and hosted-search insertion; the formatter still owns message
+    conversion, media, call-ID mapping, and tool results. Callers supply only the messages after any
+    stored-response continuation.
     """
     prepared_input = list(formatted_input)
     cursor = 0
@@ -36,7 +45,7 @@ def formatted_input_with_provider_items(
         if anchor is None:
             continue
         data = message.provider_data or {}
-        # Agno emits calls, or one text item followed by its single reasoning item.
+        # The formatter emits calls, or one text item followed by its single reasoning item.
         size = len(message.tool_calls) if message.tool_calls else 1
         if not message.tool_calls and replay_reasoning and data.get("reasoning_output") is not None:
             size += 1

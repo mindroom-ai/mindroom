@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 import mcp.types as mcp_types
 import pytest
-from agno.models.openai import OpenAIChat
 from authlib.integrations.base_client.errors import OAuthError
 from mcp.types import CallToolResult, Implementation, ListToolsResult, Tool, ToolListChangedNotification
 
@@ -4746,15 +4745,13 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
 
     bind_mcp_server_manager(manager)
     try:
-        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=worker_target.execution_identity,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=worker_target.execution_identity,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 
@@ -5161,23 +5158,19 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
 
     bind_mcp_server_manager(manager)
     try:
-        with patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            side_effect=lambda *_args, **_kwargs: OpenAIChat(id="gpt-4o-mini", api_key="sk-test"),
-        ):
-            await manager.get_request_catalog(
-                "demo",
-                credentials_manager=get_runtime_credentials_manager(runtime_paths),
-                worker_target=worker_target,
-            )
+        await manager.get_request_catalog(
+            "demo",
+            credentials_manager=get_runtime_credentials_manager(runtime_paths),
+            worker_target=worker_target,
+        )
 
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=worker_target.execution_identity,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=worker_target.execution_identity,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 
@@ -5231,15 +5224,13 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
     assert manager.failed_server_ids() == {"demo"}
 
     bind_mcp_server_manager(manager)
-    model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-        )
+    agent = create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        include_interactive_questions=False,
+    )
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
     assert "dynamic_tools" not in tool_names
@@ -5291,15 +5282,13 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
 
     bind_mcp_server_manager(manager)
     try:
-        model = OpenAIChat(id="gpt-4o-mini", api_key="sk-test")
-        with patch("mindroom.providers.model_loading.get_model_instance", return_value=model):
-            agent = create_agent(
-                "code",
-                config,
-                runtime_paths,
-                execution_identity=None,
-                include_interactive_questions=False,
-            )
+        agent = create_agent(
+            "code",
+            config,
+            runtime_paths,
+            execution_identity=None,
+            include_interactive_questions=False,
+        )
     finally:
         await manager.shutdown()
 

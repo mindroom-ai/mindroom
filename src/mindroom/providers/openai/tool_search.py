@@ -13,6 +13,7 @@ import re
 from typing import Any, cast
 
 from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
+from mindroom.providers.model_loading import canonical_provider
 
 __all__ = ["openai_native_tool_search_supported", "request_params_with_deferred_tool_search"]
 
@@ -31,11 +32,11 @@ def openai_native_tool_search_supported(provider: str, model_id: str, *, base_ur
     providers and parses the ``gpt-N.M`` version from the model id instead of keeping an allowlist that goes stale
     with each release.
     """
-    canonical_provider = provider.strip().lower().replace("-", "_")
-    if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
+    canonical = canonical_provider(provider)
+    if canonical not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
     if (
-        canonical_provider == "openai"
+        canonical == "openai"
         and base_url not in (None, "")
         and (not isinstance(base_url, str) or base_url.rstrip("/") != _OPENAI_API_BASE_URL)
     ):

@@ -12,7 +12,7 @@ from mindroom.budgets.pricing import PricedModel, _PriceTable, cost_usd, price_t
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.registry import build_model_provider
 from mindroom.usage.stats import TokenTotals
 
 if TYPE_CHECKING:
@@ -77,13 +77,13 @@ def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: P
 
     table = price_table(config, paths).prices
 
-    sol = get_model_instance(config, paths, "sol")
-    opus = get_model_instance(config, paths, "opus")
-    codex = get_model_instance(config, paths, "codex")
-    assert set(table) == {(sol.get_provider(), "gpt-6.1-sol"), (opus.get_provider(), "claude-opus-5-5")}
-    assert (codex.get_provider(), "gpt-6.1-sol") not in table
-    assert table[(sol.get_provider(), "gpt-6.1-sol")].input_includes_cache is True
-    assert table[(opus.get_provider(), "claude-opus-5-5")].input_includes_cache is False
+    sol = build_model_provider(config, paths, "sol").identity
+    opus = build_model_provider(config, paths, "opus").identity
+    codex = build_model_provider(config, paths, "codex").identity
+    assert set(table) == {(sol.provider_name, "gpt-6.1-sol"), (opus.provider_name, "claude-opus-5-5")}
+    assert (codex.provider_name, "gpt-6.1-sol") not in table
+    assert table[(sol.provider_name, "gpt-6.1-sol")].input_includes_cache is True
+    assert table[(opus.provider_name, "claude-opus-5-5")].input_includes_cache is False
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "bedrock_claude", "vertexai_claude"])

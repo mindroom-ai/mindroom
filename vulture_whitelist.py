@@ -172,7 +172,6 @@ _._validate_api_provider  # Pydantic model validator (src/mindroom/config/models
 _._normalize_api_key  # Pydantic field validator (src/mindroom/config/models.py, src/mindroom/config/memory.py)
 _._normalize_extra_kwargs_api_key  # Pydantic field validator (src/mindroom/config/models.py)
 _._validate_single_api_key  # Pydantic model validator (src/mindroom/config/models.py)
-_._using_reasoning_model  # Agno Responses continuation hook (src/mindroom/providers/agno_compat_openai_responses.py)
 _.handle_starttag  # unused method (src/mindroom/matrix/message_builder.py)
 _.validate_history_settings  # unused method (src/mindroom/config/agent.py)
 _.normalize_display_name  # unused method (src/mindroom/config/agent.py, src/mindroom/mcp/config.py)

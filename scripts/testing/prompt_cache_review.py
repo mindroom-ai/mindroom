@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -14,29 +15,29 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import yaml
 from agno.models.message import Message
-from agno.models.vertexai.claude import Claude as VertexAIClaude
 from agno.utils.models.claude import format_messages
 from pydantic import ValidationError
-
-if TYPE_CHECKING:
-    from agno.models.response import ModelResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
-from mindroom.providers.claude_prompt_cache import (  # noqa: E402
+from mindroom.llm.messages import Message as ProviderMessage  # noqa: E402
+from mindroom.llm.provider import ModelRequest, ModelTurn, complete  # noqa: E402
+from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider  # noqa: E402
+from mindroom.providers.cache_ladder import (  # noqa: E402
     MESSAGE_RUNG_COUNT,
-    install_claude_prompt_cache_hook,
     mark_message_cache_rungs,
     prompt_cache_control,
 )
+from mindroom.providers.model_http_client import closing_model_connections  # noqa: E402
 
 DEFAULT_AGENT_DB = "mindroom_dev"
 SQLITE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -167,7 +168,7 @@ class CacheSimulationReport:
 
 @dataclass(frozen=True)
 class ProbeModelSpec:
-    """Resolved direct-Agno Vertex Claude model settings for one probe."""
+    """Resolved Vertex Claude model settings for one probe."""
 
     config_path: Path
     model_name: str
@@ -181,7 +182,7 @@ class ProbeModelSpec:
 
 @dataclass(frozen=True)
 class LiveProbeTurn:
-    """One live direct-Agno cache-probe request."""
+    """One live cache-probe request."""
 
     turn_index: int
     request_message_count: int
@@ -261,7 +262,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--probe-live",
         action="store_true",
-        help="Run a direct Agno Vertex Claude prompt-cache probe instead of JSONL/DB review.",
+        help="Run a live Vertex Claude prompt-cache probe through MindRoom's Claude adapter, not JSONL/DB review.",
     )
     parser.add_argument(
         "--probe-model",
@@ -301,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--probe-compare-plain",
         action="store_true",
-        help="Also run a plain Agno baseline without the MindRoom Vertex prompt-cache hook.",
+        help="Also run a plain baseline without MindRoom's prompt-cache breakpoints.",
     )
     return parser.parse_args()
 
@@ -1050,12 +1051,12 @@ def run_live_probe(
     threshold: float,
     compare_plain: bool,
 ) -> None:
-    """Run a live direct-Agno Vertex Claude prompt-cache probe."""
+    """Run a live Vertex Claude prompt-cache probe through MindRoom's Claude adapter."""
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_root)
     bootstrap_probe_environment(runtime_paths)
     spec = load_probe_model_spec(config_path, runtime_paths, model_name)
 
-    print("Live direct Agno Vertex Claude probe")
+    print("Live Vertex Claude probe")
     print(f"Config: {spec.config_path}")
     print(
         f"Model: {spec.model_name} -> {spec.model_id} | project={spec.project_id} | region={spec.region} | "
@@ -1074,6 +1075,7 @@ def run_live_probe(
     for label, install_hook in modes:
         turns = run_live_probe_sequence(
             spec,
+            runtime_paths,
             scenario_label=label,
             install_hook=install_hook,
             turn_count=turn_count,
@@ -1164,6 +1166,7 @@ def coerce_bool(value: object, *, default: bool) -> bool:
 
 def run_live_probe_sequence(
     spec: ProbeModelSpec,
+    runtime_paths: RuntimePaths,
     *,
     scenario_label: str,
     install_hook: bool,
@@ -1173,7 +1176,7 @@ def run_live_probe_sequence(
     max_output_tokens: int,
 ) -> list[LiveProbeTurn]:
     """Run the repeated live probe requests for one scenario label."""
-    model = build_probe_model(spec, install_hook=install_hook, max_output_tokens=max_output_tokens)
+    provider = build_probe_model(spec, runtime_paths, install_hook=install_hook, max_output_tokens=max_output_tokens)
     system_prompt = build_probe_system_prompt(system_line_count, scenario_label)
     conversation_messages: list[Message] = [Message(role="system", content=system_prompt)]
     previous_request_row: RequestRow | None = None
@@ -1194,7 +1197,11 @@ def run_live_probe_sequence(
             model_params=model_params,
             apply_cache_ladder=install_hook,
         )
-        response = model.invoke(messages=request_messages, assistant_message=Message(role="assistant"))
+        request = ModelRequest(
+            messages=[ProviderMessage(role=message.role, content=message.content) for message in request_messages],
+            stream=False,
+        )
+        response = asyncio.run(closing_model_connections(complete(provider, request)))
         response_text = extract_model_response_text(response)
         turn_results.append(
             LiveProbeTurn(
@@ -1225,24 +1232,24 @@ def run_live_probe_sequence(
 
 def build_probe_model(
     spec: ProbeModelSpec,
+    runtime_paths: RuntimePaths,
     *,
     install_hook: bool,
     max_output_tokens: int,
-) -> VertexAIClaude:
-    """Construct the Vertex Claude model used for a live probe sequence."""
-    model = VertexAIClaude(
-        id=spec.model_id,
-        project_id=spec.project_id,
-        region=spec.region,
-        cache_system_prompt=spec.cache_system_prompt,
-        extended_cache_time=spec.extended_cache_time,
-        temperature=0,
-        max_tokens=max_output_tokens,
-        base_url=spec.base_url,
-    )
-    if install_hook:
-        install_claude_prompt_cache_hook(model)
-    return model
+) -> ClaudeProvider:
+    """Construct the Vertex Claude adapter used for a live probe sequence; the plain one sends no breakpoints."""
+    extra_kwargs: dict[str, object] = {
+        "project_id": spec.project_id,
+        "region": spec.region,
+        "cache_system_prompt": spec.cache_system_prompt and install_hook,
+        "extended_cache_time": spec.extended_cache_time,
+        "temperature": 0,
+        "max_tokens": max_output_tokens,
+    }
+    if spec.base_url:
+        extra_kwargs["base_url"] = spec.base_url
+    model_config = ModelConfig(provider="vertexai_claude", id=spec.model_id, extra_kwargs=extra_kwargs)
+    return build_provider(model_config, runtime_paths)
 
 
 def build_probe_system_prompt(line_count: int, scenario_label: str) -> str:
@@ -1298,16 +1305,17 @@ def build_probe_request_row(
     )
 
 
-def extract_model_response_text(response: ModelResponse) -> str:
+def extract_model_response_text(response: ModelTurn) -> str:
     """Extract plain text from a model response for probe logging."""
-    if isinstance(response.content, str) and response.content:
-        return response.content
-    return extract_text(response.content) or "<empty response>"
+    content = response.message.content
+    if isinstance(content, str) and content:
+        return content
+    return extract_text(content) or "<empty response>"
 
 
-def response_usage_int(response: ModelResponse, field_name: str) -> int:
+def response_usage_int(response: ModelTurn, field_name: str) -> int:
     """Return one integer usage field from a model response."""
-    usage = response.response_usage
+    usage = response.message.metrics
     if usage is None:
         return 0
     if field_name == "input_tokens":

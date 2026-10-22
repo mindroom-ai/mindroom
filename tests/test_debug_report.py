@@ -16,7 +16,6 @@ import pytest
 from typer.testing import CliRunner
 
 from mindroom import debug_report as debug_report_module
-from mindroom import llm_request_logging
 from mindroom.cli.debug_report import _resolve_sources
 from mindroom.cli.main import app
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
@@ -35,6 +34,7 @@ from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.history.session_context import _team_scope_state_root
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -120,12 +120,12 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
         process_env={},
     )
     sources = _resolve_sources(runtime_paths)
-    # providers/model_loading.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
+    # providers/registry.py passes `runtime_paths.storage_root / "logs" / "llm_requests"` to the request-log writer
     # as an inline expression, so that literal is what is pinned here.
     assert sources.llm_request_log_dir == runtime_paths.storage_root / "logs" / "llm_requests"
 
     tool_call_log = tool_calls._tool_call_log_path(runtime_paths)
-    request_log = llm_request_logging._daily_log_path(None, sources.llm_request_log_dir, datetime.now().astimezone())
+    request_log = request_log_stage._daily_log_path(None, sources.llm_request_log_dir, datetime.now().astimezone())
     for log in (tool_call_log, request_log):
         log.parent.mkdir(parents=True)
         log.write_text(json.dumps({"correlation_id": "$user"}) + "\n", encoding="utf-8")

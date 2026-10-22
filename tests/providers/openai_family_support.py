@@ -17,7 +17,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.responses import ResponsesAdapter
-from tests.providers.golden_support import PacedBytes, Replay, pipeline_provider, replay_through_pipeline
+from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -78,32 +78,6 @@ def write_cli_logins(root: Path) -> dict[str, str]:
         encoding="utf-8",
     )
     return {_CODEX_HOME: str(codex_home), _KIMI_HOME: str(kimi_home)}
-
-
-def _sse_event(event: dict[str, Any]) -> bytes:
-    data = event["data"]
-    name = f"event: {event['event']}\n" if "event" in event else ""
-    return f"{name}data: {data if isinstance(data, str) else json.dumps(data)}\n\n".encode()
-
-
-def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
-    """Build the HTTP response a golden's ``response_raw`` describes.
-
-    Tests may add ``pause_seconds`` to send each SSE event after a pause, and ``drop_connection`` to end the
-    stream with a transport error instead of EOF.
-    """
-    status, headers = response_raw["status"], response_raw["headers"]
-    if "sse" not in response_raw:
-        return httpx.Response(status, headers=headers, content=json.dumps(response_raw["json"]).encode())
-    events = [_sse_event(event) for event in response_raw["sse"]]
-    if "pause_seconds" in response_raw or "drop_connection" in response_raw:
-        stream = PacedBytes(
-            events,
-            pause_seconds=response_raw.get("pause_seconds", 0.0),
-            drop=response_raw.get("drop_connection", False),
-        )
-        return httpx.Response(status, headers=headers, stream=stream)
-    return httpx.Response(status, headers=headers, content=b"".join(events))
 
 
 @dataclass(frozen=True, slots=True)

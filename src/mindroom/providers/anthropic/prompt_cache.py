@@ -2,7 +2,8 @@
 
 The cache breakpoints come from the ladder primitives in ``providers/cache_ladder.py``, which the OpenRouter
 Claude ladder shares. The repairs run on every request, cached or not, because an already-stored history can
-carry blocks the request schema rejects.
+carry blocks the request schema rejects. ``claude_loaded_tool_names`` reads which deferred tools earlier tool
+searches loaded, which the mid-turn history budget counts as sent.
 """
 
 from __future__ import annotations
@@ -35,12 +36,16 @@ from mindroom.providers.claude_wire_blocks import (
     TOOL_SEARCH_TOOL_TYPE,
     as_dict,
 )
+from mindroom.providers.model_loading import canonical_provider
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ToolChoice
     from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
-__all__ = ["native_tool_search_supported", "prepare_request_body"]
+__all__ = ["claude_loaded_tool_names", "native_tool_search_supported", "prepare_request_body"]
 
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
 _TOOL_CHOICES = {"auto": {"type": "auto"}, "none": {"type": "none"}, "required": {"type": "any"}}
@@ -52,10 +57,27 @@ def native_tool_search_supported(provider: str, model_id: str) -> bool:
     Every Claude model since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 supports the search tool, so gating denylists
     the closed pre-4.5 set and new model releases take the native path without a code change.
     """
-    canonical_provider = provider.strip().lower().replace("-", "_")
-    if canonical_provider not in _NATIVE_TOOL_SEARCH_PROVIDERS:
+    if canonical_provider(provider) not in _NATIVE_TOOL_SEARCH_PROVIDERS:
         return False
     return not model_id.startswith(TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES)
+
+
+def claude_loaded_tool_names(messages: Sequence[Message]) -> frozenset[str]:
+    """Return the tool names whose definitions tool searches in these messages loaded into Claude's context."""
+    names: set[str] = set()
+    for message in messages:
+        blocks = message.provider_data.get("server_tool_blocks") if message.provider_data else None
+        for block in blocks if isinstance(blocks, list) else ():
+            block_dict = as_dict(block)
+            content = as_dict(block_dict.get("content")) if block_dict is not None else None
+            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE or content is None:
+                continue
+            references = content.get("tool_references")
+            for reference in references if isinstance(references, list) else ():
+                reference_dict = as_dict(reference)
+                if reference_dict is not None and isinstance(name := reference_dict.get("tool_name"), str):
+                    names.add(name)
+    return frozenset(names)
 
 
 def _count_cache_markers(body: dict[str, Any]) -> int:

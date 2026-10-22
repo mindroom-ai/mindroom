@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import typer
-from anthropic import APIStatusError
-from google.auth.exceptions import DefaultCredentialsError
+from google.auth.exceptions import DefaultCredentialsError, TransportError
 
 from mindroom.cli.doctor import (
     _check_matrix_homeserver,
@@ -24,6 +23,7 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.llm.errors import ProviderError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,10 +31,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _api_status_error(status_code: int, message: str) -> APIStatusError:
-    request = httpx.Request("POST", "https://example.test/v1/messages")
-    response = httpx.Response(status_code, request=request)
-    return APIStatusError(message, response=response, body=None)
+def _api_status_error(status_code: int, message: str) -> ProviderError:
+    return ProviderError(message, provider="VertexAI", status_code=status_code)
 
 
 def test_publisher_model_not_found_explains_model_garden() -> None:
@@ -74,12 +72,21 @@ def test_other_status_codes_stay_compact() -> None:
     assert detail == "HTTP 500"
 
 
-def test_missing_credentials_stay_inconclusive() -> None:
-    """Missing ADC credentials remain a warning, not a failure."""
-    valid, detail = _classify_vertexai_claude_error(DefaultCredentialsError("no ADC"))
+@pytest.mark.parametrize(
+    "error",
+    [
+        DefaultCredentialsError("no ADC"),
+        TransportError("token service unreachable"),
+        ProviderError("connection refused", provider="VertexAI"),
+    ],
+    ids=["missing-credentials", "token-service-unreachable", "endpoint-unreachable"],
+)
+def test_unverifiable_checks_stay_inconclusive(error: Exception) -> None:
+    """Missing credentials and unreachable services remain a warning, not a failure."""
+    valid, detail = _classify_vertexai_claude_error(error)
 
     assert valid is None
-    assert detail == "no ADC"
+    assert detail == str(error)
 
 
 def _openai_embedder_config(host: str | None = None) -> Config:

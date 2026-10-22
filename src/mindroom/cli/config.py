@@ -970,7 +970,7 @@ def config_use_local_model(
 
 def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Return the providers with a model that has no credential of its own, so it needs the shared key."""
-    # model_loading pulls in the Agno runtime, which CLI startup must not import.
+    # model_loading opens the credential store, which CLI startup must not import.
     from mindroom.providers.model_loading import model_uses_own_credential  # noqa: PLC0415
 
     try:

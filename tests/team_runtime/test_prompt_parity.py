@@ -32,7 +32,6 @@ async def test_the_production_team_turn_sends_every_golden_request(name: str, tm
     assert SCENARIOS[name].description == golden["description"]
     assert normalize(run.input, tmp_path) == golden["input"]
     assert run.calls
-    assert all(call.owned for call in run.calls)
     assert all(isinstance(message, Message) for call in run.calls for message in call.messages)
     assert normalize([call_dict(call) for call in run.calls], tmp_path) == golden["requests"]
     # The leader's prompt is built once per turn and sent with both of its requests.

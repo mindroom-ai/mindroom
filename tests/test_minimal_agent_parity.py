@@ -48,7 +48,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
-from mindroom.providers import stream_retry as provider_stream_retry
+from mindroom.providers.pipeline import retry as provider_retry
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import CollectedStreamPresentation
@@ -544,7 +544,7 @@ async def test_actual_fallback_request_keeps_only_bash(response_harness, monkeyp
     original = ai.create_agent
     failed_requests = []
     send = h.provider.send
-    monkeypatch.setattr(provider_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(provider_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
 
     async def failing_primary(**request):
         if request["model"] == "test-model":

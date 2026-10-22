@@ -185,6 +185,29 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(tmp_path: Path) -> None:
+    """Gemini matches each result to its call by id, so malformed ids are left out without shifting valid ones."""
+    messages = (
+        Message(role="user", content="Hi"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": 7, "type": "function", "function": {"name": "invalid", "arguments": "{}"}},
+                {"id": "call-123", "type": "function", "function": {"name": "valid", "arguments": "{}"}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="", tool_name="invalid", content="invalid result"),
+        Message(role="tool", tool_call_id="call-123", tool_name="valid", content="valid result"),
+    )
+
+    sent, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    calls, results = (sent["body"]["contents"][index]["parts"] for index in (1, 2))
+    assert [part["functionCall"].get("id") for part in calls] == [None, "call-123"]
+    assert [part["functionResponse"].get("id") for part in results] == [None, "call-123"]
+
+
+@pytest.mark.asyncio
 async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: Path) -> None:
     """Models that require their provider's sampling defaults never receive temperature, top_p, or top_k."""
     config = _config({**GEMINI, "id": "gemini-3.8-flash"}, temperature=0.2, top_p=0.9, top_k=40, seed=7)
@@ -219,6 +242,50 @@ async def test_gemini_decision_requests_keep_schemas_but_disable_function_callin
     assert [declaration["name"] for declaration in body["tools"][0]["functionDeclarations"]] == ["get_weather"]
     assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
     assert ("responseMimeType" in body["generationConfig"]) is json_output
+
+
+@pytest.mark.asyncio
+async def test_gemini_decision_requests_drop_authored_native_tools(tmp_path: Path) -> None:
+    """Grounding, code execution, and URL context run whatever the function-calling mode, so a decision drops them."""
+    authored = {
+        "tools": [
+            {"google_search": {}},
+            {"code_execution": {}, "function_declarations": [{"name": "read_status", "description": "Read status"}]},
+        ],
+    }
+    config = _config(GEMINI, generation_config=copy.deepcopy(authored))
+
+    with without_provider_tools():
+        request, _ = await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "{}"})))
+
+    body = request["body"]
+    assert body["tools"] == [{"functionDeclarations": [{"name": "read_status", "description": "Read status"}]}]
+    assert body["toolConfig"] == {"functionCallingConfig": {"mode": "NONE"}}
+    assert config["extra_kwargs"]["generation_config"] == authored
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "error"),
+    [
+        ({"cached_content": "cachedContents/example"}, "cached content"),
+        ({"generation_config": {"http_options": {"extra_body": {"tools": [{"googleSearch": {}}]}}}}, "body overrides"),
+    ],
+    ids=["cached-content", "body-override"],
+)
+async def test_gemini_decision_requests_fail_on_tools_they_cannot_inspect(
+    extra_kwargs: dict[str, Any],
+    error: str,
+    tmp_path: Path,
+) -> None:
+    """Cached content and raw body overrides can carry native tools, so a decision refuses to send them."""
+    with without_provider_tools(), pytest.raises(ValueError, match=error):
+        await run_adapter(
+            _config(GEMINI, **extra_kwargs),
+            _request(),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "{}"})),
+        )
 
 
 @pytest.mark.asyncio
@@ -410,6 +477,25 @@ async def test_gemini_credential_failures_are_not_provider_errors(
         [event async for event in adapter.stream(_request())]
 
     assert not isinstance(raised.value, ProviderError)
+
+
+@pytest.mark.asyncio
+async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp_path: Path) -> None:
+    """Google bills thinking as output, and cached input stays inside the prompt count."""
+    chunk = _gemini_chunk({"text": "ok"}, usage=False)
+    chunk["usageMetadata"] = {
+        "promptTokenCount": 1000,
+        "cachedContentTokenCount": 400,
+        "candidatesTokenCount": 200,
+        "thoughtsTokenCount": 1500,
+        "totalTokenCount": 2700,
+    }
+
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(chunk))
+
+    metrics = _completed(events).message.metrics
+    assert (metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) == (1000, 1700, 2700)
+    assert (metrics.reasoning_tokens, metrics.cache_read_tokens) == (1500, 400)
 
 
 @pytest.mark.asyncio

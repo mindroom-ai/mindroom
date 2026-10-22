@@ -29,10 +29,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Shared by provider retry policy and final user-message routing. Status 200 is
+# Statuses the final user message reports as temporary provider trouble. Status 200 is
 # the mid-stream SSE case: the HTTP response was already committed before a
 # Claude error event or an early Responses end without visible output.
-TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
+_TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503, 504, 529})
 
 # Errors raised before any provider request when a model has no API key at all.
 _MISSING_PROVIDER_KEY_PATTERN = re.compile(
@@ -49,14 +49,6 @@ class AvatarGenerationError(RuntimeError):
 
 class AvatarSyncError(RuntimeError):
     """Raised when managed avatar sync cannot complete."""
-
-
-class ModelSafeguardRefusalError(ModelProviderError):
-    """Raised when a provider explicitly stops generation for safeguards."""
-
-
-class IncompleteResponsesStreamError(ModelProviderError):
-    """A Responses stream cannot safely reuse accumulated output in a retry."""
 
 
 class MinimalModeUnavailableError(RuntimeError):
@@ -104,11 +96,8 @@ def _run_error_additional_message(data: object) -> str | None:
 
 
 def is_model_safeguard_refusal(error: Exception | str) -> bool:
-    """Recognize typed refusals from either provider layer and the exact text errored runs preserve."""
-    return (
-        isinstance(error, ModelSafeguardRefusalError | ModelSafeguardRefusal)
-        or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
-    )
+    """Recognize the typed refusal and the exact text errored runs preserve."""
+    return isinstance(error, ModelSafeguardRefusal) or str(error).strip() == MODEL_SAFEGUARD_REFUSAL_MESSAGE
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:
@@ -162,9 +151,9 @@ def _is_transient_provider_error(error: Exception) -> bool:
     if isinstance(error, ProviderUnavailable):
         return True
     status_code = getattr(error, "status_code", None)
-    if isinstance(error, ModelProviderError | ProviderError) and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
+    if isinstance(error, ModelProviderError | ProviderError) and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
         return True
-    if _extract_provider_from_error(error) is not None and status_code in TRANSIENT_PROVIDER_STATUS_CODES:
+    if _extract_provider_from_error(error) is not None and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
         return True
 
     structured_error = _structured_provider_error(str(error))
