@@ -122,16 +122,16 @@ from tests.scripted_agent_helpers import (
     raising,
     registered_probe_tools,
     stop_turn,
+    stored_runs,
+    streamed_text,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
-    from mindroom.ai import AIStreamChunk
     from mindroom.final_delivery import StreamTransportOutcome
     from mindroom.llm.provider import ModelProvider
-    from mindroom.llm.runs import AnyRunRecord
     from mindroom.response_turn import ResponseTurnContext
 
 
@@ -210,16 +210,6 @@ def _final_only(text: str) -> list[ScriptStep]:
         UsageReported(final),
         TurnCompleted(message=Message(role="assistant", content=text, metrics=final), stop_reason="end"),
     ]
-
-
-def _stored_runs(config: Config, runtime_paths: RuntimePaths, session_id: str = "session1") -> list[AnyRunRecord]:
-    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
-    return [] if session is None else session.runs
-
-
-def _text(chunks: Sequence[AIStreamChunk]) -> list[str]:
-    return [chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)]
 
 
 async def _respond(
@@ -771,7 +761,7 @@ class TestUserIdPassthrough:
             streaming=streaming,
         )
 
-        [run] = _stored_runs(config, runtime_paths)
+        [run] = stored_runs(config, runtime_paths, "session1")
         assert (run.run_id, run.user_id, run.content) == ("run-123", "@user:localhost", "Response")
 
     @pytest.mark.asyncio
@@ -787,7 +777,7 @@ class TestUserIdPassthrough:
 
         await _respond(make_turn_context("general", session_id="session1"), config, runtime_paths, streaming=False)
 
-        [run] = _stored_runs(config, runtime_paths)
+        [run] = stored_runs(config, runtime_paths, "session1")
         assert run.user_id is None
 
     @pytest.mark.asyncio
@@ -1134,7 +1124,7 @@ class TestUserIdPassthrough:
                 show_tool_calls=False,
             )
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         assert persisted_run.metadata is not None
         prepared_context = persisted_run.metadata[AI_RUN_METADATA_KEY].pop("prepared_context")
@@ -1206,7 +1196,7 @@ class TestUserIdPassthrough:
             ("call-0", "tool_call_completed"),
             ("call-1", "tool_call_started"),
         ]
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.paused
         assert stored.metadata is not None
         assert "mindroom_replay_state" not in stored.metadata
@@ -1248,7 +1238,7 @@ class TestUserIdPassthrough:
             )
 
         assert "Earlier answer" in str([message.content for message in model.requests[0].messages])
-        persisted_run = next(run for run in _stored_runs(config, runtime_paths) if run.run_id == "run-123")
+        persisted_run = next(run for run in stored_runs(config, runtime_paths, "session1") if run.run_id == "run-123")
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test"),
             ("assistant", "Half done\n\n(turn stopped before completion)"),
@@ -1280,7 +1270,7 @@ class TestUserIdPassthrough:
                 turn_recorder=recorder,
             )
 
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.cancelled
         assert "mindroom_replay_state" not in (stored.metadata or {})
         snapshot = recorder.interrupted_snapshot()
@@ -1309,7 +1299,7 @@ class TestUserIdPassthrough:
         )
 
         assert response == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         assert stored.metadata["mindroom_original_status"] == "error"
 
@@ -1460,7 +1450,7 @@ class TestUserIdPassthrough:
             )
         ]
 
-        assert "".join(_text(chunks)) == "Deferred stream"
+        assert "".join(streamed_text(chunks)) == "Deferred stream"
         [log_file] = tmp_path.glob("llm-requests-*.jsonl")
         [entry] = [
             logged
@@ -1569,7 +1559,7 @@ class TestUserIdPassthrough:
         assert run_ids[0] == "run-1"
         assert len(run_ids) == 2
         assert run_ids[1] != "run-1"
-        assert [run.run_id for run in _stored_runs(config, runtime_paths)] == run_ids
+        assert [run.run_id for run in stored_runs(config, runtime_paths, "session1")] == run_ids
         if not streaming:
             assert len(tool_trace) == 1
 
@@ -1746,7 +1736,7 @@ class TestUserIdPassthrough:
             turn_recorder=recorder,
         )
 
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         prepared_context = stored.metadata[AI_RUN_METADATA_KEY]["prepared_context"]
         assert isinstance(prepared_context["tokens"], int)
@@ -1887,7 +1877,7 @@ class TestUserIdPassthrough:
 
         assert recorder.outcome == "completed"
         assert recorder.assistant_text == recorded
-        assert "".join(_text(chunks)) == streamed
+        assert "".join(streamed_text(chunks)) == streamed
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
@@ -1963,7 +1953,7 @@ class TestUserIdPassthrough:
         assert raised.value.presentation is not None
         assert raised.value.presentation.response_text.strip() == "🔧 `dangerous` [1] ⏳"
         assert raised.value.presentation.tool_trace[0].tool_call_id == "call-stream-approval"
-        [stored] = _stored_runs(config, runtime_paths)
+        [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.status is RunStatus.paused
         assert len(stored.requirements or []) == 1
 
@@ -2083,7 +2073,7 @@ class TestUserIdPassthrough:
         with pytest.raises(asyncio.CancelledError):
             await reply
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         name, preview = running_preview
         assert [(message.role, message.content) for message in persisted_run.messages] == [
@@ -2135,7 +2125,7 @@ class TestUserIdPassthrough:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        [persisted_run] = _stored_runs(config, runtime_paths)
+        [persisted_run] = stored_runs(config, runtime_paths, "session1")
         assert persisted_run.status is RunStatus.completed
         assert [(message.role, message.content) for message in persisted_run.messages] == [
             ("user", "test\n\n<mindroom_message_context>persist me</mindroom_message_context>"),

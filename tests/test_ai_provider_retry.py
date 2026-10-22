@@ -15,21 +15,24 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import ProviderUnavailable
-from mindroom.llm.events import ContentDelta
 from mindroom.llm.provider import TextDelta
 from mindroom.providers.pipeline import retry as provider_stream_retry
 from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit
+from tests.scripted_agent_helpers import (
+    install_agent_model,
+    raising,
+    registered_toolkit,
+    stored_runs,
+    streamed_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.ai import AIStreamChunk
-    from mindroom.llm.runs import AnyRunRecord
 
 SESSION_ID = "retry-session"
 
@@ -98,17 +101,6 @@ def _stream(config: Config, run_id: str) -> AsyncIterator[AIStreamChunk]:
     )
 
 
-def _text(chunks: Sequence[AIStreamChunk]) -> str:
-    return "".join(chunk.text for chunk in chunks if isinstance(chunk, ContentDelta))
-
-
-def _stored_runs(config: Config) -> list[AnyRunRecord]:
-    storage = create_session_storage("worker", config, runtime_paths_for(config), execution_identity=None)
-    session = storage.load_session(SESSION_ID, "agent")
-    assert session is not None
-    return session.runs
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("finish", ["recover", "user_stop", "sync_restart"])
 async def test_post_tool_backoff_preserves_turn_history_and_followup(
@@ -147,14 +139,14 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(
             if finish == "recover":
                 release.set()
                 chunks = await task
-                assert _text(chunks) == "Recovered"
+                assert "".join(streamed_text(chunks)) == "Recovered"
                 assert model.requests[2] == model.requests[3]
             else:
                 request_task_cancel(task, cancel_source=finish)
                 with pytest.raises(asyncio.CancelledError, match=finish):
                     await task
                 release.set()
-            runs = _stored_runs(config)
+            runs = stored_runs(config, runtime_paths_for(config), SESSION_ID, agent_name="worker")
             assert len(runs) == 1
             if finish != "recover":
                 assert runs[0].metadata is not None
@@ -164,9 +156,9 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(
             assert "step-2-done" in saved
             before_followup = len(model.requests)
             followup = [chunk async for chunk in _stream(config, "followup")]
-            assert _text(followup) == "Follow-up"
+            assert "".join(streamed_text(followup)) == "Follow-up"
             assert len(model.requests) == before_followup + 1
-            assert len(_stored_runs(config)) == 2
+            assert len(stored_runs(config, runtime_paths_for(config), SESSION_ID, agent_name="worker")) == 2
             assert steps.actions == [1, 2]
     finally:
         release.set()
@@ -190,8 +182,8 @@ async def test_partial_stream_failure_stays_one_durable_turn(
     chunks = [chunk async for chunk in _stream(config, "first")]
 
     assert len(model.requests) == 1
-    assert _text(chunks).count("Partial") == 1
-    runs = _stored_runs(config)
+    assert "".join(streamed_text(chunks)).count("Partial") == 1
+    runs = stored_runs(config, runtime_paths_for(config), SESSION_ID, agent_name="worker")
     assert len(runs) == 1
     assert runs[0].metadata is not None
     assert runs[0].metadata["mindroom_original_status"] == "error"

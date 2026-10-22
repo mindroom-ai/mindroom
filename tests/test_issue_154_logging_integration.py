@@ -22,14 +22,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
 from mindroom.handled_turns import TurnRecord
-from mindroom.llm.events import ContentDelta
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.response_payload_preparation import DispatchPayloadInputs
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
@@ -43,7 +41,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.scripted_agent_helpers import install_agent_model, registered_toolkit
+from tests.scripted_agent_helpers import install_agent_model, registered_toolkit, stored_runs, streamed_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -162,10 +160,7 @@ def _tool_calls_path(runtime_paths: object) -> Path:
 
 def _stored_metadata(config: Config, runtime_paths: RuntimePaths, session_id: str) -> dict[str, object]:
     """Return the run metadata the reply stored with its run."""
-    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
-    assert session is not None
-    [run] = session.runs
+    [run] = stored_runs(config, runtime_paths, session_id)
     assert run.metadata is not None
     return run.metadata
 
@@ -378,7 +373,7 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
         )
     ]
 
-    assert "".join(chunk.text for chunk in chunks if isinstance(chunk, ContentDelta)) == "Done"
+    assert "".join(streamed_text(chunks)) == "Done"
     llm_entry = _read_llm_entries(llm_log_dir)[0]
     tool_entry = _read_jsonl(_tool_calls_path(runtime_paths))[0]
     metadata = _stored_metadata(config, runtime_paths, "!room:localhost:$thread:localhost")
