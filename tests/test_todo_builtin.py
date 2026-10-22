@@ -200,10 +200,7 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: Path) -> None:
-    """A ``show_all`` of ``"false"`` that skips argument parsing, as a resumed call's does, reaches ``list_todos`` as False.
-
-    Agno's argument coercion turns it into the boolean.
-    """
+    """Agno's argument coercion turns a ``show_all`` string into the boolean it names before ``list_todos`` runs."""
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
     list_todos = next(function for function in adapt_toolkit(tool).functions if function.name == "list_todos")

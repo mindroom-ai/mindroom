@@ -50,15 +50,12 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     DelegatingLeader,
@@ -135,23 +132,9 @@ class _ReportTools(Toolkit):
 @contextmanager
 def _registered_reports() -> Iterator[type[_ReportTools]]:
     """Register the ``reports`` toolkit for one test and restore the registries afterwards."""
-    snapshot = capture_tool_registry_snapshot()
-
-    @register_tool_with_metadata(
-        name="reports",
-        file_access=ToolFileAccess.NONE,
-        display_name="Reports",
-        description="Writes and deletes the report a delegated child was asked for.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def reports_factory() -> type[_ReportTools]:
-        return _ReportTools
-
     _ReportTools.effects.clear()
-    try:
+    with registered_toolkit("reports", _ReportTools):
         yield _ReportTools
-    finally:
-        restore_tool_registry_snapshot(snapshot)
 
 
 def _tool_message(record: RunRecord, call_id: str) -> str:
