@@ -477,12 +477,13 @@ class EventLoopStallDetector:
 
 
 def shorten_gil_switch_interval() -> None:
-    """Hand the GIL back to the event loop within 1 ms instead of CPython's 5 ms.
+    """Set CPython's GIL switch interval to 1 ms instead of the default 5 ms.
 
     The loop releases the GIL around every SQLite statement, socket write and
-    selector poll. Getting it back from a busy worker thread takes at least one
-    switch interval, and one more for each other runnable thread, so a callback
-    with tens of such calls stalled the loop for hundreds of milliseconds.
+    selector poll. While worker threads run Python, the loop usually waits about
+    a switch interval to get it back, so a callback with tens of such calls
+    stalled for hundreds of milliseconds. A shorter interval makes those waits
+    shorter; it does not help while another thread is inside one long C call.
     """
     sys.setswitchinterval(_GIL_SWITCH_INTERVAL_SECONDS)
     logger.info("gil_switch_interval_set", interval_seconds=_GIL_SWITCH_INTERVAL_SECONDS)

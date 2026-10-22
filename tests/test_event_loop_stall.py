@@ -794,8 +794,8 @@ async def test_detector_rejects_repeated_or_stopped_start_without_leaking_callba
             first_thread.join(timeout=2.0)
 
 
-def test_primary_hands_the_gil_back_within_one_millisecond() -> None:
-    """Each GIL-releasing call on the loop waits at most one switch interval per busy thread."""
+def test_primary_shortens_the_gil_switch_interval() -> None:
+    """The primary asks CPython to switch threads every 1 ms instead of every 5 ms."""
     with capture_logs() as logs:
         shorten_gil_switch_interval()
     assert sys.getswitchinterval() == pytest.approx(0.001)
