@@ -128,17 +128,18 @@ _SEPARATE_DASHBOARD = {
 
 def test_connections_pages_on_the_dashboard_host_move_to_the_public_origin(
     gate_client: Callable[..., TestClient],
+    signed_headers: dict[str, str],
 ) -> None:
     """Connections sign-in, account links, and MCP consent belong to the public origin, so their pages move there."""
-    admin = gate_client(trusted_upstream=False, extra_env=_SEPARATE_DASHBOARD, base_url="https://admin.example.org")
+    admin = gate_client(trusted_upstream=True, extra_env=_SEPARATE_DASHBOARD, base_url="https://admin.example.org")
     moved = admin.get("/connections/egress", params={"agent": "personal"})
     assert moved.status_code == 307
     assert moved.headers["location"] == "https://chat.example.org/connections/egress?agent=personal"
-    dashboard = admin.get("/")
+    dashboard = admin.get("/", headers=signed_headers)
     assert dashboard.status_code == 200
     assert dashboard.text == "administrator dashboard"
 
-    public = gate_client(trusted_upstream=False, extra_env=_SEPARATE_DASHBOARD, base_url="https://chat.example.org")
+    public = gate_client(trusted_upstream=True, extra_env=_SEPARATE_DASHBOARD, base_url="https://chat.example.org")
     served = public.get("/connections")
     assert served.status_code == 200
     assert served.text == "connections bundle"
@@ -149,9 +150,9 @@ def test_dashboard_on_another_port_of_the_public_host_moves_only_its_own_request
 ) -> None:
     """Origins that share a host name but not a port are told apart, so the public origin never redirects to itself."""
     env = {"MINDROOM_PUBLIC_URL": "http://localhost:3000", "MINDROOM_DASHBOARD_URL": "http://localhost:8765"}
-    public = gate_client(trusted_upstream=False, extra_env=env, base_url="http://localhost:3000")
+    public = gate_client(trusted_upstream=True, extra_env=env, base_url="http://localhost:3000")
     assert public.get("/connections").status_code == 200
-    dashboard = gate_client(trusted_upstream=False, extra_env=env, base_url="http://localhost:8765")
+    dashboard = gate_client(trusted_upstream=True, extra_env=env, base_url="http://localhost:8765")
     moved = dashboard.get("/connections")
     assert moved.status_code == 307
     assert moved.headers["location"] == "http://localhost:3000/connections"
@@ -160,5 +161,5 @@ def test_dashboard_on_another_port_of_the_public_host_moves_only_its_own_request
 def test_a_dashboard_url_equal_to_the_public_url_moves_nothing(gate_client: Callable[..., TestClient]) -> None:
     """Setting both URLs to one origin keeps Connections pages where they are instead of redirecting to themselves."""
     env = {"MINDROOM_PUBLIC_URL": "https://chat.example.org", "MINDROOM_DASHBOARD_URL": "https://chat.example.org"}
-    client = gate_client(trusted_upstream=False, extra_env=env, base_url="https://chat.example.org")
+    client = gate_client(trusted_upstream=True, extra_env=env, base_url="https://chat.example.org")
     assert client.get("/connections").status_code == 200

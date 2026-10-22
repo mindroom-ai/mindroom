@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -969,10 +969,9 @@ def test_oauth_connect_from_the_dashboard_host_returns_to_the_dashboard(tmp_path
     runtime_paths = _runtime_paths(
         tmp_path,
         {
-            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            **trusted_upstream_env(),
             "MINDROOM_PUBLIC_URL": public_url,
             "MINDROOM_DASHBOARD_URL": dashboard_url,
-            "MINDROOM_API_KEY": "test-key",
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
@@ -1002,8 +1001,10 @@ def test_oauth_connect_from_the_dashboard_host_returns_to_the_dashboard(tmp_path
 
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app, base_url=dashboard_url) as client:
-            _login(client)
-            response = client.post("/api/oauth/public_mail/connect?agent_name=general")
+            response = client.post(
+                "/api/oauth/public_mail/connect?agent_name=general",
+                headers={"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"], "Origin": dashboard_url},
+            )
 
     assert response.status_code == 200, response.text
     state = parse_qs(urlparse(response.json()["auth_url"]).query)["state"][0]
@@ -1031,33 +1032,6 @@ def _dashboard_host_app(tmp_path: Path, env: dict[str, str]) -> tuple[FastAPI, c
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     return api_app, runtime_paths, provider
-
-
-def test_oauth_started_on_the_dashboard_host_signs_in_on_the_public_host_to_finish(tmp_path: Path) -> None:
-    """A dashboard sign-in stays on its host, so the public callback asks for one and then finishes the flow."""
-    api_app, runtime_paths, provider = _dashboard_host_app(
-        tmp_path,
-        {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org", "MINDROOM_API_KEY": "test-key"},
-    )
-    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
-        with TestClient(api_app, base_url=_DASHBOARD_ORIGIN) as dashboard:
-            _login(dashboard)
-            state = _state_from_auth_url(
-                dashboard.post(f"/api/oauth/{provider.id}/connect?agent_name=general").json()["auth_url"],
-            )
-        callback = f"/api/oauth/{provider.id}/callback?code=test-code&state={state}"
-        with TestClient(api_app, base_url=_PUBLIC_ORIGIN) as public:
-            asked = public.get(callback, follow_redirects=False)
-            assert asked.status_code == 307
-            assert asked.headers["location"] == f"/login?{urlencode({'next': callback})}"
-            _login(public)
-            finished = public.get(callback, follow_redirects=False)
-
-    assert finished.status_code == 307
-    assert urlparse(finished.headers["location"]).path == f"/api/oauth/{provider.id}/success"
-    stored = _stored_oauth_credentials(provider, runtime_paths)
-    assert stored is not None
-    assert stored["token"] == "google_drive-access-token"
 
 
 def test_oauth_started_on_the_dashboard_host_finishes_under_trusted_upstream_auth(tmp_path: Path) -> None:

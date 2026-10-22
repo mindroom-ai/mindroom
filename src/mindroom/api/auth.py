@@ -159,16 +159,22 @@ class ApiAuthState:
 
 def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
+    dashboard = dashboard_origin(runtime_paths)
+    # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
+    if dashboard is not None and not trusted_upstream.enabled:
+        msg = "MINDROOM_DASHBOARD_URL requires trusted upstream auth (MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED)"
+        raise ValueError(msg)
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
-        dashboard_origin=dashboard_origin(runtime_paths),
+        dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
         platform_sso_secret=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_SECRET"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=trusted_upstream,
     )
 
 

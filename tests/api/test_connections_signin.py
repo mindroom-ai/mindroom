@@ -617,9 +617,7 @@ def test_dashboard_session_cannot_finish_api_key_started_flow(signin: dict[str, 
         params={"code": "test-code", "state": state},
         follow_redirects=False,
     )
-    # The flow needs the API-key sign-in that started it, so the browser is sent to sign in with it.
-    assert rejected.status_code == 307
-    assert rejected.headers["location"].startswith("/login?")
+    assert rejected.status_code == 401
 
     _complete_callback(dashboard, state)
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
@@ -853,9 +851,7 @@ def test_dashboard_flow_callback_rejects_portal_session_only(signin: dict[str, A
         params={"code": "test-code", "state": state},
         follow_redirects=False,
     )
-    # The flow needs the API-key sign-in that started it, so the browser is sent to sign in with it.
-    assert rejected.status_code == 307
-    assert rejected.headers["location"].startswith("/login?")
+    assert rejected.status_code == 401
 
     _complete_callback(dashboard, state)
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")

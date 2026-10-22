@@ -5097,6 +5097,14 @@ def test_dashboard_url_origin_may_change_the_dashboard(tmp_path: Path) -> None:
         assert response.status_code == expected, (host, origin, response.text)
 
 
+def test_dashboard_url_without_trusted_upstream_auth_fails_startup(tmp_path: Path) -> None:
+    """Only a gateway's signed identity reaches both hosts, so the setting needs trusted upstream auth."""
+    with pytest.raises(ValueError, match="MINDROOM_DASHBOARD_URL requires trusted upstream auth"):
+        auth._build_auth_settings(
+            _runtime_paths(tmp_path, process_env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"}),
+        )
+
+
 def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:
     """A dashboard URL that is not an HTTPS origin, or HTTP on a local address, is a setup error."""
     with pytest.raises(ValueError, match="Browser origin must be explicit HTTPS"):

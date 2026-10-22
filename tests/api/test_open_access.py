@@ -66,7 +66,6 @@ def test_only_the_runtimes_own_hosts_are_answered(tmp_path: Path, host: str, *, 
     ("env_name", "value"),
     [
         ("MINDROOM_PUBLIC_URL", "https://Dashboard.example.org/mindroom"),
-        ("MINDROOM_DASHBOARD_URL", "https://dashboard.example.org"),
         ("MINDROOM_BASE_URL", "https://dashboard.example.org"),
         ("MINDROOM_URL", "http://dashboard.example.org:8765"),
         ("MINDROOM_SCRIPT_GATEWAY_URL", "http://dashboard.example.org:8765/api/script-gateway"),

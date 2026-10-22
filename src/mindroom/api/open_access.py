@@ -23,13 +23,7 @@ if TYPE_CHECKING:
 
 _ALLOWED_HOSTS_ENV = "MINDROOM_DASHBOARD_ALLOWED_HOSTS"
 # The runtime is told it is reached at these URLs, so their hosts are its own.
-_SELF_URL_ENVS = (
-    "MINDROOM_PUBLIC_URL",
-    "MINDROOM_DASHBOARD_URL",
-    "MINDROOM_BASE_URL",
-    "MINDROOM_URL",
-    "MINDROOM_SCRIPT_GATEWAY_URL",
-)
+_SELF_URL_ENVS = ("MINDROOM_PUBLIC_URL", "MINDROOM_BASE_URL", "MINDROOM_URL", "MINDROOM_SCRIPT_GATEWAY_URL")
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 _REMEDY = f"to {_ALLOWED_HOSTS_ENV} or configure authentication"
 _AUTHORITY = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9._-]+)(?::[0-9]*)?")
