@@ -186,6 +186,23 @@ async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queue
 
 
 @pytest.mark.asyncio
+async def test_a_streamed_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger_unseen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stream that showed nothing marks no event seen, so the next turn still reads the message."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer(""), answer("")])
+
+    chunks = await team.stream()
+
+    assert chunks == [ai_runtime.EMPTY_RESPONSE_NOTICE]
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert session.runs == []
+    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_format(
     tmp_path: Path,

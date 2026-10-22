@@ -64,9 +64,9 @@ from mindroom.llm.events import ContentDelta, ToolStarted
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.request_context import stream_with_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
-from mindroom.llm_request_logging import stream_with_llm_request_log_context
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
@@ -347,7 +347,7 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         status="completed",
         model="claude-sonnet-5",
         model_provider="google",
-        metrics={"input_tokens": 3_277, "cache_read_tokens": 99_772, "cache_write_tokens": 49_886},
+        metrics=RunMetrics(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886),
         context_input_tokens=30_210,
         context_raw_input_tokens=1_777,
         context_cache_read_tokens=49_886,

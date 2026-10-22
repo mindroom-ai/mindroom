@@ -44,7 +44,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from tests.access_schema_support import with_current_room_member_access, with_responder_access
-from tests.ai_user_id_helpers import _team_orchestrator
+from tests.ai_user_id_helpers import team_orchestrator
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -394,7 +394,7 @@ def build_team_turn(
         execution_identity=identity,
     )
     assert bound is not None
-    orchestrator = _team_orchestrator(config, runtime_paths)
+    orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(
         config=config,

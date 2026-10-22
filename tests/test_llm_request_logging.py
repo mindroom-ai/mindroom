@@ -7,7 +7,8 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
+    RequestAttribution,
     build_llm_request_log_context,
     current_llm_request_log_context,
     stream_with_llm_request_log_context,
@@ -32,13 +33,15 @@ def test_debug_config_parses() -> None:
 def test_request_context_names_each_source_event_once() -> None:
     """A coalesced turn lists the reply target first, then each other source event and its prompt."""
     context = build_llm_request_log_context(
-        agent_id="assistant",
-        session_id="session-1",
-        room_id="!room:localhost",
-        thread_id=None,
-        reply_to_event_id="$reply",
-        requester_id="@user:localhost",
-        correlation_id="corr-1",
+        RequestAttribution(
+            agent_id="assistant",
+            session_id="session-1",
+            room_id="!room:localhost",
+            thread_id=None,
+            reply_to_event_id="$reply",
+            requester_id="@user:localhost",
+            correlation_id="corr-1",
+        ),
         prompt="Hi",
         model_prompt=None,
         full_prompt="System. Hi",

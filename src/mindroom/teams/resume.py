@@ -19,7 +19,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_delegation_call
+from mindroom.delegation.state import member_delegation_card
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -347,8 +347,7 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     """
     member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
-        call_id = requirement.tool_execution.tool_call_id
-        if requirement.member_agent_id is None and call_id and member_delegation_call(call_id, member_names):
+        if member_delegation_card(requirement, member_names):
             continue
         scope = (
             f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"

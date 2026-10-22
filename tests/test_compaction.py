@@ -24,6 +24,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
+from mindroom.llm.usage import RunMetrics
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
@@ -223,7 +224,7 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         status="completed",
         model="test-model",
         model_provider="openai",
-        metrics={"input_tokens": 123, "output_tokens": 45, "total_tokens": 168},
+        metrics=RunMetrics(input_tokens=123, output_tokens=45, total_tokens=168),
         prepared_history=prepared_history,
     )
 
@@ -271,7 +272,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         status="completed",
         model="claude-opus-5",
         model_provider="VertexAI",
-        metrics={"input_tokens": 153_294, "cache_read_tokens": 281_264},
+        metrics=RunMetrics(input_tokens=153_294, cache_read_tokens=281_264),
         context_input_tokens=153_294,
         context_cache_read_tokens=281_264,
         context_cache_write_tokens=500,

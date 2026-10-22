@@ -55,7 +55,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
-from tests.ai_user_id_helpers import _team_orchestrator
+from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -189,7 +189,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         thread_id=context.thread_id,
         requester_id=context.requester_id,
     )
-    orchestrator = _team_orchestrator(config, paths)
+    orchestrator = team_orchestrator(config, paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("general", "second")}
 
     async def pause() -> None:

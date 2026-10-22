@@ -36,12 +36,13 @@ from mindroom.history.storage import new_scope_session, update_scope_seen_event_
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.runs import RunStatus
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
+    RequestAttribution,
     bind_llm_request_log_context,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
+from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -143,13 +144,15 @@ def _team_request_log_context(
     metadata: dict[str, object] | None,
 ) -> dict[str, object]:
     return build_llm_request_log_context(
-        agent_id=team_name,
-        session_id=ctx.session_id or "",
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        reply_to_event_id=ctx.reply_to_event_id,
-        requester_id=ctx.requester_id,
-        correlation_id=ctx.correlation_id,
+        RequestAttribution(
+            agent_id=team_name,
+            session_id=ctx.session_id or "",
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            reply_to_event_id=ctx.reply_to_event_id,
+            requester_id=ctx.requester_id,
+            correlation_id=ctx.correlation_id,
+        ),
         prompt=prompt,
         model_prompt=None,
         full_prompt=_team_run_input_text(run_input),
@@ -717,7 +720,7 @@ class _TeamTurn:
         record = self.terminal_record(attempt)
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record)
-        return self.resolve_completed(run, attempt, record, blocking=True)
+        return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
         self,
@@ -726,6 +729,7 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state, stream=True)
+        emitted_output = False
         try:
             async with closing_async_stream(events):
                 async for event in events:
@@ -734,6 +738,7 @@ class _TeamTurn:
                     self.sync_live_turn_recorder(run, attempt)
                     chunk = attempt.chunk()
                     if chunk is not None:
+                        emitted_output = True
                         yield chunk
         except Exception as error:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
@@ -752,7 +757,9 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False))
+        # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
+        # carries the trigger either, so the next turn still reads it.
+        yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output))
 
     def terminal_record(self, attempt: TeamAttempt) -> TeamRunRecord:
         """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
@@ -806,9 +813,13 @@ class _TeamTurn:
         record: TeamRunRecord,
         *,
         blocking: bool,
+        mark_seen: bool,
     ) -> CompletedAttempt:
-        """Return the completed attempt: its rendered body, what replays, and the turn's metadata."""
-        if self.ctx.reply_to_event_id:
+        """Return the completed attempt: its rendered body, what replays, and the turn's metadata.
+
+        ``mark_seen`` records the Matrix events the turn consumed as seen on the stored session row.
+        """
+        if mark_seen and self.ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
                 session_id=self.session_id,

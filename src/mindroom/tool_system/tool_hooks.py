@@ -26,7 +26,7 @@ from mindroom.hooks import (
     emit,
     emit_gate,
 )
-from mindroom.llm_request_logging import current_llm_request_log_context
+from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event

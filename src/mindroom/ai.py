@@ -56,12 +56,13 @@ from mindroom.hooks import (
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm_request_logging import (
+from mindroom.llm.request_context import (
+    RequestAttribution,
     bind_llm_request_log_context,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -706,13 +707,15 @@ def _attempt_request_log_context(
 ) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
     return build_llm_request_log_context(
-        agent_id=ctx.entity_label,
-        session_id=session_id,
-        room_id=ctx.room_id,
-        thread_id=ctx.thread_id,
-        reply_to_event_id=ctx.reply_to_event_id,
-        requester_id=ctx.requester_id,
-        correlation_id=ctx.correlation_id,
+        RequestAttribution(
+            agent_id=ctx.entity_label,
+            session_id=session_id,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            reply_to_event_id=ctx.reply_to_event_id,
+            requester_id=ctx.requester_id,
+            correlation_id=ctx.correlation_id,
+        ),
         prompt=prompt,
         model_prompt=model_prompt,
         full_prompt=full_prompt,
@@ -1885,7 +1888,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, ToolStarted):
                 emit_timing_event(
                     "Dispatch tool-call timing",
-                    phase="agno_tool_call_started",
+                    phase="tool_call_started",
                     agent_name=agent_name,
                     tool_name=event.tool.tool_name,
                     tool_call_id=tool_execution_call_id(event.tool),
@@ -1900,7 +1903,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, ToolCompleted):
                 emit_timing_event(
                     "Dispatch tool-call timing",
-                    phase="agno_tool_call_completed",
+                    phase="tool_call_completed",
                     agent_name=agent_name,
                     tool_name=event.tool.tool_name,
                     tool_call_id=tool_execution_call_id(event.tool),

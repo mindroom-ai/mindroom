@@ -1,4 +1,4 @@
-"""Read-only aggregation of retained Agno token usage."""
+"""Read-only aggregation of retained token usage."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str]
 
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
-    "Private self and admin totals use Agno session aggregates, including team members. "
+    "Private self and admin totals use stored session aggregates, including team members. "
     "Compaction, memory auto-flush and embedded workflow helpers add tokens without increasing run_count. "
     "Usage snapshots survive compaction and regeneration. Deleted sessions are unavailable."
 )
@@ -115,7 +115,7 @@ _VOICE_COVERAGE_NOTE = (
 
 @dataclass(frozen=True, slots=True)
 class TokenTotals:
-    """Token counters retained by Agno."""
+    """Token counters a stored run or session retains."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -1167,7 +1167,7 @@ def _run_model_totals(run: UsageRunNode, totals: TokenTotals) -> dict[tuple[str,
 
 
 def _session_totals(row: UsageSessionRow) -> TokenTotals | None:
-    """Independent helpers are not part of Agno's session counters; add them exactly once."""
+    """Independent helpers are not part of the session's counters; add them exactly once."""
     totals = _metrics_totals(row.session_metrics)
     for run in row.runs:
         if run.kind != "run" and (helper_totals := _metrics_totals(run.metrics)) is not None:
@@ -1211,7 +1211,7 @@ def _detailed_model_totals(
     try:
         for entry in model_metrics:
             model_totals = _metrics_totals(entry.metrics)
-            # Agno also records a model whose requests reported no usage, as an entry without counters.
+            # A run also records a model whose requests reported no usage, as an entry without counters.
             if model_totals is None:
                 continue
             if require_usable_entries and (entry.model_provider is None or entry.model is None):

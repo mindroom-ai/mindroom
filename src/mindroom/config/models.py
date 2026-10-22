@@ -456,7 +456,7 @@ class DefaultsConfig(BaseModel):
     num_history_runs: int | None = Field(
         default=None,
         ge=1,
-        description="Default number of prior Agno runs to include as history context (None = all)",
+        description="Default number of prior runs to include as history context (None = all)",
     )
     num_history_messages: int | None = Field(
         default=None,

@@ -85,7 +85,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",
@@ -95,7 +95,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": None,
@@ -105,7 +105,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_completed",
+                "phase": "tool_call_completed",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",

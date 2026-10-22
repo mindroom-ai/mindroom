@@ -19,26 +19,16 @@ if TYPE_CHECKING:
 _AI_RUN_METADATA_VERSION = 1
 
 
-def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
-    def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-        sanitized: dict[str, Any] = {}
-        for key, value in payload.items():
-            if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
-                sanitized[key] = value
-            elif isinstance(value, float):
-                sanitized[key] = format(value, ".12g")
-        return sanitized or None
-
+def _serialize_metrics(metrics: RunMetrics | None) -> dict[str, Any] | None:
     if metrics is None:
         return None
-    if isinstance(metrics, RunMetrics):
-        metrics_dict = metrics.to_dict()
-        if not isinstance(metrics_dict, dict):
-            return None
-        return _sanitize_metrics_payload(metrics_dict)
-    if isinstance(metrics, dict):
-        return _sanitize_metrics_payload(metrics)
-    return None
+    sanitized: dict[str, Any] = {}
+    for key, value in metrics.to_dict().items():
+        if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
+            sanitized[key] = value
+        elif isinstance(value, float):
+            sanitized[key] = format(value, ".12g")
+    return sanitized or None
 
 
 def _build_context_payload(
@@ -171,7 +161,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     status: RunStatus | str | None,
     model: str | None,
     model_provider: str | None,
-    metrics: RunMetrics | dict[str, Any] | None = None,
+    metrics: RunMetrics | None = None,
     context_metrics: RunMetrics | None = None,
     context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,

@@ -1117,7 +1117,7 @@ async def test_member_and_leader_tool_calls_emit_dispatch_timing_marks(
 
     def mark(phase: str, scope: str, agent: str | None, tool: str, call_id: str) -> dict[str, object]:
         return {
-            "phase": f"agno_tool_call_{phase}",
+            "phase": f"tool_call_{phase}",
             "team_name": "Team (GeneralAgent)",
             "tool_scope": scope,
             "agent_name": agent,

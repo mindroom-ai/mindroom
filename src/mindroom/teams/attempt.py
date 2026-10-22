@@ -113,7 +113,7 @@ class TeamAttempt:
     ) -> None:
         emit_timing_event(
             "Dispatch tool-call timing",
-            phase="agno_tool_call_started" if isinstance(event, ToolStarted) else "agno_tool_call_completed",
+            phase="tool_call_started" if isinstance(event, ToolStarted) else "tool_call_completed",
             team_name=self.team_name,
             tool_scope=tool_scope,
             agent_name=agent_name,

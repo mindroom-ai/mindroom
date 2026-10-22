@@ -36,7 +36,7 @@ class _HistoryScopeMetadata(TypedDict):
 
 @dataclass(frozen=True)
 class HistoryScope:
-    """One logical persisted-history scope inside a stored Agno session."""
+    """One logical persisted-history scope inside a stored session."""
 
     kind: _ScopeKind
     scope_id: str
@@ -84,12 +84,12 @@ class HistoryPolicy:
 
     @property
     def num_history_runs(self) -> int | None:
-        """Return the Agno run-replay limit for this policy."""
+        """Return the run-replay limit for this policy."""
         return self.limit if self.mode == "runs" else None
 
     @property
     def num_history_messages(self) -> int | None:
-        """Return the Agno message-replay limit for this policy."""
+        """Return the message-replay limit for this policy."""
         return self.limit if self.mode == "messages" else None
 
 
