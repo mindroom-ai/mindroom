@@ -42,7 +42,7 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1.4",
+  "mindroom-nio[e2e]==1.1.5",
   "ollama>=0.6.1",
   "openai>=2.54",
   "packaging>=24",
