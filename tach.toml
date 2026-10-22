@@ -802,6 +802,7 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
     "mindroom.approval.execution",
+    "mindroom.approval.resume",
     "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.delegation.direct",
@@ -1239,6 +1240,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.approval.execution"
 depends_on = [
+    "mindroom.agent_loop.build",
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.helper_usage",
     "mindroom.history.types",
@@ -1275,6 +1277,7 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.llm",
     "mindroom.loop_hooks",
+    "mindroom.response_turn",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
@@ -7628,6 +7631,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.agent_loop.build",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",

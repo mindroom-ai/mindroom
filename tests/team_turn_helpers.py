@@ -355,8 +355,9 @@ async def resume_approval(
     *,
     approved: bool,
     calls_: Sequence[ApprovalCall],
+    session_id: str = SESSION_ID,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Approve or deny ``calls_`` and resume the paused team run as a saved approval does."""
+    """Approve or deny ``calls_`` and resume the paused team run as a saved approval from ``session_id`` does."""
     with tool_runtime_context(team.runtime):
         return await continue_paused_team_run(
             member_names=("writer", "checker"),
@@ -364,7 +365,7 @@ async def resume_approval(
             config=team.config,
             runtime_paths=team.runtime_paths,
             execution_identity=team.identity,
-            session_id=SESSION_ID,
+            session_id=session_id,
             run_id=paused.run_id,
             user_id=REQUESTER_ID,
             configured_team_name="squad",

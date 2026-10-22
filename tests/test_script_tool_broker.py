@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 
 import mindroom.agents as agents_module
@@ -23,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, tracking_dir
+from mindroom.custom_tools.claude_agent import ClaudeAgentTools
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -566,6 +568,33 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert events == ["tool:before_call", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A script run belongs to no conversation, so ``claude_agent`` keeps the one session it shares outside them."""
+    claude = ClaudeAgentTools()
+
+    class SessionKeyedCalculator(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        async def add(self, a: int, b: int, run_context: RunContext | None = None) -> str:
+            del a, b
+            return await claude.claude_session_status(run_context=run_context)
+
+    _replace_calculator_toolkit(monkeypatch, SessionKeyedCalculator)
+    broker, token = _broker(tmp_path, events=[])
+
+    receipt = await _call_through_gateway(broker, _request(), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result is not None
+    assert receipt.result.startswith("No active Claude session for `")
+    assert receipt.result.endswith(":default`.")
 
 
 @pytest.mark.parametrize("tool_worker_scope", ["shared", "user"])

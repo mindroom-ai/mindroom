@@ -21,12 +21,12 @@ from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner, resume_history
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import TurnMessages, build_request
+from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import CompactionOutcome
@@ -178,7 +178,6 @@ class _Resumable:
             session=session,
             scope=_SCOPE,
             user_id=None,
-            stream=False,
         )
 
 
@@ -230,7 +229,9 @@ async def _pause(agent: _Resumable) -> RunRecord:
     build = agent.build
     turn = TurnMessages(prompt=Message(role="user", content="Do the task"))
     plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
-    history, summary = resume_history(agent.session, _SCOPE, build, plan) if agent.replays_history else ([], None)
+    history, summary = (
+        replayed_history(agent.session, _SCOPE, build.history_settings, plan) if agent.replays_history else ([], None)
+    )
     store_record = persist_to(agent.store, agent.session)
 
     async def persist(record: RunRecord) -> None:

@@ -50,7 +50,8 @@ class AgentBuild:
     settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
     authored toolkit it came from, None for a generated one, which approvals check. ``tool_middleware`` is the
     tool-call policy the loop runs around every call, outermost first: the binding through which a scheduled call
-    runs one of the build's functions, plugin before and after hooks, call recording, and the computer announcement.
+    runs one of the build's functions (for a build that offers the scheduler), plugin before and after hooks, call
+    recording, and the computer announcement.
     """
 
     spec: AgentSpec
@@ -61,6 +62,11 @@ class AgentBuild:
     tool_owners: Mapping[str, str | None]
     surface: AgentSurface
     tool_middleware: tuple[ToolMiddleware, ...] = ()
+
+
+def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str | None]:
+    """Return the authored toolkit of each function the builds offer, keyed ``(agent id, function)`` as approvals look it up."""
+    return {(build.spec.id, name): toolkit for build in builds for name, toolkit in build.tool_owners.items()}
 
 
 def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
@@ -86,4 +92,5 @@ __all__ = [
     "AgentBuild",
     "AgentSurface",
     "prompt_for_turn",
+    "tool_owners_by_agent",
 ]

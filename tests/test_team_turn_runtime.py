@@ -27,6 +27,7 @@ from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.events import ContentDelta
 from mindroom.llm.provider import TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
@@ -38,6 +39,11 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeModelBinding,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.usage.storage import quote_identifier
 from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
@@ -72,9 +78,12 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.history.types import HistoryScope
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.teams.runtime import TeamRunEvent
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -255,6 +264,83 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
     record, members = stored_runs(team)
     assert len(members) == 1
     assert all(transient not in json.dumps(run.to_dict()) for run in [record, *members])
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_todo_work_defaults_to_the_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's ``add_todo`` without an assignee assigns the work to that member, not to the team."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Plan it"), answer("Planned.", usage(50, 5))],
+        writer=[
+            calls(tool_call("add_todo", "call-todo", title="Draft the report"), metrics=usage(10, 1)),
+            answer("Done."),
+        ],
+    )
+    team.config.agents["writer"].tools = [PROBE_TOOL, "todo"]
+
+    await stream_reply(team)
+
+    _, [member] = stored_runs(team)
+    assert member.tools is not None
+    assert member.tools[0].result is not None
+    assert member.tools[0].result.endswith("assigned to writer")
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_claude_sessions_are_the_member_s_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's Claude session is keyed by the member, so members of one team never share a session."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Check Claude"), answer("Checked.", usage(50, 5))],
+        writer=[calls(tool_call("claude_session_status", "call-claude"), metrics=usage(10, 1)), answer("None yet.")],
+    )
+    team.config.agents["writer"].tools = [PROBE_TOOL, "claude_agent"]
+
+    await stream_reply(team)
+
+    _, [member] = stored_runs(team)
+    assert member.tools is not None
+    assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
+
+
+@pytest.mark.asyncio
+async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's code sees the team scope and the attempt's model; the reply consuming its events never does."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[])
+    produced: list[tuple[HistoryScope | None, str | None]] = []
+
+    def current_binding() -> tuple[HistoryScope | None, str | None]:
+        context = get_tool_runtime_context()
+        assert context is not None
+        return context.history_scope, context.active_model_name
+
+    async def run_events() -> AsyncIterator[TeamRunEvent]:
+        for text in ("one", "two"):
+            produced.append(current_binding())
+            yield ContentDelta(text)
+
+    with tool_runtime_context(replace(team.runtime, active_model_name="turn-model")):
+        # As the attempt does: the team scope around the run, the attempt's model around that.
+        events = ToolRuntimeModelBinding().stream_with_model(
+            envelope._under_team_scope(run_events(), TEAM_SCOPE),
+            active_model_name="attempt-model",
+        )
+        consumed = [current_binding() async for _event in events]
+
+    assert produced == [(TEAM_SCOPE, "attempt-model")] * 2
+    assert consumed == [(None, "turn-model")] * 2
 
 
 @pytest.mark.asyncio
@@ -476,6 +562,31 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     assert record.status is RunStatus.paused
 
 
+@pytest.mark.asyncio
+async def test_an_approval_from_another_session_never_resumes_the_paused_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run the team store holds for another conversation is refused before anything runs, as an agent's is."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([])
+    team.models["checker-model"] = ScriptedModel([])
+
+    with pytest.raises(RuntimeError, match="is no longer available"):
+        await resume_approval(
+            team,
+            raised.paused,
+            approved=True,
+            calls_=(member_approval("call-touch", "dangerous"),),
+            session_id=f"{ROOM_ID}:$other-thread:localhost",
+        )
+
+    assert ProbeToolkit.calls == []
+    assert (team.leader.requests, team.checker.requests) == ([], [])
+    record, _ = stored_runs(team)
+    assert record.status is RunStatus.paused
+
+
 def _delegate_to_helper(task: str) -> list[ScriptStep]:
     return calls(tool_call("run_subagent", "call-sub", agent_name="helper", task=task), metrics=usage(10, 1))
 
@@ -529,6 +640,26 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert team.leader.requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
     )
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team's continuation after a member's delegation streams even in a blocking turn, as Agno's did."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: the helper found it.")],
+        helper=[answer("Helper found it.")],
+    )
+
+    text = await blocking_reply(team, show_tool_calls=False)
+
+    assert text.endswith("**Team Consensus**:\n\nConsensus.")
+    assert [request.stream for request in team.leader.requests] == [False, True]
 
 
 @pytest.mark.asyncio

@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
+    "DENIED_WITHOUT_REASON",
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
@@ -109,6 +110,10 @@ class CompletedApprovalRun:
     metadata_content: dict[str, Any]
 
 
+# The note MindRoom's continuation has always given the model for a call denied without a reason.
+DENIED_WITHOUT_REASON = "Not approved by requester"
+
+
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
     *,
@@ -132,7 +137,7 @@ def apply_exact_approval_decisions(
         if decisions[tool_call_id]:
             requirement.confirm()
         else:
-            requirement.reject(denial_reasons[tool_call_id] or "Not approved by requester")
+            requirement.reject(denial_reasons[tool_call_id] or DENIED_WITHOUT_REASON)
     return pending
 
 

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.prompt import model_note_for
@@ -28,7 +28,7 @@ from mindroom.agents import team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.receipt import approval_receipt_hook
-from mindroom.approval.resume import ResumeDecisions, approval_decisions
+from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
@@ -43,7 +43,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook, without_fold_records
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import build_request, build_resume_request, scope_history_messages
+from mindroom.history.request_messages import build_request, build_resume_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     open_bound_scope_session_context,
@@ -121,7 +121,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
@@ -152,7 +152,7 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StreamingToolTracker, ToolTraceEntry
-    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -225,17 +225,18 @@ def _team_member(
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
-    mid-turn compaction, and approval receipt. It replays no history, so its compaction stays within the run, and the
-    leader owns the queued-message notices of the turn. ``model_name`` is the member's configured model for this
-    turn, whose window its compaction sizes against. The compaction and receipt hooks hold the state of the run they
-    serve, so each run or resume builds its own.
+    mid-turn compaction, and approval receipt, and its tools run under its own identity. It replays no history, so
+    its compaction stays within the run, and the leader owns the queued-message notices of the turn. ``model_name``
+    is the member's configured model for this turn, whose window its compaction sizes against. The compaction and
+    receipt hooks hold the state of the run they serve, so each run or resume builds its own.
     """
+    as_member = replace(build, tool_middleware=(*build.tool_middleware, _as_member(build.spec.id, model_name)))
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role or "",
         hooks=partial(
             agent_loop_hooks,
-            build,
+            as_member,
             config=config,
             runtime_paths=runtime_paths,
             agent_name=build.spec.id,
@@ -250,6 +251,25 @@ def _team_member(
         ),
         request_template=build.request_template,
     )
+
+
+def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
+    """Return the innermost step of a member's tool calls, which runs the tool under the member's own identity.
+
+    The turn's tool runtime context names the team. Tools that act for the running agent, such as ``todo``'s default
+    assignee and workspace templates or ``claude_agent``'s sessions and model, read it from that context, so each
+    call reaches its entrypoint with the member's name and the model it runs on. The tool-call policy around the
+    step still sees the turn's context, as it did when Agno ran the members.
+    """
+
+    async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
+        context = get_tool_runtime_context()
+        if context is None:
+            return await call_next(call.arguments)
+        with tool_runtime_context(replace(context, agent_name=member_id, active_model_name=model_name)):
+            return await call_next(call.arguments)
+
+    return run_as_member
 
 
 def _resolve_team_instance_id(
@@ -396,22 +416,14 @@ def _replayed_team_history(
     configured_team_name: str | None,
 ) -> tuple[list[Message], ScopeSummary | None]:
     """Return the stored team history this request replays under the resolved plan, and the scope summary."""
-    plan = prepared_history.replay_plan
-    if scope_context is None or scope_context.session is None or plan is None or not plan.add_history_to_context:
+    if scope_context is None:
         return [], None
-    session = scope_context.session
-    settings = config.resolve_entity(
-        configured_team_name if configured_team_name in config.teams else None,
-    ).history_settings
-    history = scope_history_messages(
-        session.runs,
-        scope=scope_context.scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
+    return replayed_history(
+        scope_context.session,
+        scope_context.scope,
+        _team_history_settings(config, configured_team_name),
+        prepared_history.replay_plan,
     )
-    return history, session.summary
 
 
 async def prepare_materialized_team_execution(
@@ -590,9 +602,7 @@ def _leader_hooks(
                 is_team=True,
                 model_name=runtime_model_name,
                 model=model,
-                history_settings=config.resolve_entity(
-                    entity_name if entity_name in config.teams else None,
-                ).history_settings,
+                history_settings=_team_history_settings(config, entity_name),
                 store=storage.store if storage is not None else None,
                 session=storage.session if storage is not None and scoped else None,
                 scope=storage.scope if storage is not None and scoped else None,
@@ -614,11 +624,6 @@ def _leader_hooks(
 def _team_history_settings(config: Config, team_name: str | None) -> ResolvedHistorySettings:
     """Return the history settings of the configured team, or the defaults for an ad hoc one."""
     return config.resolve_entity(team_name if team_name in config.teams else None).history_settings
-
-
-def _toolkit_owners(members: ResolvedExactTeamMembers) -> dict[tuple[str, str], str | None]:
-    """Return the authored toolkit of each member function, keyed as approvals look them up."""
-    return {(build.spec.id, name): toolkit for build in members.builds for name, toolkit in build.tool_owners.items()}
 
 
 def _persist_bound_seen_event_ids(
@@ -1021,11 +1026,12 @@ class _TeamTurn:
                     storage=storage,
                     terminal=attempt.terminal,
                     hooks=hooks,
-                    request_template=request_template,
+                    # A delegation continuation streams its requests even in a blocking turn, as Agno's did.
+                    request_template=replace(request_template, stream=True),
                     settings=_team_history_settings(config, self.configured_team_name),
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,
-                    toolkit_owners=_toolkit_owners(members),
+                    toolkit_owners=tool_owners_by_agent(*members.builds),
                 ),
                 owners={},
                 team_name=self.entity_name,
@@ -1142,7 +1148,7 @@ class _TeamTurn:
             record,
             fallback_session_id=self.ctx.session_id,
             fallback_run_id=attempt.run_id,
-            toolkit_owners=_toolkit_owners(attempt.members),
+            toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
         )
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
@@ -1259,21 +1265,24 @@ class _TeamTurn:
         )
 
 
-async def _under_team_scope(
+def _under_team_scope(
     events: AsyncIterator[TeamRunEvent],
     scope: HistoryScope | None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Pull the run's events with the team scope bound as the scope the running entity stores to.
 
     Tools that address history by scope, such as ``compact_context``, read it from the tool runtime context, so a
-    member compacts the team's history, not its own agent's.
+    member compacts the team's history, not its own agent's. The binding holds only while an event is pulled, so
+    the consumer never runs under it, and it is read at each pull, so the bindings around it, such as the attempt
+    model's, reach the run.
     """
-    context = get_tool_runtime_context()
-    bound = replace(context, history_scope=scope) if context is not None and scope is not None else context
-    with tool_runtime_context(bound):
-        async with closing_async_stream(events):
-            async for event in events:
-                yield event
+
+    def with_scope() -> AbstractContextManager[None]:
+        context = get_tool_runtime_context()
+        bound = replace(context, history_scope=scope) if context is not None and scope is not None else context
+        return tool_runtime_context(bound)
+
+    return context_bound_async_stream(context_factory=with_scope, stream_factory=lambda: events)
 
 
 def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session_id: str | None) -> str | None:
@@ -1604,14 +1613,21 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
-    """Return the paused team run the approval names, from the loaded session or the store."""
+def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id: str) -> TeamRunRecord:
+    """Return the paused team run the approval names, from the loaded session or the store.
+
+    A run the store holds for another session of the scope is refused, as the agent path refuses it.
+    """
     persisted: AnyRunRecord | None = None
     if scope.session is not None:
         persisted = next((run for run in scope.session.runs if run.run_id == run_id), None)
     if persisted is None:
         persisted = scope.storage.get_run(run_id)
-    if not isinstance(persisted, TeamRunRecord) or persisted.status is not RunStatus.paused:
+    if (
+        not isinstance(persisted, TeamRunRecord)
+        or persisted.session_id != session_id
+        or persisted.status is not RunStatus.paused
+    ):
         msg = f"Paused team run {run_id!r} is no longer available"
         raise RuntimeError(msg)
     return persisted
@@ -1682,18 +1698,8 @@ def _resume_request(
     plan: ResolvedReplayPlan | None,
 ) -> list[Message]:
     """Return the leader's resume request: its stored system message, the summary and history ``plan`` replays, then the rest."""
-    session = storage.session
-    if plan is None or not plan.add_history_to_context:
-        return build_resume_request(paused=persisted.messages, summary=None, history=[])
-    history = scope_history_messages(
-        session.runs,
-        scope=storage.scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
-    )
-    return build_resume_request(paused=persisted.messages, summary=session.summary, history=history)
+    history, summary = replayed_history(storage.session, storage.scope, settings, plan)
+    return build_resume_request(paused=persisted.messages, summary=summary, history=history)
 
 
 @dataclass(frozen=True)
@@ -1748,21 +1754,12 @@ class _TeamResume:
         decisions: ResumeDecisions,
         on_event: ResumeEvents | None,
     ) -> TeamRunRecord:
-        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record."""
-        record: TeamRunRecord | None = None
-        events = self.events(paused, decisions)
-        async with closing_async_stream(events):
-            async for event in events:
-                if isinstance(event, RunFinished):
-                    assert isinstance(event.record, TeamRunRecord)
-                    record = event.record
-                elif on_event is not None:
-                    # The driver forwards a parent's events without reading them, so member events ride along.
-                    on_event(cast("RunEvent", event))
-        if record is None:
-            msg = f"team run {paused.run_id!r} ended its resume without its terminal record"
-            raise RuntimeError(msg)
-        return record
+        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record.
+
+        The driver forwards a parent's events without reading them, so member events ride along.
+        """
+        events = cast("AsyncIterator[RunEvent]", self.events(paused, decisions))
+        return await forward_resume(events, on_event, record_type=TeamRunRecord)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1905,7 +1902,7 @@ async def continue_paused_team_run(
                 msg = "Paused team history is no longer available"
                 raise RuntimeError(msg)
             set_consumption_storage(scope.storage_factory)
-            persisted = _stored_paused_team_run(scope, run_id)
+            persisted = _stored_paused_team_run(scope, run_id, session_id)
             delegated = has_delegation_state(persisted)
             approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
             async with asyncio.TaskGroup() as recovery:
@@ -1943,7 +1940,7 @@ async def continue_paused_team_run(
                 model_name=model_name,
                 configured_team_name=configured_team_name,
             )
-            toolkit_owners = _toolkit_owners(members)
+            toolkit_owners = tool_owners_by_agent(*members.builds)
             native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
             presentation = TeamStreamPresentation.restore(
                 config_names=member_names,

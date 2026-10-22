@@ -12,6 +12,7 @@ from uuid import uuid4
 from mindroom import ai_runtime
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -21,7 +22,7 @@ from mindroom.approval.tool_owners import (
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
+from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
@@ -146,8 +147,10 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     completed_call_ids = {
         entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
     }
+    # A delegation answered on an earlier entry no longer waits, though its stored call still names the pause.
+    answered = answered_delegation_calls(response)
     for tool in response.tools or ():
-        if tool.is_paused:
+        if tool.is_paused and tool.tool_call_id not in answered:
             presentation.start_tool(tool)
         elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
             # Repeated terminal completions must not match older public slots by name.
@@ -228,7 +231,7 @@ async def _continue_persisted_agent(
         response,
         fallback_session_id=continuation.session_id,
         fallback_run_id=continuation.run_id,
-        toolkit_owners=_toolkit_owners(continuation.entity_name, build),
+        toolkit_owners=tool_owners_by_agent(build),
     )
     if paused is not None:
         return replace(
@@ -281,11 +284,6 @@ async def _continue_persisted_agent(
         tool_dispatch=tool_dispatch,
         progress=progress,
     )
-
-
-def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str], str | None]:
-    """Return the authored toolkit of each of the agent's functions, keyed as approvals look them up."""
-    return {(agent_name, name): toolkit for name, toolkit in build.tool_owners.items()}
 
 
 def _continuation_turn_context(
@@ -553,7 +551,7 @@ class AgentApprovalExecution:
                     # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds
                     # each approval to the toolkit it was granted for before the agent's tools are reached.
                     validate_approval_tool_owners(
-                        _toolkit_owners(continuation.entity_name, build),
+                        tool_owners_by_agent(build),
                         approved_calls,
                         local_approval_requirements(persisted),
                     )

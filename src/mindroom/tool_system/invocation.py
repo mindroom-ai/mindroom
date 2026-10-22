@@ -46,6 +46,10 @@ _DECODE_ERROR_TEXT = (
     "Error while decoding function arguments: {error}\n\nPlease make sure we can json.loads() the arguments and retry."
 )
 _NOT_AN_OBJECT_ERROR_TEXT = "Function arguments are not a valid JSON object.\n\n Please fix and retry."
+# The session id of a call that belongs to no conversation, such as an MCP gateway or script-run call. Tools that key
+# state by session, such as ``claude_agent``, share one session across those calls, the one they used when Agno's
+# runners called them without a run context.
+DETACHED_SESSION_ID = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +257,7 @@ async def _drain_async(stream: AsyncIterator[object]) -> object:
 
 
 __all__ = [
+    "DETACHED_SESSION_ID",
     "MISSING_TOOL_ERROR_TEXT",
     "ToolArgumentError",
     "ToolCall",

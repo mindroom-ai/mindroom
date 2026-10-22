@@ -4,8 +4,8 @@ The scheduling agent names a function its run offers. When the task fires, the a
 ``run_scheduled_call`` with the task ID, and the stored call runs through that same live function under the
 run's tool-call policy, so the turn's worker routing, credentials, file access, output files, and tool hooks all
 apply. The requester's approval is spent once, and the stored arguments run as stored unless any arguments were
-approved. An agent build binds its run's functions to every call it runs (``bind_live_tools``); a scheduled call
-outside an agent's own run finds nothing bound and runs nothing.
+approved. An agent build that offers the scheduler binds its run's functions to every call it runs
+(``bind_live_tools``); a scheduled call outside such a run finds nothing bound and runs nothing.
 """
 
 from __future__ import annotations
@@ -48,6 +48,8 @@ __all__ = [
 
 # The scheduler's own functions are never a scheduled call; its runner spends approvals itself.
 _SCHEDULER_TOOLKIT = "scheduler"
+# The scheduler's functions that read the run's live functions: one stores a call to one, one runs it.
+_LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 # Parameters through which an entrypoint takes the run's media, which a scheduled call does not carry.
 _MEDIA_PARAMETERS = frozenset({"images", "videos", "audios", "files"})
 
@@ -104,8 +106,10 @@ def bind_live_tools(
 
     ``functions`` are the ones the run offers, by name, and ``owners`` maps each to its authored toolkit, None for
     a generated function, which no stored call can name; a stored call runs under the returned policy, this step
-    included.
+    included. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
+    if _LIVE_FUNCTION_READERS.isdisjoint(functions):
+        return tuple(middleware)
     policy: tuple[ToolMiddleware, ...]
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
