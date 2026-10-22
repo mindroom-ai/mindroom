@@ -290,7 +290,7 @@ def _protect_dashboard_from_workers(
         dashboard_has_credential = dashboard_requires_credential(runtime_paths)
     except ValueError as exc:
         # Refuse dashboard auth settings MindRoom cannot serve, such as a dashboard URL without trusted upstream auth.
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from None
     if ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=dashboard_has_credential):
         return activate_cli_runtime(path=config_path, storage_path=storage_path)
