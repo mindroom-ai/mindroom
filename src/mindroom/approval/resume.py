@@ -1,15 +1,15 @@
 """Resume a persisted paused agent run on the owned loop, as an approval or a delegation continues it.
 
-A resume rebuilds the agent, replays the stored history its scope's configured policy selects, restores the paused
-request's native history settings, installs the hooks an agent turn installs, and continues the run with the
-decisions on exactly the calls it waits for. The loop refuses anything but exact coverage of those calls before it
-runs any of them.
+A resume replays the stored history a replay plan selects and continues the paused request with the decisions on
+exactly the calls it waits for; the loop refuses anything but exact coverage of those calls before it runs any of
+them. ``ResumeRunner`` resumes a rebuilt agent, for an approval or a delegated child, and a live turn continuing
+after its delegations calls ``resume_from_session`` with its own plan.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resume_agent
@@ -18,10 +18,9 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.events import RunFinished
-from mindroom.llm.request_context import bind_llm_request_log_context
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
+from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
-from mindroom.response_turn import DENIED_WITHOUT_REASON
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -131,15 +130,17 @@ def with_resumed_turn_log_context[EventT](
     if context is None:
         return events
     target = context.target
-    attribution = {
-        "agent_id": context.agent_name if entity_name is None else entity_name,
-        "session_id": target.session_id,
-        "room_id": target.room_id,
-        "thread_id": target.resolved_thread_id,
-        "reply_to_event_id": target.reply_to_event_id,
-        "requester_id": context.requester_id,
-        "correlation_id": context.correlation_id,
-    }
+    attribution = asdict(
+        RequestAttribution(
+            agent_id=context.agent_name if entity_name is None else entity_name,
+            session_id=target.session_id,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            reply_to_event_id=target.reply_to_event_id,
+            requester_id=context.requester_id,
+            correlation_id=context.correlation_id,
+        ),
+    )
     return context_bound_async_stream(
         context_factory=lambda: bind_llm_request_log_context(**attribution),
         stream_factory=events.__aiter__,

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.llm.runs import RunRequirement, ToolExecution
+from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, ToolExecution
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -48,7 +48,8 @@ def cli_dispatch_active() -> bool:
 
 
 @contextmanager
-def _inner_cli_dispatch() -> Iterator[None]:
+def cli_dispatch_scope() -> Iterator[None]:
+    """Mark this context as executing a CLI-dispatched tool call, which ``cli_dispatch_active`` reports."""
     token = _INNER.set(True)
     try:
         yield
@@ -194,7 +195,6 @@ class PreparedAgentToolCatalog:
     ) -> None:
         """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
-        instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
             authored = owners is None or function.name in owners
             namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
@@ -206,8 +206,9 @@ class PreparedAgentToolCatalog:
                 msg = f"Duplicate qualified tool: {namespace}.{function.name}"
                 raise ValueError(msg)
             bindings[key] = PreparedAgentToolBinding(key, function, self)
-            self._instructions[key] = instructions
+        # Nothing is recorded until every function is bound, so a refused toolkit leaves the catalog unchanged.
         self._bindings.update(bindings)
+        self._instructions.update(dict.fromkeys(bindings, (toolkit.guidance,) if toolkit.guidance else ()))
 
     def bindings(self) -> tuple[PreparedAgentToolBinding, ...]:
         """Return the bindings prepared so far, for a check over the whole prepared surface."""
@@ -406,7 +407,7 @@ async def _execute_agent_tool_call(
         if requirement is not None:
             _check_resolves(requirement, binding, call_id, arguments)
             if not requirement.confirmation:
-                note = requirement.confirmation_note or "Not approved by requester"
+                note = requirement.confirmation_note or DENIED_WITHOUT_REASON
                 yield _failure(binding, call_id, arguments, note)
                 return
         try:
@@ -451,7 +452,7 @@ async def _execute_agent_tool_call(
         # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
         tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
         try:
-            with catalog.execution_context(), track_sync_tool_completion(tracker), _inner_cli_dispatch():
+            with catalog.execution_context(), track_sync_tool_completion(tracker), cli_dispatch_scope():
                 outcome = await execute_tool_call(
                     function,
                     arguments,
@@ -488,6 +489,7 @@ __all__ = [
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",
     "cli_dispatch_active",
+    "cli_dispatch_scope",
     "execute_agent_shell_call",
     "execute_agent_tool_call",
 ]

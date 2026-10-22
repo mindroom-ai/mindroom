@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,12 +19,36 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-__all__ = ["JSONValue", "bind_llm_request_log_context", "current_llm_request_log_context", "json_safe"]
+__all__ = [
+    "REQUEST_ATTRIBUTION_FIELDS",
+    "JSONValue",
+    "RequestAttribution",
+    "bind_llm_request_log_context",
+    "current_llm_request_log_context",
+    "json_safe",
+]
 
 type _JSONScalar = str | int | float | bool | None
 type JSONValue = _JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 _REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RequestAttribution:
+    """The turn a provider request belongs to, as its request-log context names it; the turn's prompts stay out."""
+
+    agent_id: str
+    session_id: str
+    room_id: str | None
+    thread_id: str | None
+    reply_to_event_id: str | None
+    requester_id: str | None
+    correlation_id: str | None
+
+
+# The request-log context keys that attribute a request to its turn, which the usage line and response record repeat.
+REQUEST_ATTRIBUTION_FIELDS = tuple(attribute.name for attribute in fields(RequestAttribution))
 
 
 def json_safe(value: object) -> JSONValue:

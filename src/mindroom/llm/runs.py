@@ -100,6 +100,10 @@ class ToolExecution:
         )
 
 
+# The note the model receives for a call its requester denied without giving a reason.
+DENIED_WITHOUT_REASON = "Not approved by requester"
+
+
 @dataclass
 class RunRequirement:
     """What a paused run waits for: a confirmation or an external execution result for one tool call."""
@@ -383,6 +387,7 @@ def run_record_from_dict(data: Mapping[str, Any]) -> AnyRunRecord:
 
 
 __all__ = [
+    "DENIED_WITHOUT_REASON",
     "AnyRunRecord",
     "RunRecord",
     "RunRequirement",

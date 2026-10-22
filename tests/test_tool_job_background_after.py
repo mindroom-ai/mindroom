@@ -23,7 +23,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.agent_tool_calls import _inner_cli_dispatch as inner_cli_dispatch
+from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -459,7 +459,7 @@ def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
     tool = job_tool(_ordinary)
     with tool_runtime_context(context):
         assert wait_mode(tool, depth=0) == "managed"
-        with inner_cli_dispatch():
+        with cli_dispatch_scope():
             assert wait_mode(tool, depth=0) == "inline"
 
 
