@@ -7525,6 +7525,7 @@ agents:
   assistant:
     display_name: Assistant
     role: Help in chat
+    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - shell
       - coding: {defer: true, initial: true}
