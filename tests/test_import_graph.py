@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
     "boto3",
-    "cerebras",
     "google.genai",
     "groq",
     "ollama",
@@ -41,11 +40,9 @@ _PROVIDER_SDK_ROOTS = (
 _HEAVY_OPTIONAL_RUNTIME_ROOTS = (
     # Provider-specific clients and authentication.
     *_PROVIDER_SDK_ROOTS,
-    "agno.models.vertexai.claude",
     "google.auth",
     "google.oauth2",
     # Storage engines.
-    "agno.vectordb.chroma",
     "chromadb",
     "falkordb",
     "graphiti_core",
@@ -86,8 +83,8 @@ _CONFIG_LAYER_ROOTS = frozenset(
 # The registry additionally carries httpx (sandbox proxy transport) and click
 # (tool CLI plumbing).
 _REGISTRY_ROOTS = _CONFIG_LAYER_ROOTS | frozenset({"brotli", "click", "httpx", "idna", "zstandard"})
-# The full tool-module sweep adds the agno toolkit runtime (redis-backed run
-# cancellation, opentelemetry via redis) and the httpx dependency tree.
+# The full tool-module sweep adds Agno's tool layer (docstring_parser and
+# packaging) and the httpx transport tree.
 _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
     {
         "agno",
@@ -100,17 +97,11 @@ _TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
         "hpack",
         "httpcore",
         "hyperframe",
-        "importlib_metadata",
-        "opentelemetry",
         "outcome",
         "packaging",
-        "psutil",
-        "redis",
         "sniffio",
         "sortedcontainers",
         "trio",
-        "xxhash",
-        "zipp",
     },
 )
 # Top-level CLI help only needs command metadata and presentation libraries.

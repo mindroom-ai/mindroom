@@ -70,7 +70,7 @@ def _extract_provider_from_error(error: Exception) -> str | None:
     module = type(error).__module__ or ""
     # e.g. "openai" from "openai._exceptions", "anthropic" from "anthropic._exceptions"
     top_module = module.split(".")[0] if module else ""
-    known_providers = {"openai", "anthropic", "google", "groq", "cerebras", "httpx"}
+    known_providers = {"openai", "anthropic", "google", "groq", "httpx"}
     if top_module in known_providers:
         return top_module
     return None
