@@ -4522,6 +4522,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.orchestration.server_state",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
     "mindroom.tool_jobs.follow_ups",
@@ -7788,6 +7789,18 @@ depends_on = [
     "mindroom.workers.runtime",
     "mindroom.origins",
 ]
+
+[[modules]]
+path = "mindroom.orchestration.server_state"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.event_types",
+    "mindroom.matrix_openid",
+    "mindroom.orchestration.computer_runtime",
+    "mindroom.runtime_env_policy",
+    "mindroom.worker_computer.sessions",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.orchestration.computer_runtime"

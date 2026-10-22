@@ -66,6 +66,7 @@ from mindroom.matrix.users import AgentMatrixUser, login_agent_owned_session
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
+from mindroom.orchestration.server_state import publish_server_state, server_state_content
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
@@ -1297,6 +1298,9 @@ class AgentBot:
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
         self._request_call_reconciliation(room_id)
+        if self.client is not None:
+            content = server_state_content(self.agent_name, self.config, self.runtime_paths)
+            await publish_server_state(self.client, room_id, content)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
