@@ -22,7 +22,8 @@ from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.teams.envelope import _TeamAttempt, _TeamTurnHolder
+from mindroom.teams.attempt import TeamAttempt
+from mindroom.teams.envelope import _TeamTurnHolder
 from mindroom.teams.members import materialize_exact_team_members, materialize_team_members
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding
@@ -300,7 +301,7 @@ def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
     presentation.start_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="touch", tool_args={}))
     holder = _TeamTurnHolder(
         team_members=members,
-        attempt=_TeamAttempt(
+        attempt=TeamAttempt(
             run_id="run-1",
             members=members,
             presentation=presentation,

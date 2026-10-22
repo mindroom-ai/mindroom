@@ -1325,7 +1325,6 @@ depends_on = [
 visibility = [
     "mindroom.loop_hooks",
     "mindroom.response_runner",
-    "mindroom.teams",
 ]
 
 [[modules]]
@@ -3257,7 +3256,6 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
-    "mindroom.approval.receipt",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.authorization",
@@ -3293,7 +3291,6 @@ depends_on = [
     "mindroom.thread_models",
     "mindroom.timing",
     "mindroom.tool_jobs.consumption",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
@@ -6229,13 +6226,8 @@ from = ["mindroom.routing"]
 
 [[interfaces]]
 expose = [
-    "envelope.BuiltTeam",
-    "envelope.TeamRunRecords",
-    "envelope.build_team_spec",
-    "envelope.continue_paused_team_run",
     "envelope.prepare_materialized_team_execution",
     "envelope.run_prepared_team",
-    "envelope.team_label",
     "envelope.team_response",
     "envelope.team_response_stream",
     "formation.TeamIntent",
@@ -6247,17 +6239,22 @@ expose = [
     "formation.resolve_configured_team",
     "formation.resolve_live_shared_agent_names",
     "formation.select_ad_hoc_team_mode",
+    "members.BuiltTeam",
     "members.ResolvedExactTeamMembers",
     "members.TeamTurnModelSelection",
+    "members.build_team_spec",
     "members.materialize_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
+    "members.team_label",
     "presentation.TeamStreamPresentation",
     "presentation.apply_team_event",
     "presentation.render_team_member_slots",
     "presentation.strip_team_display",
+    "resume.continue_paused_team_run",
     "runtime.MemberEvent",
     "spec.TeamMode",
+    "storage.TeamRunRecords",
 ]
 from = ["mindroom.teams"]
 

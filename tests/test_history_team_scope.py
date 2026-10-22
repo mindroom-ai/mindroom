@@ -30,9 +30,8 @@ from mindroom.history.types import (
     PreparedHistoryState,
 )
 from mindroom.llm.messages import Message
-from mindroom.teams import envelope
-from mindroom.teams.envelope import BuiltTeam, build_team_spec, prepare_materialized_team_execution
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.envelope import prepare_materialized_team_execution
+from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
 from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
@@ -79,7 +78,10 @@ def _build_pair(
 ) -> BuiltTeam:
     """Build the alpha+zeta team on scripted providers, as a reply builds it; ``leader`` scripts the leader's turns."""
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: leader or ScriptedModel([]))
+    monkeypatch.setattr(
+        "mindroom.teams.members.build_model_provider",
+        lambda *_args, **_kwargs: leader or ScriptedModel([]),
+    )
     members = materialize_exact_team_members(
         ["zeta", "alpha"],
         config=config,

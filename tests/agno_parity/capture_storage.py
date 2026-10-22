@@ -90,8 +90,9 @@ from mindroom.session_storage.agent_storage import (
     get_team_session,
     save_compaction_usage,
 )
-from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
+from mindroom.teams.envelope import team_response, team_response_stream
 from mindroom.teams.members import select_model_for_team
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (

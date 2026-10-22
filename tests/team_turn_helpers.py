@@ -32,8 +32,8 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.message_target import MessageTarget
-from mindroom.teams import envelope
-from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
+from mindroom.teams.envelope import team_response, team_response_stream
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.events import StructuredStreamChunk
@@ -164,7 +164,10 @@ def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, Sc
     ``models`` is read at every build, so a test may replace a model between a pause and its resume.
     """
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
-    monkeypatch.setattr(envelope, "build_model_provider", lambda _config, _paths, name, **_kwargs: models[name])
+    monkeypatch.setattr(
+        "mindroom.teams.members.build_model_provider",
+        lambda _config, _paths, name, **_kwargs: models[name],
+    )
 
 
 def authored_team_config(

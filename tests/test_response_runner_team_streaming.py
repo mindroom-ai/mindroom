@@ -1497,7 +1497,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     # The leader is stopped while its first request streams; the member never runs.
     leader = ScriptedModel([[Await(stopped)]])
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.envelope.build_model_provider", lambda *_args, **_kwargs: leader)
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: leader)
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])

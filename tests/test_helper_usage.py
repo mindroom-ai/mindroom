@@ -44,8 +44,8 @@ from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_c
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.teams import envelope
-from mindroom.teams.envelope import continue_paused_team_run, team_response
+from mindroom.teams.envelope import team_response
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -157,7 +157,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         ],
     )
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
-    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: leader)
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: leader)
     original_add = CalculatorTools.add
     helper_results: list[object] = []
 

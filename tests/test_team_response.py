@@ -35,18 +35,14 @@ from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
-from mindroom.teams.envelope import (
-    build_team_spec,
-    prepare_materialized_team_execution,
-    team_label,
-    team_response,
-    team_response_stream,
-)
+from mindroom.teams.envelope import prepare_materialized_team_execution, team_response, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
+    build_team_spec,
     materialize_exact_requested_team_members,
     materialize_team_members,
+    team_label,
 )
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
@@ -1114,7 +1110,7 @@ async def test_member_and_leader_tool_calls_emit_dispatch_timing_marks(
     marks: list[dict[str, object]] = []
 
     with patch(
-        "mindroom.teams.envelope.emit_timing_event",
+        "mindroom.teams.attempt.emit_timing_event",
         side_effect=lambda _event_name, **event_data: marks.append(event_data),
     ):
         await team.stream()
@@ -1290,8 +1286,8 @@ async def test_a_resume_whose_history_cannot_be_opened_builds_no_member(
             return None
 
     with (
-        patch("mindroom.teams.envelope.materialize_exact_team_members") as materialize,
-        patch("mindroom.teams.envelope.open_resolved_scope_session_context", return_value=_Unavailable()),
+        patch("mindroom.teams.resume.materialize_exact_team_members") as materialize,
+        patch("mindroom.teams.resume.open_resolved_scope_session_context", return_value=_Unavailable()),
         pytest.raises(RuntimeError, match="scope open failed"),
     ):
         await team.resume(

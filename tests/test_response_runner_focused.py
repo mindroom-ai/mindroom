@@ -149,8 +149,8 @@ from mindroom.streaming import (
     StreamingResponse,
     UnfinishedStreamedReply,
 )
-from mindroom.teams.envelope import continue_paused_team_run
 from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming

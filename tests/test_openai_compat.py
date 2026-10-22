@@ -81,8 +81,8 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
 from mindroom.teams import envelope
-from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
-from mindroom.teams.members import ResolvedExactTeamMembers
+from mindroom.teams.envelope import PreparedTeamExecution
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.tool_calls import record_tool_success
@@ -4495,7 +4495,7 @@ class TestTeamCompletion:
         runtime_paths = _runtime_paths_for_config(config)
         with (
             patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
-            patch("mindroom.teams.envelope.build_model_provider", return_value=ScriptedModel([])),
+            patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
             open_bound_scope_session_context(
                 member_names=[],
                 session_id="session-1",
@@ -4551,7 +4551,7 @@ class TestTeamCompletion:
                 team_name="super_team",
             ) as scope_context,
             patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])),
-            patch("mindroom.teams.envelope.build_model_provider", return_value=ScriptedModel([])),
+            patch("mindroom.teams.members.build_model_provider", return_value=ScriptedModel([])),
         ):
             assert scope_context is not None
             members, _built, mode = openai_compat._build_team(

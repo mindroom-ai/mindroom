@@ -96,7 +96,7 @@ Matrix sync callback
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval/resume.py` | Resuming a persisted paused agent run on the owned loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |
-| `loop_hooks.py` | The hooks an agent run or resume, a team member's included, installs on the owned loop, in the order the turn applies them |
+| `loop_hooks.py` | The hooks an agent's or a team leader's run or resume, a team member's included, installs on the owned loop, composed once in the order the turn applies them |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
 | `approval/manager.py` | Matrix-backed tool approval runtime state |
@@ -163,13 +163,16 @@ Matrix sync callback
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
-| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, and the leader's and members' model aliases for a turn |
+| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, and job controls with each member's prompt, role, and loop hooks |
 | `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
 | `teams/prompt.py` | The leader's system message in the layout Agno rendered: roster, mode block, tool instructions, provider note, context |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
 | `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
-| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, and the durable `team_stream` snapshot an approval resume restores |
-| `teams/envelope.py` | `team_response`, `team_response_stream`, and `continue_paused_team_run`: build the leader and members, run the team through the turn drivers, drive a member's delegations and resume the run with their results, render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, and the live document a resumed run publishes |
+| `teams/envelope.py` | `team_response` and `team_response_stream`: prepare a team turn, run its leader through the turn drivers, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the text an interrupted turn keeps, and its run metadata |
+| `teams/storage.py` | Where a team's new runs and resumes store, the records a run hands over, and the team scope its tools address |
+| `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, and `continue_paused_team_run` rebuilds the team from a saved approval |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |
 | `agent_cli/checkpoint.py` | Minimal Bash's provider batch, saved as a `before_dispatch` hook before any Bash call takes effect |
