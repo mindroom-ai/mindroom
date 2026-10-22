@@ -431,8 +431,8 @@ async def test_every_hook_fires_at_its_documented_point() -> None:
         log.append(("before_request", "second", state.request_index))
         return SendRequest()
 
-    async def before_dispatch(messages: list[Message], planned: Sequence[PlannedCall]) -> None:
-        log.append(("before_dispatch", [call.function.name for call in planned], messages[-1].role))
+    async def before_dispatch(state: LoopState, planned: Sequence[PlannedCall]) -> None:
+        log.append(("before_dispatch", [call.function.name for call in planned], state.messages[-1].role))
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         log.append(("middleware", call.function.name, call.arguments))

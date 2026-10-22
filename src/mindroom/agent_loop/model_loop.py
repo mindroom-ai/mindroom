@@ -80,7 +80,7 @@ type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
 type AnswerToolCalls = Callable[[Message, StopReason | None], list[Message] | None]
-type BeforeDispatchHook = Callable[[list[Message], Sequence[PlannedCall]], Awaitable[None]]
+type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[None]]
 type ResumeEntryHook = Callable[[list[Message]], Awaitable[None]]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
@@ -97,8 +97,9 @@ class LoopHooks:
       when it returns result messages, they answer the batch in place of running it (the output-limit policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
-    - ``before_dispatch``: awaited with the live messages and the planned calls before any call of a batch runs
-      (the CLI checkpoint).
+    - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
+      whose record holds the batch's executions, and the planned calls before any call of the batch runs (minimal
+      mode's checkpoint of the batch).
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
       results and any media follow-up are appended, before the loop decides to stop, pause, or continue
@@ -283,7 +284,7 @@ async def _run_tool_batch(
     )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
-        await hooks.before_dispatch(state.messages, batch.planned)
+        await hooks.before_dispatch(state, batch.planned)
     for call in batch.planned:
         yield ToolStarted(call.execution)
     executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)

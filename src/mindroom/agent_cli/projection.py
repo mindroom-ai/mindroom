@@ -17,8 +17,7 @@ from mindroom.tool_system.output_files import (
 )
 
 if TYPE_CHECKING:
-    from agno.models.response import ModelResponse
-
+    from mindroom.tool_system.agno_toolkits import ToolValue
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -70,13 +69,13 @@ def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool
 
 
 def register_cli_media(
-    response: ModelResponse,
+    response: ToolValue,
     *,
     context: ToolRuntimeContext,
     policy: ToolOutputFilePolicy | None,
     call_id: str,
 ) -> list[dict[str, object]]:
-    """Retain scoped local references while leaving Agno's media objects intact."""
+    """Retain scoped local references while leaving the call's media objects intact."""
     references: list[dict[str, object]] = []
     for kind, items in (
         ("image", response.images),
@@ -84,7 +83,7 @@ def register_cli_media(
         ("video", response.videos),
         ("file", response.files),
     ):
-        for item in items or []:
+        for item in items:
             reference: dict[str, object] = {"kind": kind, "mime_type": item.mime_type}
             if item.url:
                 reference["url"] = item.url

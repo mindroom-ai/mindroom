@@ -16,7 +16,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agent_cli.agno_compat_cli_checkpoint import cli_dispatch_active
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -46,6 +45,7 @@ from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
+from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.agno_toolkits import ToolResult, ToolValue, tool_value
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction

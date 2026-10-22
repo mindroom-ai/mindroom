@@ -134,7 +134,10 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.request_template == ModelRequest(messages=())
     assert build.history_settings == config.resolve_entity("assistant").history_settings
     assert isinstance(build.store, ConversationStore)
-    assert build.surface == AgentSurface(
+    # Large CLI results and their media are saved in the agent's own workspace.
+    assert build.surface.output_file_policy is not None
+    assert build.surface.output_file_policy.workspace_root == workspace
+    assert replace(build.surface, output_file_policy=None) == AgentSurface(
         mode="standard",
         cli_shell=False,
         context_documents=("You are calm and precise.",),

@@ -14,7 +14,6 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import Function
 
-from mindroom.agent_cli.agno_compat_cli_checkpoint import _install_capture
 from mindroom.providers.portable_tool_search import (
     install_portable_deferred_tool_search,
     portable_deferred_tool_names,
@@ -401,19 +400,3 @@ async def test_approval_gated_deferred_call_pauses_under_its_real_name() -> None
 
     assert output.is_paused
     assert [(tool.tool_name, tool.tool_args) for tool in output.tools or []] == [("crm_delete", {"customer_id": 7})]
-
-
-def test_rewrite_keeps_the_bound_method_shape_other_bindings_wrap() -> None:
-    # The CLI checkpoint capture unwraps get_function_calls_to_run via __func__, so the rewrite must stay a bound method.
-    model = _ScriptedModel([])
-    install_portable_deferred_tool_search(model, deferred_tool_names=frozenset({"crm_lookup"}))
-
-    _install_capture(model)
-
-    message = Message(role="assistant", tool_calls=[_call("c1", "call_tool", '{"name": "crm_lookup"}')])
-    [call] = model.get_function_calls_to_run(
-        assistant_message=message,
-        messages=[],
-        functions={"crm_lookup": Function(name="crm_lookup", entrypoint=lambda: "ok")},
-    )
-    assert call.function.name == "crm_lookup"

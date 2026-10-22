@@ -53,11 +53,16 @@ _UNBINDABLE_KINDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when Agno would add it to the prompt."""
+    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when Agno would add it to the prompt.
+
+    ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
+    it describes the toolkit's functions and minimal mode offers as a context document.
+    """
 
     name: str
     functions: tuple[ToolFunction, ...]
     instructions: str | None
+    guidance: str | None = None
 
 
 def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolkit:
@@ -68,6 +73,7 @@ def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolki
         name=toolkit.name,
         functions=tuple(adapt_function(function) for function in functions.values()),
         instructions=toolkit.instructions if added else None,
+        guidance=toolkit.instructions or None,
     )
 
 
@@ -264,7 +270,7 @@ class ToolValue:
 def tool_value(result: object) -> ToolValue:
     """Read a tool's return value as Agno's loop does: a ``ToolResult`` carries text and media, anything else is text.
 
-    A value already in owned terms, as a tool job's saved result is, stands as it is.
+    A value already in owned terms, as a tool job's saved result or minimal mode's Bash facade returns, stands as it is.
     """
     if isinstance(result, ToolValue):
         return result

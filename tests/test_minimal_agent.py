@@ -1,4 +1,4 @@
-"""Minimal presentation must not prepare a hidden catalog during prompt sizing."""
+"""Minimal presentation offers only Bash, and its catalog and grant are bound only by a managed attempt."""
 
 # ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 
@@ -11,34 +11,41 @@ from typing import Literal
 from uuid import uuid4
 
 import pytest
-from agno.agent import Agent
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.session import AgentSession
-from agno.tools.function import FunctionCall
-from agno.tools.toolkit import Toolkit
 
 from mindroom import agents, ai
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.context import minimal_system_message
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.minimal_agent import MinimalAgent
+from mindroom.agent_cli.minimal_agent import (
+    minimal_attempt,
+    minimal_context_documents,
+    minimal_turn,
+    prepare_minimal_catalog,
+    presented_build,
+)
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
+from mindroom.agent_loop.model_loop import NO_HOOKS
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_modes import resolve_agent_mode, set_agent_mode
-from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import primary_records_dir, resolve_runtime_paths
 from mindroom.error_handling import MinimalModeUnavailableError, get_user_friendly_error_message
-from mindroom.history.prompt_tokens import _agent_prompt_tool_surface, agent_static_token_estimator
 from mindroom.hooks import EnrichmentItem
 from mindroom.hooks.enrichment import is_transient_context
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from tests.identity_helpers import persist_entity_accounts
@@ -47,9 +54,63 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     agent_cli_api,
     cli_window,
     install_scripted_shell,
+    offered_tools,
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+
+
+def _function_names(build) -> list[str]:
+    return [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
+
+
+def _turn(build):
+    return minimal_turn(build, session_preamble="", transient_memory="", system_enrichment=(), transient_enrichment=())
+
+
+def _session(runtime) -> ConversationSession:
+    return ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
+
+
+async def _attempt(build, runtime, session: ConversationSession, *, run_id: str = "generation-1"):
+    """Bind one managed minimal attempt of ``build`` as a reply does, returning the run's spec, hooks, and context."""
+    run = RunContext(
+        run_id=run_id,
+        session_id=runtime.session_id,
+        user_id=runtime.requester_id,
+        session_state=session.session_state,
+    )
+    spec, hooks = await minimal_attempt(
+        build,
+        replace(build.spec, system_message=_turn(build).system_message),
+        NO_HOOKS,
+        run=run,
+        session=session,
+        store=build.store,
+        response_context=_turn_context(),
+        context_documents=minimal_context_documents(build),
+        delegation_depth=0,
+        refresh_scheduler=None,
+    )
+    return spec, hooks, run
+
+
+async def _run_attempt(build, runtime, session: ConversationSession, prompt: str, *, run_id: str = "generation-1"):
+    """Run one minimal attempt on the owned loop and return its terminal record."""
+    spec, hooks, run = await _attempt(build, runtime, session, run_id=run_id)
+    events = run_agent(
+        spec,
+        [Message(role="user", content=prompt)],
+        ctx=run,
+        hooks=hooks,
+        persist=persist_to(build.store, session) if build.store is not None else None,
+    )
+    record = None
+    async for event in events:
+        if isinstance(event, RunFinished):
+            record = event.record
+    assert record is not None
+    return record
 
 
 def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
@@ -69,18 +130,16 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     persist_entity_accounts(config, runtime)
     standard = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False)
     minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
-    assert standard.system_message is None
-    assert "Required short rule" in minimal.system_message
-    assert "Long authored role" not in minimal.system_message
-    assert "Long authored instruction" not in minimal.system_message
-    assert minimal.context_documents["role"].endswith("Long authored role")
-    assert "Long authored instruction" in minimal.context_documents["instructions"]
-    tools = minimal.get_tools(
-        RunOutput(run_id="budget"),
-        RunContext(run_id="budget", session_id="budget", user_id="synthetic", session_state={}),
-        AgentSession(session_id="budget"),
-    )
-    assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
+    assert standard.surface.mode == "standard"
+    assert standard.surface.minimal_instructions == ()
+    turn = _turn(minimal)
+    system = turn.system_message.get_content_string()
+    assert "Required short rule" in system
+    assert "Long authored role" not in system
+    assert "Long authored instruction" not in system
+    assert turn.context_documents["role"].endswith("Long authored role")
+    assert "Long authored instruction" in turn.context_documents["instructions"]
+    assert _function_names(presented_build(minimal)) == ["bash"]
 
 
 def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Path) -> None:
@@ -94,12 +153,7 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
     persist_entity_accounts(config, runtime)
     minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
 
-    functions = {
-        name: function
-        for toolkit in minimal.tools or []
-        if isinstance(toolkit, Toolkit)
-        for name, function in toolkit.get_async_functions().items()
-    }
+    functions = {function.name: function for toolkit in minimal.spec.toolkits for function in toolkit.functions}
     assert "run_shell_command" in functions
     assert "timeout" in functions["run_shell_command"].parameters["properties"]
 
@@ -154,7 +208,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         identity,
         persist_runtime_state=False,
     )
-    functions = {name for tool in standard.tools if isinstance(tool, Toolkit) for name in tool.get_async_functions()}
+    functions = _function_names(standard)
     assert "run_shell_command" in functions
     assert "add" not in functions
 
@@ -187,23 +241,25 @@ def test_context_files_remain_complete_and_notes_untouched(
     runtime = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     persist_entity_accounts(config, runtime)
     minimal = agents.create_agent("helper", config, runtime, None, persist_runtime_state=False, agent_mode="minimal")
+    turn = _turn(minimal)
+    system = turn.system_message.get_content_string()
+    policy = minimal.surface.output_file_policy
     if memory_backend == "file":
-        assert "context/notes.md" in minimal.system_message
-        assert minimal.output_file_policy.workspace_root / "context/notes.md" == notes
-        memory_line = next(line for line in minimal.system_message.splitlines() if line.startswith("File memory: "))
-        entrypoint, directory = [
-            minimal.output_file_policy.workspace_root / path for path in memory_line.split("`")[1::2]
-        ]
+        assert policy is not None
+        assert "context/notes.md" in system
+        assert policy.workspace_root / "context/notes.md" == notes
+        memory_line = next(line for line in system.splitlines() if line.startswith("File memory: "))
+        entrypoint, directory = [policy.workspace_root / path for path in memory_line.split("`")[1::2]]
         assert entrypoint.read_text() == "Remember the existing memory entrypoint."
         assert (directory / "2026-09-22.md").read_text() == "Remember the existing daily memory."
     else:
-        assert "context/notes.md" not in minimal.system_message
-        assert "File memory:" not in minimal.system_message
-    assert "missing.md" not in minimal.system_message
-    assert str(tmp_path) not in minimal.system_message
-    assert "full-content-" not in minimal.system_message
-    assert notes.read_text() in minimal.context_documents.values()
-    assert all(not key.startswith("/") and ".." not in key for key in minimal.context_documents)
+        assert "context/notes.md" not in system
+        assert "File memory:" not in system
+    assert "missing.md" not in system
+    assert str(tmp_path) not in system
+    assert "full-content-" not in system
+    assert notes.read_text() in turn.context_documents.values()
+    assert all(not key.startswith("/") and ".." not in key for key in turn.context_documents)
     assert notes.read_text() == "full-content-" * 2000
 
 
@@ -250,17 +306,45 @@ def test_minimal_context_file_list_is_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_minimal_async_preparation_requires_managed_owner() -> None:
-    from agno.models.openai import OpenAIChat  # noqa: PLC0415 - keep optional provider/server imports deferred
+async def test_minimal_attempt_requires_managed_owner(tmp_path: Path) -> None:
+    """Bash is offered only inside a response that owns its CLI lifetime and an orchestrator registry."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
+    build = agents.create_agent(
+        "helper",
+        runtime.config,
+        runtime.runtime_paths,
+        build_execution_identity_from_runtime_context(runtime),
+        agent_mode="minimal",
+        persist_runtime_state=False,
+    )
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="response owner"):
+        await _attempt(build, runtime, _session(runtime))
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="response owner"):
+        async with response_cli_lifetime():
+            await _attempt(build, runtime, _session(runtime))
 
-    agent = MinimalAgent(id="helper", model=OpenAIChat(id="test-model", api_key="test"))
-    with pytest.raises(RuntimeError, match="response owner"):
-        await agent.aget_tools(
-            RunOutput(run_id="run"),
-            RunContext(run_id="run", session_id="session", session_state={}),
-            AgentSession(session_id="session"),
-            user_id="alice",
-        )
+
+@pytest.mark.asyncio
+async def test_the_bash_facade_hands_its_own_provider_call_to_the_owner() -> None:
+    """Bash names the provider call it runs as, so the owner checkpoints exactly that call's batch."""
+    seen = []
+
+    async def execute(key, arguments, call_id):
+        seen.append((key, arguments, call_id))
+        return "canonical owner"
+
+    [bash] = adapt_toolkit(MinimalBashTools(execute=execute)).functions
+    outcome = await execute_tool_call(
+        bash,
+        {"command": "true", "timeout": 5},
+        ToolCallContext(run_id="run", session_id="session", call_id="outer"),
+    )
+    assert outcome.content == "canonical owner"
+    assert seen == [(ToolKey("shell", "run_shell_command"), {"args": "true", "tail": 100, "timeout": 5}, "outer")]
+    refused = await execute_tool_call(bash, {"command": "true"}, ToolCallContext(run_id="run", session_id="session"))
+    assert refused.is_error
+    assert "response owner" in refused.content
 
 
 @pytest.mark.asyncio
@@ -270,26 +354,17 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
     context = _runtime_context(tmp_path)
     context.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"], memory_backend="file")
     context = replace(context, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
-    agent = agents.create_agent(
+    build = agents.create_agent(
         "helper",
         context.config,
         context.runtime_paths,
         build_execution_identity_from_runtime_context(context),
         agent_mode="minimal",
     )
-    agent.response_context = _turn_context()
-    run = RunOutput(run_id="generation-1")
-    run_context = RunContext(
-        run_id="generation-1",
-        session_id=context.session_id,
-        user_id=context.requester_id,
-        session_state={},
-    )
-    session = AgentSession(session_id=context.session_id)
     with tool_runtime_context(context):
         async with response_cli_lifetime() as lifetime:
-            tools = await agent.aget_tools(run, run_context, session, user_id=context.requester_id)
-            assert [name for tool in tools for name in tool.get_async_functions()] == ["bash"]
+            spec, _hooks, _run = await _attempt(build, context, _session(context))
+            assert [function.name for toolkit in spec.toolkits for function in toolkit.functions] == ["bash"]
             owner = lifetime.owner
             assert owner is not None
             shell_env = owner.shell_env
@@ -297,14 +372,12 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
             # This agent's shell runs in MindRoom, so its commands call the local API.
             assert shell_env.api_url == "http://127.0.0.1:8765"
             assert owner.authenticate(shell_env.token, now_ns=time.time_ns()) is owner.owner
+            assert lifetime.grant_expires_at_ns is not None
             assert 0 < lifetime.grant_expires_at_ns - time.time_ns() <= MAX_CLI_GRANT_LIFETIME_NS
             assert any(item.get("function") == "run_shell_command" for item in owner.catalog.metadata())
             catalog = owner.catalog
-            agent.get_tools(
-                RunOutput(run_id="budget"),
-                RunContext(run_id="budget", session_id="budget", session_state={}),
-                AgentSession(session_id="budget"),
-            )
+            # Sizing a minimal request presents Bash alone and never touches the bound catalog or grant.
+            assert _function_names(presented_build(build)) == ["bash"]
             assert owner.catalog is catalog
             assert lifetime.owner is owner
             assert owner.shell_env is shell_env
@@ -351,66 +424,57 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     tokens = []
+    session = _session(runtime)
 
     def create():
-        agent = agents.create_agent(
+        return agents.create_agent(
             "helper",
             runtime.config,
             runtime.runtime_paths,
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
         )
-        agent.response_context = _turn_context()
-        return agent
+
+    def stored_runs(build):
+        stored = build.store.load_session(runtime.session_id, "agent")
+        return [run.to_dict() for run in stored.runs] if stored is not None else []
 
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
+            history = []
             if rebuild:
                 initial = create()
-                result = await initial.arun(
-                    "First request",
-                    user_id=runtime.requester_id,
-                    session_id=runtime.session_id,
-                )
-                assert result.content == "done"
-                history = [run.to_dict() for run in initial.db.get_session(runtime.session_id).runs]
+                record = await _run_attempt(initial, runtime, session, "First request", run_id="first")
+                assert record.content == "done"
+                history = stored_runs(initial)
                 await lifetime.retire_attempt()
             previous_owner = lifetime.owner
             previous_shell_env = previous_owner.shell_env if previous_owner is not None else None
             prior_requests = list(provider.requests)
             runtime.config.agents["helper"].tools = [{"shell": {"defer": deferred, **shell_settings}}]
-            agent = create()
+            build = create()
             if "exclude_tools" in shell_settings:
-                result = await agent.arun(
-                    "Restricted request",
-                    user_id=runtime.requester_id,
-                    session_id=runtime.session_id,
-                )
-                assert result.status == "ERROR"
-                assert "`run_shell_command` shell permission" in result.content
-                assert "!mode helper standard" in result.content
+                with pytest.raises(MinimalModeUnavailableError) as raised:
+                    await _run_attempt(build, runtime, session, "Restricted request")
+                assert "`run_shell_command` shell permission" in str(raised.value)
+                assert "!mode helper standard" in str(raised.value)
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
-                if rebuild:
-                    assert [
-                        run.to_dict() for run in agent.db.get_session(runtime.session_id).runs[: len(history)]
-                    ] == history
+                assert stored_runs(build)[: len(history)] == history
             else:
-                result = await agent.arun(
-                    "Supported request",
-                    user_id=runtime.requester_id,
-                    session_id=runtime.session_id,
-                )
-                assert result.content == "done"
-                assert [tool["function"]["name"] for tool in provider.requests[-1]["tools"]] == ["bash"]
+                record = await _run_attempt(build, runtime, session, "Supported request")
+                assert record.content == "done"
+                assert offered_tools(provider.requests[-1]) == ["bash"]
                 assert len(provider.requests) == len(prior_requests) + 1
+                assert lifetime.owner is not None
                 assert lifetime.owner.shell_env is not None
                 if rebuild:
                     assert lifetime.owner is previous_owner
                     # The rebuilt request keeps the response's one grant.
                     assert lifetime.owner.shell_env is previous_shell_env
-                    assert lifetime.owner.catalog.agent is agent
+                    assert lifetime.owner.catalog.run.run_id == "generation-1"
             if lifetime.owner is not None:
+                assert lifetime.owner.shell_env is not None
                 tokens.append(lifetime.owner.shell_env.token)
     assert len(tokens) == (1 if rebuild or "exclude_tools" not in shell_settings else 0)
     for token in tokens:
@@ -434,49 +498,23 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
     set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    agent = agents.create_agent(
+    build = agents.create_agent(
         "helper",
         runtime.config,
         runtime.runtime_paths,
         identity,
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
     )
-    agent.response_context = _turn_context()
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
-            result = await agent.arun("Hello", user_id=runtime.requester_id, session_id=runtime.session_id)
-            assert result.status == "ERROR"
-            assert "Run MindRoom with its API server" in result.content
-            assert "!mode helper standard" in result.content
+            with pytest.raises(MinimalModeUnavailableError) as raised:
+                await _run_attempt(build, runtime, _session(runtime), "Hello")
+            assert "Run MindRoom with its API server" in str(raised.value)
+            assert "!mode helper standard" in str(raised.value)
             # No grant is issued for a shell that cannot reach MindRoom.
             assert lifetime.owner is None
     assert provider.requests == []
     assert resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id) == "minimal"
-
-
-@pytest.mark.asyncio
-async def test_prepared_bash_facade_reports_its_per_run_copy(tmp_path: Path) -> None:
-    from agno.models.openai import OpenAIChat  # noqa: PLC0415 - keep optional provider/server imports deferred
-
-    prepared = []
-
-    async def execute(key, arguments, fc):
-        return "canonical owner"
-
-    facade = MinimalBashTools(execute=execute, on_prepare=prepared.append)
-    agent = MinimalAgent(id="helper", model=OpenAIChat(id="test-model", api_key="test"))
-    functions = prepare_agent_tools(
-        agent,
-        processed_tools=[facade],
-        run_response=RunOutput(run_id="run"),
-        run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        session=AgentSession(session_id="session"),
-    )
-    function = functions[0]
-    assert prepared[-1] is function
-    call = FunctionCall(function=function, call_id="outer", arguments={"command": "true"})
-    await call.aexecute()
-    assert call.result == "canonical owner"
 
 
 @pytest.mark.asyncio
@@ -512,13 +550,18 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
         execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
     assert "actual current user request" in prepared.prompt_text
-    turn_context = next(message for message in prepared.messages if "required current target" in str(message.content))
-    assert is_transient_context(turn_context.content)
+    turn_context = next(
+        message for message in prepared.turn.in_request_order() if "required current target" in str(message.content)
+    )
+    assert is_transient_context(turn_context.get_content_string())
     assert "optional memory" not in prepared.prompt_text
     assert "optional plugin" not in prepared.prompt_text
-    assert "optional system" not in prepared.agent.system_message
-    documents = "\n".join(prepared.agent.context_documents.values())
+    assert prepared.spec.system_message is not None
+    assert "optional system" not in prepared.spec.system_message.get_content_string()
+    assert "optional preamble" not in prepared.spec.system_message.get_content_string()
+    documents = "\n".join(prepared.cli_context.values())
     assert "optional memory" in documents
+    assert "optional preamble" in documents
     assert "optional plugin" in documents
     assert "optional system" in documents
 
@@ -543,7 +586,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         return original(name, **kwargs)
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
-    agent = agents.create_agent(
+    minimal = agents.create_agent(
         "helper",
         runtime.config,
         runtime.runtime_paths,
@@ -551,17 +594,18 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         agent_mode="minimal",
     )
     with tool_runtime_context(runtime):
-        catalog = await agent.prepare_execution_catalog(
-            RunOutput(run_id="run"),
-            RunContext(run_id="run", session_id=runtime.session_id, session_state={}),
-            AgentSession(session_id=runtime.session_id),
-            user_id=runtime.requester_id,
+        catalog = await prepare_minimal_catalog(
+            minimal,
+            run=RunContext(run_id="run", session_id=runtime.session_id, user_id=runtime.requester_id),
+            session=_session(runtime),
+            store=None,
+            delegation_depth=0,
         )
         try:
             metadata = catalog.metadata()
             assert any(item["toolkit"] == "calculator" and item.get("deferred") for item in metadata)
             binding = await catalog.bind(ToolKey("calculator", "add"))
-            assert binding.catalog.agent is agent
+            assert binding.catalog.agent_name == "helper"
             assert binding.function.name == "add"
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:
@@ -578,10 +622,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     streamed: bool,
     switch_model: bool,
 ) -> None:
-    """The supported response entrypoints format actual SDK requests with one tool."""
-    from agno.models.openai import OpenAIChat  # noqa: PLC0415 - keep optional provider/server imports deferred
-    from openai.types.chat import ChatCompletionChunk  # noqa: PLC0415 - keep optional provider/server imports deferred
-
+    """The supported response entrypoints send requests that offer one tool and replay the Bash history."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
@@ -593,7 +634,6 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     runtime.config.models["other"] = runtime.config.models["default"].model_copy(update={"id": "other-model"})
-    requests = []
     owners = []
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ASYNC109
@@ -633,62 +673,12 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             assert switch_receipt["status"] == "completed", switch_receipt
         return "discovered result: " + str(receipt["outcome"])
 
-    async def send(**request):
-        requests.append(request)
-        assert [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-        assert "optional long role" not in str(request["messages"])
-        assert "actual current request" in str(request["messages"])
-        first = len(requests) == 1
-
-        async def chunks():
-            if first:
-                yield ChatCompletionChunk(
-                    id="completion",
-                    model="test-model",
-                    created=0,
-                    object="chat.completion.chunk",
-                    choices=[
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "tool_calls": [
-                                    {
-                                        "index": 0,
-                                        "id": "bash-1",
-                                        "type": "function",
-                                        "function": {"name": "bash", "arguments": '{"command":"discover"}'},
-                                    },
-                                ],
-                            },
-                            "finish_reason": None,
-                        },
-                    ],
-                )
-            else:
-                yield ChatCompletionChunk(
-                    id="completion",
-                    model="test-model",
-                    created=0,
-                    object="chat.completion.chunk",
-                    choices=[{"index": 0, "delta": {"role": "assistant", "content": "done"}, "finish_reason": None}],
-                )
-            yield ChatCompletionChunk(
-                id="completion",
-                model="test-model",
-                created=0,
-                object="chat.completion.chunk",
-                choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls" if first else "stop"}],
-            )
-
-        return chunks()
-
+    models = {
+        "default": ScriptedProvider(steps=[[("bash", {"command": "discover"})]]),
+        "other": ScriptedProvider(),
+    }
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda _config, _paths, name, _identity: models[name])
     install_scripted_shell(monkeypatch, run_shell_command)
-    monkeypatch.setattr(
-        OpenAIChat,
-        "get_async_client",
-        lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send))),
-    )
     ctx = replace(_turn_context(), agent_mode="minimal", run_id=None)
     identity = build_execution_identity_from_runtime_context(runtime)
 
@@ -710,38 +700,46 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
     with tool_runtime_context(runtime):
         result = await respond()
-        assert "done" in str(result)
-        assert len(requests) == 2
-        assert requests[1]["model"] == ("other-model" if switch_model else "test-model")
-        saved = owners[0].catalog.agent.db.get_session(ctx.session_id)
-        assert saved is not None
-        assert saved.runs
-        assert saved.runs[-1].status == "COMPLETED", [(run.status, len(run.messages or [])) for run in saved.runs or []]
-        set_agent_mode(
-            runtime.runtime_paths,
-            runtime.runtime_paths.storage_root / "agents/helper",
-            "helper",
-            ctx.session_id,
-            "standard",
-        )
-        ctx = replace(ctx, reply_to_event_id="$next", correlation_id="next")
-        runtime = replace(runtime, target=replace(runtime.target, reply_to_event_id="$next"), correlation_id="next")
-        identity = build_execution_identity_from_runtime_context(runtime)
-        with tool_runtime_context(runtime):
-            result = await respond()
-        assert "done" in str(result)
-    assert len(requests) == 3
+    assert "done" in str(result)
+    minimal_requests = models["default"].requests + models["other"].requests
+    assert len(minimal_requests) == 2
+    assert len(models["other"].requests) == (1 if switch_model else 0)
+    for request in minimal_requests:
+        assert offered_tools(request) == ["bash"]
+        assert "optional long role" not in str(request.messages)
+        assert "actual current request" in str(request.messages)
+    store = owners[0].catalog.store
+    assert store is not None
+    saved = store.load_session(ctx.session_id, "agent")
+    assert saved is not None
+    assert saved.runs
+    assert saved.runs[-1].status.value == "COMPLETED", [(run.status, len(run.messages)) for run in saved.runs]
+    set_agent_mode(
+        runtime.runtime_paths,
+        runtime.runtime_paths.storage_root / "agents/helper",
+        "helper",
+        ctx.session_id,
+        "standard",
+    )
+    ctx = replace(ctx, reply_to_event_id="$next", correlation_id="next")
+    runtime = replace(runtime, target=replace(runtime.target, reply_to_event_id="$next"), correlation_id="next")
+    identity = build_execution_identity_from_runtime_context(runtime)
+    with tool_runtime_context(runtime):
+        result = await respond()
+    assert "done" in str(result)
+    replying = models["other" if switch_model else "default"]
+    assert len(replying.requests) == (2 if switch_model else 3)
     assert len(owners) == 1
-    replay = requests[-1]["messages"]
-    replayed_ids = {call["id"] for message in replay for call in message.get("tool_calls", [])}
-    assert any(message.get("tool_call_id") in replayed_ids for message in replay), replay
-    assert all("add" not in str(message.get("tool_calls", [])) for message in replay)
+    replay = replying.requests[-1].messages
+    replayed_ids = {call["id"] for message in replay for call in message.tool_calls or ()}
+    assert any(message.tool_call_id in replayed_ids for message in replay), replay
+    assert all("add" not in str(message.tool_calls or []) for message in replay)
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pure(tmp_path: Path) -> None:
-    """A worker shell gets the API origin it can reach, and prompt sizing never prepares or grants."""
+    """A worker shell gets the API origin it can reach, and sizing a request never prepares or grants."""
     runtime = _runtime_context(tmp_path)
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
@@ -761,53 +759,24 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
             },
         ),
     )
-    agent = agents.create_agent(
+    build = agents.create_agent(
         "helper",
         runtime.config,
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
     )
-    agent.response_context = _turn_context()
-    assert agent_static_token_estimator(agent).estimate("budget input") > 0
-    assert [item["name"] for item in _agent_prompt_tool_surface(agent).payloads] == ["bash"]
+    assert _function_names(presented_build(build)) == ["bash"]
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
-            await agent.aget_tools(
-                RunOutput(run_id="generation-1"),
-                RunContext(
-                    run_id="generation-1",
-                    session_id=runtime.session_id,
-                    user_id=runtime.requester_id,
-                    session_state={},
-                ),
-                AgentSession(session_id=runtime.session_id),
-                user_id=runtime.requester_id,
-            )
-            catalog = lifetime.owner.catalog
-            shell_env = lifetime.owner.shell_env
+            await _attempt(build, runtime, _session(runtime))
+            owner = lifetime.owner
+            assert owner is not None
+            catalog = owner.catalog
+            shell_env = owner.shell_env
+            assert shell_env is not None
             # The worker reaches MindRoom over the network and already has its own `mindroom-agent`.
             assert shell_env == AgentCliShellEnv("http://primary.test:8765", shell_env.token)
-            assert agent_static_token_estimator(agent).estimate("budget input") > 0
-            assert lifetime.owner.catalog is catalog
-            assert lifetime.owner.shell_env is shell_env
-
-
-@pytest.mark.asyncio
-async def test_minimal_rejects_loaded_toolkit_omitted_by_native_connection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    agent = MinimalAgent(id="helper", tools=[Toolkit(name="unavailable")])
-
-    async def unavailable(*_args, **_kwargs):
-        return []
-
-    monkeypatch.setattr(Agent, "aget_tools", unavailable)
-    with pytest.raises(RuntimeError, match=r"unavailable.*failed connection"):
-        await agent.aget_execution_tools(
-            RunOutput(run_id="run"),
-            RunContext(run_id="run", session_id="session"),
-            AgentSession(session_id="session"),
-        )
+            assert _function_names(presented_build(build)) == ["bash"]
+            assert owner.catalog is catalog
+            assert owner.shell_env is shell_env

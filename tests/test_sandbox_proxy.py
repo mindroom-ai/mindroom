@@ -1434,7 +1434,7 @@ async def test_stopped_sync_tool_call_keeps_its_completion_owner_waiting(
         credentials_manager=None,
         worker_target=None,
     )
-    catalog = await _catalog(tmp_path, [toolkit])
+    catalog = await _catalog(tmp_path, [adapt_toolkit(toolkit)])
     call = asyncio.create_task(_events(catalog, "calculator", "action"))
     assert await asyncio.to_thread(entered.wait, 5)
     call.cancel()

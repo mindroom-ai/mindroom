@@ -7,22 +7,19 @@ from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.run.base import RunStatus
-
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.delegation.execution import advance_delegation_call, persist_delegation_state, prepare_delegation_state
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from agno.models.response import ToolExecution
-    from agno.run.requirement import RunRequirement
-
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
 
 
@@ -55,15 +52,15 @@ async def advance_cli_delegation(
     approval_calls: Sequence[ApprovalCall] = (),
     on_event: Callable[[object], None] | None = None,
 ) -> PausedAttempt | ToolExecution:
-    """Advance one child, persisting state on the real parent without resuming it."""
+    """Advance one child, persisting state on the real parent run without resuming it."""
     from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - envelope creation cycle
 
     catalog = binding.catalog
     context = catalog.runtime_context
-    response = catalog.run_response
+    response = catalog.record
     tool = requirement.tool_execution
     if (
-        tool is None
+        response is None
         or not requirement.needs_external_execution
         or tool.tool_name not in {"run_subagent", "continue_subagent"}
     ):
@@ -77,7 +74,7 @@ async def advance_cli_delegation(
         msg = "CLI external call is not owned by the delegate toolkit"
         raise ValueError(msg)
     config = context.current_config
-    state, previous = prepare_delegation_state(
+    state, previous, _parent_decisions = prepare_delegation_state(
         response,
         agent_name=context.agent_name,
         config=config,
@@ -88,12 +85,12 @@ async def advance_cli_delegation(
         # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
         # chooses; a fresh call therefore never inherits an approval saved under the same ID.
         state.gates.pop(str(tool.tool_call_id), None)
-    persist = partial(persist_delegation_state, catalog.agent, response)
+    persist = partial(persist_delegation_state, catalog.store, catalog.session, response)
 
-    # Same mutation/authorization owner as ordinary prepared dispatch. No parent
-    # acontinue_run and no hidden requirements inserted into its native transcript.
+    # Same mutation/authorization owner as ordinary prepared dispatch. The parent never resumes, and no hidden
+    # requirement enters its provider history.
     with catalog.execution_context():
-        waiting = await advance_delegation_call(
+        result = await advance_delegation_call(
             requirement,
             response=response,
             state=state,
@@ -112,14 +109,14 @@ async def advance_cli_delegation(
             on_event=on_event,
         )
         await persist(state)
-    if not waiting:
-        return tool
+    if result is not None:
+        return replace(tool, result=result, external_execution_required=False)
     view = deepcopy(response)
     view.status = RunStatus.paused
     paused = paused_attempt_from_response(
         view,
-        fallback_session_id=catalog.session.session_id,
-        fallback_run_id=catalog.run_context.run_id,
+        fallback_session_id=catalog.run.session_id,
+        fallback_run_id=catalog.run.run_id,
         toolkit_owners={(context.agent_name, binding.key.function): binding.key.toolkit},
     )
     if paused is None:

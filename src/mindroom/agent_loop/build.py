@@ -9,6 +9,7 @@ from mindroom.agent_loop.prompt import render_system_message
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from mindroom.agent_loop.prompt import PromptSpec
     from mindroom.agent_loop.spec import AgentSpec
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
     from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
+    from mindroom.tool_system.skills import Skill
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -32,6 +35,12 @@ class AgentSurface:
     tools and the toolkits in ``deferred`` once it materializes them, and reads ``context_documents``, the complete
     preload files before the prompt cap, listed as ``context_files`` relative to its workspace, and
     ``knowledge_sources``, the knowledge bases its search reaches after the persona and approval gating.
+
+    Minimal mode's bootstrap message names the agent by ``identity`` when an authored persona replaces it, lists
+    ``toolkit_names`` as its roster, points at its file memory under ``memory_root``, and ends with the Mind agent's
+    ``runtime_context`` and the ``minimal_instructions``; ``interactive_prompt`` and ``skills`` are context documents
+    beside the role and instructions. ``output_file_policy`` saves large CLI results and their media in the agent's
+    workspace.
     """
 
     mode: AgentMode
@@ -40,6 +49,14 @@ class AgentSurface:
     context_documents: tuple[str, ...] = ()
     context_files: tuple[str, ...] = ()
     knowledge_sources: tuple[KnowledgeSourceDescription, ...] = ()
+    identity: str | None = None
+    toolkit_names: tuple[str, ...] = ()
+    memory_root: Path | None = None
+    runtime_context: str = ""
+    minimal_instructions: tuple[str, ...] = ()
+    interactive_prompt: str = ""
+    skills: tuple[Skill, ...] = ()
+    output_file_policy: ToolOutputFilePolicy | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

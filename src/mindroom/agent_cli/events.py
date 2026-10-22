@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
@@ -42,13 +42,12 @@ def emit_cli_suspension(error: BaseException) -> None:
 def emit_cli_tool_event(event: AgentToolCallEvent, parent: str | None) -> None:
     """Publish trusted inner audit events, excluding the canonical outer shell alias."""
     sink = _SINK.get()
-    if sink is None or event.call_id == parent:
-        return
-    if event.execution is None:
-        if event.progress is not None:
-            sink(event.progress)
-        return
-    if event.kind not in {"started", "completed", "failed", "continuation_required"}:
+    if (
+        sink is None
+        or event.call_id == parent
+        or event.execution is None
+        or event.kind not in {"started", "completed", "failed", "continuation_required"}
+    ):
         return
     cls = ToolStarted if event.kind == "started" else ToolCompleted
     emit_cli_run_event(cls(event.execution), parent=parent, toolkit_name=event.key.toolkit)
@@ -81,8 +80,10 @@ def project_cli_execution(
     )
 
 
-async def stream_cli_events(source: AsyncIterator[object]) -> AsyncIterator[object]:
-    """Merge actual provider and hidden events; may start before tool preparation.
+async def stream_cli_events[EventT](
+    source: AsyncIterator[EventT],
+) -> AsyncIterator[EventT | ToolStarted | ToolCompleted]:
+    """Merge the run's own events with the hidden calls' tool events, which may start before tool preparation.
 
     The existing attempt and presentation consumers remain the only trace owners.
     """
@@ -102,4 +103,5 @@ async def stream_cli_events(source: AsyncIterator[object]) -> AsyncIterator[obje
             if isinstance(event, _CliSuspension):
                 raise event.error
             if event is not None:
-                yield event
+                # The sink receives only the source's events and the hidden calls' ToolStarted and ToolCompleted.
+                yield cast("EventT | ToolStarted | ToolCompleted", event)
