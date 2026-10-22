@@ -82,7 +82,7 @@ Tools that share a service connection share its OAuth controls, and tools that n
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
-Without such a template, when a signed trusted upstream Matrix claim is configured, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
+Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
 
 ## Route browser and machine traffic
 

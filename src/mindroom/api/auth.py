@@ -932,10 +932,10 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
 
 
 def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
-    """Return how a signed upstream login turns an email into its Matrix user, or None when the email does not decide it."""
+    """Return how the email-to-Matrix template turns an email into its Matrix user, or None when the email does not decide it."""
     settings = _request_auth_state(request).settings.trusted_upstream
     # In `_trusted_upstream_matrix_user_id`, a signed Matrix claim wins over the email template, which then names no one.
-    if not settings.enabled or settings.matrix_user_id_claim is not None:
+    if settings.enabled and settings.matrix_user_id_claim is not None:
         return None
     template = _validated_trusted_upstream_email_to_matrix_template(settings)
     if template is None:

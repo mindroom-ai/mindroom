@@ -143,6 +143,7 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
         ("alice", "template", [{"domain": "other.org"}], False),
         ("alice", "template", [{"user": "bob", "domain": "other.org"}, {}], True),
         ("alice", "template+signed-claim", [{}], False),
+        ("alice", "template-without-trusted-upstream", [{}], True),
     ],
     ids=[
         "mapped",
@@ -154,6 +155,7 @@ def test_unavailable_mcp_account_preserves_connections_without_granting_access(
         "outside-domain",
         "outside-domain-skipped",
         "signed-matrix-claim-wins",
+        "template-without-trusted-upstream",
     ],
 )
 def test_portal_session_finds_the_account_its_email_mapping_names(
@@ -173,6 +175,9 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
     if env_change is not None:
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
         env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.org"
+    if env_change == "template-without-trusted-upstream":
+        # The template maps provisioned emails to Chat users even when nobody signs in through an upstream.
+        env["MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"] = "false"
     snapshot.runtime_paths = replace(snapshot.runtime_paths, process_env=env)
     gateway_app.include_router(connections.router)
     for account in accounts:
