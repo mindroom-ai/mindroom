@@ -22,7 +22,7 @@ import httpx
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
-from mindroom.egress_broker.env import egress_broker_enabled
+from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
@@ -1021,7 +1021,16 @@ def _call_proxy_sync(
         if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
             # A minimal response's grant travels with each command to the agent's own worker.
             execution_env = {**(execution_env or {}), **cli_env.env()}
-        if tool_name in EXECUTION_ENV_TOOL_NAMES and egress_broker_enabled(runtime_paths):
+        runtime_config = manager_context.runtime_config
+        agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
+        if (
+            tool_name in EXECUTION_ENV_TOOL_NAMES
+            and egress_broker_enabled(runtime_paths)
+            and runtime_config is not None
+            and agent_name is not None
+            and egress_agent_scope(runtime_config, agent_name) is not None
+        ):
             # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
             from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
 
@@ -1029,7 +1038,7 @@ def _call_proxy_sync(
                 **(execution_env or {}),
                 **execution_env_for_worker(
                     runtime_paths,
-                    config=manager_context.runtime_config,
+                    config=runtime_config,
                     worker_target=worker_target,
                     routed_worker_key=worker_payload.get("worker_key"),
                     call_env=execution_env,

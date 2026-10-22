@@ -7,11 +7,14 @@ from urllib.parse import quote, unquote, urlsplit
 
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.egress_broker.env import (
     BROKER_CA_PEM_ENV,
+    EgressAgentScope,
     apply_runner_ca_bundle,
     broker_execution_env,
+    egress_agent_scope,
     egress_broker_enabled,
     personal_page_served,
     primary_callback_hosts,
@@ -259,3 +262,28 @@ def test_personal_page_served_needs_a_sign_in(
 
     assert personal_page_served(paths({"MINDROOM_EGRESS_BROKER_PORT": "8768", **process_env})) is served
     assert personal_page_served(paths(process_env)) is False
+
+
+def _agent(*tools: str, **extra: object) -> dict[str, object]:
+    return {"display_name": "Agent", "tools": list(tools), "include_default_tools": False, **extra}
+
+
+@pytest.mark.parametrize(
+    ("agent", "scope"),
+    [
+        pytest.param(_agent("shell", "egress_credentials"), "unscoped", id="shell-and-tool"),
+        pytest.param(_agent("python", "egress_credentials", worker_scope="user"), "user", id="python-and-tool"),
+        pytest.param({"display_name": "Agent", "tools": ["shell"]}, "unscoped", id="tool-from-defaults"),
+        pytest.param(_agent("shell"), None, id="shell-without-tool"),
+        pytest.param(_agent("egress_credentials"), None, id="tool-without-shell"),
+    ],
+)
+def test_only_agents_with_the_egress_credentials_tool_use_the_broker(
+    agent: dict[str, object],
+    scope: EgressAgentScope | None,
+) -> None:
+    """The `egress_credentials` tool opts an agent in, and only its shell or python calls carry brokered traffic."""
+    config = Config(agents={"agent": agent}, defaults={"tools": ["egress_credentials"]})
+
+    assert egress_agent_scope(config, "agent") == scope
+    assert egress_agent_scope(config, "removed") is None

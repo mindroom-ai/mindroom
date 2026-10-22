@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -10,7 +9,7 @@ import {
 } from "./EgressServiceTable";
 import { errorText } from "./request";
 import { STACKED } from "./stackedTable";
-import { ItemName } from "./ToolRow";
+import { ItemName, StatusLabel } from "./ToolRow";
 import type { EgressInactiveReason, EgressInactiveService } from "./types";
 
 const REASON_TEXT: Record<EgressInactiveReason, string> = {
@@ -65,9 +64,7 @@ function InactiveServiceRow({
       </th>
       <td className="px-4 py-3 max-sm:hidden" />
       <td data-label="Status" className={SERVICE_CELL.status}>
-        <Badge variant="outline" className="font-normal">
-          Inactive
-        </Badge>
+        <StatusLabel tone="attention">Inactive</StatusLabel>
       </td>
       <td className={SERVICE_CELL.actions}>
         {onDelete && (

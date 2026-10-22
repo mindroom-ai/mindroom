@@ -5,6 +5,7 @@ import type {
   EgressCredentialService,
   EgressOAuthStatus,
   EgressRuleSummary,
+  EgressScope,
   EgressServiceSource,
 } from "./types";
 
@@ -15,6 +16,8 @@ export interface RowAgent {
   displayName: string;
   /** A shared or unscoped agent: everyone using it shares its keys and accounts. */
   shared: boolean;
+  /** Whose store its keys and accounts live in; every `unscoped` agent shares the global one. */
+  scope?: EgressScope;
   /** The credential managers' Matrix IDs; the dashboard, whose operator manages every service, leaves them out. */
   managers?: string[];
   /** Every service of the agent: disconnecting a provider names the ones that use it. */
@@ -83,7 +86,7 @@ function keySavedLabel(saved: string | null): string {
     : "Key saved";
 }
 
-/** What the row's badge says about where the service's credential comes from. */
+/** What the row's status label says about where the service's credential comes from. */
 export function statusLabel(service: EgressCredentialService): string {
   const oauth = service.oauth;
   if (oauth) {
@@ -92,8 +95,10 @@ export function statusLabel(service: EgressCredentialService): string {
       return oauth.unavailable_reason === null
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
-    // The row names the account below the badge.
-    if (service.active_source === "oauth") return "Connected";
+    // The row names the account below the status label.
+    if (service.active_source === "oauth") return "Using connected account";
+    if (oauth.connected && !oauth.reuse_enabled)
+      return "Connected for tools only";
     return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";

@@ -234,7 +234,7 @@ class TlsInterceptor:
 
         Each body but the `broker_error` for a changed service carries `manage_url`, which its message names, unless
         no page sets the scope's keys (a personal scope without the personal page), and a connect link only in
-        `connect_url`.
+        `connect_url`. An account nobody allowed Agent Keys to use gets `oauth_reuse: "off"` and no connect link.
         """
         if isinstance(result, SecretServiceChanged):
             # The service changed after routing, so its credential may be for other hosts; a retry routes afresh.
@@ -266,21 +266,22 @@ class TlsInterceptor:
             if result.reset_required:
                 reconnect["reset_required"] = True
             return 403, reconnect
-        # No secret, or an empty one: the body also names the account the user can connect instead, if any.
-        provider = result.provider if isinstance(result, SecretMissing) else None
-        connect_url = result.connect_url if isinstance(result, SecretMissing) else None
+        # No secret, or an empty one: the body also names the account the user can connect or allow instead, if any.
+        lookup = result if isinstance(result, SecretMissing) else SecretMissing()
         missing = refusal_body(
             "credential_not_configured",
             service=service,
-            provider=provider,
+            provider=lookup.provider,
             managers=scope.managers,
             shared=scope.shared,
             personal_page=scope.personal_page,
-            connectable=provider is not None and connect_url is not None,
+            connectable=lookup.provider is not None and lookup.connect_url is not None,
+            reuse_off=lookup.reuse_off,
+            requester_owned=lookup.requester_owned,
             manage_url=manage_url,
         )
-        if provider is not None:
-            missing["connect_url"] = connect_url
+        if lookup.provider is not None and not lookup.reuse_off:
+            missing["connect_url"] = lookup.connect_url
         return 403, missing
 
     async def _forward(

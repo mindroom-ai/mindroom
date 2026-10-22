@@ -412,7 +412,7 @@ To let worker-routed `shell` and `python` call external APIs without ever receiv
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
 There are three supported shapes:
 
-- **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read.
+- **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read, for agents with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool).
   See [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) for configuration, secret management, and deployment.
   This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
 - **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.

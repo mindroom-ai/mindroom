@@ -147,18 +147,28 @@ describe("egress credentials page", () => {
       within(table)
         .getAllByRole("row")
         .slice(1)
-        .map((row) =>
-          within(row)
-            .getAllByRole("cell")
-            .map((cell) => cell.textContent),
-        ),
+        .map((row) => {
+          const [agent, keys] = within(row).getAllByRole("cell");
+          const button = within(agent).getByRole("button");
+          // The agent's type sits under its name and is read with its button.
+          return [
+            button.getAttribute("aria-label"),
+            button.getAttribute("aria-describedby") &&
+              document.getElementById(button.getAttribute("aria-describedby")!)
+                ?.textContent,
+            keys.textContent,
+          ];
+        }),
     ).toEqual([
       // A limit is neither a key nor an account.
-      ["Personal Mind", "Personal", "1 of 2 set"],
-      ["Shared Dev", "Shared", "0 of 1 set"],
-      ["Bare Agent", "Personal", "None"],
+      ["Expand Personal Mind", "Personal", "1 of 2 set"],
+      ["Expand Shared Dev", "Shared", "0 of 1 set"],
+      ["Expand Bare Agent", "Personal", "None"],
     ]);
     expect(screen.queryByRole("region")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Expand Shared Dev" }),
+    ).toHaveAccessibleDescription("Shared");
     fireEvent.click(
       screen.getByRole("button", { name: "Expand Personal Mind" }),
     );
@@ -210,7 +220,7 @@ describe("egress credentials page", () => {
     render(<EgressCredentials />);
     expect(
       await screen.findByText(
-        "No agents with shell or python access are available to you.",
+        "None of the agents available to you use Agent Keys.",
       ),
     ).toBeInTheDocument();
   });
@@ -259,6 +269,61 @@ describe("egress credentials page", () => {
     );
   });
 
+  it("reloads the listing once a connected account is allowed and stopped for Agent Keys", async () => {
+    let reuse = false;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input).endsWith("/oauth-reuse")) {
+        reuse = options?.method === "PUT";
+        return new Response(null, { status: 204 });
+      }
+      return json({
+        agents: [
+          {
+            ...agents[0],
+            services: [
+              {
+                ...service,
+                configured: reuse,
+                active_source: reuse ? "oauth" : null,
+                oauth: {
+                  ...account,
+                  connected: true,
+                  account_label: "octocat",
+                  reuse_enabled: reuse,
+                },
+              },
+            ],
+          },
+        ],
+      });
+    });
+    await renderPage();
+    expect(
+      await screen.findByText("Connected for tools only"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+    );
+    await pressInDialog("Use account");
+    expect(
+      await screen.findByText("Using connected account"),
+    ).toBeInTheDocument();
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([input]) => String(input).endsWith("/oauth-reuse"))
+        .map(([input, options]) => [String(input), options?.method]),
+    ).toEqual([
+      ["/api/connections/egress/agents/personal/github/oauth-reuse", "PUT"],
+    ]);
+
+    fireEvent.click(await rowAction("Stop using GitHub account for GitHub"));
+    expect(
+      await screen.findByText("Connected for tools only"),
+    ).toBeInTheDocument();
+  });
+
   it("reloads the listing after an account is connected and disconnected", async () => {
     let connected = false;
     const popup = {
@@ -303,7 +368,9 @@ describe("egress credentials page", () => {
     });
     await renderPage();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     await waitFor(() =>
       expect(popup.location.href).toBe(
@@ -334,7 +401,9 @@ describe("egress credentials page", () => {
     fireEvent.click(await rowAction("Disconnect for GitHub"));
     await pressInDialog("Disconnect");
     expect(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeInTheDocument();
     expect(screen.queryByText("octocat")).toBeNull();
   });
@@ -734,7 +803,7 @@ describe("egress services on the personal page", () => {
     expect(screen.getByLabelText("My API")).toBeInTheDocument();
   });
 
-  it("shows the administrator's services read-only, without a badge on the row", async () => {
+  it("shows the administrator's services read-only, without a source label on the row", async () => {
     await renderPage();
     const row = await screen.findByLabelText("GitHub");
     expect(within(row).queryByText(/administrator/)).toBeNull();
@@ -2138,7 +2207,9 @@ describe("who can change a shared agent's keys", () => {
     };
     await show([shared({ can_manage: true, services: [google] })]);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect Google for Gmail" }),
+      await screen.findByRole("button", {
+        name: "Connect Google for Agent Keys for Gmail",
+      }),
     );
     expect(
       within(

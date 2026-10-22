@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from html import escape
 from html.parser import HTMLParser
@@ -69,6 +70,8 @@ _CHUNK_BYTES = 1024 * 1024
 _OFFSET = re.compile(r"[0-9]{1,10}")
 _KEY_SEGMENT = re.compile(r"\('([^/]+)'\)(?=/|$)")
 _USER_PREFIX = re.compile(r"^/users/[^/]+")
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_GRAPH_MESSAGE_CHARACTERS = 300
 _STATUS_ERRORS = {
     403: ("forbidden", "The connected Microsoft account has no permission for this."),
     404: ("not_found", "Microsoft Graph found nothing there, or the connected account cannot see it."),
@@ -315,14 +318,29 @@ def _chunks(handle: BinaryIO) -> Iterator[bytes]:
         yield chunk
 
 
-def _graph_error_code(response: httpx.Response) -> str | None:
+def _graph_error_details(response: httpx.Response) -> dict[str, object]:
+    """Return Graph's error code and, when Graph gives one, its reason as one short line of plain text.
+
+    The reason is untrusted text: control characters become spaces, links become `<url>`, whitespace collapses,
+    and anything past a few hundred characters is cut.
+    """
     try:
         payload = response.json()
     except ValueError:
-        return None
+        payload = None
     error = payload.get("error") if isinstance(payload, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
+    error = error if isinstance(error, dict) else {}
+    code = error.get("code")
+    details: dict[str, object] = {"graph_code": code if isinstance(code, str) else None}
+    message = error.get("message")
+    if isinstance(message, str):
+        printable = "".join(" " if unicodedata.category(character)[0] == "C" else character for character in message)
+        text = " ".join(_URL.sub("<url>", printable).split())
+        if len(text) > _GRAPH_MESSAGE_CHARACTERS:
+            text = text[: _GRAPH_MESSAGE_CHARACTERS - 1].rstrip() + "…"
+        if text:
+            details["graph_message"] = text
+    return details
 
 
 def _retry_after_seconds(response: httpx.Response) -> int | None:
@@ -353,12 +371,12 @@ class GraphSession:
             raise MicrosoftGraphError(code="throttled", message=msg, retry_after_seconds=_retry_after_seconds(response))
         if response.status_code in _STATUS_ERRORS:
             code, message = _STATUS_ERRORS[response.status_code]
-            raise MicrosoftGraphError(code=code, message=message, graph_code=_graph_error_code(response))
+            raise MicrosoftGraphError(code=code, message=message, **_graph_error_details(response))
         raise MicrosoftGraphError(
             code="graph_error",
             message="Microsoft Graph rejected the request.",
             status_code=response.status_code,
-            graph_code=_graph_error_code(response),
+            **_graph_error_details(response),
         )
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:  # noqa: ANN401

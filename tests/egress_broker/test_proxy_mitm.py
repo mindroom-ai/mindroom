@@ -608,6 +608,41 @@ async def test_missing_secret_offers_oauth_connect_link(
 
 
 @pytest.mark.asyncio
+async def test_an_account_agent_keys_may_not_use_is_named_without_a_connect_link(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A connected account nobody allowed for the service is named with `oauth_reuse: off` and no connect link."""
+    await broker(
+        single_rule_config(),
+        resolve_secret=lambda _claims, _service, _routed: SecretMissing(
+            provider="github",
+            reuse_off=True,
+            requester_owned=True,
+        ),
+        manage_url=MANAGE_URL,
+    )
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "svc",
+        "provider": "github",
+        "oauth_reuse": "off",
+        "manage_url": MANAGE_URL,
+        "message": "No svc key is set for this agent, and Agent Keys may not use a connected github account. "
+        "Ask the user to add a key or allow that account at manage_url, then retry.",
+    }
+    assert tls_upstream.hits == []
+    await assert_audited(audit, kind="denied", status=403, service="svc", code="credential_not_configured")
+
+
+@pytest.mark.asyncio
 async def test_missing_secret_on_a_shared_agent_names_its_credential_managers(
     broker: BrokerFactory,
     tls_upstream: Upstream,
@@ -762,6 +797,17 @@ _WITHOUT_PAGE = ScopeInfo(shared=False, managers=(), personal_page=False)
             },
         ),
         (
+            SecretMissing(provider="github", reuse_off=True, requester_owned=True),
+            403,
+            {
+                "error": "credential_not_configured",
+                "service": "svc",
+                "provider": "github",
+                "oauth_reuse": "off",
+                "message": "No svc key or allowed github account: each user sets these " + _PAGE_NOT_SERVED,
+            },
+        ),
+        (
             SecretNeedsReconnect(provider="github", connect_url=CONNECT_URL),
             403,
             {
@@ -796,7 +842,7 @@ _WITHOUT_PAGE = ScopeInfo(shared=False, managers=(), personal_page=False)
             },
         ),
     ],
-    ids=["key", "connectable", "reconnect", "reconnect-without-link", "refresh"],
+    ids=["key", "connectable", "reuse-off", "reconnect", "reconnect-without-link", "refresh"],
 )
 async def test_personal_scope_without_the_personal_page_links_no_page(
     broker: BrokerFactory,

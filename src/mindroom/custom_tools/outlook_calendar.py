@@ -376,7 +376,7 @@ def _refuse_another_organizer(event_id: str, expected_organizer: str) -> _Prepar
         event = session.json("GET", _event_path(event_id), params={"$select": "organizer"})
         organizer = _person(event.get("organizer"))
         email = organizer["email"]
-        if not isinstance(email, str) or email.casefold() != expected_organizer.casefold():
+        if not isinstance(email, str) or email.lower() != expected_organizer.lower():
             msg = "The meeting's organizer is not expected_organizer; tell the requester the real organizer first."
             raise MicrosoftGraphError(code="target_mismatch", message=msg, organizer=organizer)
         return request

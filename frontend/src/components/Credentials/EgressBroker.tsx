@@ -352,7 +352,8 @@ function ServiceSection({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Services you add here are offered to every agent and user. Agents with a{" "}
+        Services you add here are offered to every user and to every agent with
+        the <code>egress_credentials</code> tool. Agents with a{" "}
         <code>user</code> or <code>user_agent</code> worker scope and private
         agents are not listed: each user sets their keys on the Connections
         page&apos;s{" "}
@@ -378,7 +379,7 @@ function ServiceSection({
         <p className="text-xs text-muted-foreground">
           {personalAgents
             ? "Only agents whose keys each user sets use the broker, so no keys are set here."
-            : "No agent uses these keys."}
+            : "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool."}
         </p>
       )}
       {error && (
@@ -460,7 +461,12 @@ function ServiceSection({
               serviceEditing={serviceEditing}
               hideKeyActions={keysUnused}
               // Only shared agents and the global store are offered here, so every key is shared.
-              agent={{ displayName: agentLabel, shared: true, services }}
+              agent={{
+                displayName: agentLabel,
+                shared: true,
+                scope: agentName === null ? "unscoped" : "shared",
+                services,
+              }}
             />
           </EgressServiceTable>
         </div>

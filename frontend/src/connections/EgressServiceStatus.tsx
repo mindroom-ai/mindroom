@@ -1,4 +1,3 @@
-import { Badge } from "@/components/ui/badge";
 import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
   type RowAgent,
@@ -6,9 +5,10 @@ import {
   sharesAccount,
   statusLabel,
 } from "./egressRowText";
+import { StatusLabel } from "./ToolRow";
 import type { EgressCredentialService } from "./types";
 
-/** The row's status badge and the notes about the account it uses, in the order they are shown. */
+/** The row's status and the notes about the account it uses, in the order they are shown. */
 export function ServiceStatus({
   service,
   agent,
@@ -25,13 +25,19 @@ export function ServiceStatus({
     oauth?.unavailable_reason === "shared_sandbox" && !service.key_configured;
   return (
     <>
-      <Badge
-        variant={service.configured ? "secondary" : "outline"}
-        className="max-w-full font-normal"
+      <StatusLabel
+        tone={
+          oauth?.reset_required && !service.configured
+            ? "attention"
+            : service.configured
+              ? "set"
+              : "unset"
+        }
       >
         {statusLabel(service)}
-      </Badge>
-      {service.active_source === "oauth" && oauth?.account_label && (
+      </StatusLabel>
+      {/* Also beside an account only its tools use: the one Agent Keys would use once allowed. */}
+      {service.active_source !== "key" && oauth?.account_label && (
         <span className="break-all text-xs">{oauth.account_label}</span>
       )}
       {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
@@ -46,9 +52,7 @@ export function ServiceStatus({
         </span>
       )}
       {sourceLabel && (
-        <Badge variant="outline" className="font-normal">
-          {sourceLabel}
-        </Badge>
+        <span className="text-xs text-muted-foreground">{sourceLabel}</span>
       )}
       {/* A service account serves the provider's tools, but the broker never injects it. */}
       {oauth?.service_account && service.active_source !== "key" && (

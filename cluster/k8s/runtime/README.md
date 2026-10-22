@@ -835,7 +835,7 @@ The chart supports direct and chain modes:
 
 > [!WARNING]
 > **Direct mode with `egressProxy` bypasses the operator proxy unless the primary uses it.**
-> Each `shell` and `python` call's broker environment replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
+> The broker environment of each `shell` and `python` call of an agent with the `egress_credentials` tool replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
 > The broker then dials from the primary pod: matched hosts always, and unmatched hosts too under the default `unmatched_hosts: passthrough`.
 > Unless the primary's own environment sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, that traffic leaves the cluster directly instead of through the operator proxy.
 > Set the operator proxy on the primary through `env.extra`, or set `egress_broker.unmatched_hosts: deny` in the MindRoom config so only the configured services' hosts are reached directly.

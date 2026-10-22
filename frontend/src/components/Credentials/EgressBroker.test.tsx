@@ -29,6 +29,8 @@ import { EgressBroker } from "./EgressBroker";
 
 const NOT_RUNNING =
   "Egress broker is not running. Set MINDROOM_EGRESS_BROKER_PORT and MINDROOM_EGRESS_BROKER_URL.";
+const NO_AGENT_USES_KEYS =
+  "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool.";
 
 let storeState: {
   agents: unknown[];
@@ -343,7 +345,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page.",
+      "Services you add here are offered to every user and to every agent with the egress_credentials tool. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page.",
     );
     expect(
       within(note).getByRole("link", { name: "Agent Keys page" }),
@@ -363,7 +365,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every agent and user. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
+      "Services you add here are offered to every user and to every agent with the egress_credentials tool. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
     );
     expect(within(note).queryByRole("link")).toBeNull();
   });
@@ -469,7 +471,7 @@ describe("egress broker key target", () => {
     expect(screen.getByLabelText("Keys for")).toBeEnabled();
     expect(screen.getByLabelText("Keys for")).toHaveValue("team");
     expect(listings()[0].searchParams.get("agent_name")).toBe("team");
-    expect(screen.queryByText("No agent uses these keys.")).toBeNull();
+    expect(screen.queryByText(NO_AGENT_USES_KEYS)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Set key for GitHub" }),
     ).toBeVisible();
@@ -533,9 +535,7 @@ describe("egress broker key target", () => {
       };
       const { unmount } = render(<EgressBroker />);
       await screen.findByText("GitHub");
-      expect(screen.queryByText("No agent uses these keys.") !== null).toBe(
-        unused,
-      );
+      expect(screen.queryByText(NO_AGENT_USES_KEYS) !== null).toBe(unused);
       unmount();
     }
   });
@@ -551,7 +551,7 @@ describe("egress broker key target", () => {
     await screen.findByText("GitHub");
 
     expect(screen.getByLabelText("Keys for")).toBeDisabled();
-    expect(screen.getByText("No agent uses these keys.")).toBeVisible();
+    expect(screen.getByText(NO_AGENT_USES_KEYS)).toBeVisible();
     for (const name of [
       "Set key for GitHub",
       "Replace key for openai",
@@ -594,7 +594,7 @@ describe("egress broker key target", () => {
     render(<EgressBroker />);
     await screen.findByText("GitHub");
 
-    expect(screen.getByText("No agent uses these keys.")).toBeVisible();
+    expect(screen.getByText(NO_AGENT_USES_KEYS)).toBeVisible();
     await expectNoAction(/Disconnect/);
     expect(screen.queryByRole("button", { name: /Connect GitLab/ })).toBeNull();
     await expectNoAction(/Use an API key instead/);
@@ -605,7 +605,7 @@ describe("egress broker key target", () => {
     render(<EgressBroker />);
     await screen.findByText("GitHub");
 
-    expect(screen.queryByText("No agent uses these keys.")).toBeNull();
+    expect(screen.queryByText(NO_AGENT_USES_KEYS)).toBeNull();
     expect(
       screen.getByRole("button", { name: "Set key for GitHub" }),
     ).toBeVisible();
@@ -625,7 +625,7 @@ describe("egress broker key target", () => {
     render(<EgressBroker />);
     await screen.findByText("GitHub");
 
-    expect(screen.queryByText("No agent uses these keys.")).toBeNull();
+    expect(screen.queryByText(NO_AGENT_USES_KEYS)).toBeNull();
     expect(
       screen.getByText(
         "Only agents whose keys each user sets use the broker, so no keys are set here.",
@@ -874,7 +874,9 @@ describe("egress broker connected accounts", () => {
     await screen.findByText("GitHub");
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     // Everyone who uses the shared agent acts as the account, so the admin is asked first.
     const question = await screen.findByRole("dialog", {
@@ -915,12 +917,59 @@ describe("egress broker connected accounts", () => {
     expect(listings()).toHaveLength(2);
   });
 
+  it("lets the selected agent's commands use its connected account after confirming", async () => {
+    services = [
+      {
+        ...github,
+        oauth: {
+          ...githubAccount,
+          connected: true,
+          account_label: "team-bot",
+          reuse_enabled: false,
+        },
+      },
+      openai,
+    ];
+    sharedCoder();
+    render(<EgressBroker />);
+    expect(
+      await screen.findByText("Connected for tools only"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+    );
+    const question = await screen.findByRole("dialog", {
+      name: "Use your GitHub account for Agent Keys?",
+    });
+    expect(question).toHaveTextContent(
+      "Commands this agent runs (shell, python) will act as team-bot with its full access, without the approval prompts GitHub tools ask for. Everyone using Agent coder gets this.",
+    );
+    fireEvent.click(
+      within(question).getByRole("button", { name: "Use account" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        requests("/api/egress-broker/services/github/oauth-reuse", "PUT"),
+      ).toHaveLength(1),
+    );
+    const [allow] = requests(
+      "/api/egress-broker/services/github/oauth-reuse",
+      "PUT",
+    );
+    expect(allow.searchParams.get("agent_name")).toBe("coder");
+    await waitFor(() => expect(listings()).toHaveLength(2));
+  });
+
   it("reads the selected agent's services again when the popup closes without answering", async () => {
     mutationResponse = () => json(authorization);
     sharedCoder();
     render(<EgressBroker />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     const question = await screen.findByRole("dialog", {
       name: "Connect a shared account?",
@@ -971,7 +1020,7 @@ describe("egress broker connected accounts", () => {
     });
     expect(
       within(dialog).getByText(
-        "This removes the saved GitHub connection for the agents without a scope. These services stop working until an account is connected again: GitHub.",
+        "This removes the saved GitHub connection for the agents without a scope. These services stop working until an account is connected again: GitHub. GitHub tools lose it too. To keep it for them, choose Stop using GitHub account instead.",
       ),
     ).toBeVisible();
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));

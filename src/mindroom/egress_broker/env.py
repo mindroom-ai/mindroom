@@ -1,20 +1,26 @@
-"""Whether the broker and its personal page are on, the worker env overlay, and runner CA bundle materialization."""
+"""Whether the broker and its personal page are on, which agents use it, the worker env overlay, and runner CA bundles."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping  # noqa: TC003
 from pathlib import Path  # noqa: TC003
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
-from mindroom.constants import WORKER_EGRESS_NO_PROXY, RuntimePaths, compose_worker_proxy_env
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, WORKER_EGRESS_NO_PROXY, RuntimePaths, compose_worker_proxy_env
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 __all__ = [
     "BROKER_CA_PEM_ENV",
     "RUNNER_CA_BUNDLE_ENV",
+    "EgressAgentScope",
     "apply_runner_ca_bundle",
     "broker_execution_env",
+    "egress_agent_scope",
     "egress_broker_enabled",
     "egress_tool_unavailable",
     "personal_page_served",
@@ -26,6 +32,8 @@ BROKER_CA_PEM_ENV = "MINDROOM_EGRESS_BROKER_CA_PEM"
 RUNNER_CA_BUNDLE_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO")
 # Not a secret: the broker ignores it. Clients that drop credentials with an empty password need a value here.
 _PROXY_PASSWORD = "mindroom"  # noqa: S105
+# The agent tool that lists the broker's services; an agent that has it opts into Agent Keys.
+_EGRESS_TOOL_NAME = "egress_credentials"
 
 
 def egress_broker_enabled(runtime_paths: RuntimePaths) -> bool:
@@ -57,7 +65,29 @@ def egress_tool_unavailable(tool_name: str, runtime_paths: RuntimePaths) -> bool
 
     That tool only reports the broker's services, so the tool lists leave it out and agents that list it do not get it.
     """
-    return tool_name == "egress_credentials" and not egress_broker_enabled(runtime_paths)
+    return tool_name == _EGRESS_TOOL_NAME and not egress_broker_enabled(runtime_paths)
+
+
+type EgressAgentScope = Literal["user", "user_agent", "shared", "unscoped"]
+
+
+def egress_agent_scope(config: Config, agent_name: str) -> EgressAgentScope | None:
+    """Return whose store an agent's egress services and keys live in, or None when it does not use the broker.
+
+    An agent opts in by listing the `egress_credentials` tool, and its brokered traffic only comes from a tool the
+    sandbox proxy gives the broker environment (`EXECUTION_ENV_TOOL_NAMES`); both must be among its resolved tools,
+    presets and defaults included. A name the config has no agent for does not use it. The store is one `user_agent`
+    agent's own per requester, every `user` agent's of a requester, everyone's on a `shared` agent, or the global one
+    all agents without a worker scope share (`unscoped`).
+    The sandbox proxy and both egress APIs decide here which agents use the broker.
+    """
+    if agent_name not in config.agents:
+        return None
+    entity = config.resolve_entity(agent_name)
+    tools = entity.available_tools
+    if _EGRESS_TOOL_NAME not in tools or EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools):
+        return None
+    return "unscoped" if entity.execution_scope is None else entity.execution_scope
 
 
 def broker_execution_env(

@@ -13,18 +13,20 @@ from pydantic import BaseModel
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
+    resolve_requester_credentials_target,
     worker_target_for_credentials_target,
 )
+from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.api.egress_status import (
     RESTRICT_ONLY_KEY_REFUSAL,
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
+    OAuthReuseRequest,
     PresetsResponse,
     PutSecretRequest,
     audit_logs_response,
     effective_services,
-    egress_agent_scope,
     egress_oauth_status,
     egress_service_status,
     oauth_provider_of_service,
@@ -32,7 +34,9 @@ from mindroom.api.egress_status import (
     require_egress_broker_enabled,
     rule_summaries,
 )
-from mindroom.egress_broker.env import personal_page_served
+from mindroom.egress_broker.env import egress_agent_scope, personal_page_served
+from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
+from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.egress_broker.user_services import ServiceSource, service_source
@@ -115,6 +119,7 @@ async def _load_service_statuses_for_target(
                 agent_name=target.agent_name,
                 refresh=False,
             ),
+            reuse_target=lambda provider: _oauth_reuse_target(request, target, worker_target, provider),
         )
         sources = await egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
         services.append(
@@ -149,8 +154,14 @@ def _resolve_scope_and_service(
     return target, worker_target, service
 
 
-def _config_service_provider(request: Request, name: str, agent_name: str | None, *, connecting: bool) -> OAuthProvider:
-    """Return the OAuth provider of a config service for the connect and disconnect routes of the selected scope.
+def _config_service_provider(
+    request: Request,
+    name: str,
+    agent_name: str | None,
+    *,
+    connecting: bool,
+) -> tuple[RequestCredentialsTarget, ResolvedWorkerTarget | None, OAuthProvider]:
+    """Return the selected scope, its worker target, and the OAuth provider of a config service for the account routes.
 
     A service the config does not define is a 404; `oauth_provider_of_service` judges the rest for the scope's worker
     target, the one the status listing uses for the same service.
@@ -161,7 +172,44 @@ def _config_service_provider(request: Request, name: str, agent_name: str | None
     service = config.egress_broker.services.get(name) if config is not None else None
     if service is None:
         raise HTTPException(404, "Service is not configured")
-    return oauth_provider_of_service(request, service, worker_target, connecting=connecting)
+    return target, worker_target, oauth_provider_of_service(request, service, worker_target, connecting=connecting)
+
+
+def _oauth_reuse_target(
+    request: Request,
+    target: RequestCredentialsTarget,
+    worker_target: ResolvedWorkerTarget | None,
+    provider: OAuthProvider,
+) -> ResolvedWorkerTarget | None:
+    """Return the target whose connection the panel shows for the selected scope, where its opt-in lives.
+
+    A requester-scoped connection (GitHub, Atlassian) is the dashboard user's own whatever scope is selected, as the
+    OAuth routes resolve it; any other is the scope's own.
+    """
+    if not provider.requester_scoped_credentials:
+        return worker_target
+    requester = resolve_requester_credentials_target(
+        request,
+        agent_name=target.agent_name,
+        service_names=(provider.credential_service,),
+    )
+    return worker_target_for_credentials_target(requester)
+
+
+async def _set_service_account_reuse(request: Request, name: str, agent_name: str | None, *, enabled: bool) -> None:
+    """Allow or stop Agent Keys using a config service's account for the selected scope, as the broker reads it."""
+    target, worker_target, provider = _config_service_provider(request, name, agent_name, connecting=False)
+    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    assert config is not None  # `_config_service_provider` found the service in it.
+    reuse_target = _oauth_reuse_target(request, target, worker_target, provider)
+    identity = build_dashboard_execution_identity(
+        request,
+        target.agent_name or "dashboard",
+        config=config,
+        runtime_paths=target.runtime_paths,
+    )
+    context = broker_credential_context(provider, config, target.runtime_paths, target.base_manager, reuse_target)
+    await asyncio.to_thread(set_oauth_reuse, context, name, provider.id, enabled=enabled, by=identity.requester_id)
 
 
 @router.get("/services", response_model=ServicesResponse)
@@ -238,7 +286,7 @@ async def connect_service_account(
     replaces personal accounts for that provider or the scope's sandbox is shared by several requesters, where the
     broker never uses a requester's own account unless the service opts in.
     """
-    provider = _config_service_provider(request, name, agent_name, connecting=True)
+    *_scope, provider = _config_service_provider(request, name, agent_name, connecting=True)
     return await oauth.connect(provider.id, request, agent_name=agent_name)
 
 
@@ -248,12 +296,37 @@ async def disconnect_service_account(
     name: str,
     agent_name: Annotated[str | None, Query()] = None,
 ) -> dict[str, str]:
-    """Reset the OAuth connection of a service's provider for the selected scope.
+    """Reset the OAuth connection of a service's provider for the selected scope; its opt-in stays.
 
     Raises 404 like the connect route, and 409 where the scope's sandbox is shared by several requesters.
     """
-    provider = _config_service_provider(request, name, agent_name, connecting=False)
+    *_scope, provider = _config_service_provider(request, name, agent_name, connecting=False)
     return await oauth.disconnect(provider.id, request, agent_name=agent_name)
+
+
+@router.put("/services/{name}/oauth-reuse", status_code=204)
+async def allow_service_account_reuse(
+    request: Request,
+    name: str,
+    _body: OAuthReuseRequest,
+    agent_name: Annotated[str | None, Query()] = None,
+) -> None:
+    """Let Agent Keys use a config service's connected account for the selected scope.
+
+    The body must confirm that the agent's shell and python then act as the account without approval prompts (422
+    without it). Raises 404 and 409 like the disconnect route. A requester-scoped account is the dashboard user's own.
+    """
+    await _set_service_account_reuse(request, name, agent_name, enabled=True)
+
+
+@router.delete("/services/{name}/oauth-reuse", status_code=204)
+async def stop_service_account_reuse(
+    request: Request,
+    name: str,
+    agent_name: Annotated[str | None, Query()] = None,
+) -> None:
+    """Stop Agent Keys using a config service's connected account for the selected scope; the connection stays."""
+    await _set_service_account_reuse(request, name, agent_name, enabled=False)
 
 
 @router.get("/logs", response_model=AuditLogsResponse)

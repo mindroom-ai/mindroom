@@ -40,10 +40,13 @@ Over plain HTTP, OAuth providers decide which redirect addresses they accept; Go
 
 The portal groups OAuth services by agent, covering every agent the user may use, private or shared, and the shared agents whose credentials the user may manage.
 Services come from each agent's tools, including deferred tools and plugin or MCP OAuth providers; tools that need no browser sign-in are listed too, and room-dependent tools are marked **MindRoom only**.
+The agent list shows at once, and each agent's counts of connected accounts and set keys fill in as they load.
 Each service's status loads independently, so one failing or unconnected service does not block the others.
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](https://docs.mindroom.chat/oauth-framework/#who-can-connect-an-account), and connections made here are the same ones tools use.
+An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](https://docs.mindroom.chat/deployment/egress-broker/#using-a-connected-account)).
+Allowing it covers that provider's account for that agent's scope until the user stops it, so an account connected here later for the tools is then used by Agent Keys at once.
 Disconnecting a shared connection affects every agent using its [credential scope](https://docs.mindroom.chat/oauth-framework/#where-connections-are-stored).
 While the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) is on, the portal and its Agent Keys page link to each other.
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.

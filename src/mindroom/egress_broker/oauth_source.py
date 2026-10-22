@@ -4,16 +4,20 @@ Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a t
 same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
 policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
 requester's own account is used only in a sandbox that belongs to that requester; see `shared_worker_oauth`.
+The broker neither reads nor refreshes a connection for a service until someone allowed it (`oauth_reuse`); the egress
+pages show its state through the Connections portal's own status reader.
 Logs carry the service, the provider id, and error types, never tokens or connect links.
 """
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
     Secret,
@@ -28,6 +32,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot_sync,
     oauth_account_label,
+    oauth_credential_store_exists,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
     resolve_oauth_credential_context,
@@ -51,6 +56,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SharedWorkerOAuth",
+    "broker_credential_context",
+    "oauth_connection_for_display",
     "oauth_status",
     "resolve_oauth_token",
     "shared_worker_oauth",
@@ -91,7 +98,7 @@ _refresh_gates: dict[tuple[object, ...], _RefreshGate] = {}
 _refresh_gates_lock = threading.Lock()
 
 
-def resolve_oauth_token(
+def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     *,
     service: str,
     provider_id: str,
@@ -102,6 +109,8 @@ def resolve_oauth_token(
 ) -> SecretResult:
     """Return a fresh access token from the scope's connection to `provider_id`, refreshing it when near expiry.
 
+    Without an opt-in for `service` (`oauth_reuse`) the connection is never read: the result names the provider, that
+    Agent Keys may not use it (`reuse_off`), and whether it is the requester's own (`requester_owned`), with no link.
     Only a rejected grant or an unreadable credential asks the user to act (`SecretNeedsReconnect`); any other refresh
     failure is `SecretUnavailable`, as the tools treat it, and the scope then answers that without another grant
     for `_TRANSIENT_FAILURE_BACKOFF_SECONDS`. `service` names the egress service in the one warning logged for a
@@ -120,10 +129,16 @@ def resolve_oauth_token(
     if access == "refused":
         # Connecting an account would not change that, so there is no link either.
         return SecretMissing()
-    context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
     if provider.requester_scoped_credentials and context.worker_target is None:
-        # No requester to bind the connection to, so there is no stored token to use.
-        return _missing(context)
+        # No requester to bind the connection to, so there is no stored token to use or allow.
+        return SecretMissing()
+    if not oauth_reuse_enabled(context, service, provider.id):
+        return SecretMissing(
+            provider=provider.id,
+            reuse_off=True,
+            requester_owned=provider.requester_scoped_credentials,
+        )
     credentials = _refreshed_credentials(service, context)
     if isinstance(credentials, SecretNeedsReconnect | SecretUnavailable):
         return credentials
@@ -144,9 +159,10 @@ def oauth_status(
 ) -> OAuthStatus | None:
     """Return the scope's connection state for `provider_id` without refreshing; None for an unknown provider.
 
-    A stored connection whose access token expired still counts as connected while it can be refreshed. A None
-    `worker_target` is the global store that agents without a worker scope read. Binding the keyword arguments
-    gives `secrets.service_status` its `oauth_status` reader.
+    A stored connection whose access token expired still counts as connected while it can be refreshed.
+    `reuse_enabled` says whether Agent Keys may use it for `service`; without that the connection is not read, so it
+    reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
+    Binding the keyword arguments gives `secrets.service_status` its `oauth_status` reader.
     """
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
@@ -159,10 +175,11 @@ def oauth_status(
     )
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
-    context = _credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    reuse_enabled = oauth_reuse_enabled(context, service, provider.id)
     credentials = None
     reset_required = False
-    if context.worker_target is not None or not provider.requester_scoped_credentials:
+    if reuse_enabled:
         try:
             credentials = load_oauth_credentials_snapshot_sync(context).credentials
         except OAuthCredentialUnreadableError:
@@ -177,7 +194,23 @@ def oauth_status(
         reset_required=reset_required,
         service_account=oauth_provider_service_account_configured(provider, runtime_paths),
         shared_worker_opt_in=access == "allowed",
+        reuse_enabled=reuse_enabled,
     )
+
+
+def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool, str | None]:
+    """Return whether the context's stored connection is usable and its account label, read whatever the opt-in.
+
+    Only the egress pages call this, to show an account a user may allow or disconnect; the broker reads through
+    `resolve_oauth_token` and `oauth_status`, which never read a connection Agent Keys may not use. A scope without a
+    store reads as not connected, and listing it creates none.
+    """
+    credentials = None
+    if oauth_credential_store_exists(context):
+        with contextlib.suppress(OAuthCredentialUnreadableError):
+            credentials = load_oauth_credentials_snapshot_sync(context).credentials
+    connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
+    return connected, oauth_account_label(credentials) if connected and credentials else None
 
 
 def shared_worker_oauth(
@@ -295,14 +328,18 @@ def _refresh_gate(context: OAuthCredentialContext) -> _RefreshGate:
         return _refresh_gates.setdefault(key, _RefreshGate())
 
 
-def _credential_context(
+def broker_credential_context(
     provider: OAuthProvider,
     config: Config,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
 ) -> OAuthCredentialContext:
-    """Resolve the credential scope the provider's tools use for this worker target."""
+    """Resolve the credential scope the provider's tools use for this worker target.
+
+    The broker reads connections and their opt-ins (`oauth_reuse`) here, and the APIs write opt-ins here, so both
+    always name the same store.
+    """
     if worker_target is not None and worker_target.worker_scope is None and worker_target.worker_key is not None:
         # An unscoped worker's routing key is not part of its credential scope: tools on unscoped agents have none.
         worker_target = replace(worker_target, worker_key=None)

@@ -9371,7 +9371,7 @@
     "functions": [
       {
         "name": "list_egress_credentials",
-        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\nA service with nothing configured also says whether the user can connect an account instead of\nadding a key (`can_connect_account`, with the account's `provider` when it can). The result carries the link\nwhere the user connects accounts and adds or replaces keys. Never ask the user to paste a key into\nthe chat; send them to the link instead.",
+        "description": "List the services this agent can use through the egress broker and how to give it credentials.\nCall this when a request fails with `credential_not_configured`, or before telling the user\nwhich credential they need. Returns each configured service with whether this agent has a\ncredential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).\n`source` says who defined the service: `config` for the administrator, `user` for the user's own.\n`oauth_reuse` says whether Agent Keys may use the service's account (null without one). A service with\nnothing configured also says whether the user can connect an account instead of adding a key\n(`can_connect_account`), with the account's\n`provider` when it can or when the account still needs allowing. The result carries the link\nwhere the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key\ninto the chat; send them to the link instead.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18804,11 +18804,21 @@
     "functions": [
       {
         "name": "microsoft_onenote_list_notebooks",
-        "description": "List the OneNote notebooks the requester owns, by name, up to 50 at a time.\nNotebooks other people share with the requester are not listed.",
+        "description": "List the OneNote notebooks in one place, by name, up to 50 at a time.\nWithout container, these are the notebooks the requester owns. Notebooks in a Teams team, on a SharePoint\nsite, or shared by another person are listed by naming that place as container; every later call on those\nnotebooks, their sections, and their pages passes the same container.",
         "parameters": {
           "type": "object",
           "properties": {
             "page_token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "container": {
               "anyOf": [
                 {
                   "type": "string"
@@ -18850,6 +18860,16 @@
               "type": "string"
             },
             "page_token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "container": {
               "anyOf": [
                 {
                   "type": "string"
@@ -18905,6 +18925,16 @@
                 }
               ]
             },
+            "container": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -18948,6 +18978,16 @@
                 }
               ]
             },
+            "container": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -18974,7 +19014,7 @@
       },
       {
         "name": "microsoft_onenote_create_page",
-        "description": "Create a OneNote page with a title and plain-text content in one section.\nBefore calling, tell the requester the page title and the section's name, because an approval prompt may\nshow only IDs. The content keeps its line breaks, and any HTML in it shows literally.",
+        "description": "Create a OneNote page with a title and plain-text content in one section.\nThe write fails with target_mismatch unless expected_web_url is the web_url of the section's notebook. The\ncontent keeps its line breaks, and any HTML in it shows literally.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18986,6 +19026,19 @@
             },
             "content": {
               "type": "string"
+            },
+            "expected_web_url": {
+              "type": "string"
+            },
+            "container": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19003,7 +19056,8 @@
           "required": [
             "section_id",
             "title",
-            "content"
+            "content",
+            "expected_web_url"
           ]
         },
         "strict": false,
@@ -19015,7 +19069,7 @@
       },
       {
         "name": "microsoft_onenote_append_to_page",
-        "description": "Append plain text to one OneNote page, as a new paragraph at the end of the page's first block of content.\nBefore calling, tell the requester the page title and the exact text, because an approval prompt may show\nonly IDs. The text keeps its line breaks, and any HTML in it shows literally.",
+        "description": "Append plain text to one OneNote page, as a new paragraph at the end of the page's first block of content.\nBefore calling, tell the requester the page's title. The write fails with target_mismatch unless\nexpected_web_url is the web_url of the page's notebook. The text keeps its line breaks, and any HTML in it\nshows literally.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19024,6 +19078,19 @@
             },
             "content": {
               "type": "string"
+            },
+            "expected_web_url": {
+              "type": "string"
+            },
+            "container": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19040,7 +19107,8 @@
           },
           "required": [
             "page_id",
-            "content"
+            "content",
+            "expected_web_url"
           ]
         },
         "strict": false,
@@ -19749,7 +19817,7 @@
       },
       {
         "name": "microsoft_teams_list_chats",
-        "description": "List the requester's Teams chats, one-on-one, group, and meeting, with their members' names.\nChats come with the most recent message first, and last_message_at is that message's time. Each chat names\nat most 25 members.",
+        "description": "List the requester's Teams chats, one-on-one, group, and meeting, with their members' names and emails.\nChats come with the most recent message first, and last_message_at is that message's time. Each chat names\nat most 25 members.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19836,7 +19904,7 @@
       },
       {
         "name": "microsoft_teams_send_channel_message",
-        "description": "Post a new message in one Teams channel, as the requester and visible to everyone in the channel.\nBefore calling, tell the requester the team and channel names and the exact text, because an approval\nprompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to\n28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.",
+        "description": "Post a new message in one Teams channel, as the requester and visible to everyone in the channel.\nBefore calling, tell the requester the team and channel names and the exact text. Unless the team and\nchannel have the names expected_team and expected_channel, nothing is posted and it fails with\ntarget_mismatch, which names the real ones. Any HTML in the text shows literally, and the text keeps its\nline breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19844,6 +19912,12 @@
               "type": "string"
             },
             "channel_id": {
+              "type": "string"
+            },
+            "expected_team": {
+              "type": "string"
+            },
+            "expected_channel": {
               "type": "string"
             },
             "text": {
@@ -19865,6 +19939,8 @@
           "required": [
             "team_id",
             "channel_id",
+            "expected_team",
+            "expected_channel",
             "text"
           ]
         },
@@ -19877,7 +19953,7 @@
       },
       {
         "name": "microsoft_teams_reply_to_channel_message",
-        "description": "Reply in the thread of one Teams channel post, as the requester and visible to everyone in the channel.\nBefore calling, tell the requester the team and channel names, which post the reply answers, and the exact\ntext, because an approval prompt may show only IDs. Any HTML in the text shows literally, and the text\nkeeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count\nextra.",
+        "description": "Reply in the thread of one Teams channel post, as the requester and visible to everyone in the channel.\nBefore calling, tell the requester the team and channel names, which post the reply answers, and the exact\ntext. Unless the team and channel have the names expected_team and expected_channel, nothing is posted and\nit fails with target_mismatch, which names the real ones. Any HTML in the text shows literally, and the\ntext keeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks\ncount extra.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19888,6 +19964,12 @@
               "type": "string"
             },
             "message_id": {
+              "type": "string"
+            },
+            "expected_team": {
+              "type": "string"
+            },
+            "expected_channel": {
               "type": "string"
             },
             "text": {
@@ -19910,6 +19992,8 @@
             "team_id",
             "channel_id",
             "message_id",
+            "expected_team",
+            "expected_channel",
             "text"
           ]
         },
@@ -19922,12 +20006,18 @@
       },
       {
         "name": "microsoft_teams_send_chat_message",
-        "description": "Send a message in one existing Teams chat, as the requester and visible to every chat member.\nBefore calling, tell the requester the chat's topic or members and the exact text, because an approval\nprompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to\n28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.",
+        "description": "Send a message in one existing Teams chat, as the requester and visible to every chat member.\nBefore calling, tell the requester the chat's members and the exact text. When the chat has a member whose\nemail address recipients does not list, or one without an email address, nothing is sent and it fails\nwith recipients_mismatch, which lists every member. Any HTML in the text shows literally, and the text\nkeeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count\nextra.",
         "parameters": {
           "type": "object",
           "properties": {
             "chat_id": {
               "type": "string"
+            },
+            "recipients": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             "text": {
               "type": "string"
@@ -19947,6 +20037,7 @@
           },
           "required": [
             "chat_id",
+            "recipients",
             "text"
           ]
         },

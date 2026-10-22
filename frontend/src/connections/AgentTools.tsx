@@ -45,7 +45,8 @@ export function AgentTools({
             <th scope="col" className="w-[44%] px-5 py-3 font-medium">
               Tool
             </th>
-            <th scope="col" className="w-[25%] px-4 py-3 font-medium">
+            {/* Inset like the agent table's cells, so Connection lines up with Tools & connections above it. */}
+            <th scope="col" className="w-[25%] px-5 py-3 font-medium">
               Connection
             </th>
             <th scope="col" className="w-[15%] px-4 py-3 font-medium">
@@ -108,7 +109,7 @@ export function AgentTools({
                     </th>
                     <td
                       data-label="Connection"
-                      className={`px-4 py-3 text-xs text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:py-1`}
+                      className={`px-5 py-3 text-xs text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1`}
                     >
                       No setup needed
                     </td>

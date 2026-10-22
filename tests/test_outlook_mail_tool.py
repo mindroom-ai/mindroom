@@ -758,6 +758,8 @@ def test_reply_sends_the_body_as_an_escaped_comment(
         ("bccRecipients", {"emailAddress": {"address": "desk@outside.example"}}, "desk@outside.example"),
         # A recipient without an address cannot be matched against the named ones.
         ("ccRecipients", {"emailAddress": {"name": "Desk"}}, "Desk"),
+        # An address that differs from a named one by more than case, here ss for ß.
+        ("toRecipients", {"emailAddress": {"address": "desk@strasse.example"}}, "desk@strasse.example"),
     ],
 )
 def test_reply_to_a_recipient_not_named_is_refused(
@@ -772,7 +774,8 @@ def test_reply_to_a_recipient_not_named_is_refused(
     mail.override = lambda request: httpx.Response(204) if request.method == "DELETE" else None
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
-    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=["alex@contoso.com"], body="Thanks"))
+    named = ["alex@contoso.com", "desk@straße.example"]
+    refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients=named, body="Thanks"))
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", [listed])
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [

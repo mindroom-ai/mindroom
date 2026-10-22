@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Any
@@ -37,16 +38,41 @@ _MAX_LISTING = 50
 _MAX_TEXT_CHARACTERS = 30_000
 # Page tokens are item or character offsets, accepted up to this bound.
 _MAX_OFFSET = 2**31 - 1
-_NOTEBOOK_SELECT = "id,displayName,isDefault,isShared,userRole,lastModifiedDateTime"
+_NOTEBOOK_SELECT = "id,displayName,isDefault,isShared,userRole,lastModifiedDateTime,links"
 _SECTION_SELECT = "id,displayName,isDefault,lastModifiedDateTime"
 _PAGE_SELECT = "id,title,createdDateTime,lastModifiedDateTime"
 _HTML_ACCEPT = {"Accept": "text/html"}
 _HTML_CONTENT = {"Content-Type": "text/html; charset=utf-8"}
+_TARGET_MISMATCH = (
+    "The target's notebook is not at expected_web_url; tell the requester the notebook's real web_url before "
+    "trying again."
+)
+_GUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+# Each kind of container has its own shape, and no value fits two: a Teams team id is the GUID of the team's
+# Microsoft 365 group, a SharePoint site id is host,guid,guid, and a person is named by sign-in email address.
+_CONTAINERS = (
+    (re.compile(_GUID), "groups"),
+    (re.compile(rf"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+,{_GUID},{_GUID}"), "sites"),
+    (re.compile(r"[^@\s/\\?#\x00-\x1f\x7f]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"), "users"),
+)
+_INVALID_CONTAINER = (
+    "container must be a Teams team id, a SharePoint site id (host,guid,guid), or a person's sign-in email address; "
+    "omit it for the requester's own notebooks."
+)
+
+
+@dataclass(frozen=True)
+class _Target:
+    """The section or page a write changes, the OneNote root it is under, and its notebook's expected web_url."""
+
+    root: str
+    path: str
+    web_url: str
 
 
 @dataclass(frozen=True)
 class _Request:
-    """One validated Graph request; every OneNote function sends exactly one."""
+    """One validated Graph request; a write first reads its section or page to check the notebook it is in."""
 
     method: str
     path: str
@@ -57,8 +83,17 @@ class _Request:
     # Where the page token said to continue: an item offset for listings, a character offset for page text.
     offset: int = 0
     limit: int = 0
+    target: _Target | None = None
 
     def send(self, session: GraphSession) -> dict[str, Any]:
+        if (target := self.target) is not None:
+            # An expanded parent notebook carries only its id, name, and self link by default, so the web link is read
+            # from the notebook itself.
+            found = session.json("GET", target.path, params={"$expand": "parentNotebook"})
+            notebook_path = _notebook_path(target.root, (found.get("parentNotebook") or {}).get("id"))
+            web_url = _web_url(session.json("GET", notebook_path, params={"$select": "links"}))
+            if web_url != target.web_url.strip():
+                raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
         return session.json(
             self.method,
             self.path,
@@ -69,8 +104,31 @@ class _Request:
         )
 
 
-def _page_path(page_id: object) -> str:
-    return f"/me/onenote/pages/{path_segment(page_id, 'page_id')}"
+def _root(container: object) -> str:
+    """Return the OneNote root of the notebooks a container names, or of the requester's own without one."""
+    if container is None:
+        return "/me/onenote"
+    for shape, collection in _CONTAINERS:
+        if isinstance(container, str) and shape.fullmatch(container):
+            return f"/{collection}/{path_segment(container, 'container')}/onenote"
+    raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_CONTAINER)
+
+
+def _notebook_path(root: str, notebook_id: object) -> str:
+    return f"{root}/notebooks/{path_segment(notebook_id, 'notebook_id')}"
+
+
+def _section_path(root: str, section_id: object) -> str:
+    return f"{root}/sections/{path_segment(section_id, 'section_id')}"
+
+
+def _page_path(root: str, page_id: object) -> str:
+    return f"{root}/pages/{path_segment(page_id, 'page_id')}"
+
+
+def _web_url(notebook: Mapping[str, Any]) -> object:
+    """Return a notebook's OneNote on the web link, which names the OneDrive or SharePoint site that holds it."""
+    return ((notebook.get("links") or {}).get("oneNoteWebUrl") or {}).get("href")
 
 
 def _listing(path: str, select: str, limit: int, page_token: object) -> _Request:
@@ -128,6 +186,7 @@ def _notebook(notebook: Mapping[str, Any]) -> dict[str, Any]:
         "is_default": notebook.get("isDefault"),
         "is_shared": notebook.get("isShared"),
         "user_role": notebook.get("userRole"),
+        "web_url": _web_url(notebook),
         "last_modified": notebook.get("lastModifiedDateTime"),
     }
 
@@ -191,10 +250,14 @@ class MicrosoftOneNoteTools(Toolkit):
 
     def _run(
         self,
+        container: str | None,
         build: Callable[[], _Request],
         operation: Callable[[GraphSession, _Request], Mapping[str, object]],
     ) -> str:
-        """Refuse malformed arguments before any request, then send the request and render its result."""
+        """Refuse malformed arguments before any request, then send the request and render its result.
+
+        The result names the container, so that calls on the notebooks it lists pass it back.
+        """
         try:
             request = build()
         except MicrosoftGraphError as exc:
@@ -208,32 +271,45 @@ class MicrosoftOneNoteTools(Toolkit):
                 self._worker_target,
                 self._config,
             ) as session:
-                return operation(session, request)
+                return {"container": container, **operation(session, request)}
 
         return graph_tool_result(_TOOL_NAME, run)
 
     def _send(
         self,
+        container: str | None,
         build: Callable[[], _Request],
         result: Callable[[_Request, dict[str, Any]], Mapping[str, object]],
     ) -> str:
-        return self._run(build, lambda session, request: result(request, request.send(session)))
+        return self._run(container, build, lambda session, request: result(request, request.send(session)))
 
-    def microsoft_onenote_list_notebooks(self, page_token: str | None = None) -> str:
-        """List the OneNote notebooks the requester owns, by name, up to 50 at a time.
+    def microsoft_onenote_list_notebooks(self, page_token: str | None = None, container: str | None = None) -> str:
+        """List the OneNote notebooks in one place, by name, up to 50 at a time.
 
-        Notebooks other people share with the requester are not listed.
+        Without container, these are the notebooks the requester owns. Notebooks in a Teams team, on a SharePoint
+        site, or shared by another person are listed by naming that place as container; every later call on those
+        notebooks, their sections, and their pages passes the same container.
 
         Args:
-            page_token: The next_page_token of the previous call, to continue the same listing.
+            page_token: The next_page_token of the previous call with the same container, to continue the listing.
+            container: Where the notebooks are: a Teams team's id from microsoft_teams_list_teams, a SharePoint
+                site's id from microsoft_sharepoint_search_sites (host,guid,guid), or the sign-in email address
+                (not the id) of a person, for the notebooks that person shares with the requester. Omit it
+                for the requester's own notebooks.
 
         """
         return self._send(
-            lambda: _listing("/me/onenote/notebooks", _NOTEBOOK_SELECT, _MAX_LISTING, page_token),
+            container,
+            lambda: _listing(f"{_root(container)}/notebooks", _NOTEBOOK_SELECT, _MAX_LISTING, page_token),
             lambda request, payload: _listed("notebooks", request, payload, _notebook),
         )
 
-    def microsoft_onenote_list_sections(self, notebook_id: str, page_token: str | None = None) -> str:
+    def microsoft_onenote_list_sections(
+        self,
+        notebook_id: str,
+        page_token: str | None = None,
+        container: str | None = None,
+    ) -> str:
         """List the sections directly in one OneNote notebook, by name, up to 50 at a time.
 
         Sections inside section groups are not listed.
@@ -241,11 +317,14 @@ class MicrosoftOneNoteTools(Toolkit):
         Args:
             notebook_id: The notebook's id from microsoft_onenote_list_notebooks.
             page_token: The next_page_token of the previous call for the same notebook, to continue the listing.
+            container: The container microsoft_onenote_list_notebooks listed the notebook with; omit it for
+                the requester's own notebooks.
 
         """
         return self._send(
+            container,
             lambda: _listing(
-                f"/me/onenote/notebooks/{path_segment(notebook_id, 'notebook_id')}/sections",
+                f"{_notebook_path(_root(container), notebook_id)}/sections",
                 _SECTION_SELECT,
                 _MAX_LISTING,
                 page_token,
@@ -253,18 +332,26 @@ class MicrosoftOneNoteTools(Toolkit):
             lambda request, payload: _listed("sections", request, payload, _section),
         )
 
-    def microsoft_onenote_list_pages(self, section_id: str, limit: int = 50, page_token: str | None = None) -> str:
+    def microsoft_onenote_list_pages(
+        self,
+        section_id: str,
+        limit: int = 50,
+        page_token: str | None = None,
+        container: str | None = None,
+    ) -> str:
         """List the pages in one OneNote section, most recently modified first, with their titles and dates.
 
         Args:
             section_id: The section's id from microsoft_onenote_list_sections.
             limit: Maximum number of pages to return, from 1 to 50.
             page_token: The next_page_token of the previous call for the same section, to continue the listing.
+            container: The container of the section's notebook; omit it for the requester's own notebooks.
 
         """
         return self._send(
+            container,
             lambda: _listing(
-                f"/me/onenote/sections/{path_segment(section_id, 'section_id')}/pages",
+                f"{_section_path(_root(container), section_id)}/pages",
                 _PAGE_SELECT,
                 _limit(limit),
                 page_token,
@@ -272,7 +359,12 @@ class MicrosoftOneNoteTools(Toolkit):
             lambda request, payload: _listed("pages", request, payload, _page),
         )
 
-    def microsoft_onenote_get_page(self, page_id: str, page_token: str | None = None) -> str:
+    def microsoft_onenote_get_page(
+        self,
+        page_id: str,
+        page_token: str | None = None,
+        container: str | None = None,
+    ) -> str:
         """Read one OneNote page's content as plain text, 30,000 characters at a time.
 
         The text leaves out the page title, which microsoft_onenote_list_pages returns. Images show as [image],
@@ -282,14 +374,16 @@ class MicrosoftOneNoteTools(Toolkit):
         Args:
             page_id: The page's id from microsoft_onenote_list_pages.
             page_token: The next_page_token of the previous call for the same page, to read on.
+            container: The container of the page's notebook; omit it for the requester's own notebooks.
 
         """
 
         def build() -> _Request:
-            path = f"{_page_path(page_id)}/content"
+            path = f"{_page_path(_root(container), page_id)}/content"
             return _Request("GET", path, headers=_HTML_ACCEPT, offset=page_offset(page_token, _MAX_OFFSET))
 
         return self._run(
+            container,
             build,
             lambda session, request: _text_chunk(
                 session.request(request.method, request.path, headers=request.headers).text,
@@ -297,47 +391,76 @@ class MicrosoftOneNoteTools(Toolkit):
             ),
         )
 
-    def microsoft_onenote_create_page(self, section_id: str, title: str, content: str) -> str:
+    def microsoft_onenote_create_page(
+        self,
+        section_id: str,
+        title: str,
+        content: str,
+        expected_web_url: str,
+        container: str | None = None,
+    ) -> str:
         """Create a OneNote page with a title and plain-text content in one section.
 
-        Before calling, tell the requester the page title and the section's name, because an approval prompt may
-        show only IDs. The content keeps its line breaks, and any HTML in it shows literally.
+        The write fails with target_mismatch unless expected_web_url is the web_url of the section's notebook. The
+        content keeps its line breaks, and any HTML in it shows literally.
 
         Args:
             section_id: The section's id from microsoft_onenote_list_sections.
             title: The page title.
             content: The page text, as plain text; may be empty for a page with only a title.
+            expected_web_url: The web_url of the section's notebook from microsoft_onenote_list_notebooks; required.
+            container: The container of the section's notebook; omit it for the requester's own notebooks.
 
         """
 
         def build() -> _Request:
-            path = f"/me/onenote/sections/{path_segment(section_id, 'section_id')}/pages"
+            root = _root(container)
+            section = _section_path(root, section_id)
             html = (
                 f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title', required=True))}</title></head>"
                 f"<body>{_paragraph(_text(content, 'content', required=False))}</body></html>"
             )
-            return _Request("POST", path, headers=_HTML_CONTENT, content=html.encode("utf-8"))
+            target = _Target(root, section, _text(expected_web_url, "expected_web_url", required=True))
+            return _Request(
+                "POST",
+                f"{section}/pages",
+                headers=_HTML_CONTENT,
+                content=html.encode("utf-8"),
+                target=target,
+            )
 
-        return self._send(build, lambda _request, payload: {"page": _page(payload)})
+        return self._send(container, build, lambda _request, payload: {"page": _page(payload)})
 
-    def microsoft_onenote_append_to_page(self, page_id: str, content: str) -> str:
+    def microsoft_onenote_append_to_page(
+        self,
+        page_id: str,
+        content: str,
+        expected_web_url: str,
+        container: str | None = None,
+    ) -> str:
         """Append plain text to one OneNote page, as a new paragraph at the end of the page's first block of content.
 
-        Before calling, tell the requester the page title and the exact text, because an approval prompt may show
-        only IDs. The text keeps its line breaks, and any HTML in it shows literally.
+        Before calling, tell the requester the page's title. The write fails with target_mismatch unless
+        expected_web_url is the web_url of the page's notebook. The text keeps its line breaks, and any HTML in it
+        shows literally.
 
         Args:
             page_id: The page's id from microsoft_onenote_list_pages.
             content: The text to add, as plain text.
+            expected_web_url: The web_url of the page's notebook from microsoft_onenote_list_notebooks; required.
+            container: The container of the page's notebook; omit it for the requester's own notebooks.
 
         """
 
         def build() -> _Request:
+            root = _root(container)
+            page = _page_path(root, page_id)
             change = {
                 "target": "body",
                 "action": "append",
                 "content": _paragraph(_text(content, "content", required=True)),
             }
-            return _Request("PATCH", f"{_page_path(page_id)}/content", body=[change])
+            target = _Target(root, page, _text(expected_web_url, "expected_web_url", required=True))
+            return _Request("PATCH", f"{page}/content", body=[change], target=target)
 
-        return self._send(build, lambda _request, _payload: {"appended": {"page_id": page_id}})
+        return self._send(container, build, lambda _request, _payload: {"appended": {"page_id": page_id}})

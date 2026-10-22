@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { canEdit, type ServiceEditing } from "./egressRowText";
 import {
@@ -111,9 +110,7 @@ export function LimitRow({
         <ServiceHosts service={service} />
       </td>
       <td data-label="Status" className={SERVICE_CELL.status}>
-        <Badge variant="outline" className="font-normal">
-          Limit only
-        </Badge>
+        <span className="text-sm text-muted-foreground">Limit only</span>
       </td>
       <td className={SERVICE_CELL.actions}>
         {limitActions.busy ? (

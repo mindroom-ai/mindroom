@@ -267,7 +267,7 @@ def test_none_target_uses_global_store(tmp_path: Path, manager: CredentialsManag
     _assert_nothing_stored_under(tmp_path, "private_oauth", "workers")
 
 
-def _oauth(*, connected: bool) -> OAuthStatus:
+def _oauth(*, connected: bool, reuse_enabled: bool = True) -> OAuthStatus:
     return OAuthStatus(
         provider="github",
         display_name="GitHub",
@@ -275,25 +275,32 @@ def _oauth(*, connected: bool) -> OAuthStatus:
         account_label="alice@example.org" if connected else None,
         can_connect=True,
         reset_required=False,
+        reuse_enabled=reuse_enabled,
     )
 
 
 @pytest.mark.parametrize(
-    ("key", "oauth_connected", "active_source"),
+    ("key", "oauth_connected", "reuse_enabled", "active_source"),
     [
-        (True, True, "key"),
-        (True, False, "key"),
-        (False, True, "oauth"),
-        (False, False, None),
+        (True, True, True, "key"),
+        (True, False, True, "key"),
+        (False, True, True, "oauth"),
+        (False, False, True, None),
+        (True, True, False, "key"),
+        (False, True, False, None),
     ],
 )
 def test_service_status_prefers_the_key_over_oauth(
     key: bool,
     oauth_connected: bool,
+    reuse_enabled: bool,
     active_source: str | None,
     manager: CredentialsManager,
 ) -> None:
-    """A stored key is the active source whenever it is set; a connected OAuth account is used otherwise."""
+    """A stored key is the active source whenever it is set; a connected OAuth account Agent Keys may use otherwise.
+
+    A connected account without the opt-in serves only its tools, so it configures nothing here.
+    """
     target = _claims(worker_scope="user_agent").to_worker_target()
     saved_at = None
     if key:
@@ -310,7 +317,7 @@ def test_service_status_prefers_the_key_over_oauth(
 
     def oauth_status(provider_id: str, scope: ResolvedWorkerTarget | None) -> OAuthStatus:
         calls.append((provider_id, scope))
-        return _oauth(connected=oauth_connected)
+        return _oauth(connected=oauth_connected, reuse_enabled=reuse_enabled)
 
     service = EgressService(rules=_RULES, oauth_provider="github")
     status = service_status(manager, target, service, "github", oauth_status=oauth_status)
@@ -320,7 +327,7 @@ def test_service_status_prefers_the_key_over_oauth(
         active_source=active_source,  # type: ignore[arg-type]
         key_configured=key,
         key_updated_at=saved_at,
-        oauth=_oauth(connected=oauth_connected),
+        oauth=_oauth(connected=oauth_connected, reuse_enabled=reuse_enabled),
     )
     assert calls == [("github", target)]
     assert "secret-value" not in repr(status)

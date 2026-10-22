@@ -503,7 +503,9 @@ def test_session_reaches_the_agent_keys_api(signin: dict[str, Any]) -> None:
         signin,
         {
             **signin["payload"],
-            "agents": {"personal": {**signin["payload"]["agents"]["personal"], "tools": ["shell"]}},
+            "agents": {
+                "personal": {**signin["payload"]["agents"]["personal"], "tools": ["shell", "egress_credentials"]},
+            },
             "egress_broker": {"services": services},
         },
         MINDROOM_EGRESS_BROKER_PORT="8768",

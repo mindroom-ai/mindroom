@@ -108,6 +108,7 @@ Matrix sync callback
 | `oauth/microsoft.py` | Microsoft 365 OAuth providers sharing one Entra app, with the tenant resolved per runtime |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `egress_broker/` | Agent Keys: the egress broker in the primary that adds stored keys or connected-account tokens to worker HTTP(S) requests the worker never sees |
+| `egress_broker/env.py` | Whether the broker and its personal page are on, the one rule for which agents use Agent Keys (`egress_credentials` plus `shell` or `python`), and the worker env overlay |
 | `egress_broker/service.py` | Broker lifecycle on its own thread, secret resolution per verified worker scope, and the per-call broker env for worker-routed calls |
 | `egress_broker/proxy.py` | Authenticated forward-proxy listener: CONNECT interception or blind tunnels, plain HTTP forwarding, and the unmatched-host policy |
 | `egress_broker/mitm.py` | TLS interception for hosts with rules: `Host` checks against the CONNECT target and per-request credential injection |
@@ -116,16 +117,17 @@ Matrix sync callback
 | `egress_broker/rules.py` | Pure rule matching, path restriction checks, ambiguous-path refusal, and credential injection into a header or query parameter |
 | `egress_broker/user_services.py` | Services users define per scope, stored beside the scope's keys and merged after the config services into the config the broker matches |
 | `egress_broker/secrets.py` | Per-scope egress keys in the primary-only credential store and each service's key-or-account status |
+| `egress_broker/oauth_reuse.py` | Per-service opt-ins that let Agent Keys use a connected OAuth account, stored beside the connection they unlock |
 | `egress_broker/tokens.py` | Signed, expiring worker proxy tokens that carry the worker scope, agent, and requester |
 | `egress_broker/audit.py` | Metadata-only SQLite request log, pruned to 30 days and 100,000 rows |
 | `egress_broker/ca.py` | Local broker CA, per-host leaf certificates, the SNI check against the CONNECT host, and the worker trust bundle |
-| `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect and disconnect, the full request log, and the CA download |
+| `api/egress_broker.py` | Dashboard Agent Keys routes: service status, presets, keys, account connect, disconnect, and opt-in, the full request log, and the CA download |
 | `api/connections_session.py` | Connections portal sign-in: exchanges a Matrix OpenID token from MindRoom Chat for a portal session cookie |
 | `api/connections_session_cookie.py` | Signed, process-local portal session cookies with a fixed one-hour lifetime |
-| `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections, and the caller's request log |
+| `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections and opt-ins, and the caller's request log |
 | `api/egress_status.py` | Service status, preset, and request-log responses and the account-connection gate shared by both egress APIs |
 | `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
-| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool: which services have a key or connected account in the agent's scope, and where to add missing ones |
+| `custom_tools/egress_credentials.py` | `egress_credentials` agent tool, whose presence opts an agent into Agent Keys: which services have a key or connected account in the agent's scope, and where to add missing ones |
 | `event_journal/tool_jobs.py` | Background tool job snapshots and outcome payloads, written only by the runtime generation that owns them |
 | `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
 | `delegation/background.py` | A background subagent's job: native child admission, outcome, and cleanup inside the generic execution owner |

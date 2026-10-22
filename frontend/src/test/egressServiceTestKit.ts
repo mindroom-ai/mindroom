@@ -133,7 +133,7 @@ export const credentialService = (
   ...changes,
 });
 
-/** GitHub's account login as the listings send it: connectable, not connected. */
+/** GitHub's account login as the listings send it: connectable, not connected, and allowed for Agent Keys. */
 export const oauthStatus = (
   changes: Partial<EgressOAuthStatus> = {},
 ): EgressOAuthStatus => ({
@@ -146,6 +146,7 @@ export const oauthStatus = (
   service_account: false,
   unavailable_reason: null,
   shared_worker_opt_in: false,
+  reuse_enabled: true,
   ...changes,
 });
 

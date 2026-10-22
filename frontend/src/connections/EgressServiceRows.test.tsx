@@ -143,7 +143,9 @@ const answer = (status: string) =>
 async function startConnect(onChanged = vi.fn()) {
   renderRows([withAccount()], { onChanged });
   fireEvent.click(
-    screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+    screen.getByRole("button", {
+      name: "Connect GitHub for Agent Keys for GitHub",
+    }),
   );
   await waitFor(() => expect(popup.location.href).toBe(authorization.auth_url));
   expect(screen.getByText("Connecting…")).toBeVisible();
@@ -379,7 +381,9 @@ describe("connected accounts", () => {
     const github = row("GitHub");
     expect(within(github).getByText("Not set")).toBeInTheDocument();
     expect(
-      within(github).getByRole("button", { name: "Connect GitHub for GitHub" }),
+      within(github).getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
     await expectNoAction("Set key for GitHub", github);
 
@@ -400,7 +404,9 @@ describe("connected accounts", () => {
     const onChanged = vi.fn();
     renderRows([withAccount()], { agentName: "my agent", onChanged });
     fireEvent.click(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
 
     await waitFor(() =>
@@ -412,7 +418,9 @@ describe("connected accounts", () => {
       expect.objectContaining({ method: "POST", credentials: "same-origin" }),
     );
     expect(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeDisabled();
     expect(onChanged).not.toHaveBeenCalled();
 
@@ -421,7 +429,9 @@ describe("connected accounts", () => {
     // The page that answered closes itself.
     expect(popup.close).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
   });
 
@@ -438,7 +448,9 @@ describe("connected accounts", () => {
       );
       expect(screen.queryByText("Connecting…")).toBeNull();
       expect(
-        screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+        screen.getByRole("button", {
+          name: "Connect GitHub for Agent Keys for GitHub",
+        }),
       ).toBeEnabled();
       expect(onChanged).not.toHaveBeenCalled();
       // The page closes itself, so the row leaves the popup alone.
@@ -464,6 +476,31 @@ describe("connected accounts", () => {
     });
   });
 
+  it("uses the supplied account path to allow the account", async () => {
+    renderRows(
+      [
+        withAccount(
+          { connected: true, reuse_enabled: false },
+          { configured: false },
+        ),
+      ],
+      {
+        secretPath: (name) => `/custom/${name}/secret`,
+        servicesPath: "/custom/services",
+        accountPath: (name, action) => `/custom/${name}/${action}?agent_name=a`,
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+    );
+    await pressInDialog("Use account");
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
+        "/custom/github/oauth-reuse?agent_name=a",
+      ),
+    );
+  });
+
   it("uses the supplied account paths for connect and disconnect", async () => {
     vi.mocked(fetch).mockImplementation(async (input) =>
       String(input).includes("/connect")
@@ -478,7 +515,9 @@ describe("connected accounts", () => {
       onChanged,
     });
     fireEvent.click(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     await waitFor(() =>
       expect(popup.location.href).toBe(authorization.auth_url),
@@ -511,14 +550,18 @@ describe("connected accounts", () => {
     const onChanged = vi.fn();
     renderRows([withAccount()], { onChanged });
     fireEvent.click(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Could not complete the request. Try again.",
     );
     expect(onChanged).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
   });
 
@@ -526,7 +569,9 @@ describe("connected accounts", () => {
     vi.mocked(window.open).mockReturnValue(null);
     renderRows([withAccount()]);
     fireEvent.click(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The popup was blocked",
@@ -549,7 +594,9 @@ describe("connected accounts", () => {
       agentName: "shared_dev",
     });
     expect(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
     await expectNoAction(/^(Set|Replace|Remove) key for /);
   });
@@ -564,7 +611,9 @@ describe("connected accounts", () => {
       ],
       { agentName: "shared_dev" },
     );
-    expect(within(row("GitHub")).getByText("Connected")).toBeVisible();
+    expect(
+      within(row("GitHub")).getByText("Using connected account"),
+    ).toBeVisible();
     expect(
       within(row("GitHub")).getByText(
         "Shared with everyone using Personal Mind",
@@ -576,7 +625,7 @@ describe("connected accounts", () => {
   it("shows the connected account with Disconnect", async () => {
     renderRows([connectedGithub]);
     const github = row("GitHub");
-    expect(within(github).getByText("Connected")).toBeVisible();
+    expect(within(github).getByText("Using connected account")).toBeVisible();
     expect(within(github).getByText("octocat")).toBeVisible();
     expect(screen.queryByText(/shared with everyone/i)).toBeNull();
     expect(
@@ -587,14 +636,16 @@ describe("connected accounts", () => {
     ).toBeNull();
   });
 
-  it("says Connected when the provider gives no account label", () => {
+  it("says the account is in use when the provider gives no account label", () => {
     renderRows([
       withAccount(
         { connected: true },
         { configured: true, active_source: "oauth" },
       ),
     ]);
-    expect(within(row("GitHub")).getByText("Connected")).toBeInTheDocument();
+    expect(
+      within(row("GitHub")).getByText("Using connected account"),
+    ).toBeInTheDocument();
   });
 
   it("disconnects only after confirmation and reports the change", async () => {
@@ -724,7 +775,9 @@ describe("connected accounts", () => {
       ),
     ).toBeVisible();
     expect(
-      within(github).getByRole("button", { name: "Connect GitHub for GitHub" }),
+      within(github).getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
   });
 
@@ -750,11 +803,200 @@ describe("connected accounts", () => {
     const onChanged = await startConnect();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(
-      screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     ).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
     await waitFor(() => expect(popup.close).toHaveBeenCalled());
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  describe("while Agent Keys may not use the account", () => {
+    const toolsOnly = withAccount(
+      { connected: true, account_label: "octocat", reuse_enabled: false },
+      { configured: false, active_source: null },
+    );
+    const approvalBypass =
+      "Commands this agent runs (shell, python) will act as octocat with its full access, without the approval prompts GitHub tools ask for.";
+
+    it("says the account serves its tools only and offers to use it after confirming the approval bypass", async () => {
+      const onChanged = vi.fn();
+      renderRows([toolsOnly], { onChanged });
+      const github = row("GitHub");
+      expect(
+        within(github).getByText("Connected for tools only"),
+      ).toBeVisible();
+      expect(within(github).getByText("octocat")).toBeVisible();
+      const use = within(github).getByRole("button", {
+        name: "Use my GitHub account for GitHub",
+      });
+      expect(use).toHaveTextContent("Use my GitHub account");
+
+      fireEvent.click(use);
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent(
+        "Use your GitHub account for Agent Keys?",
+      );
+      expect(dialog).toHaveTextContent(
+        `${approvalBypass} This covers each of your agents whose GitHub service uses this account.`,
+      );
+      expect(fetch).not.toHaveBeenCalled();
+      await pressInDialog("Use account");
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/connections/egress/agents/personal/github/oauth-reuse",
+        expect.objectContaining({
+          method: "PUT",
+          credentials: "same-origin",
+          body: JSON.stringify({ acknowledge_approval_bypass: true }),
+        }),
+      );
+    });
+
+    it("leaves the account alone when the confirmation is cancelled", async () => {
+      renderRows([toolsOnly]);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Use my GitHub account for GitHub",
+        }),
+      );
+      await pressInDialog("Cancel");
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("connects for Agent Keys by allowing the account, then running the sign-in", async () => {
+      vi.mocked(fetch).mockImplementation(async (input) =>
+        String(input).endsWith("/oauth-reuse")
+          ? noContent()
+          : json(authorization),
+      );
+      const onChanged = vi.fn();
+      renderRows([withAccount({ reuse_enabled: false })], { onChanged });
+      const connect = screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      });
+      expect(connect).toHaveTextContent("Connect GitHub for Agent Keys");
+
+      fireEvent.click(connect);
+      expect(await screen.findByRole("dialog")).toHaveTextContent(
+        "will act as the GitHub account you connect with its full access",
+      );
+      expect(window.open).not.toHaveBeenCalled();
+      await pressInDialog("Continue");
+
+      await waitFor(() =>
+        expect(popup.location.href).toBe(authorization.auth_url),
+      );
+      expect(vi.mocked(fetch).mock.calls.map(([path]) => path)).toEqual([
+        "/api/connections/egress/agents/personal/github/oauth-reuse",
+        "/api/connections/egress/agents/personal/github/connect",
+      ]);
+      answer("connected");
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    });
+
+    it("tells everyone using a shared agent that they get its account", async () => {
+      renderRows(
+        [
+          withAccount(
+            {
+              provider: "google_drive",
+              display_name: "Google Drive",
+              connected: true,
+              account_label: "team@example.com",
+              reuse_enabled: false,
+            },
+            {
+              name: "drive",
+              display_name: "Drive",
+              is_shared: true,
+              active_source: null,
+            },
+          ),
+        ],
+        { agentName: "shared_dev" },
+      );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Use my Google Drive account for Drive",
+        }),
+      );
+      expect(await screen.findByRole("dialog")).toHaveTextContent(
+        "without the approval prompts Google Drive tools ask for. Everyone using Personal Mind gets this.",
+      );
+    });
+
+    it("tells a manager of agents without a scope that every one of them gets the account", async () => {
+      const unscoped = withAccount(
+        {
+          provider: "google_drive",
+          display_name: "Google Drive",
+          connected: true,
+          account_label: "team@example.com",
+          reuse_enabled: false,
+        },
+        { name: "drive", display_name: "Drive", is_shared: true },
+      );
+      renderRows([unscoped], {
+        agent: {
+          displayName: "the agents without a scope",
+          shared: true,
+          scope: "unscoped",
+          services: [unscoped],
+        },
+      });
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Use my Google Drive account for Drive",
+        }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent(
+        "without the approval prompts Google Drive tools ask for. Every agent without a scope gets this.",
+      );
+      expect(dialog).not.toHaveTextContent("Everyone using");
+    });
+
+    it("offers nothing to a user who may not change the account", () => {
+      renderRows(
+        [
+          withAccount(
+            { connected: true, can_connect: false, reuse_enabled: false },
+            { is_shared: true, can_manage: false },
+          ),
+        ],
+        { agentName: "shared_dev" },
+      );
+      expect(
+        within(row("GitHub")).getByText("Connected for tools only"),
+      ).toBeVisible();
+      expect(screen.queryByRole("button")).toBeNull();
+    });
+  });
+
+  it("stops Agent Keys using the account from the menu and keeps the connection", async () => {
+    const onChanged = vi.fn();
+    renderRows([connectedGithub], { onChanged });
+    expect(
+      within(row("GitHub")).getByText("Using connected account"),
+    ).toBeVisible();
+    fireEvent.click(await rowAction("Stop using GitHub account for GitHub"));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/connections/egress/agents/personal/github/oauth-reuse",
+      expect.objectContaining({ method: "DELETE", credentials: "same-origin" }),
+    );
+  });
+
+  it("says Disconnect removes the connection for the agent's tools too", async () => {
+    renderRows([connectedGithub]);
+    fireEvent.click(await rowAction("Disconnect for GitHub"));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "GitHub tools lose it too. To keep it for them, choose Stop using GitHub account instead.",
+    );
   });
 
   it("says Agent Keys cannot use a shared service account and offers no connect action", () => {
@@ -971,7 +1213,7 @@ describe("rows with an agent's wording", () => {
       agent: agent({ displayName: "Shared Dev", services: [shared] }),
     });
     const status = within(row("GitHub"));
-    expect(status.getByText("Connected")).toBeVisible();
+    expect(status.getByText("Using connected account")).toBeVisible();
     expect(status.getByText("team@example.org")).toBeVisible();
     expect(
       status.getByText("Shared with everyone using Shared Dev"),
@@ -999,7 +1241,9 @@ describe("rows with an agent's wording", () => {
         agent: agent({ displayName: "Shared Dev", services: [sharedGoogle] }),
       });
       fireEvent.click(
-        screen.getByRole("button", { name: "Connect Google for Gmail" }),
+        screen.getByRole("button", {
+          name: "Connect Google for Agent Keys for Gmail",
+        }),
       );
 
       const dialog = await screen.findByRole("dialog", {
@@ -1029,7 +1273,9 @@ describe("rows with an agent's wording", () => {
         agent: agent({ displayName: "Shared Dev", services: [sharedGoogle] }),
       });
       fireEvent.click(
-        screen.getByRole("button", { name: "Connect Google for Gmail" }),
+        screen.getByRole("button", {
+          name: "Connect Google for Agent Keys for Gmail",
+        }),
       );
       const dialog = await screen.findByRole("dialog");
       fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -1045,7 +1291,9 @@ describe("rows with an agent's wording", () => {
       );
       renderRows([optedIn], { agent: agent({ services: [optedIn] }) });
       fireEvent.click(
-        screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+        screen.getByRole("button", {
+          name: "Connect GitHub for Agent Keys for GitHub",
+        }),
       );
       await waitFor(() => expect(fetch).toHaveBeenCalled());
       expect(screen.queryByRole("dialog")).toBeNull();
@@ -1069,7 +1317,9 @@ describe("rows with an agent's wording", () => {
       const personal = { ...sharedGoogle, is_shared: false };
       renderRows([personal], { agent: agent({ services: [personal] }) });
       fireEvent.click(
-        screen.getByRole("button", { name: "Connect Google for Gmail" }),
+        screen.getByRole("button", {
+          name: "Connect Google for Agent Keys for Gmail",
+        }),
       );
       await waitFor(() => expect(fetch).toHaveBeenCalled());
       expect(screen.queryByRole("dialog")).toBeNull();
@@ -1220,7 +1470,7 @@ describe("rows with an agent's wording", () => {
       });
       expect(
         within(dialog).getByText(
-          "This removes the saved GitHub connection for Personal Mind. These services stop working until an account is connected again: GitHub and GitHub (a/b).",
+          "This removes the saved GitHub connection for Personal Mind. These services stop working until an account is connected again: GitHub and GitHub (a/b). GitHub tools lose it too. To keep it for them, choose Stop using GitHub account instead.",
         ),
       ).toBeVisible();
       fireEvent.click(
@@ -1420,22 +1670,21 @@ describe("rows with an agent's wording", () => {
       { name: "work", display_name: "Work GitHub" },
     );
     renderRows([first, second]);
-    const visible = ["Connect", "Connect GitHub", "Use an API key instead"];
+    const visible = ["Connect GitHub for Agent Keys", "Use an API key instead"];
     const controls = [
       ...(await rowControls("GitHub")),
       ...(await rowControls("Work GitHub")),
     ].filter(({ text }) => visible.includes(text));
-    // The row already names its service, so only another account is named on the button.
     expect(controls.map(({ text }) => text)).toEqual([
-      "Connect",
+      "Connect GitHub for Agent Keys",
       "Use an API key instead",
-      "Connect GitHub",
+      "Connect GitHub for Agent Keys",
       "Use an API key instead",
     ]);
     expect(controls.map(({ name }) => name)).toEqual([
-      "Connect GitHub for GitHub",
+      "Connect GitHub for Agent Keys for GitHub",
       "Use an API key instead for GitHub",
-      "Connect GitHub for Work GitHub",
+      "Connect GitHub for Agent Keys for Work GitHub",
       "Use an API key instead for Work GitHub",
     ]);
     for (const { text, name } of controls)
@@ -1445,7 +1694,7 @@ describe("rows with an agent's wording", () => {
     // Each name reaches its own row's button.
     expect(
       within(row("Work GitHub")).getByRole("button", {
-        name: "Connect GitHub for Work GitHub",
+        name: "Connect GitHub for Agent Keys for Work GitHub",
       }),
     ).toBeEnabled();
   });
@@ -1563,7 +1812,9 @@ describe("rows with an agent's wording", () => {
     it("keep every key action by default", async () => {
       renderRows([connectable, openai]);
       expect(
-        screen.getByRole("button", { name: "Connect GitHub for GitHub" }),
+        screen.getByRole("button", {
+          name: "Connect GitHub for Agent Keys for GitHub",
+        }),
       ).toBeEnabled();
       expect(await rowAction("Remove key for OpenAI")).not.toHaveAttribute(
         "aria-disabled",
@@ -1571,7 +1822,7 @@ describe("rows with an agent's wording", () => {
     });
   });
 
-  it("shows no administrator badge when no label is given", () => {
+  it("shows no administrator source label when no label is given", () => {
     renderRows([{ ...github, source: "config" }], {
       serviceEditing: editing(),
     });

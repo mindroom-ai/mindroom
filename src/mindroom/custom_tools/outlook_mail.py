@@ -108,7 +108,7 @@ def _address_set(recipients: list[Any]) -> set[str | None]:
     for recipient in recipients:
         email = recipient.get("emailAddress") if isinstance(recipient, dict) else None
         address = email.get("address") if isinstance(email, dict) else None
-        addresses.add(address.casefold() if isinstance(address, str) else None)
+        addresses.add(address.lower() if isinstance(address, str) else None)
     return addresses
 
 

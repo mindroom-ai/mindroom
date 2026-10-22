@@ -113,6 +113,58 @@ def test_each_refusal_code_has_its_sentence(code: str, values: dict[str, object]
     assert body["message"] == message
 
 
+_REUSE_OFF = {"service": "drive", "provider": "google_drive", "reuse_off": True, "manage_url": MANAGE_URL}
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        (
+            {},
+            "No drive key is set for this agent, and Agent Keys may not use a connected google_drive account. "
+            "Ask the user to add a key or allow that account at manage_url, then retry.",
+        ),
+        (
+            {"requester_owned": True},
+            "No drive key is set for this agent, and Agent Keys may not use a connected google_drive account. "
+            "Ask the user to add a key or allow that account at manage_url, then retry.",
+        ),
+        (
+            {"shared": True, "managers": ("@bob:example.org",)},
+            "No drive key is set for this shared agent, and Agent Keys may not use its connected google_drive "
+            "account. Only its credential managers (@bob:example.org) can add a key or allow that account, "
+            "at manage_url.",
+        ),
+        (
+            {"shared": True},
+            "No drive key is set for this shared agent, and Agent Keys may not use its connected google_drive "
+            "account. Only an administrator can add a key or allow that account, at manage_url.",
+        ),
+        (
+            {"shared": True, "managers": ("@bob:example.org",), "requester_owned": True},
+            "No drive key is set for this shared agent, and Agent Keys may not use the user's own google_drive "
+            "account. Ask the user to allow it at manage_url, then retry.",
+        ),
+    ],
+    ids=["personal", "personal-own-account", "shared", "shared-without-managers", "shared-own-account"],
+)
+def test_an_account_agent_keys_may_not_use_says_who_can_allow_it(values: dict[str, object], message: str) -> None:
+    """A refusal for an account nobody allowed names the provider, says so in `oauth_reuse`, and offers no link.
+
+    On a shared agent the agent's own account is its managers' to allow, while a requester's own account is theirs.
+    """
+    body = refusal_body("credential_not_configured", **{**_REUSE_OFF, **values})
+
+    assert body == {
+        "error": "credential_not_configured",
+        "service": "drive",
+        "provider": "google_drive",
+        "oauth_reuse": "off",
+        "manage_url": MANAGE_URL,
+        "message": message,
+    }
+
+
 def test_shared_agent_with_a_connect_link_gets_the_connectable_text() -> None:
     """A refusal that carries a connect link says so, even on a shared agent whose managers could be named."""
     body = refusal_body(
