@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -75,7 +75,6 @@ def _spec(participants: list[dict[str, object]], steps: int = 1, **permissions: 
     }
 
 
-@dataclass
 class _ChildModel(ScriptedModel):
     """Scripted child model that keeps each request's system prompt and offered function names."""
 
