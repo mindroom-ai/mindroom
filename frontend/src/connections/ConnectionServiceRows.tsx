@@ -173,7 +173,7 @@ export function ConnectionServiceRows({
               <td
                 rowSpan={tools.length}
                 data-label="Connection"
-                className={`px-4 py-3 align-top ${STACKED_CELL} ${STACKED_LABEL} max-sm:py-1`}
+                className={`px-5 py-3 align-top ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1`}
               >
                 {loading ? (
                   <span
