@@ -1196,6 +1196,9 @@ class _TeamTurn:
                 and not any(text.strip() for text in attempt.canonical_per_member.values())
             )
             response_text = consensus.strip() if silent else rendered
+            if silent:
+                # A quiet scheduled reply records the bare token, as it delivers it, not the team document.
+                replayable_text = response_text
         metadata_content = (
             attempt.metadata_content(self.config, session_id=self.ctx.session_id, status=record.status)
             if self.run_metadata_collector is not None

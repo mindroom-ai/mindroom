@@ -237,7 +237,8 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
             text
             == f"🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
         )
-        assert team.recorder.assistant_text == text
+    # The turn records what it delivered: the bare token, or the document that carries the finding.
+    assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
