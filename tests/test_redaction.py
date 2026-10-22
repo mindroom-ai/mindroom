@@ -128,6 +128,39 @@ def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "Agent Keys adds the user's API key or connected account on the wire.",
+        "Services have neither an API key nor a connected account.",
+        "An API key wins over a connected account.",
+        "Your API keys are expiring soon: 1 API key for Acme.",
+        "Send a bearer token with each request, as bearer tokens expire.",
+        "permissions:\n  contents: read\n  id-token: write",
+    ],
+)
+def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
+    """Docs and tool results that talk about API keys keep their words, as Matrix shows them in tool previews."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("API key: hunter", f"API key: {REDACTED}"),
+        ("Invalid API key hunter", f"Invalid API key {REDACTED}"),
+        ("Authorization header Bearer hunter", f"Authorization header Bearer {REDACTED}"),
+        ("Authorization: Bearer hunter", f"Authorization: Bearer {REDACTED}"),
+        ("API key AbCdEfGhIjKlMnOp", f"API key {REDACTED}"),
+        ("Bearer abcdefghIJKLmnop", f"Bearer {REDACTED}"),
+        ("id-token: eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id-token: {REDACTED}"),
+    ],
+)
+def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: str, expected: str) -> None:
+    """A labeled value, an Authorization header, or a mixed-case run is a credential even without digits."""
+    assert redact_sensitive_text(text) == expected
+
+
+@pytest.mark.parametrize(
     "dsn",
     [
         "postgresql://journal_user:hunter2@db.example:5432/journal",
