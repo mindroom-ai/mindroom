@@ -127,7 +127,7 @@ _RESULTS = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", sorted(_RESULTS))
+@pytest.mark.parametrize("family", sorted(FAMILIES))
 async def test_combined_results_reach_every_route(family: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scrub_provider_env(monkeypatch)
     spec = FAMILIES[family]
