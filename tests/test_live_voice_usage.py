@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import TYPE_CHECKING
 
@@ -12,8 +13,10 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage
+from mindroom.usage.storage import quote_identifier
 from tests.conftest import test_runtime_paths
 from tests.test_request_usage import request_usage  # noqa: F401
 
@@ -114,6 +117,35 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_call_without_responses_stores_its_model_with_zero_usage(tmp_path: Path) -> None:
+    """A call saved before any response keeps the stored usage shape Agno wrote: its model's entry, all counts zero."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(agents={"helper": AgentConfig(display_name="Helper")})
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="helper",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="call",
+    )
+    usage = RealtimeCallUsage(usage_id="call-1", model="gpt-realtime-2.1", created_at=1_700_000_000, responses=())
+
+    await record_call_token_usage(usage, config=config, runtime_paths=paths, execution_identity=identity)
+
+    storage = create_session_storage("helper", config, paths, identity)
+    with storage.transaction(write=False) as connection:
+        [(raw,)] = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            ("realtime_voice:call-1",),
+        ).fetchall()
+    snapshot = json.loads(raw)
+    assert snapshot["run_id"] == "realtime_voice:call-1"
+    assert snapshot["metrics"] == {"details": {"model": [{"id": "gpt-realtime-2.1", "provider": "OpenAI"}]}}
 
 
 def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_coverage(

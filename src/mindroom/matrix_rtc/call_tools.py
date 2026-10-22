@@ -44,7 +44,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
@@ -218,8 +218,11 @@ async def record_call_token_usage(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> None:
-    """Upsert a realtime call's speech-model tokens for the caller, one request per response."""
-    metrics = RunMetrics()
+    """Upsert a realtime call's speech-model tokens for the caller, one request per response.
+
+    The call's model has its entry under ``details`` even before any response, as Agno's record kept it.
+    """
+    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
     messages: list[Message] = []
     for response in usage.responses:
         response_metrics = MessageMetrics(
