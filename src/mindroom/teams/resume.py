@@ -347,12 +347,6 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     return f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"
 
 
-def _member_id(presentation: TeamStreamPresentation, member: RunRecord) -> str:
-    """Return the document's id of a member run's member."""
-    assert member.agent_id is not None  # A member run always names its member.
-    return presentation.resolve_member_id(member.agent_id, member.agent_name)
-
-
 def _append_unstreamed_run_content(
     presentation: TeamStreamPresentation,
     record: TeamRunRecord,
@@ -370,7 +364,7 @@ def _append_unstreamed_run_content(
     if "team" not in streamed:
         presentation.append_consensus(record.content)
     for member in members:
-        member_id = _member_id(presentation, member)
+        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
         if f"agent:{member_id}" not in streamed:
             presentation.append_member(member_id, member.content)
 
@@ -421,7 +415,7 @@ def blocking_team_pause(
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
     for member in members:
-        member_id = _member_id(presentation, member)
+        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
     for scope, tool in calls:

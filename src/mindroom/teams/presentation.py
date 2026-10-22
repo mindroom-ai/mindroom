@@ -334,8 +334,11 @@ class TeamStreamPresentation:
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
         return state
 
-    def resolve_member_id(self, agent_id: str, reported_name: str | None) -> str:
-        """Resolve an event only through its stable member identity: a member id or a member's config name."""
+    def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
+        """Resolve an event or a member run only through its stable member identity: a member id or a config name.
+
+        A run record's member identity is optional, and a run that names no member has no slot.
+        """
         if agent_id in self.per_member:
             return agent_id
         for member_id, config_name in self.config_names_by_id.items():
