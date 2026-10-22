@@ -242,6 +242,7 @@ def _member_hooks(build: AgentBuild, *, config: Config, runtime_paths: RuntimePa
     """Return the hooks of one member run; the compaction hook holds the run's own state, so each run gets a new one."""
     capabilities = build.spec.model.capabilities
     deferred = build.request_template.deferred_tool_names
+    jobs = build.tool_jobs
     return LoopHooks(
         before_request=(
             mid_turn_compaction_hook(
@@ -260,11 +261,13 @@ def _member_hooks(build: AgentBuild, *, config: Config, runtime_paths: RuntimePa
                 deferred_tool_names=deferred,
                 prompt_id=None,
             ),
-            *(() if build.tool_jobs is None else (job_definitions_hook(build.tool_jobs),)),
+            *(() if jobs is None else (job_definitions_hook(jobs),)),
         ),
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
         tool_middleware=build.tool_middleware,
+        # The notice reaches only the member whose account posts an ad hoc team's replies.
+        after_tool_batch=(job_notice_hook(jobs.name),) if jobs is not None and jobs.depth == 0 else (),
     )
 
 

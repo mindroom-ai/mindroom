@@ -500,3 +500,73 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         assert "`ended` (report) completed" in str(messages[0].content)
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ad hoc team answers as the member whose account posts its replies, so only that member hears the notice."""
+    runtime_paths = history_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha"), "zeta": AgentConfig(display_name="Zeta")},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(config, runtime_paths)
+    register_background_runtime(runtime_paths, runtime)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        transport_agent_name="alpha",
+    )
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    context = replace(
+        _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
+        agent_name="zeta",
+        transport_agent_name="alpha",
+    )
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Member result")
+
+    try:
+        members = materialize_exact_team_members(
+            ["alpha", "zeta"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+        hooks = {
+            build.spec.id: envelope._member_hooks(
+                build,
+                config=config,
+                runtime_paths=runtime_paths,
+                model_name="default",
+            )
+            for build in members.builds
+        }
+        await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
+        await wait_for_status(runtime, "ended", "completed")
+        heard = {}
+        with tool_runtime_context(context), job_notice_context(JobNotices()):
+            for name in ("zeta", "alpha"):
+                messages = [Message(role="tool", tool_call_id="call", content="result")]
+                for hook in hooks[name].after_tool_batch:
+                    await hook(messages, messages)
+                heard[name] = str(messages[0].content)
+        assert heard["zeta"] == "result"
+        assert "`ended` (report) completed" in heard["alpha"]
+    finally:
+        await runtime.shutdown()
