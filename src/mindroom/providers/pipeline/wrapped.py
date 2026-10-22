@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted, UsageReported
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
@@ -35,9 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AGGREGATE_USAGE_KEY",
-    "AttemptUsage",
     "WrappedProvider",
-    "add_usage",
     "is_visible_output",
     "with_carried_usage",
 ]
@@ -89,43 +87,6 @@ def is_visible_output(event: StreamEvent) -> bool:
     if isinstance(event, TextDelta | ReasoningDelta):
         return bool(event.text)
     return isinstance(event, ToolCallReady)
-
-
-def add_usage(total: MessageMetrics | None, usage: MessageMetrics | None) -> MessageMetrics | None:
-    """Return the sum of two optional usage reports."""
-    if total is None or usage is None:
-        return usage if total is None else total
-    return total + usage
-
-
-@dataclass(slots=True)
-class AttemptUsage:
-    """The usage one attempt reported: the sum of its final reports, and a later partial report none replaced yet."""
-
-    settled: MessageMetrics | None = None
-    pending: MessageMetrics | None = None
-
-    def observe(self, event: StreamEvent) -> None:
-        """Track one event the attempt forwarded."""
-        if not isinstance(event, UsageReported):
-            return
-        if event.final:
-            self.settled = add_usage(self.settled, event.usage)
-            self.pending = None
-        else:
-            self.pending = event.usage
-
-    def settle(self) -> UsageReported | None:
-        """Count a failed attempt's pending partial report as settled, returning it as final to forward before a retry.
-
-        The retry's own reports would otherwise replace it, and the caller would lose usage the provider billed.
-        """
-        if self.pending is None:
-            return None
-        report = UsageReported(self.pending)
-        self.settled = add_usage(self.settled, self.pending)
-        self.pending = None
-        return report
 
 
 def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:

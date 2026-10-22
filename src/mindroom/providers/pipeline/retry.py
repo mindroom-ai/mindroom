@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.llm.provider import ReportedUsage
+from mindroom.llm.usage import add_usage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import AttemptUsage, add_usage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -123,7 +125,7 @@ async def _retried(
     carried: MessageMetrics | None = None
     while True:
         visible = False
-        usage = AttemptUsage()
+        usage = ReportedUsage()
         try:
             events = inner.stream(request)
             async with closing_async_stream(events):

@@ -21,8 +21,9 @@ from mindroom.llm.errors import (
     ProviderError,
 )
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
+from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import AttemptUsage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -173,7 +174,7 @@ async def media_fallback_stream(
     remaining = present - known
     first = replace(request, messages=_without_media(request.messages, known, fallback_prompt))
     visible = False
-    usage = AttemptUsage()
+    usage = ReportedUsage()
     try:
         events = inner.stream(first)
         async with closing_async_stream(events):

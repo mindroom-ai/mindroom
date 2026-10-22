@@ -149,12 +149,16 @@ async def save_cli_session(
     session_state: Mapping[str, object],
     write: Callable[[ConversationStore, ConversationSession], object],
 ) -> None:
-    """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate."""
+    """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate.
+
+    The store records the state it writes as ``session.stored_session_state``; ``write`` saves through a copy of
+    the session that holds its own copy of the state, so no later change to either aliases the other.
+    """
     if store is None:
         msg = "CLI history requires persisted session storage"
         raise RuntimeError(msg)
     state = deepcopy(dict(session_state))
-    saved = replace(session, session_state=state)
+    saved = replace(session, session_state=deepcopy(state))
 
     def operation(opened: ConversationStore) -> None:
         opened.save_session_state(session, state)

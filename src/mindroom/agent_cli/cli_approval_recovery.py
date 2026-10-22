@@ -91,6 +91,11 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
 
     The fresh model turn that reports the result is returned for the caller to
     stream through the same continuation driver as standard approvals.
+
+    The recovery runs on a copy of ``session.session_state``, and its saves record that copy as
+    ``session.stored_session_state`` while ``session.session_state`` stays as loaded. No later
+    ``persist_to`` may therefore run on this ``session`` object: it would compare the stale state with
+    the recovered one and write the stale state back.
     """
     if continuation.state != "claimed":
         msg = "CLI recovery requires its native claimed continuation"

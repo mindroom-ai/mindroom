@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ReportedUsage
 from mindroom.logging_config import get_logger
 from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
-from mindroom.providers.pipeline.wrapped import AttemptUsage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import is_visible_output, with_carried_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -31,7 +32,7 @@ logger = get_logger(__name__)
 async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, resending it once with the malformed-call guidance after a malformed tool call."""
     visible = False
-    usage = AttemptUsage()
+    usage = ReportedUsage()
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):

@@ -80,8 +80,8 @@ class _RecordingModel(ScriptedModel):
 def _compacting_model(
     route: str = "route-a",
     turns: Sequence[Sequence[ScriptStep]] = (answer("Ready"),),
-) -> ScriptedModel:
-    """Return a scripted provider whose route compacts natively."""
+) -> _RecordingModel:
+    """Return a scripted provider whose route compacts natively and records each response's replay policy."""
     return _RecordingModel(
         list(turns),
         capabilities=Capabilities(native_compaction=True),
@@ -261,7 +261,8 @@ async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
     """The resumed leader request runs under its paused request's native policy and replays the same checkpoint.
 
     The leader's route compacts at the team's threshold, and the team's earlier answer holds that route's checkpoint;
-    both leader requests replay it in place of the transcript it covers.
+    both leader requests replay it in place of the transcript it covers. The threshold the team's config holds at
+    resume differs from the paused request's, so the resumed request proves the policy is restored, not re-derived.
     """
     leader = _compacting_model(
         turns=[delegate("call-team", "checker", "Touch it"), answer("The checker touched it.")],
@@ -285,6 +286,7 @@ async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
     seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=[earlier]))
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
+    team.config.defaults.compaction = CompactionConfig(threshold_tokens=50_000)
 
     result = await team.resume(
         raised.value.paused,

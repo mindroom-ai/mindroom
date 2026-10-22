@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError
+from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -167,6 +168,45 @@ class TurnCompleted:
 type StreamEvent = TextDelta | ReasoningDelta | ToolCallReady | UsageReported | StreamProgress | TurnCompleted
 
 
+@dataclass(slots=True)
+class ReportedUsage:
+    """The usage one request's stream reported so far: its final reports summed, and a partial report none replaced yet.
+
+    A partial report stands in for its attempt until a final one replaces it, so ``received`` is what the provider
+    billed for a stream cut off now, and a retrying stage settles a failed attempt's partial report before retrying.
+    """
+
+    settled: MessageMetrics | None = None
+    pending: MessageMetrics | None = None
+
+    def observe(self, event: StreamEvent) -> None:
+        """Track one event of the stream."""
+        if not isinstance(event, UsageReported):
+            return
+        if event.final:
+            self.settled = add_usage(self.settled, event.usage)
+            self.pending = None
+        else:
+            self.pending = event.usage
+
+    @property
+    def received(self) -> MessageMetrics | None:
+        """The settled reports plus the partial report none replaced, or None when nothing was reported."""
+        return add_usage(self.settled, self.pending)
+
+    def settle(self) -> UsageReported | None:
+        """Count the pending partial report as settled, returning it as a final report to forward before a retry.
+
+        The retry's own reports would otherwise replace it, and the consumer would lose usage the provider billed.
+        """
+        if self.pending is None:
+            return None
+        report = UsageReported(self.pending)
+        self.settled = add_usage(self.settled, self.pending)
+        self.pending = None
+        return report
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelTurn:
     """One finished model turn, as ``complete`` returns it."""
@@ -281,6 +321,7 @@ __all__ = [
     "NativeHistoryRoute",
     "PortableReplayEstimator",
     "ReasoningDelta",
+    "ReportedUsage",
     "RequestOverrides",
     "StopReason",
     "StreamEvent",

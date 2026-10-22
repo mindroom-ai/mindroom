@@ -18,7 +18,7 @@ from mindroom.agent_loop.tools import dispatch_tool_calls, media_follow_up, plan
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, ReasoningDelta, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -338,10 +338,7 @@ async def _stream_turn(
     """
     identity = model.identity
     turn: TurnCompleted | None = None
-    # Final reports of attempts that ended are summed; a partial report stands in for its attempt until the
-    # attempt's final report replaces it, so a cut-off request settles exactly what was billed.
-    settled: MessageMetrics | None = None
-    partial: MessageMetrics | None = None
+    reported = ReportedUsage()
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
@@ -351,15 +348,12 @@ async def _stream_turn(
                 elif isinstance(event, ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
-                    if event.final:
-                        settled = event.usage if settled is None else settled + event.usage
-                        partial = None
-                    else:
-                        partial = event.usage
+                    reported.observe(event)
                 elif isinstance(event, TurnCompleted):
                     turn = event
     finally:
-        received = settled if partial is None else (partial if settled is None else settled + partial)
+        # A cut-off request settles exactly what was billed: the final reports plus a partial none replaced.
+        received = reported.received
         if turn is None and received is not None and received.to_dict():
             cut_off = Message(role="assistant", metrics=received)
             _stamp_model(cut_off, identity)

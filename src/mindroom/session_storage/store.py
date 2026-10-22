@@ -139,6 +139,7 @@ class ConversationStore:
                 session_id,
                 owner_scope_key(stored_kind, agent_id, team_id),
             )
+        state = _session_state(session_data)
         runs: list[AnyRunRecord] = []
         for run_id, stored_type, run_data in run_rows:
             run = run_from_row(stored_type, run_data)
@@ -153,8 +154,8 @@ class ConversationStore:
             owner_id=(team_id if kind == "team" else agent_id) or "",
             user_id=user_id,
             metadata=_decoded_mapping(metadata),
-            session_state=_session_state(session_data),
-            stored_session_state=_session_state(session_data),
+            session_state=state,
+            stored_session_state=copy.deepcopy(state),
             runs=runs,
             summary=summary,
             created_at=created_at,
@@ -173,7 +174,8 @@ class ConversationStore:
     def ensure_session_row(self, session: ConversationSession) -> None:
         """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
         with self.transaction(write=True) as connection:
-            _ensure_session_row(connection, self.names, session)
+            created = _ensure_session_row(connection, self.names, session)
+        _record_stored_state(session, created)
 
     def save_run(self, session: ConversationSession, run: AnyRunRecord, *, record_usage: bool) -> SaveOutcome:
         """Save one run of ``session`` under the conversation log's insertion rules, creating the session row if needed.
@@ -198,8 +200,9 @@ class ConversationStore:
         record_usage: bool,
     ) -> SaveOutcome:
         with self.transaction(write=True) as connection:
-            _ensure_session_row(connection, self.names, session)
+            created = _ensure_session_row(connection, self.names, session)
             saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+        _record_stored_state(session, created)
         _reconcile(session, [saved])
         return saved.outcome
 
@@ -219,7 +222,7 @@ class ConversationStore:
             msg = "save_runs received a run object loaded from the session; edit a copy instead"
             raise ValueError(msg)
         with self.transaction(write=True) as connection:
-            _ensure_session_row(connection, self.names, session)
+            created = _ensure_session_row(connection, self.names, session)
             saved = [
                 self._save_run(
                     connection,
@@ -230,6 +233,7 @@ class ConversationStore:
                 )
                 for run in runs
             ]
+        _record_stored_state(session, created)
         _reconcile(session, saved)
 
     def save_session_fields(self, session: ConversationSession, *fields: SessionField) -> None:
@@ -252,7 +256,7 @@ class ConversationStore:
         """Write ``session``'s metadata when asked and ``state`` when given, creating the row if needed."""
         names = self.names
         with self.transaction(write=True) as connection:
-            _ensure_session_row(connection, names, session)
+            created = _ensure_session_row(connection, names, session)
             assignments: list[str] = ["updated_at = ?"]
             values: list[object] = [int(time())]
             if metadata:
@@ -269,8 +273,7 @@ class ConversationStore:
                 f"UPDATE {quote_identifier(names.sessions)} SET {', '.join(assignments)} WHERE session_id = ?",  # noqa: S608
                 (*values, session.session_id),
             )
-        if state is not None:
-            session.stored_session_state = state
+        _record_stored_state(session, created if state is None else state)
 
     def delete_run_subtrees(
         self,
@@ -506,10 +509,19 @@ def _json_or_null(value: object) -> str | None:
     return None if value is None else json.dumps(value)
 
 
-def _ensure_session_row(connection: sqlite3.Connection, names: TableNames, session: ConversationSession) -> None:
-    """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
+def _ensure_session_row(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session: ConversationSession,
+) -> dict[str, Any] | None:
+    """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile.
+
+    Returns the copy of ``session.session_state`` a created row holds, for the caller to record as
+    ``session.stored_session_state`` once its transaction commits, or None when the row existed.
+    """
     owner_column = "team_id" if session.kind == "team" else "agent_id"
-    connection.execute(
+    state = copy.deepcopy(session.session_state)
+    cursor = connection.execute(
         f"INSERT INTO {quote_identifier(names.sessions)} (session_id, session_type, {owner_column}, user_id, "  # noqa: S608
         "session_data, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(session_id) DO NOTHING",
@@ -518,12 +530,19 @@ def _ensure_session_row(connection: sqlite3.Connection, names: TableNames, sessi
             session.kind,
             session.owner_id,
             session.user_id,
-            json.dumps({"session_state": session.session_state}),
+            json.dumps({"session_state": state}),
             _json_or_null(session.metadata),
             session.created_at,
             session.created_at,
         ),
     )
+    return state if cursor.rowcount else None
+
+
+def _record_stored_state(session: ConversationSession, state: dict[str, Any] | None) -> None:
+    """Record ``state``, the session state a committed write left in the row, as ``session.stored_session_state``."""
+    if state is not None:
+        session.stored_session_state = state
 
 
 def _write_run_row(

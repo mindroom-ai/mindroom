@@ -983,6 +983,25 @@ async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_las
     assert _loaded(store).session_state == {"cwd": "/repo"}
 
 
+@pytest.mark.asyncio
+async def test_the_save_that_creates_the_session_row_records_the_state_it_stored(store: ConversationStore) -> None:
+    """A created row holds the session's state, so a terminal save that leaves it alone keeps another writer's."""
+    session = _session()
+    session.session_state["cwd"] = "/repo"
+    persist = persist_to(store, session)
+
+    store.save_run(session, _run("r1"), record_usage=True)
+
+    assert session.stored_session_state == {"cwd": "/repo"}
+    assert session.stored_session_state is not session.session_state
+    _execute(
+        store,
+        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"cwd": "/other"}'))""",
+    )
+    await persist(_run("r2"))
+    assert _loaded(store).session_state == {"cwd": "/other"}
+
+
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
     """Agno 2 columns encoded twice load, and a field save writes them encoded once."""
     store.save_session_fields(_session())

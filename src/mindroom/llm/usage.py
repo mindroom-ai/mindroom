@@ -116,6 +116,13 @@ class MessageMetrics:
         return result
 
 
+def add_usage(total: MessageMetrics | None, usage: MessageMetrics | None) -> MessageMetrics | None:
+    """Return the sum of two optional usage reports."""
+    if total is None or usage is None:
+        return usage if total is None else total
+    return total + usage
+
+
 @dataclass(slots=True, kw_only=True)
 class ModelMetrics:
     """Usage one model accumulated inside a run; an entry of ``RunMetrics.details``."""
@@ -381,4 +388,5 @@ __all__ = [
     "RunMetrics",
     "SessionMetrics",
     "ToolCallMetrics",
+    "add_usage",
 ]
