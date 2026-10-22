@@ -32,8 +32,6 @@ KNOWN_VIOLATIONS = frozenset(
         "mcp_gateway/tools.py",
         "memory/_mem0_backend.py",
         "memory/_mem0_usage.py",
-        "script_runs/broker.py",
-        "script_runs/policy.py",
         "teams/delegate_tools.py",
         "tool_system/runtime_context.py",
     },
