@@ -27,10 +27,23 @@ local-matrix-logs:
 
 # Reset local Matrix volumes, selected runtime Matrix state, and repository tmp/
 local-matrix-reset:
-    cd local/matrix && docker compose down -v
-    uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd local/matrix && docker compose down -v)
+    uv run python - <<'PY'
+    import shutil
+    from mindroom.constants import encryption_keys_dir, matrix_state_file, resolve_runtime_paths, tracking_dir
+    paths = resolve_runtime_paths()
+    # The new homeserver knows none of the accounts, devices, and events this state is bound to.
+    matrix_state_file(paths).unlink(missing_ok=True)
+    for directory in (encryption_keys_dir(paths), paths.storage_root / "sync_continuity"):
+        if directory.exists():
+            shutil.rmtree(directory)
+    for journal in tracking_dir(paths).glob("event_journal*"):
+        journal.unlink()
+    PY
     rm -rf tmp/
-    @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
+    echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)
