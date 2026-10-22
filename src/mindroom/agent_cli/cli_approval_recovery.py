@@ -95,17 +95,18 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         msg = "CLI recovery requires its native claimed continuation"
         raise ValueError(msg)
     persisted = deepcopy(persisted)
+    approved = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
+    external = payload.external_requirement
+    state = DelegationState.from_metadata(persisted.metadata)
+    if state.pending_child_id is None and payload.toolkit != "agent":
+        # Generated functions have no configured toolkit; the rebuilt binding's authorization checks them.
+        owners = {(build.spec.id, name): toolkit for name, toolkit in build.tool_owners.items()}
+        validate_approval_tool_owners(owners, approved, payload.requirements)
     requirements = apply_exact_approval_decisions(
         list(payload.requirements),
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
-    approved = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
-    external = payload.external_requirement
-    state = DelegationState.from_metadata(persisted.metadata)
-    if state.pending_child_id is None and payload.toolkit != "agent":
-        owners = {(build.spec.id, name): toolkit for name, toolkit in build.tool_owners.items()}
-        validate_approval_tool_owners(owners, approved, requirements)
     key = ToolKey(payload.toolkit, payload.function)
     call_id = payload.call_id
     arguments = deepcopy(payload.arguments)
