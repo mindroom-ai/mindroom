@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
@@ -48,7 +49,18 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import (
+    Capabilities,
+    ModelIdentity,
+    ModelRequest,
+    StreamEvent,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -71,9 +83,8 @@ if TYPE_CHECKING:
     from agno.models.message import Message as AgnoMessage
 
     from mindroom.history.types import ScopeSummary
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -623,3 +634,128 @@ def store_fold(
     )
     assert row_id is not None
     return row_id
+
+
+# One large tool result: a few of them outgrow a 4,000-token window.
+TOOL_RESULT = "r" * 4000
+TEST_AGENT_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
+_TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
+
+
+@dataclass
+class ToolLoopRequest:
+    """One request a ``ToolLoopModel`` received, with its roles and contents spelled out."""
+
+    roles: list[str]
+    contents: list[str]
+    messages: list[Message]
+    request: ModelRequest
+
+
+class ToolLoopModel:
+    """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request."""
+
+    def __init__(
+        self,
+        *,
+        tool_rounds: int,
+        calls_per_round: int = 1,
+        usage: Callable[[int], MessageMetrics] | None = None,
+        reasoning: str | None = None,
+    ) -> None:
+        self.identity = _TEST_MODEL
+        self.capabilities = Capabilities()
+        self.native_history_route = None
+        self.replay_estimator = None
+        self.model_params: dict[str, Any] = {}
+        self.tool_rounds = tool_rounds
+        self.calls_per_round = calls_per_round
+        self.usage = usage
+        self.reasoning = reasoning
+        self.requests: list[ToolLoopRequest] = []
+
+    def respond(self, number: int, request: ModelRequest) -> Message:  # noqa: ARG002
+        metrics = self.usage(number) if self.usage is not None else MessageMetrics()
+        if number <= self.tool_rounds:
+            return Message(
+                role="assistant",
+                content=f"step {number}",
+                tool_calls=[
+                    {
+                        "id": f"call_{number}_{index}",
+                        "type": "function",
+                        "function": {"name": "probe", "arguments": "{}"},
+                    }
+                    for index in range(self.calls_per_round)
+                ],
+                reasoning_content=self.reasoning,
+                metrics=metrics,
+            )
+        return Message(role="assistant", content="done", metrics=metrics)
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        self.requests.append(
+            ToolLoopRequest(
+                roles=[message.role for message in request.messages],
+                contents=[str(message.content) for message in request.messages],
+                messages=list(request.messages),
+                request=request,
+            ),
+        )
+        message = self.respond(len(self.requests), request)
+        if message.content:
+            yield TextDelta(str(message.content))
+        for call in message.tool_calls or []:
+            yield ToolCallReady(call)
+        yield UsageReported(message.metrics)
+        yield TurnCompleted(message=message, stop_reason="tool_use" if message.tool_calls else "end")
+
+
+@dataclass
+class SummaryCalls:
+    """A compaction summary call that records its inputs and reports usage; it can fail or be cancelled."""
+
+    inputs: list[str] = field(default_factory=list)
+    fail: bool = False
+    cancel: bool = False
+
+    async def __call__(
+        self,
+        *,
+        model: object,  # noqa: ARG002
+        summary_input: str,
+        summary_prompt: str,  # noqa: ARG002
+        timeout_seconds: float,  # noqa: ARG002
+        on_usage: Callable[[MessageMetrics], Any] | None = None,
+    ) -> str:
+        self.inputs.append(summary_input)
+        if on_usage is not None:
+            await on_usage(MessageMetrics(input_tokens=7, output_tokens=3))
+        if self.cancel:
+            raise asyncio.CancelledError
+        if self.fail:
+            msg = "summary model unavailable"
+            raise RuntimeError(msg)
+        return f"SUMMARY-{len(self.inputs)}"
+
+
+def seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:
+    """Return ``test_agent``'s store whose ``session-1`` holds two completed runs."""
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                _completed_run(
+                    "run-1",
+                    messages=[Message(role="user", content="q1"), Message(role="assistant", content="a1")],
+                ),
+                _completed_run(
+                    "run-2",
+                    messages=[Message(role="user", content="q2"), Message(role="assistant", content="a2")],
+                ),
+            ],
+        ),
+    )
+    return storage
