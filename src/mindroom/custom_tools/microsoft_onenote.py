@@ -362,8 +362,9 @@ class MicrosoftOneNoteTools(Toolkit):
     def microsoft_onenote_append_to_page(self, page_id: str, content: str, expected_web_url: str) -> str:
         """Append plain text to one OneNote page, as a new paragraph at the end of the page's first block of content.
 
-        The write fails with target_mismatch unless expected_web_url is the web_url of the page's notebook. The text
-        keeps its line breaks, and any HTML in it shows literally.
+        Before calling, tell the requester the page's title. The write fails with target_mismatch unless
+        expected_web_url is the web_url of the page's notebook. The text keeps its line breaks, and any HTML in it
+        shows literally.
 
         Args:
             page_id: The page's id from microsoft_onenote_list_pages.
