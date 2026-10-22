@@ -348,6 +348,34 @@ def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirem
     return f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"
 
 
+def _member_id(presentation: TeamStreamPresentation, member: RunRecord) -> str:
+    """Return the document's id of a member run's member."""
+    assert member.agent_id is not None  # A member run always names its member.
+    return presentation.resolve_member_id(member.agent_id, member.agent_name)
+
+
+def _append_unstreamed_run_content(
+    presentation: TeamStreamPresentation,
+    record: TeamRunRecord,
+    members: Sequence[RunRecord],
+    *,
+    streamed: set[str],
+) -> None:
+    """Add each resumed run's content to its slot when the resume streamed no text there, as Agno's resume did.
+
+    That content is a member's error, or a run's paused notice when the run pauses again: the leader's is the
+    consensus, and each member run adds its own to its member's slot. A run without content adds nothing, where
+    Agno's resume added its messages' text again: what a resumed model wrote streamed into its slot, and what it
+    wrote before the pause is already in the restored document.
+    """
+    if "team" not in streamed:
+        presentation.append_consensus(record.content)
+    for member in members:
+        member_id = _member_id(presentation, member)
+        if f"agent:{member_id}" not in streamed:
+            presentation.append_member(member_id, member.content)
+
+
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
@@ -394,8 +422,7 @@ def blocking_team_pause(
     presentation.append_consensus(finished_run_text(record))
     calls = [("team", tool) for tool in record.tools or ()]
     for member in members:
-        assert member.agent_id is not None  # A member run always names its member.
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_name)
+        member_id = _member_id(presentation, member)
         presentation.append_member(member_id, finished_run_text(member))
         calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
     for scope, tool in calls:
@@ -582,6 +609,12 @@ async def continue_paused_team_run(
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
             continued = attempt.records.terminal(entity_name)
+            _append_unstreamed_run_content(
+                presentation,
+                continued,
+                attempt.records.members,
+                streamed=attempt.reply.streamed_slots(),
+            )
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,
@@ -594,7 +627,7 @@ async def continue_paused_team_run(
                 raise RuntimeError(str(continued.content or "Team continuation did not complete"))
             if tool_trace_collector is not None and show_tool_calls:
                 tool_trace_collector.extend(presentation.tool_trace)
-            # A resume that streamed no text renders its finished runs, as Agno's blocking team reply did.
+            # A resume whose document stays empty, every run's text blank, renders its finished runs, as Agno's did.
             response_text = presentation.render_body() or format_team_header(members.display_names) + (
                 format_team_response(continued, attempt.records.members)
                 or finished_run_text(continued)

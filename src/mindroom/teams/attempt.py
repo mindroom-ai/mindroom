@@ -1,8 +1,9 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted; the attempt also collects the records the run hands over, which a blocking reply and an
-interrupted blocking turn render from, and renders the run's metadata from them.
+also when it is interrupted, and which tells a resume the slots its runs streamed text into; the attempt also collects
+the records the run hands over, which a blocking reply and an interrupted blocking turn render from, and renders the
+run's metadata from them.
 """
 
 from __future__ import annotations
@@ -66,6 +67,13 @@ class TeamReplyText:
                 self.per_member[member_id] += event.event.text
         elif isinstance(event, ContentDelta):
             self.consensus += event.text
+
+    def streamed_slots(self) -> set[str]:
+        """Return the slots the run's events gave text: ``team`` for the consensus, ``agent:<id>`` for a member."""
+        slots = {f"agent:{member_id}" for member_id, text in self.per_member.items() if text}
+        if self.consensus:
+            slots.add("team")
+        return slots
 
     def canonical_text(self) -> str:
         """Return the text in the configured member order, then the consensus: what a streamed reply records."""

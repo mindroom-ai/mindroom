@@ -623,7 +623,7 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert team.recorder.outcome == "suspended"
 
 
-_CHECKER_PAUSED = "I have tools to execute, but I need confirmation."
+_MEMBER_PAUSED = "I have tools to execute, but I need confirmation."
 _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
 
 
@@ -633,17 +633,17 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
     [
         pytest.param(
             True,
-            f"{HEADER}**Checker**: {_CHECKER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n\n"
+            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n\n"
             f"**Team Consensus**:\n\n{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]",
-            f"{_CHECKER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n",
+            f"{_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n",
             f"{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]\n\n",
             None,
             id="tool-calls-shown",
         ),
         pytest.param(
             False,
-            f"{HEADER}**Checker**: {_CHECKER_PAUSED}\n\n\n**Team Consensus**:\n\n{_TEAM_PAUSED}",
-            _CHECKER_PAUSED,
+            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n\n**Team Consensus**:\n\n{_TEAM_PAUSED}",
+            _MEMBER_PAUSED,
             _TEAM_PAUSED,
             ["agent:checker", "team"],
             id="tool-calls-hidden",
@@ -845,6 +845,92 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == HEADER + body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "writer", "body"),
+    [
+        pytest.param(
+            [delegate("call-write", "writer", "Write it up"), answer("Done.")],
+            [[Await(_writer_unavailable)]],
+            "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone.",
+            id="completed",
+        ),
+        pytest.param(
+            [delegate("call-write", "writer", "Touch it too")],
+            [calls(tool_call("touch", "call-touch-2", label="risky"))],
+            f"**Writer**: {_MEMBER_PAUSED}\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\n"
+            "Team run paused. The following require input:\n- Writer: touch requires confirmation",
+            id="paused-again",
+        ),
+    ],
+)
+async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_streamed_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """A resume shows each run's content in a slot that streamed no text of its own, as the Agno-backed resume did.
+
+    The approved checker's streamed answer stands as it streamed. The writer the resumed leader then hands a task
+    streams nothing: its error, or its paused notice when its own call pauses the team again, fills its slot, and a
+    leader that streamed nothing before that pause shows its paused notice as the consensus.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(leader)
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel(writer)
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == HEADER + body
+
+
+@pytest.mark.asyncio
+async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text the leader and the checker wrote before the pause stands once when neither writes more after approval.
+
+    The Agno-backed resume added a content-less run's earlier messages to its slot again; the restored document
+    already holds them.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="checker", task="Touch it"),
+                content="Asking the checker.",
+            ),
+        ],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("")])
+    team.models["checker-model"] = ScriptedModel([answer("")])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert (
+        result.response_text == f"{HEADER}**Checker**: Let me touch it.\n\n\n**Team Consensus**:\n\nAsking the checker."
+    )
 
 
 @pytest.mark.asyncio
