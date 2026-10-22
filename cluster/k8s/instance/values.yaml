@@ -117,12 +117,8 @@ allowUnauthenticatedPrimary: false
 
 trustedUpstreamAuth:
   enabled: "false"
-  userIdHeader: ""
-  emailHeader: ""
-  matrixUserIdHeader: ""
   emailToMatrixUserIdTemplate: ""
   emailDomain: ""
-  requireJwt: "false"
   jwtHeader: ""
   jwksUrl: ""
   jwtAudience: ""

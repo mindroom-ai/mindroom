@@ -158,7 +158,7 @@ export function RoomEditor() {
             agents.map((agent) => (
               <div
                 key={agent.id}
-                className="flex items-center space-x-3 p-3 sm:p-2 rounded-lg hover:bg-muted/50"
+                className="flex items-center space-x-3 p-3 sm:p-2 rounded-lg hover:bg-secondary"
               >
                 <Checkbox
                   id={`agent-${agent.id}`}

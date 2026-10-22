@@ -491,7 +491,7 @@ describe("connected accounts", () => {
       },
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+      screen.getByRole("button", { name: "Use account for GitHub" }),
     );
     await pressInDialog("Use account");
     await waitFor(() =>
@@ -829,9 +829,9 @@ describe("connected accounts", () => {
       ).toBeVisible();
       expect(within(github).getByText("octocat")).toBeVisible();
       const use = within(github).getByRole("button", {
-        name: "Use my GitHub account for GitHub",
+        name: "Use account for GitHub",
       });
-      expect(use).toHaveTextContent("Use my GitHub account");
+      expect(use).toHaveTextContent("Use account");
 
       fireEvent.click(use);
       const dialog = await screen.findByRole("dialog");
@@ -859,7 +859,7 @@ describe("connected accounts", () => {
       renderRows([toolsOnly]);
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my GitHub account for GitHub",
+          name: "Use account for GitHub",
         }),
       );
       await pressInDialog("Cancel");
@@ -877,7 +877,7 @@ describe("connected accounts", () => {
       const connect = screen.getByRole("button", {
         name: "Connect GitHub for Agent Keys for GitHub",
       });
-      expect(connect).toHaveTextContent("Connect GitHub for Agent Keys");
+      expect(connect).toHaveTextContent(/^Connect$/);
 
       fireEvent.click(connect);
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -920,7 +920,7 @@ describe("connected accounts", () => {
       );
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my Google Drive account for Drive",
+          name: "Use account for Drive",
         }),
       );
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -949,7 +949,7 @@ describe("connected accounts", () => {
       });
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my Google Drive account for Drive",
+          name: "Use account for Drive",
         }),
       );
       const dialog = await screen.findByRole("dialog");
@@ -1035,6 +1035,19 @@ describe("connected accounts", () => {
     expect(
       within(row("Google Drive")).getByText(
         "Agent Keys cannot use the shared service account, so this uses the account connected earlier.",
+      ),
+    ).toBeInTheDocument();
+    cleanup();
+
+    renderRows([
+      drive(
+        { connected: true, account_label: "alice", reuse_enabled: false },
+        {},
+      ),
+    ]);
+    expect(
+      within(row("Google Drive")).getByText(
+        "Agent Keys cannot use the shared service account, so this service needs a key or the account connected earlier.",
       ),
     ).toBeInTheDocument();
   });
@@ -1670,15 +1683,15 @@ describe("rows with an agent's wording", () => {
       { name: "work", display_name: "Work GitHub" },
     );
     renderRows([first, second]);
-    const visible = ["Connect GitHub for Agent Keys", "Use an API key instead"];
+    const visible = ["Connect", "Use an API key instead"];
     const controls = [
       ...(await rowControls("GitHub")),
       ...(await rowControls("Work GitHub")),
     ].filter(({ text }) => visible.includes(text));
     expect(controls.map(({ text }) => text)).toEqual([
-      "Connect GitHub for Agent Keys",
+      "Connect",
       "Use an API key instead",
-      "Connect GitHub for Agent Keys",
+      "Connect",
       "Use an API key instead",
     ]);
     expect(controls.map(({ name }) => name)).toEqual([
@@ -1958,6 +1971,73 @@ describe("what a row says about how the key is sent", () => {
     cleanup();
     renderRows([custom([rule("httpbin.org", "bearer")], { configured: true })]);
     expect(screen.queryByText(/Requests are refused/)).toBeNull();
+  });
+
+  const toolsOnly = {
+    connected: true,
+    account_label: "octocat",
+    reuse_enabled: false,
+  };
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
+    [
+      "an account to connect",
+      {},
+      "Requests are refused until a key is set or an account is connected.",
+    ],
+    [
+      "a connected account only its tools use",
+      toolsOnly,
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a connected account while connecting another is unavailable",
+      {
+        ...toolsOnly,
+        can_connect: false,
+      },
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a connection that needs a reset",
+      { connected: true, account_label: "octocat", reset_required: true },
+      "Requests are refused until a key is set or an account is connected.",
+    ],
+    [
+      "an account that cannot be connected here",
+      { can_connect: false },
+      "Requests are refused until a key is set.",
+    ],
+    [
+      "an account the sandbox refuses",
+      { unavailable_reason: "shared_sandbox", can_connect: false },
+      "Requests are refused until a key is set.",
+    ],
+    [
+      "a personal account connected before a service account",
+      {
+        ...toolsOnly,
+        service_account: true,
+        can_connect: false,
+      },
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a service account beside a personal connection that needs a reset",
+      { service_account: true, can_connect: false, reset_required: true },
+      "Requests are refused until a key is set.",
+    ],
+    [
+      "a service account with no personal account",
+      { service_account: true, can_connect: false },
+      "Requests are refused until a key is set.",
+    ],
+  ])("states what stops refusals for %s", (_, account, note) => {
+    renderRows([
+      custom([rule("api.github.com", "bearer")], {
+        oauth: { ...githubAccount, ...account },
+      }),
+    ]);
+    expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
   });
 });
 

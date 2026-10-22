@@ -35,9 +35,8 @@ Re-provisioning also rolls the instance pod onto the current runtime image.
 The runtime evaluates these modes in order:
 
 1. **Trusted upstream auth**, when enabled, takes precedence over Supabase and standalone auth.
-   It requires the configured identity headers and, when configured, verifies the upstream JWT.
-   Missing required headers are rejected without falling back to a Supabase cookie.
-   Only enable this mode behind a verified access layer that strips client-supplied identity headers and injects authenticated values.
+   It takes the user only from a JWT that the access layer signs and adds to each request, and ignores identity headers.
+   A request without a valid JWT is rejected without falling back to a Supabase cookie.
 2. **Supabase auth** is enabled by the instance's Supabase URL and anon key.
    It accepts a Supabase bearer token or a platform session cookie and rejects a user whose ID differs from a configured `ACCOUNT_ID`.
    Browser sign-in also requires `MINDROOM_PLATFORM_SSO_URL` and the instance key in `MINDROOM_PLATFORM_SSO_SECRET`.
@@ -62,7 +61,7 @@ The provisioner therefore grants the owner's Matrix user administrator, invite, 
 
 - Platform backend: `PLATFORM_DOMAIN` controls links, allowed origins, and the legacy shared-cookie expiry; `INSTANCE_BASE_DOMAIN` selects the dashboard hosts that may receive login tickets; `INSTANCE_CREDENTIALS_ENCRYPTION_SECRET`, or `PROVISIONER_API_KEY` when it is unset, is the root of each instance key; Supabase URL, anon key, and service key configure platform identity and server operations.
 - Instance chart: `supabaseUrl`, `supabaseAnonKey`, and `accountId` configure hosted Supabase authentication and its account check; `platformDomain`, defaulting to `baseDomain`, selects the platform login and SSO hosts; the instance Secret's `platform_sso_secret` holds the instance key.
-- Optional access layer: `trustedUpstreamAuth.enabled` selects upstream authentication; its headers and JWT settings must match that layer.
+- Optional access layer: `trustedUpstreamAuth.enabled` selects upstream authentication, and `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer` must match that layer's signed JWT.
 - Standalone runtime: `MINDROOM_API_KEY` enables the standalone credential requirement.
 
 ## Troubleshooting

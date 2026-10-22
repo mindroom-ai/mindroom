@@ -3203,10 +3203,7 @@ class TestRunApiFlags:
             ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, None),
             (
                 (),
-                {
-                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-User",
-                },
+                {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
                 None,
             ),
             (("--api-host", "127.0.0.1"), {}, None),

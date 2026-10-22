@@ -1652,7 +1652,7 @@ export function AgentEditor() {
                   return (
                     <div
                       key={toolName}
-                      className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors"
+                      className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-secondary transition-colors"
                     >
                       <Checkbox
                         aria-label={`worker ${toolName}`}

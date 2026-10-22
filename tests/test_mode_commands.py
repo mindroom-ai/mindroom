@@ -237,11 +237,6 @@ def test_mode_parser_preserves_target_and_action() -> None:
             "the MindRoom API; the dashboard then asks for this key.",
         ),
         (
-            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
-            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
-            "trusted-upstream headers.",
-        ),
-        (
             {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
             "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
             "the unauthenticated OpenAI-compatible API.",

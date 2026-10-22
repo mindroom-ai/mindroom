@@ -209,7 +209,7 @@ The runtime chart rejects a file-sourced config inside `agents`, `private_instan
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, and memory.
-> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`; header-only trusted-upstream authentication is forgeable from the sidecar.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY`.
 > Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
 

@@ -352,7 +352,7 @@ export function TeamEditor() {
                 const isSelectable =
                   agentPolicy != null && eligibilityReason == null;
                 return (
-                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
+                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
@@ -412,7 +412,7 @@ export function TeamEditor() {
                   return (
                     <div
                       key={room.id}
-                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200"
                     >
                       <Checkbox
                         id={`room-${room.id}`}

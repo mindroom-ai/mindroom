@@ -49,7 +49,7 @@ export function CheckboxListField({
                 return (
                   <div
                     key={item.value}
-                    className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                    className="flex items-center space-x-2 p-2 rounded-lg hover:bg-secondary transition-all duration-200"
                   >
                     <Checkbox
                       id={checkboxId}

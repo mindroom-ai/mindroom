@@ -60,12 +60,8 @@ _SERVICES: dict[str, object] = {
 }
 
 
-# Serves the personal egress page: the broker is on behind trusted upstream auth with JWT.
-_PAGE_SERVED = {
-    "MINDROOM_EGRESS_BROKER_PORT": "8768",
-    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-    "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
-}
+# Serves the personal egress page: the broker is on behind trusted upstream auth.
+_PAGE_SERVED = {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
@@ -335,24 +331,15 @@ _PAGE_NOT_SERVED_NOTE = (
     [
         {},
         {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"},
-        {
-            "MINDROOM_EGRESS_BROKER_PORT": "8768",
-            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        },
     ],
-    ids=["broker-off", "chat-sign-in-off", "trusted-without-jwt"],
+    ids=["broker-off", "chat-sign-in-off"],
 )
 def test_personal_scope_without_the_personal_page_is_sent_to_no_page(
     tmp_path: Path,
     worker_scope: WorkerScope,
     env: dict[str, str],
 ) -> None:
-    """Only the personal page sets a personal scope's keys; where it is not served the tool names no page, as the broker.
-
-    With sign-in from Chat off, trusted upstream auth without JWT does not serve it either: the personal API answers
-    403 without signed requests.
-    """
+    """Only the personal page sets a personal scope's keys; where it is not served the tool names no page, as the broker."""
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example", **env)
     tool = _tool(runtime_paths, worker_scope=worker_scope)
 

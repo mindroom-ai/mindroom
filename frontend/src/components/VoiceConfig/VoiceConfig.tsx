@@ -194,7 +194,7 @@ export function VoiceConfig() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Volume2 className="h-5 w-5 text-primary" />
+              <Volume2 className="h-5 w-5" />
               <CardTitle>Voice Message Support</CardTitle>
             </div>
             <input
@@ -223,7 +223,7 @@ export function VoiceConfig() {
           </Alert>
 
           {/* Current Settings Summary */}
-          <div className="rounded-lg border border-border bg-muted/40 p-4 shadow-sm">
+          <div className="rounded-lg border border-border bg-muted/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold">
                 Current Effective Settings
@@ -280,7 +280,7 @@ export function VoiceConfig() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-background p-4 shadow-sm">
+          <div className="rounded-lg border border-border bg-background p-4">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
                 <Label
@@ -450,7 +450,7 @@ export function VoiceConfig() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <PhoneCall className="h-5 w-5 text-primary" />
+            <PhoneCall className="h-5 w-5" />
             Voice Calls
           </CardTitle>
           <CardDescription>

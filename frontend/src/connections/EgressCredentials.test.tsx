@@ -303,7 +303,7 @@ describe("egress credentials page", () => {
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+      screen.getByRole("button", { name: "Use account for GitHub" }),
     );
     await pressInDialog("Use account");
     expect(

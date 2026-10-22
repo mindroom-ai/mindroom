@@ -77,7 +77,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](connections-portal.md) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](connections-portal.md) (opened from MindRoom Chat or signed in through trusted upstream auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |

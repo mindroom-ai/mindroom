@@ -147,7 +147,7 @@ export function Settings() {
     <div className="flex h-full flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <SlidersHorizontal className="h-5 w-5 text-primary" />
+          <SlidersHorizontal className="h-5 w-5" />
           <div>
             <h2 className="text-lg font-semibold">Settings</h2>
             <p className="text-sm text-muted-foreground">
@@ -178,8 +178,9 @@ export function Settings() {
                     type="button"
                     aria-current={section.id === active.id ? "page" : undefined}
                     className={cn(
-                      "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
-                      section.id === active.id && "bg-muted font-medium",
+                      "w-full rounded-md px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground",
+                      section.id === active.id &&
+                        "bg-active font-medium text-foreground hover:bg-active",
                     )}
                     onClick={() => setSelectedId(section.id)}
                   >

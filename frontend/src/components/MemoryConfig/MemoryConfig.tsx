@@ -1011,7 +1011,7 @@ export function MemoryConfig() {
           />
         </div>
 
-        <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">
+        <div className="p-4 bg-muted/50 rounded-lg border border-border">
           <h3 className="text-sm font-medium mb-3">Current Configuration</h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">

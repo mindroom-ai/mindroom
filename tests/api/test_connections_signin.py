@@ -26,11 +26,11 @@ from mindroom.api.connections_session_cookie import (
 )
 from mindroom.matrix_openid import MatrixOpenIDError, homeserver_binds_openid_audience, verify_matrix_openid
 from mindroom.oauth import registry as oauth_registry
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
+from tests.api.conftest import (
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
     _expect_styled_oauth_page,
@@ -654,17 +654,16 @@ def test_session_ignored_on_non_portal_oauth_and_credential_routes(
     assert response.status_code == 401
 
 
-def _serve_with_strict_upstream(
+def _serve_with_trusted_upstream(
     signin: dict[str, Any],
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     payload: dict[str, Any],
 ) -> tuple[TestClient, Callable[[str], dict[str, str]]]:
-    """Serve the portal with strict trusted-upstream JWT next to sessions; return a client and upstream headers per user."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    """Serve the portal with trusted-upstream auth next to sessions; return a client and upstream headers per user."""
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     env = {name: value for name, value in signin["paths"].process_env.items() if name != "MINDROOM_API_KEY"}
-    env.update(_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
+    env.update(trusted_upstream_env())
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
     _publish_config(main.app, paths, payload)
@@ -672,8 +671,7 @@ def _serve_with_strict_upstream(
 
     def upstream(name: str) -> dict[str, str]:
         return {
-            "X-Trusted-User": name,
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",
@@ -686,12 +684,11 @@ def _serve_with_strict_upstream(
 
 def test_session_cookie_ignored_for_admin_on_dashboard_routes(
     signin: dict[str, Any],
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without token binding, an administrator's portal session never opens administrator routes."""
     payload = {**signin["payload"], "administrators": ["@alice:example.org"]}
-    client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, payload)
+    client, upstream = _serve_with_trusted_upstream(signin, monkeypatch, payload)
 
     assert sign_in(client, "alice").status_code == 200
     assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
@@ -701,11 +698,10 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
 
 def test_upstream_identity_refuses_a_page_showing_another_account(
     signin: dict[str, Any],
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Once a page's session is gone, the browser's upstream identity cannot act for the account the page shows."""
-    client, upstream = _serve_with_strict_upstream(signin, tmp_path, monkeypatch, signin["payload"])
+    client, upstream = _serve_with_trusted_upstream(signin, monkeypatch, signin["payload"])
 
     stale = client.get(
         "/api/connections/session",

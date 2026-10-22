@@ -1240,20 +1240,16 @@ def test_instance_chart_numeric_customer_uses_valid_instance_secret_name() -> No
     assert deployment["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "mindroom-api-keys-1"
 
 
-def test_instance_chart_rejects_email_template_without_email_header() -> None:
-    """Email-to-Matrix derivation requires the trusted email header name."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/instance"),
-        "trustedUpstreamAuth.enabled=true",
-        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
-        set_string_args=("trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",),
-    )
+_TRUSTED_UPSTREAM_JWT_VALUES = {
+    "jwtHeader": "X-Trusted-Jwt",
+    "jwksUrl": "https://issuer.example/jwks",
+    "jwtAudience": "mindroom-dashboard",
+    "jwtIssuer": "https://issuer.example",
+}
 
-    assert completed.returncode != 0
-    assert (
-        "trustedUpstreamAuth.emailHeader is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
-        in completed.stderr
-    )
+
+def _trusted_upstream_jwt_args(prefix: str, *, omit: str | None = None) -> tuple[str, ...]:
+    return tuple(f"{prefix}.{name}={value}" for name, value in _TRUSTED_UPSTREAM_JWT_VALUES.items() if name != omit)
 
 
 @pytest.mark.parametrize("chart", ["instance", "platform"])
@@ -1264,10 +1260,11 @@ def test_chart_email_mapping_requires_explicit_domain(chart: str, email_domain: 
     completed = _run_helm_template(
         Path("cluster/k8s") / chart,
         f"{prefix}.enabled=true",
-        f"{prefix}.userIdHeader=X-Trusted-User",
-        f"{prefix}.emailHeader=X-Trusted-Email",
         f"{prefix}.emailDomain={email_domain}",
-        set_string_args=(f"{prefix}.emailToMatrixUserIdTemplate=@{{localpart}}:example.org",),
+        set_string_args=(
+            f"{prefix}.emailToMatrixUserIdTemplate=@{{localpart}}:example.org",
+            *_trusted_upstream_jwt_args(prefix),
+        ),
     )
     if not email_domain:
         assert completed.returncode != 0
@@ -1283,27 +1280,36 @@ def test_chart_email_mapping_requires_explicit_domain(chart: str, email_domain: 
         assert email_domain in completed.stdout
 
 
-def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
-    """Strict trusted upstream settings should render to MindRoom runtime env vars."""
+@pytest.mark.parametrize("chart", ["instance", "platform"])
+@pytest.mark.parametrize("missing", list(_TRUSTED_UPSTREAM_JWT_VALUES))
+def test_chart_rejects_trusted_upstream_without_jwt_setting(chart: str, missing: str) -> None:
+    """Both charts fail before deploying an instance whose trusted upstream auth cannot verify the signed assertion."""
+    prefix = "provisioner.trustedUpstreamAuth" if chart == "platform" else "trustedUpstreamAuth"
+    completed = _run_helm_template(
+        Path("cluster/k8s") / chart,
+        f"{prefix}.enabled=true",
+        set_string_args=_trusted_upstream_jwt_args(prefix, omit=missing),
+    )
+
+    assert completed.returncode != 0
+    assert f"{prefix}.{missing} is required when {prefix}.enabled=true" in completed.stderr
+
+
+def test_instance_chart_renders_trusted_upstream_jwt_env() -> None:
+    """Trusted upstream settings should render to MindRoom runtime env vars."""
     docs = _render_chart(
         Path("cluster/k8s/instance"),
         "trustedUpstreamAuth.enabled=true",
-        "trustedUpstreamAuth.userIdHeader=X-Trusted-User",
-        "trustedUpstreamAuth.emailHeader=X-Trusted-Email",
-        "trustedUpstreamAuth.requireJwt=true",
-        "trustedUpstreamAuth.jwtHeader=X-Trusted-Jwt",
-        "trustedUpstreamAuth.jwtAudience=mindroom-dashboard",
-        "trustedUpstreamAuth.jwtIssuer=https://issuer.example",
         "trustedUpstreamAuth.jwtEmailClaim=email",
         "trustedUpstreamAuth.jwtUserIdClaim=sub",
         "trustedUpstreamAuth.jwtMatrixUserIdClaim=matrix_user_id",
-        set_string_args=("trustedUpstreamAuth.jwksUrl=https://issuer.example/jwks",),
+        set_string_args=_trusted_upstream_jwt_args("trustedUpstreamAuth"),
     )
     deployment = _resource(docs, "Deployment", "mindroom-demo")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
-    assert env_values["MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"] == "true"
+    assert env_values["MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"] == "true"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"] == "X-Trusted-Jwt"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"] == "https://issuer.example/jwks"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"] == "mindroom-dashboard"
@@ -1311,37 +1317,6 @@ def test_instance_chart_renders_strict_trusted_upstream_jwt_env() -> None:
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM"] == "email"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] == "sub"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] == "matrix_user_id"
-
-
-def test_platform_chart_rejects_email_template_without_email_header() -> None:
-    """The platform chart should fail before provisioning invalid instance auth config."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/platform"),
-        "provisioner.trustedUpstreamAuth.enabled=true",
-        "provisioner.trustedUpstreamAuth.userIdHeader=X-Trusted-User",
-        release_name="mindroom-platform",
-        set_string_args=("provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate=@{localpart}:example.org",),
-    )
-
-    assert completed.returncode != 0
-    assert (
-        "provisioner.trustedUpstreamAuth.emailHeader is required when "
-        "provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set"
-    ) in completed.stderr
-
-
-def test_platform_chart_rejects_trusted_upstream_without_user_id_header() -> None:
-    """The platform chart should fail before provisioning instances that cannot authenticate users."""
-    completed = _run_helm_template(
-        Path("cluster/k8s/platform"),
-        "provisioner.trustedUpstreamAuth.enabled=true",
-        release_name="mindroom-platform",
-    )
-
-    assert completed.returncode != 0
-    assert (
-        "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true"
-    ) in completed.stderr
 
 
 @pytest.mark.parametrize("webhook_secret", ["", " ", "whsec_test"])

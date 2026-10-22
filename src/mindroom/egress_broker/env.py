@@ -49,15 +49,14 @@ def personal_page_served(runtime_paths: RuntimePaths) -> bool:
     """Return whether the personal egress page is served: the broker is on and its users can sign in.
 
     Only that page, `/connections/egress`, sets the keys of `user` and `user_agent` agents, which belong to each
-    requester. Its API needs a verified Matrix identity, from trusted upstream auth with a signed JWT or from
-    Matrix sign-in, which an empty MindRoom Chat allowlist turns off.
+    requester. Its API needs a verified Matrix identity, from trusted upstream auth or from Matrix sign-in, which an
+    empty MindRoom Chat allowlist turns off.
     """
     if not egress_broker_enabled(runtime_paths):
         return False
-    upstream_sign_in = runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") and runtime_paths.env_flag(
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
+    return runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") or connections_sign_in_enabled(
+        runtime_paths,
     )
-    return upstream_sign_in or connections_sign_in_enabled(runtime_paths)
 
 
 def egress_tool_unavailable(tool_name: str, runtime_paths: RuntimePaths) -> bool:
