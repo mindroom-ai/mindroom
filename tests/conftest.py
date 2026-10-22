@@ -3017,6 +3017,14 @@ def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_gc_thresholds() -> Generator[None, None, None]:
+    """Keep a runtime refreeze in one test from raising the full-collection threshold for later tests."""
+    thresholds = gc.get_threshold()
+    yield
+    gc.set_threshold(*thresholds)
+
+
+@pytest.fixture(autouse=True)
 def _reopen_primary_worker_manager() -> Generator[None, None, None]:
     """Reopen the process-wide primary worker manager after a test runs a real shutdown."""
     yield

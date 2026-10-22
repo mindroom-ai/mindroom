@@ -189,14 +189,11 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
 @pytest.mark.parametrize(("configured", "expected"), [(10, 100), (500, 500)])
 def test_frozen_heap_raises_the_full_collection_threshold_without_lowering_it(configured: int, expected: int) -> None:
     """Full passes walk everything since the refreeze yet find little garbage, so they run ten times less often."""
-    original = gc.get_threshold()
-    try:
-        gc.set_threshold(original[0], original[1], configured)
-        with capture_logs() as logs:
-            _raise_full_collection_threshold()
-        assert gc.get_threshold() == (original[0], original[1], expected)
-    finally:
-        gc.set_threshold(*original)
+    young, middle, _ = gc.get_threshold()
+    gc.set_threshold(young, middle, configured)
+    with capture_logs() as logs:
+        _raise_full_collection_threshold()
+    assert gc.get_threshold() == (young, middle, expected)
     [record] = [entry for entry in logs if entry["event"] == "gc_full_collection_threshold_raised"]
     assert (record["previous"], record["threshold"]) == (configured, expected)
 
