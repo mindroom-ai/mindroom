@@ -1,36 +1,39 @@
-"""SDK-generated knowledge and skill functions keep their native schemas and run inline."""
+"""Framework-generated knowledge and skill functions keep their native schemas and run inline."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Never, cast
+from typing import TYPE_CHECKING, Never
 
 import pytest
-from agno.knowledge.knowledge import Knowledge
-from agno.models.response import ModelResponse
-from agno.tools.function import Function, FunctionCall
 
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_jobs.agno_execution import wrap_tool_execution
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.execution_authority import authorized_tool_call
+from mindroom.tool_jobs.execution import job_middleware
+from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Function, adapt_function
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import tool_execution_identity
-from tests.delegation_helpers import _call, _delegate_runtime_context, _runtime_paths
-from tests.history_helpers import RecordingModel
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_skills import _write_skill
 from tests.tool_job_helpers import (
     completed_delegation_job,
+    job_actor,
+    job_tool,
     managed_team_config,
+    run_built_turn,
     saved_jobs,
     team_coordinator,
     tool_job_runtime,
@@ -39,32 +42,20 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.models.message import Message
-
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 _SDK_FUNCTIONS = ("search_knowledge_base", "get_skill_instructions")
 
 
-@dataclass
-class _SdkFunctionModel(RecordingModel):
-    """Call each SDK-generated function once."""
+class _KnowledgeIndex:
+    """A published index that answers every query with one synthetic document."""
 
-    schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    def search(self, query: str, *, limit: int) -> list[SearchHit]:
+        del limit
+        return [SearchHit(content=f"Knowledge about {query}")]
 
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        messages = cast("list[Message]", kwargs["messages"])
-        tools = cast("list[dict[str, Any]]", kwargs.get("tools") or [])
-        schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
-        if messages[-1].role == "tool":
-            return ModelResponse(content="done")
-        self.schemas = schemas
-        return ModelResponse(
-            tool_calls=[
-                _call("search_knowledge_base", "knowledge", query="tea"),
-                _call("get_skill_instructions", "skill", skill_name="demo"),
-            ],
-        )
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return self.search(query, limit=limit)
 
 
 @pytest.mark.asyncio
@@ -89,15 +80,24 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
     workspace = resolve_agent_runtime("lead", config, paths, execution_identity=owner).workspace
     assert workspace is not None
     _write_skill(workspace.root / "skills", "demo", "Sample skill")
-    model = _SdkFunctionModel(id="test")
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    agent = create_agent("lead", config, paths, owner, knowledge=Knowledge(name="probe"))
-
-    async def retrieve(query: str, num_documents: int | None = None) -> list[dict[str, str]]:
-        del num_documents
-        return [{"content": f"Knowledge about {query}", "name": "synthetic document"}]
-
-    agent.knowledge_retriever = retrieve
+    model = ScriptedModel(
+        [
+            calls(
+                tool_call("search_knowledge_base", "knowledge", query="tea"),
+                tool_call("get_skill_instructions", "skill", skill_name="demo"),
+            ),
+            answer("done"),
+        ],
+    )
+    ScriptedAgents({"lead": model}).install(monkeypatch)
+    knowledge = AgentKnowledge(
+        sources=(
+            KnowledgeSource(
+                description=KnowledgeSourceDescription(base_id="probe", description=""),
+                index=_KnowledgeIndex(),
+            ),
+        ),
+    )
     try:
         await coordinator.sync()
         async with execution_resources():
@@ -105,19 +105,23 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
                 tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
                 tool_execution_identity(owner),
             ):
-                response = await agent.arun(
-                    "Look up tea and read the demo skill.",
-                    session_id=owner.session_id,
-                    user_id=owner.requester_id,
+                build = create_agent("lead", config, paths, owner, knowledge=knowledge)
+                record = await run_built_turn(
+                    build,
+                    config=config,
+                    runtime_paths=paths,
+                    prompt="Look up tea and read the demo skill.",
+                    session_id=owner.session_id or "session",
                 )
-        assert response.tools is not None
-        results = {tool.tool_name: tool for tool in response.tools}
+        assert record.tools is not None
+        results = {tool.tool_name: tool for tool in record.tools}
         assert set(results) == set(_SDK_FUNCTIONS)
         assert all(not tool.tool_call_error for tool in results.values())
         assert "Knowledge about tea" in str(results["search_knowledge_base"].result)
         assert "# Body" in str(results["get_skill_instructions"].result)
-        assert set(model.schemas["search_knowledge_base"]["properties"]) == {"query"}
-        assert all("background_after" not in model.schemas[name]["properties"] for name in _SDK_FUNCTIONS)
+        schemas = {definition.name: definition.parameters for definition in model.requests[0].tools}
+        assert set(schemas["search_knowledge_base"]["properties"]) == {"query"}
+        assert all("background_after" not in schemas[name]["properties"] for name in _SDK_FUNCTIONS)
         assert await saved_jobs(paths.storage_root) == {}
     finally:
         await coordinator.stop()
@@ -126,14 +130,14 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stopped_by", ["cancel", "revoked grant"])
 async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, stopped_by: str) -> None:
-    """SDK-generated functions have no tool hooks, so the job's own stop and grant checks keep them from running."""
+    """Generated functions have no tool hooks, so the job's own stop and grant checks keep them from running."""
     ran: list[str] = []
 
     def search(query: str) -> str:
         return query
 
-    async def original(call: FunctionCall) -> Never:
-        ran.append(call.function.name)
+    async def leaf(arguments: dict[str, object]) -> Never:
+        ran.append(str(arguments))
         raise AssertionError
 
     def authorize_execution(*_args: object) -> None:
@@ -149,8 +153,10 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
     control = JobControl()
     if stopped_by == "cancel":
         control.cancel()
-    job_call = FunctionCall(function=Function(name="job_tool"), arguments={})
-    sdk_call = FunctionCall(function=Function.from_callable(search), arguments={"query": "tea"})
+    run = ToolCallContext(run_id="job-run", session_id="session", call_id="sdk-call")
+    job_call = JobCall(tool=job_tool(search), arguments={}, context=run, team=False)
+    generated = adapt_function(Function.from_callable(search))
+    admit = job_middleware(job_actor(), ())
     try:
         async with execution_resources():
             with (
@@ -159,7 +165,7 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
                 authorized_tool_call(build_execution_identity_from_runtime_context(context), job_call),
                 pytest.raises(asyncio.CancelledError if stopped_by == "cancel" else JobAccessError),
             ):
-                await wrap_tool_execution(original, depth=0)(sdk_call)
+                await admit(ToolCall(function=generated, arguments={"query": "tea"}, context=run), leaf)
     finally:
         await runtime.shutdown()
     assert ran == []
