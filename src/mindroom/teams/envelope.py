@@ -627,7 +627,6 @@ def _leader_hooks(
                 turn_recorder=turn_recorder,
             ),
             approval_receipt_hook(capabilities),
-            *(() if leader_jobs is None else (job_definitions_hook(leader_jobs),)),
         ),
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         tool_middleware=leader_middleware,
