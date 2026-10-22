@@ -2168,7 +2168,12 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
     ("configured", "expected", "stored_toolkit_runs", "outcome"),
     [
         ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
-        ((_MIRRORED_TOOLKIT, _TOOLKIT), "now comes from another of this agent's toolkits", [], None),
+        (
+            (_MIRRORED_TOOLKIT, _TOOLKIT),
+            "now comes from another toolkit than the one the call was stored for",
+            [],
+            None,
+        ),
     ],
     ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
 )
@@ -2286,7 +2291,7 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
         ("none", _THREAD, "own conversation turn"),
         ("live", "$other-thread", "another agent, conversation, or requester"),
         ("without-tool", _THREAD, "not one of this agent's tools"),
-        ("other-toolkit", _THREAD, "now comes from another of this agent's toolkits"),
+        ("other-toolkit", _THREAD, "now comes from another toolkit than the one the call was stored for"),
     ],
     ids=["no-live-agent", "other-thread", "tool-gone", "same-name-other-toolkit"],
 )
