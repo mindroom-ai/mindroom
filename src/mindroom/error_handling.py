@@ -5,8 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import re
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from agno.exceptions import ModelProviderError
 
@@ -22,9 +21,6 @@ from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
-    from agno.run.agent import RunErrorEvent
-    from agno.run.team import RunErrorEvent as TeamRunErrorEvent
-
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -68,39 +64,6 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
     if subagent:
         return f"{reason.rstrip('.')}. Start a new subagent without minimal."
     return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
-
-
-def run_error_event_text(event: RunErrorEvent | TeamRunErrorEvent, *, entity_label: str = "Agent") -> str:
-    """Return credential-redacted error text for an Agno streaming error event."""
-    if event.content:
-        return redact_sensitive_text(event.content)
-
-    additional_message = _run_error_additional_message(event.additional_data or {})
-    if additional_message:
-        return redact_sensitive_text(additional_message)
-
-    details = []
-    if event.error_type:
-        details.append(f"type={event.error_type}")
-    if event.error_id:
-        details.append(f"id={event.error_id}")
-    if details:
-        return redact_sensitive_text(f"{entity_label} run failed ({', '.join(details)})")
-
-    return f"{entity_label} run failed without provider error details"
-
-
-def _run_error_additional_message(data: object) -> str | None:
-    if isinstance(data, str):
-        stripped = data.strip()
-        return stripped or None
-    if isinstance(data, Mapping):
-        mapping = cast("Mapping[object, object]", data)
-        for key in ("message", "error", "detail"):
-            message = _run_error_additional_message(mapping.get(key))
-            if message:
-                return message
-    return None
 
 
 def is_model_safeguard_refusal(error: Exception | str) -> bool:
