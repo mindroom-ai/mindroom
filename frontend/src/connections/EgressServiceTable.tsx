@@ -8,6 +8,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { serviceHosts } from "./egressRowText";
 import { BROKERED_PLACEHOLDER } from "./egressServiceForm";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
@@ -35,22 +36,23 @@ export function EgressServiceTable({
     <div className="overflow-x-auto">
       <table
         aria-label={label}
-        className={`w-full text-sm sm:min-w-[720px] ${STACKED.table}`}
+        // Fixed widths, so a long description or button cannot starve the status column.
+        className={`w-full text-sm sm:min-w-[720px] sm:table-fixed ${STACKED.table}`}
       >
         <thead
           className={`text-left text-xs text-muted-foreground ${STACKED.head}`}
         >
           <tr>
-            <th scope="col" className="w-[32%] px-5 py-3 font-medium">
+            <th scope="col" className="px-5 py-3 font-medium">
               Service
             </th>
-            <th scope="col" className="w-[24%] px-4 py-3 font-medium">
+            <th scope="col" className="w-[20%] px-4 py-3 font-medium">
               Hosts
             </th>
             <th scope="col" className="w-[26%] px-4 py-3 font-medium">
               Status
             </th>
-            <th scope="col" className="px-5 py-3 text-right font-medium">
+            <th scope="col" className="w-48 px-5 py-3 text-right font-medium">
               Actions
             </th>
           </tr>
@@ -76,10 +78,10 @@ export function ServiceGroupHeading({ label }: { label: string }) {
   );
 }
 
-/** A host, variable, or header name, set apart as code. */
+/** A host, variable, or header name, set apart as code; it wraps only when wider than its cell. */
 function Code({ children }: { children: ReactNode }) {
   return (
-    <code className="whitespace-nowrap rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground">
+    <code className="inline-block max-w-full break-words rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground">
       {children}
     </code>
   );
@@ -186,7 +188,10 @@ export function AgentSees({ service }: { service: EgressCredentialService }) {
             <Fragment key={name}>
               {index > 0 && ", "}
               <Code>
-                {name}={BROKERED_PLACEHOLDER}
+                {breakAfterUnderscores(name)}=<wbr />
+                <span className="whitespace-nowrap">
+                  {BROKERED_PLACEHOLDER}
+                </span>
               </Code>
             </Fragment>
           ))}
