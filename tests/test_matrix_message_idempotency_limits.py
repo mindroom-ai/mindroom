@@ -234,17 +234,21 @@ async def test_deadline_settles_durable_write_before_unlocking(
 
     def stalled_write(path: Path, payload: object, **kwargs: Any) -> None:  # noqa: ANN401
         loop.call_soon_threadsafe(entered.set)
-        assert release.wait(2), "test did not release durable writer"
+        assert release.wait(10), "test did not release durable writer"
         original_write(path, payload, **kwargs)
 
     monkeypatch.setattr(durable, "write_json_file_durable", stalled_write)
-    monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 0.05)
+    # The claim timeout also covers authorization and the lock wait before the write,
+    # which can take a few hundred milliseconds on a loaded host.
+    monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 1.0)
     with tool_runtime_context(context):
         pending = asyncio.create_task(MatrixMessageTools().matrix_message(message="first", idempotency_key="writing"))
         try:
-            await entered.wait()
+            async with asyncio.timeout(10):
+                await entered.wait()
+            # Waiting past the deadline shows the expired claim still waits for its writer.
             with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(pending), 0.1)
+                await asyncio.wait_for(asyncio.shield(pending), 1.5)
             assert not pending.done()
             root = context.runtime_paths.control_state_root
             assert root is not None
