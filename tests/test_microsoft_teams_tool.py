@@ -565,18 +565,25 @@ def test_sends_post_escaped_text_with_line_breaks(
 
 
 @pytest.mark.parametrize(
-    "member",
-    [{"displayName": "Eve Outside", "email": "eve@fabrikam.com"}, {"displayName": "Guest"}],
-    ids=["unlisted", "no-email"],
+    ("member", "listed"),
+    [
+        ({"displayName": "Eve Outside", "email": "eve@fabrikam.com"}, []),
+        ({"displayName": "Guest"}, []),
+        # Addresses that differ from a listed one by more than case, here ss and ß.
+        ({"displayName": "Eve Strasse", "email": "eve@strasse.example"}, ["eve@straße.example"]),
+        ({"displayName": "Eve Straße", "email": "eve@straße.example"}, ["eve@strasse.example"]),
+    ],
+    ids=["unlisted", "no-email", "ss-for-sharp-s", "sharp-s-for-ss"],
 )
 def test_chat_send_reaching_a_member_not_in_recipients_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     member: dict[str, object],
+    listed: list[str],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _send_answer(_message(), [*MEMBERS, member]))
 
-    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, "hi"))
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, [*RECIPIENTS, *listed], "hi"))
 
     assert (result["status"], result["code"]) == ("error", "recipients_mismatch")
     assert result["members"] == [

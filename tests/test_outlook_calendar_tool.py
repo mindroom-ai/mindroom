@@ -679,17 +679,27 @@ def test_respond_to_event_posts_the_matching_action(
     assert _body(graph.requests[1]) == {"sendResponse": True, "comment": "See you"}
 
 
-@pytest.mark.parametrize("address", ["alex@contoso.com", None])
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("alex@contoso.com", "sam@contoso.com"),
+        (None, "sam@contoso.com"),
+        # Addresses that differ from the expected one by more than case, here ss and ß.
+        ("alex@strasse.example", "alex@straße.example"),
+        ("alex@straße.example", "alex@strasse.example"),
+    ],
+)
 def test_respond_to_another_organizer_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     address: str | None,
+    expected: str,
 ) -> None:
     organizer = {"emailAddress": {"name": "Alex Example", "address": address}}
     routes = {("GET", f"/me/events/{EVENT_ID}"): httpx.Response(200, json={"organizer": organizer})}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, "sam@contoso.com", "decline", comment="No"))
+    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, expected, "decline", comment="No"))
 
     assert result["code"] == "target_mismatch"
     assert result["organizer"] == {"name": "Alex Example", "email": address}

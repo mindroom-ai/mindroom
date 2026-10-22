@@ -181,7 +181,7 @@ def _chat(chat: Mapping[str, Any]) -> dict[str, Any]:
 
 def _addresses(recipients: object) -> frozenset[str]:
     if isinstance(recipients, list):
-        addresses = [address.casefold() for address in recipients if isinstance(address, str)]
+        addresses = [address.lower() for address in recipients if isinstance(address, str)]
         if len(addresses) == len(recipients):
             return frozenset(addresses)
     raise MicrosoftGraphError(code="invalid_argument", message="recipients must be a list of email addresses.")
@@ -198,7 +198,7 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
     if (
         not members
         or "@odata.nextLink" in payload
-        or any(not isinstance(email := member["email"], str) or email.casefold() not in addresses for member in members)
+        or any(not isinstance(email := member["email"], str) or email.lower() not in addresses for member in members)
     ):
         msg = "The chat has members recipients does not list; every member is listed here, and nothing was sent."
         raise MicrosoftGraphError(code="recipients_mismatch", message=msg, members=members)
