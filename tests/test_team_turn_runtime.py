@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock
@@ -22,11 +22,12 @@ from agno.tools import Toolkit
 
 from mindroom import agents, response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
@@ -659,6 +660,36 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert team.leader.requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Checker]: Touched."
     )
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader_and_stores_it_in_neither(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The member whose call was approved and the leader each read the trusted receipt in their first resumed request.
+
+    The response runner binds the receipt around the resume; it is projected into each loop's request only, so no
+    stored run holds it.
+    """
+    del probe
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    call = _approval("call-touch", "dangerous")
+    receipt = build_approval_receipt(
+        (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
+    )
+
+    with approval_receipt_context(receipt):
+        await _resume(team, raised.paused, approved=True, calls_=(call,))
+
+    for model in (team.checker, team.leader):
+        [request] = model.requests
+        assert [message.role for message in request.messages if receipt in str(message.content)] == ["system"]
+    record, members = _stored_runs(team)
+    assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
 
 
 @pytest.mark.asyncio

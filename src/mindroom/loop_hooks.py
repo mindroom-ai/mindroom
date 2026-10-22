@@ -1,8 +1,8 @@
 """The hooks an agent run or resume installs on the owned loop, in the order the turn applies them.
 
-An agent turn, an approval resume, and a delegated child's resume all run the same policy around the loop: the
-participation gate, mid-turn compaction, the approval receipt, the output-limit answer, portable tool search, the
-tool-call middleware, the queued-message notices, and the skill-review capture.
+An agent turn, an approval resume, a delegated child's resume, and a team member's run or resume all run the same
+policy around the loop: the participation gate, mid-turn compaction, the approval receipt, the output-limit answer,
+portable tool search, the tool-call middleware, the queued-message notices, and the skill-review capture.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def agent_loop_hooks(
     agent_name: str,
     model_name: str,
     store: ConversationStore | None,
-    session: ConversationSession,
+    session: ConversationSession | None,
     scope: HistoryScope | None,
     scoped: bool,
     native_compaction: NativeCompactionReplay | None,
@@ -50,6 +50,7 @@ def agent_loop_hooks(
     turn_recorder: TurnRecorder | None = None,
     skill_review_capture: SkillReviewCapture | None = None,
     run_id: str | None = None,
+    queued_notices: bool = True,
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, in the order the loop applies them before each request.
 
@@ -57,7 +58,8 @@ def agent_loop_hooks(
     cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
     messages, and folds into the scope only when ``scoped`` says the run replays the scope's stored history; the
     approval receipt projects into the first request of a resumed run only. Queued-message notices follow every
-    tool batch and a resume's entry; ``skill_review_capture`` records the final request of run ``run_id``.
+    tool batch and a resume's entry unless ``queued_notices`` is off, as for a team member, whose leader owns the
+    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
     """
     model = build.spec.model
     capabilities = model.capabilities
@@ -92,8 +94,8 @@ def agent_loop_hooks(
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
         tool_middleware=build.tool_middleware,
-        after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),),
-        on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),),
+        after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),) if queued_notices else (),
+        on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),) if queued_notices else (),
         on_loop_end=(
             capture_final_request(skill_review_capture, model, run_id=run_id or "", model_name=model_name)
             if skill_review_capture is not None

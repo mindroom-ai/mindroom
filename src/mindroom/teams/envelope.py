@@ -22,7 +22,6 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.prompt import model_note_for
 from mindroom.agent_loop.spec import AgentSpec, RunContext
-from mindroom.agent_loop.tool_search import resolve_call_tool_calls
 from mindroom.agent_loop.tools import prepare_run_tools
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import team_background_jobs
@@ -65,6 +64,7 @@ from mindroom.llm_request_logging import (
     stream_with_llm_request_log_context,
 )
 from mindroom.logging_config import get_logger
+from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.providers.pipeline.request_log import provider_model_params
@@ -224,44 +224,31 @@ def _team_member(
 ) -> TeamMember:
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
-    A member's tool-call policy, output-limit policy, portable tool search, and mid-turn compaction are its own; it
-    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of
-    the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
+    A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
+    mid-turn compaction, and approval receipt. It replays no history, so its compaction stays within the run, and the
+    leader owns the queued-message notices of the turn. ``model_name`` is the member's configured model for this
+    turn, whose window its compaction sizes against. The compaction and receipt hooks hold the state of the run they
+    serve, so each run or resume builds its own.
     """
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role or "",
-        hooks=partial(_member_hooks, build, config=config, runtime_paths=runtime_paths, model_name=model_name),
-        request_template=build.request_template,
-    )
-
-
-def _member_hooks(build: AgentBuild, *, config: Config, runtime_paths: RuntimePaths, model_name: str) -> LoopHooks:
-    """Return the hooks of one member run; the compaction hook holds the run's own state, so each run gets a new one."""
-    capabilities = build.spec.model.capabilities
-    deferred = build.request_template.deferred_tool_names
-    return LoopHooks(
-        before_request=(
-            mid_turn_compaction_hook(
-                config=config,
-                runtime_paths=runtime_paths,
-                entity_name=build.spec.id,
-                scope_id=build.spec.id,
-                is_team=False,
-                model_name=model_name,
-                model=build.spec.model,
-                history_settings=build.history_settings,
-                store=None,
-                session=None,
-                scope=None,
-                native_compaction=None,
-                deferred_tool_names=deferred,
-                prompt_id=None,
-            ),
+        hooks=partial(
+            agent_loop_hooks,
+            build,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=build.spec.id,
+            model_name=model_name,
+            store=None,
+            session=None,
+            scope=None,
+            scoped=False,
+            native_compaction=None,
+            prompt_id=None,
+            queued_notices=False,
         ),
-        answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
-        rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
-        tool_middleware=build.tool_middleware,
+        request_template=build.request_template,
     )
 
 
