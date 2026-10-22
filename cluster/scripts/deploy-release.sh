@@ -190,7 +190,7 @@ while read -r row; do
     log "Instance $id is held by the subscription lifecycle; the provisioner kept it stopped"
     continue
   fi
-  if kubectl rollout status "deployment/synapse-$id" -n mindroom-instances --timeout=10m &&
+  if kubectl rollout status "deployment/tuwunel-$id" -n mindroom-instances --timeout=10m &&
     kubectl rollout status "deployment/mindroom-$id" -n mindroom-instances --timeout=10m; then
     HEALTH_URLS+=("https://$id.$INSTANCE_DOMAIN/api/health")
   else

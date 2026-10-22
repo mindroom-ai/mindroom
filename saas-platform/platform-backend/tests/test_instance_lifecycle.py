@@ -955,7 +955,7 @@ async def test_expired_trial_stops_instance_and_pauses_subscription(platform: Pl
     platform.kubectl.assert_has_awaits(
         [
             call(["scale", "deployment/mindroom-7", "--replicas=0"], namespace="mindroom-instances"),
-            call(["scale", "deployment/synapse-7", "--replicas=0"], namespace="mindroom-instances"),
+            call(["scale", "deployment/tuwunel-7", "--replicas=0"], namespace="mindroom-instances"),
         ]
     )
     assert platform.instance()["status"] == "stopped"
@@ -991,15 +991,15 @@ async def test_failed_tenant_scale_down_records_error_without_marking_stopped(pl
         )
     )
     platform.db.tables["instances"].append(_instance("running", tier="byok", openrouter_key_hash=None))
-    platform.kubectl.side_effect = [(0, "scaled", ""), (1, "", "synapse scale forbidden")]
+    platform.kubectl.side_effect = [(0, "scaled", ""), (1, "", "tuwunel scale forbidden")]
 
     summary = await reconcile_subscription_instances(SUBSCRIPTION_ID, now=now)
 
     instance = platform.instance()
     assert instance["status"] == "running"
-    assert "synapse scale forbidden" in instance["lifecycle_error"]
+    assert "tuwunel scale forbidden" in instance["lifecycle_error"]
     assert instance["teardown_after"] is not None
-    assert summary.errors == ["instance 7: kubectl scale failed for deployment/synapse-7: synapse scale forbidden"]
+    assert summary.errors == ["instance 7: kubectl scale failed for deployment/tuwunel-7: tuwunel scale forbidden"]
 
 
 @pytest.mark.asyncio

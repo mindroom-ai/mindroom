@@ -14,14 +14,14 @@ PLATFORM_BACKEND_IMAGE="${REGISTRY}/platform-backend:latest"
 PLATFORM_FRONTEND_IMAGE="${REGISTRY}/platform-frontend:latest"
 MINDROOM_IMAGE="${REGISTRY}/mindroom:latest"
 MINDROOM_MINIMAL_IMAGE="${REGISTRY}/mindroom-minimal:latest"
-SYNAPSE_IMAGE="${SYNAPSE_IMAGE:-matrixdotorg/synapse:latest}"
+TUWUNEL_IMAGE="${TUWUNEL_IMAGE:-ghcr.io/mindroom-ai/mindroom-tuwunel:latest}"
 
 echo "[images] Building images tagged to chart/runtime defaults:"
 echo "  - ${PLATFORM_BACKEND_IMAGE}"
 echo "  - ${PLATFORM_FRONTEND_IMAGE}"
 echo "  - ${MINDROOM_IMAGE}"
 echo "  - ${MINDROOM_MINIMAL_IMAGE}"
-echo "  - ${SYNAPSE_IMAGE}"
+echo "  - ${TUWUNEL_IMAGE}"
 
 pushd "${ROOT_DIR}" >/dev/null
 
@@ -55,14 +55,14 @@ else
   docker pull "${MINDROOM_MINIMAL_IMAGE}"
 fi
 
-echo "[images] Pulling Synapse image..."
-docker pull "${SYNAPSE_IMAGE}"
+echo "[images] Pulling Tuwunel image..."
+docker pull "${TUWUNEL_IMAGE}"
 
 echo "[images] Loading images into kind cluster '${CLUSTER_NAME}'..."
 kind load docker-image "${PLATFORM_FRONTEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${PLATFORM_BACKEND_IMAGE}" --name "${CLUSTER_NAME}"
 kind load docker-image "${MINDROOM_IMAGE}" --name "${CLUSTER_NAME}"
-kind load docker-image "${SYNAPSE_IMAGE}" --name "${CLUSTER_NAME}"
+kind load docker-image "${TUWUNEL_IMAGE}" --name "${CLUSTER_NAME}"
 
 echo "[images] Done. Helm will use these images with imagePullPolicy=IfNotPresent."
 

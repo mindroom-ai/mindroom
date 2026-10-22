@@ -1,5 +1,5 @@
 apiVersion: v2
 name: mindroom-matrix
-description: Minimal MindRoom with Matrix (Synapse + SQLite)
+description: Minimal MindRoom with a Tuwunel Matrix homeserver
 type: application
 version: 0.1.0

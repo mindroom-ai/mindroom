@@ -167,8 +167,8 @@ def deploy_instance_directly(
     account_id: str,
     mindroom_image: str,
     mindroom_image_pull_policy: str,
-    synapse_image: str,
-    synapse_image_pull_policy: str,
+    tuwunel_image: str,
+    tuwunel_image_pull_policy: str,
 ) -> None:
     """Deploy the instance chart directly with smoke-safe overrides."""
     namespace_status = run_command(
@@ -203,9 +203,9 @@ def deploy_instance_directly(
             "--set",
             f"mindroom_image_pull_policy={mindroom_image_pull_policy}",
             "--set",
-            f"synapse_image={synapse_image}",
+            f"tuwunel_image={tuwunel_image}",
             "--set",
-            f"synapse_image_pull_policy={synapse_image_pull_policy}",
+            f"tuwunel_image_pull_policy={tuwunel_image_pull_policy}",
             "--set-json",
             "administrators=[]",
             "--set",
@@ -227,16 +227,16 @@ def deploy_instance_directly(
 def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None:
     """Best-effort Kubernetes diagnostics for a failed smoke deploy."""
     error(f"[diagnostics] Dumping Kubernetes state for namespace {instance_namespace}")
-    matrix_service_host = f"synapse-{instance_id}.{instance_namespace}.svc.cluster.local"
+    matrix_service_host = f"tuwunel-{instance_id}.{instance_namespace}.svc.cluster.local"
     commands = [
         ["kubectl", "get", "pods", "-n", instance_namespace, "-o", "wide"],
         ["kubectl", "get", "svc", "-n", instance_namespace],
         ["kubectl", "get", "endpoints", "-n", instance_namespace],
         ["kubectl", "get", "deployment", "-n", instance_namespace],
         ["kubectl", "describe", "deployment", f"mindroom-{instance_id}", "-n", instance_namespace],
-        ["kubectl", "describe", "deployment", f"synapse-{instance_id}", "-n", instance_namespace],
+        ["kubectl", "describe", "deployment", f"tuwunel-{instance_id}", "-n", instance_namespace],
         ["kubectl", "describe", "pod", "-n", instance_namespace, "-l", "app=mindroom"],
-        ["kubectl", "describe", "pod", "-n", instance_namespace, "-l", "app=synapse"],
+        ["kubectl", "describe", "pod", "-n", instance_namespace, "-l", "app=tuwunel"],
         [
             "kubectl",
             "logs",
@@ -271,11 +271,11 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
         [
             "kubectl",
             "logs",
-            f"deployment/synapse-{instance_id}",
+            f"deployment/tuwunel-{instance_id}",
             "-n",
             instance_namespace,
             "-c",
-            "synapse",
+            "tuwunel",
             "--tail=200",
         ],
         ["kubectl", "get", "events", "-n", instance_namespace, "--sort-by=.lastTimestamp"],
@@ -306,8 +306,8 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
             "-c",
             (
                 "import socket; "
-                f"print('synapse-short', socket.getaddrinfo('synapse-{instance_id}', 8008, type=socket.SOCK_STREAM)); "
-                f"print('synapse-fqdn', socket.getaddrinfo('{matrix_service_host}', 8008, type=socket.SOCK_STREAM))"
+                f"print('tuwunel-short', socket.getaddrinfo('tuwunel-{instance_id}', 8008, type=socket.SOCK_STREAM)); "
+                f"print('tuwunel-fqdn', socket.getaddrinfo('{matrix_service_host}', 8008, type=socket.SOCK_STREAM))"
             ),
         ],
         [
@@ -325,7 +325,7 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
                 "import traceback\n"
                 "import urllib.request\n"
                 "urls = [\n"
-                f"    'http://synapse-{instance_id}:8008/_matrix/client/versions',\n"
+                f"    'http://tuwunel-{instance_id}:8008/_matrix/client/versions',\n"
                 f"    'http://{matrix_service_host}:8008/_matrix/client/versions',\n"
                 "]\n"
                 "for url in urls:\n"
@@ -361,13 +361,13 @@ def validate_local_ports(
     platform_backend_local_port: int,
     platform_frontend_local_port: int,
     mindroom_local_port: int,
-    synapse_local_port: int,
+    tuwunel_local_port: int,
 ) -> None:
     """Validate all host ports used by the smoke run."""
     validate_port("PLATFORM_BACKEND_LOCAL_PORT", platform_backend_local_port)
     validate_port("PLATFORM_FRONTEND_LOCAL_PORT", platform_frontend_local_port)
     validate_port("MINDROOM_LOCAL_PORT", mindroom_local_port)
-    validate_port("SYNAPSE_LOCAL_PORT", synapse_local_port)
+    validate_port("TUWUNEL_LOCAL_PORT", tuwunel_local_port)
 
 
 def start_platform_port_forwards(
@@ -419,8 +419,8 @@ def resolve_instance_id(
     base_domain: str,
     mindroom_image: str,
     mindroom_image_pull_policy: str,
-    synapse_image: str,
-    synapse_image_pull_policy: str,
+    tuwunel_image: str,
+    tuwunel_image_pull_policy: str,
 ) -> str:
     """Provision an instance through the platform when available, else deploy directly."""
     if '"supabase":true' in platform_health:
@@ -442,8 +442,8 @@ def resolve_instance_id(
         account_id=account_id,
         mindroom_image=mindroom_image,
         mindroom_image_pull_policy=mindroom_image_pull_policy,
-        synapse_image=synapse_image,
-        synapse_image_pull_policy=synapse_image_pull_policy,
+        tuwunel_image=tuwunel_image,
+        tuwunel_image_pull_policy=tuwunel_image_pull_policy,
     )
     return instance_id
 
@@ -464,8 +464,8 @@ def wait_for_rollout(deployment_name: str, instance_namespace: str, deployment_r
 
 
 def wait_for_instance_rollouts(instance_id: str, instance_namespace: str, deployment_rollout_timeout: str) -> None:
-    """Wait for both Synapse and MindRoom deployments to finish rolling out."""
-    wait_for_rollout(f"synapse-{instance_id}", instance_namespace, deployment_rollout_timeout)
+    """Wait for both Tuwunel and MindRoom deployments to finish rolling out."""
+    wait_for_rollout(f"tuwunel-{instance_id}", instance_namespace, deployment_rollout_timeout)
     wait_for_rollout(f"mindroom-{instance_id}", instance_namespace, deployment_rollout_timeout)
 
 
@@ -474,14 +474,14 @@ def verify_instance_http_endpoints(
     instance_id: str,
     instance_namespace: str,
     mindroom_local_port: int,
-    synapse_local_port: int,
+    tuwunel_local_port: int,
     tmp_dir: Path,
     port_forwards: list[tuple[subprocess.Popen[str], IO[str]]],
 ) -> None:
     """Verify the deployed instance readiness and UI endpoints over port-forwards."""
     mindroom_ready_url = f"http://127.0.0.1:{mindroom_local_port}/api/ready"
     mindroom_ui_url = f"http://127.0.0.1:{mindroom_local_port}/"
-    synapse_url = f"http://127.0.0.1:{synapse_local_port}/_matrix/client/versions"
+    tuwunel_url = f"http://127.0.0.1:{tuwunel_local_port}/_matrix/client/versions"
     start_port_forward_for_http_match(
         instance_namespace,
         f"svc/mindroom-{instance_id}",
@@ -496,12 +496,12 @@ def verify_instance_http_endpoints(
     wait_for_http_match(mindroom_ui_url, "MindRoom", "MindRoom dashboard")
     start_port_forward_for_http_match(
         instance_namespace,
-        f"svc/synapse-{instance_id}",
-        synapse_local_port,
+        f"svc/tuwunel-{instance_id}",
+        tuwunel_local_port,
         8008,
-        tmp_dir / "pf-synapse.log",
-        "instance Synapse",
-        synapse_url,
+        tmp_dir / "pf-tuwunel.log",
+        "instance Tuwunel",
+        tuwunel_url,
         '"versions"',
         port_forwards,
     )
@@ -516,12 +516,12 @@ def run_smoke(
     account_id: str,
     mindroom_image: str,
     mindroom_image_pull_policy: str,
-    synapse_image: str,
-    synapse_image_pull_policy: str,
+    tuwunel_image: str,
+    tuwunel_image_pull_policy: str,
     platform_backend_local_port: int,
     platform_frontend_local_port: int,
     mindroom_local_port: int,
-    synapse_local_port: int,
+    tuwunel_local_port: int,
     provisioner_api_key: str,
     smoke_require_platform_provisioning: str,
     deployment_rollout_timeout: str,
@@ -548,8 +548,8 @@ def run_smoke(
         base_domain=base_domain,
         mindroom_image=mindroom_image,
         mindroom_image_pull_policy=mindroom_image_pull_policy,
-        synapse_image=synapse_image,
-        synapse_image_pull_policy=synapse_image_pull_policy,
+        tuwunel_image=tuwunel_image,
+        tuwunel_image_pull_policy=tuwunel_image_pull_policy,
     )
     instance_id = instance_id_ref[0]
     wait_for_instance_rollouts(instance_id, instance_namespace, deployment_rollout_timeout)
@@ -557,7 +557,7 @@ def run_smoke(
         instance_id=instance_id,
         instance_namespace=instance_namespace,
         mindroom_local_port=mindroom_local_port,
-        synapse_local_port=synapse_local_port,
+        tuwunel_local_port=tuwunel_local_port,
         tmp_dir=tmp_dir,
         port_forwards=port_forwards,
     )
@@ -573,12 +573,12 @@ def main() -> int:
     account_id = os.getenv("ACCOUNT_ID", "acct-kindtest")
     mindroom_image = os.getenv("MINDROOM_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     mindroom_image_pull_policy = os.getenv("MINDROOM_IMAGE_PULL_POLICY", "IfNotPresent")
-    synapse_image = os.getenv("SYNAPSE_IMAGE", "matrixdotorg/synapse:latest")
-    synapse_image_pull_policy = os.getenv("SYNAPSE_IMAGE_PULL_POLICY", "IfNotPresent")
+    tuwunel_image = os.getenv("TUWUNEL_IMAGE", "ghcr.io/mindroom-ai/mindroom-tuwunel:latest")
+    tuwunel_image_pull_policy = os.getenv("TUWUNEL_IMAGE_PULL_POLICY", "IfNotPresent")
     platform_backend_local_port = getenv_int("PLATFORM_BACKEND_LOCAL_PORT", 18000)
     platform_frontend_local_port = getenv_int("PLATFORM_FRONTEND_LOCAL_PORT", 13000)
     mindroom_local_port = getenv_int("MINDROOM_LOCAL_PORT", 18765)
-    synapse_local_port = getenv_int("SYNAPSE_LOCAL_PORT", 18008)
+    tuwunel_local_port = getenv_int("TUWUNEL_LOCAL_PORT", 18008)
     provisioner_api_key = os.getenv("PROVISIONER_API_KEY", "kind-provisioner-key")
     smoke_require_platform_provisioning = os.getenv("SMOKE_REQUIRE_PLATFORM_PROVISIONING", "0")
     deployment_rollout_timeout = os.getenv("DEPLOYMENT_ROLLOUT_TIMEOUT", "600s")
@@ -586,7 +586,7 @@ def main() -> int:
         platform_backend_local_port,
         platform_frontend_local_port,
         mindroom_local_port,
-        synapse_local_port,
+        tuwunel_local_port,
     )
 
     instance_id_ref = [instance_id]
@@ -601,12 +601,12 @@ def main() -> int:
                 account_id=account_id,
                 mindroom_image=mindroom_image,
                 mindroom_image_pull_policy=mindroom_image_pull_policy,
-                synapse_image=synapse_image,
-                synapse_image_pull_policy=synapse_image_pull_policy,
+                tuwunel_image=tuwunel_image,
+                tuwunel_image_pull_policy=tuwunel_image_pull_policy,
                 platform_backend_local_port=platform_backend_local_port,
                 platform_frontend_local_port=platform_frontend_local_port,
                 mindroom_local_port=mindroom_local_port,
-                synapse_local_port=synapse_local_port,
+                tuwunel_local_port=tuwunel_local_port,
                 provisioner_api_key=provisioner_api_key,
                 smoke_require_platform_provisioning=smoke_require_platform_provisioning,
                 deployment_rollout_timeout=deployment_rollout_timeout,

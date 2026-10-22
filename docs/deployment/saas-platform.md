@@ -10,7 +10,7 @@ Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
 This keeps the current bill low while making later worker nodes possible.
 Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
 The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
-Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+Tenant MindRoom and Tuwunel releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
 
 Production platform values should make the storage class explicit:
 
@@ -100,7 +100,7 @@ The instance chart mounts provider keys as files under `/etc/secrets/` and sets 
 
 Provisioned instances keep their credentials in the Secret `mindroom-api-keys-{instance_id}`, which the platform backend writes outside Helm, so tenant API keys and OIDC client secrets never enter Helm release values or history.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
-The one exception is the platform-wide Matrix OIDC client secret, which only Synapse mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
+The one exception is the platform-wide Matrix OIDC client secret, which only Tuwunel mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
 The sandbox proxy token is random per instance.
 Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
 Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
@@ -111,7 +111,7 @@ Each instance gets three hosts:
 
 - `{customer}.{baseDomain}` - MindRoom dashboard and API
 - `{customer}.api.{baseDomain}` - Direct API access
-- `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
+- `{customer}.matrix.{baseDomain}` - Matrix homeserver (Tuwunel)
 
 ## Platform Deployment
 
@@ -157,9 +157,9 @@ Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is k
 
 ### Matrix SSO
 
-With `matrixOidc.enabled: "true"` (default `"false"`), instance owners sign into their instance's Synapse server with their platform login.
+With `matrixOidc.enabled: "true"` (default `"false"`), instance owners sign into their instance's Matrix server with their platform login.
 Enabling it requires `matrixOidc.clientSecret`, a random shared secret, and `matrixOidc.privateKey`, a PEM-encoded RSA private key such as one from `openssl genrsa 2048`; an external Secret holds them as `matrix_oidc_client_secret` and `matrix_oidc_private_key`.
-`matrixOidc.issuer` defaults to `https://api.{domain}/matrix-oidc`, `matrixOidc.clientId` to `mindroom-synapse`, and `matrixOidc.keyId` to `mindroom-platform`.
+`matrixOidc.issuer` defaults to `https://api.{domain}/matrix-oidc`, `matrixOidc.clientId` to `mindroom-matrix`, and `matrixOidc.keyId` to `mindroom-platform`.
 Existing instances pick up the setting when they are re-provisioned, for example with `deploy-release.sh`.
 
 ## Local Development with Kind
@@ -278,15 +278,17 @@ The script performs these steps:
 
 1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
 2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
-3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
+3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `tuwunel-{id}` and `mindroom-{id}` rollouts.
 4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance, where `baseDomain` is `provisioner.instanceBaseDomain` or, when that is empty, `domain`.
 
 It reads the domain, environment, Supabase URL, and platform Secret name from the release's computed Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret in the chart's `mindroom-{environment}` namespace; secrets are never printed.
 `--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
 `NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select the Helm release to upgrade.
 Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
-Tenant Synapse runs `matrixdotorg/synapse:latest` with pull policy `Always` unless the platform chart sets `provisioner.instanceSynapseImage` and `provisioner.instanceSynapseImagePullPolicy`.
-Set them there to pin or upgrade Synapse; the script keeps them across releases, and each instance switches when it is re-provisioned.
+Tenant homeservers run MindRoom's Tuwunel fork, `ghcr.io/mindroom-ai/mindroom-tuwunel:latest` with pull policy `Always`, unless the platform chart sets `provisioner.instanceTuwunelImage` and `provisioner.instanceTuwunelImagePullPolicy`.
+Set them there to pin or upgrade Tuwunel; the script keeps them across releases, and each instance switches when it is re-provisioned.
+Instances deployed with v2026.10.461 or earlier ran Synapse, and their first re-provision on a later release replaces it with an empty Tuwunel server.
+That deletes the instance's Matrix accounts, rooms, messages, and uploaded files, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
 The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.
@@ -343,7 +345,7 @@ Each customer instance gets:
 
 - Separate Kubernetes deployment in `mindroom-instances` namespace
 - Isolated PersistentVolumeClaim for data
-- Own Matrix/Synapse server (SQLite)
+- Own Matrix server, MindRoom's Tuwunel fork, which binds OpenID tokens so MindRoom Chat can open the instance's [Connections](../connections-portal.md) without settings
 - Independent ConfigMap configuration
 - Dedicated ingress routes
 
@@ -358,7 +360,7 @@ Tenants share the namespace, so their isolation comes from these controls:
   The matching ephemeral-storage requests stay at 64 MiB, because every tenant's requests count against the node's allocatable ephemeral storage and large ones would leave new tenant pods unschedulable.
 
 Platform services run in `mindroom-{environment}` namespace.
-The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The hosted SaaS chart runs a Tuwunel server per tenant, with server names such as `{customer}.mindroom.chat`.
 The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
 Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
 The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.

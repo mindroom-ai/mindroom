@@ -57,24 +57,55 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-      - name: wait-for-synapse
+      - name: wait-for-tuwunel
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
         imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
         command: ["/bin/sh", "-ec"]
         args:
         - |
           while true; do
-            body="$(curl --silent --show-error --max-time 5 "${SYNAPSE_READY_URL}" || true)"
+            body="$(curl --silent --show-error --max-time 5 "${MATRIX_READY_URL}" || true)"
             if printf '%s' "${body}" | grep -q '"versions"'; then
-              echo "Synapse is ready: ${SYNAPSE_READY_URL}"
+              echo "Tuwunel is ready: ${MATRIX_READY_URL}"
               exit 0
             fi
-            echo "Waiting for Synapse at ${SYNAPSE_READY_URL}"
+            echo "Waiting for Tuwunel at ${MATRIX_READY_URL}"
             sleep 2
           done
         env:
-        - name: SYNAPSE_READY_URL
-          value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
+        - name: MATRIX_READY_URL
+          value: "http://tuwunel-{{ .Values.customer }}:8008/_matrix/client/versions"
+      # LEGACY_COMPAT: tenant storage from a Synapse homeserver
+      # Legacy format: tenant storage with no .homeserver-tuwunel marker holds the Matrix state bound to the tenant's
+      # Synapse server, which Tuwunel replaced with an empty database: matrix_state.yaml, encryption_keys/,
+      # sync_continuity/, and the event journal with its binding in tracking/.
+      # Last legacy release: v2026.10.461 ran tenants on Synapse; the next release runs them on Tuwunel.
+      # Handling: the first start on Tuwunel deletes that set once, as `just local-matrix-reset` does, so the runtime
+      # registers its accounts and rooms again instead of refusing to start; the marker keeps later starts from
+      # touching it. Remove once every tenant has started on Tuwunel.
+      # Coverage: tests/test_helm_instance_worker_isolation.py::test_instance_chart_resets_synapse_matrix_state_once
+      - name: reset-synapse-matrix-state
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          if [ ! -e "${STORAGE}/.homeserver-tuwunel" ]; then
+            rm -rf "${STORAGE}/matrix_state.yaml" "${STORAGE}/encryption_keys" "${STORAGE}/sync_continuity" \
+              "${STORAGE}"/tracking/event_journal*
+            touch "${STORAGE}/.homeserver-tuwunel"
+          fi
+        env:
+        - name: STORAGE
+          value: {{ .Values.storagePath | quote }}
+        volumeMounts:
+        - name: storage
+          mountPath: {{ .Values.storagePath }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       # Create the sandbox runner's storage subPaths as the runtime user; kubelet would create missing ones as root.
       - name: prepare-sandbox-runner-storage
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
@@ -165,7 +196,7 @@ spec:
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
           value: "shell,file,python,coding"
         - name: MATRIX_HOMESERVER
-          value: "http://synapse-{{ .Values.customer }}:8008"
+          value: "http://tuwunel-{{ .Values.customer }}:8008"
         - name: MINDROOM_DESKTOP_MATRIX_HOMESERVER
           value: "https://{{ .Values.customer }}.matrix.{{ .Values.baseDomain }}"
         - name: MATRIX_SERVER_NAME
@@ -275,7 +306,7 @@ spec:
         secret:
           secretName: {{ $instanceSecretName }}
           defaultMode: 0400
-          # Mount only the files this container reads; the platform-wide Matrix OIDC client secret stays with Synapse.
+          # Mount only the files this container reads; the platform-wide Matrix OIDC client secret stays with Tuwunel.
           # Missing keys stay absent as with a whole-Secret mount; the secretKeyRef env vars still require the Secret.
           optional: true
           items:

@@ -111,12 +111,12 @@ Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account
 | POST | `/my/sso-cookie` | `sso.py` | `src/lib/api.ts` → auth completion and dashboard: set the SSO cookie |
 | DELETE | `/my/sso-cookie` | `sso.py` | `src/lib/api.ts` → `src/hooks/useAuth.tsx`: clear the SSO cookie |
 | GET | `/instance-sso/authorize` | `sso.py` | Instance runtime login redirect: issue a single-use login ticket to an owned instance dashboard |
-| GET | `/matrix-oidc/.well-known/openid-configuration` | `matrix_oidc.py` | OIDC discovery for Synapse |
+| GET | `/matrix-oidc/.well-known/openid-configuration` | `matrix_oidc.py` | OIDC discovery for tenant homeservers |
 | GET | `/.well-known/openid-configuration/matrix-oidc` | `matrix_oidc.py` | Alternate OIDC discovery path |
 | GET | `/matrix-oidc/jwks.json` | `matrix_oidc.py` | Public signing keys for the OIDC client |
-| GET | `/matrix-oidc/authorize` | `matrix_oidc.py` | Synapse browser redirect flow using platform-cookie authentication |
-| POST | `/matrix-oidc/token` | `matrix_oidc.py` | Synapse authorization-code exchange with client authentication |
-| GET | `/matrix-oidc/userinfo` | `matrix_oidc.py` | Synapse user-info request with an OIDC access token |
+| GET | `/matrix-oidc/authorize` | `matrix_oidc.py` | Tenant homeserver browser redirect flow using platform-cookie authentication |
+| POST | `/matrix-oidc/token` | `matrix_oidc.py` | Tenant homeserver authorization-code exchange with client authentication |
+| GET | `/matrix-oidc/userinfo` | `matrix_oidc.py` | Tenant homeserver user-info request with an OIDC access token |
 
 The six Matrix OIDC operations participate in the Matrix login flow rather than direct platform frontend API calls.
 They are registered even when OIDC is disabled; their handlers check whether the integration is enabled.

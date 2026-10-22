@@ -35,8 +35,6 @@ from backend.config import (
     INSTANCE_MATRIX_OIDC_ISSUER,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
-    INSTANCE_SYNAPSE_IMAGE,
-    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
     INSTANCE_STORAGE_CLASS_NAME,
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
@@ -48,6 +46,8 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
     INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
+    INSTANCE_TUWUNEL_IMAGE,
+    INSTANCE_TUWUNEL_IMAGE_PULL_POLICY,
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
@@ -101,12 +101,12 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
         "mindroomResources.limits.ephemeral-storage": "32Gi",
-        "synapseResources.requests.memory": "384Mi",
-        "synapseResources.requests.cpu": "100m",
-        "synapseResources.requests.ephemeral-storage": "64Mi",
-        "synapseResources.limits.memory": "4Gi",
-        "synapseResources.limits.cpu": "2000m",
-        "synapseResources.limits.ephemeral-storage": "4Gi",
+        "tuwunelResources.requests.memory": "384Mi",
+        "tuwunelResources.requests.cpu": "100m",
+        "tuwunelResources.requests.ephemeral-storage": "64Mi",
+        "tuwunelResources.limits.memory": "4Gi",
+        "tuwunelResources.limits.cpu": "2000m",
+        "tuwunelResources.limits.ephemeral-storage": "4Gi",
         "sandboxRunnerResources.requests.memory": "256Mi",
         "sandboxRunnerResources.requests.cpu": "50m",
         "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
@@ -179,7 +179,7 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
 
 
 def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
-    """Derive a stable per-instance Synapse registration shared secret."""
+    """Derive a stable per-instance Matrix registration shared secret."""
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
@@ -206,8 +206,8 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _matrix_localpart_from_email(email: str) -> str:
-    """Return the Matrix localpart Synapse derives from our OIDC email template."""
+def matrix_localpart_from_email(email: str) -> str:
+    """Return the Matrix localpart the platform's OIDC issuer asks tenant homeservers to give an account email."""
     email_localpart = email.strip().lower().rsplit("@", maxsplit=1)[0]
     if not email_localpart:
         msg = "Account email is required to configure Matrix owner access"
@@ -222,7 +222,7 @@ def _matrix_localpart_from_email(email: str) -> str:
 
 def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domain: str) -> str:
     """Build the hosted tenant owner MXID from a platform account email."""
-    return f"@{_matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
+    return f"@{matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
 
 
 def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
@@ -288,7 +288,7 @@ def _instance_secret_name(instance_id: str) -> str:
 
 def _instance_pvc_names(instance_id: str | int) -> list[str]:
     """Return the chart-managed PVC names that hold one instance's data."""
-    return [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
+    return [f"mindroom-storage-{instance_id}", f"tuwunel-storage-{instance_id}"]
 
 
 def _instance_secret_names(instance_id: str | int) -> list[str]:
@@ -861,7 +861,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
         # Tenant workloads are untrusted, so every value here must be scoped to this instance,
-        # except the platform-wide OIDC client secret, which the instance chart mounts only into Synapse.
+        # except the platform-wide OIDC client secret, which the instance chart mounts only into Tuwunel.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",
@@ -932,10 +932,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "--set",
                 (f"matrixHomeserverStartupTimeoutSeconds={INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS}"),
             ]
-        if INSTANCE_SYNAPSE_IMAGE:
-            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
-        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
-            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+        if INSTANCE_TUWUNEL_IMAGE:
+            helm_args += ["--set", f"tuwunel_image={INSTANCE_TUWUNEL_IMAGE}"]
+        if INSTANCE_TUWUNEL_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"tuwunel_image_pull_policy={INSTANCE_TUWUNEL_IMAGE_PULL_POLICY}"]
         if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
             helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN:
@@ -971,7 +971,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         if created_openrouter_key is not None:
             await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
         # Apply before Helm so pods restarted by the new secret hash read the new values;
-        # Synapse reads its OIDC client secret only at startup.
+        # Tuwunel reads its OIDC client secret only at startup.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:

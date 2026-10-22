@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+import tomllib
 from contextlib import closing
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -207,6 +208,10 @@ def _instance_secret_hash(**overrides: str) -> str:
         secret_data["platform_sso_secret"],
     ]
     return hashlib.sha256("|".join(ordered_values).encode("utf-8")).hexdigest()
+
+
+def _tuwunel_config(docs: list[dict[str, Any]], customer: str) -> dict[str, Any]:
+    return tomllib.loads(_resource(docs, "ConfigMap", f"tuwunel-config-{customer}")["data"]["tuwunel.toml"])["global"]
 
 
 @pytest.mark.parametrize("worker_backend", ["kubernetes", "docker"])
@@ -431,7 +436,6 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         ),
     )
     mindroom_config = yaml.safe_load(_resource(docs, "ConfigMap", "mindroom-config-42")["data"]["config.yaml"])
-    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-42")["data"]["homeserver.yaml"])
 
     assert "access_model" not in mindroom_config
     assert mindroom_config["administrators"] == ["@owner:42.example.test"]
@@ -443,11 +447,7 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
         "admins": ["@owner:42.example.test"],
     }
     Config.model_validate(mindroom_config)
-    assert synapse_config["auto_join_rooms"] == [
-        "#lobby:42.example.test",
-        "#dev:42.example.test",
-    ]
-    assert synapse_config["autocreate_auto_join_rooms"] is False
+    assert _tuwunel_config(docs, "42")["auto_join_rooms"] == ["#lobby:42.example.test", "#dev:42.example.test"]
 
 
 @pytest.mark.parametrize(
@@ -455,20 +455,69 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
     [(), ("matrixOidc.enabled=true", "matrixOidc.issuer=https://api.example.test/matrix-oidc")],
     ids=["default", "oidc"],
 )
-def test_instance_chart_closes_public_synapse_registration(oidc_args: tuple[str, ...]) -> None:
-    """Tenant homeservers are public, so no mode may accept anonymous self-registration."""
+def test_instance_chart_closes_public_tuwunel_registration(oidc_args: tuple[str, ...]) -> None:
+    """Tenant homeservers are public, so no mode may accept anonymous self-registration or grant server admin."""
     docs = _render_chart(Path("cluster/k8s/instance"), *oidc_args)
-    synapse_config = yaml.safe_load(_resource(docs, "ConfigMap", "synapse-config-demo")["data"]["homeserver.yaml"])
+    tuwunel_config = _tuwunel_config(docs, "demo")
 
-    assert synapse_config["enable_registration"] is False
-    assert synapse_config["enable_registration_without_verification"] is False
-    assert synapse_config["registration_shared_secret_path"] == (
+    assert tuwunel_config["allow_registration"] is False
+    assert tuwunel_config["registration_shared_secret_file"] == (
         "/etc/mindroom-secrets/matrix_registration_shared_secret"  # noqa: S105
     )
-    assert synapse_config["rc_registration"] == {"per_second": 0.17, "burst_count": 3}
-    assert synapse_config["rc_login"]["failed_attempts"] == {"per_second": 0.17, "burst_count": 3}
-    assert synapse_config["rc_login"]["account"]["per_second"] < 1
-    assert synapse_config["rc_login"]["address"]["per_second"] < 1
+    assert tuwunel_config["grant_admin_to_first_user"] is False
+    assert tuwunel_config["allow_federation"] is False
+    # Wrong passwords keep Tuwunel's default brute-force limit; only successful sign-ins get a larger burst.
+    assert tuwunel_config["rate_limiting"]["login"] == {"account": {"per_second": 0.05, "burst_count": 10}}
+
+
+def test_instance_chart_signs_owners_in_through_platform_oidc_with_bound_tokens() -> None:
+    """The platform names the owner's localpart, and OpenID tokens stay bound to the server that asked."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=42",
+        "baseDomain=example.test",
+        "matrixOidc.enabled=true",
+        "matrixOidc.issuer=https://api.example.test/matrix-oidc",
+    )
+    tuwunel_config = _tuwunel_config(docs, "42")
+
+    assert tuwunel_config["server_name"] == "42.example.test"
+    assert tuwunel_config["mindroom_openid_audience"] is True
+    assert tuwunel_config["identity_provider"] == [
+        {
+            "brand": "mindroom",
+            "name": "MindRoom",
+            "client_id": "mindroom-matrix",
+            "client_secret_file": "/etc/mindroom-secrets/matrix_oidc_client_secret",
+            "issuer_url": "https://api.example.test/matrix-oidc",
+            "callback_url": "https://42.matrix.example.test/_matrix/client/unstable/login/sso/callback/mindroom-matrix",
+            "scope": ["openid", "profile", "email"],
+            "userid_claims": ["preferred_username"],
+        },
+    ]
+    assert "identity_provider" not in _tuwunel_config(_render_instance_chart(), "demo")
+
+
+def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None:
+    """The first start on Tuwunel drops the Synapse accounts the runtime stored; later starts keep the new ones."""
+    deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
+    reset = next(
+        container
+        for container in deployment["spec"]["template"]["spec"]["initContainers"]
+        if container["name"] == "reset-synapse-matrix-state"
+    )
+    state = tmp_path / "matrix_state.yaml"
+
+    def start() -> None:
+        subprocess.run([*reset["command"], *reset["args"]], env={**os.environ, "STORAGE": str(tmp_path)}, check=True)
+
+    state.write_text("accounts: synapse\n")
+    start()
+    assert not state.exists()
+    state.write_text("accounts: tuwunel\n")
+    start()
+    assert state.read_text() == "accounts: tuwunel\n"
+    assert _env_by_name(reset)["STORAGE"]["value"] == "/mindroom_data"
 
 
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
@@ -939,7 +988,7 @@ def test_instance_chart_exposes_public_matrix_url_to_desktop_pairing() -> None:
     deployment = _resource(docs, "Deployment", "mindroom-alice")
     env = _env_by_name(_container(deployment, "mindroom"))
 
-    assert env["MATRIX_HOMESERVER"]["value"] == "http://synapse-alice:8008"
+    assert env["MATRIX_HOMESERVER"]["value"] == "http://tuwunel-alice:8008"
     assert env["MINDROOM_DESKTOP_MATRIX_HOMESERVER"]["value"] == "https://alice.matrix.staging.mindroom.chat"
 
 
@@ -1147,14 +1196,14 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
         "credentials_encryption_key=must-not-render",
         "matrixOidc.enabled=true",
         "matrixOidc.issuer=https://api.mindroom.chat/matrix-oidc",
-        "matrixOidc.clientId=mindroom-synapse",
+        "matrixOidc.clientId=mindroom-matrix",
         "matrixOidc.clientSecret=must-not-render-oidc",
         "matrixRegistrationSharedSecret=must-not-render-registration",
         "platformSsoSecret=must-not-render-platform-sso",
     )
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
-    synapse_config = _resource(docs, "ConfigMap", "synapse-config-demo")["data"]["homeserver.yaml"]
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
+    tuwunel_config = _tuwunel_config(docs, "demo")
     rendered = json.dumps(docs)
     mindroom_container = _container(mindroom, "mindroom")
     mindroom_env = {env["name"]: env.get("value") for env in mindroom_container["env"]}
@@ -1174,15 +1223,19 @@ def test_instance_chart_can_use_existing_secret_for_sensitive_values() -> None:
     }
     assert mindroom_env["MINDROOM_PLATFORM_SSO_URL"] == "https://api.mindroom.chat/instance-sso/authorize"
     assert mindroom["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
-    assert synapse["spec"]["template"]["spec"]["volumes"][2]["secret"]["secretName"] == "tenant-runtime-secrets"
+    assert _volumes_by_name(tuwunel)["mindroom-secrets"]["secret"]["secretName"] == "tenant-runtime-secrets"
     assert mindroom["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
-    assert synapse["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
+    assert tuwunel["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/instance-secret-hash"] == "abc123"
     assert mindroom_env["MATRIX_REGISTRATION_SHARED_SECRET_FILE"] == (
         "/etc/secrets/matrix_registration_shared_secret"  # noqa: S105
     )
-    assert "registration_shared_secret_path: /etc/mindroom-secrets/matrix_registration_shared_secret" in synapse_config
-    assert "registration_shared_secret:" not in synapse_config
-    assert yaml.safe_load(synapse_config)["password_config"] == {"enabled": True}
+    assert tuwunel_config["registration_shared_secret_file"] == (
+        "/etc/mindroom-secrets/matrix_registration_shared_secret"  # noqa: S105
+    )
+    assert "registration_shared_secret" not in tuwunel_config
+    assert tuwunel_config["identity_provider"][0]["client_secret_file"] == (
+        "/etc/mindroom-secrets/matrix_oidc_client_secret"  # noqa: S105
+    )
 
 
 def test_instance_chart_never_gives_tenant_the_supabase_service_key() -> None:
@@ -1200,11 +1253,11 @@ def test_instance_chart_never_gives_tenant_the_supabase_service_key() -> None:
     assert "SUPABASE_ANON_KEY" in mindroom_env
 
 
-def test_instance_chart_mounts_the_platform_oidc_client_secret_only_into_synapse() -> None:
+def test_instance_chart_mounts_the_platform_oidc_client_secret_only_into_tuwunel() -> None:
     """The Matrix OIDC client secret is platform-wide, so tenant code in the MindRoom container must not read it."""
     docs = _render_instance_chart()
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
     mounted_keys = {item["key"] for item in _volumes_by_name(mindroom)["api-keys"]["secret"].get("items", [])}
     secret_files = {
         env["value"]
@@ -1214,7 +1267,10 @@ def test_instance_chart_mounts_the_platform_oidc_client_secret_only_into_synapse
 
     assert {f"/etc/secrets/{key}" for key in mounted_keys} == secret_files
     assert "matrix_oidc_client_secret" not in mounted_keys
-    assert "items" not in _volumes_by_name(synapse)["mindroom-secrets"]["secret"]
+    assert {item["key"] for item in _volumes_by_name(tuwunel)["mindroom-secrets"]["secret"]["items"]} == {
+        "matrix_oidc_client_secret",
+        "matrix_registration_shared_secret",
+    }
 
 
 def test_instance_chart_points_platform_login_at_platform_domain() -> None:
@@ -1459,41 +1515,43 @@ def test_instance_chart_requests_fit_measured_tenant_use() -> None:
     """Default requests decide how many tenants fit on a node, so they stay near measured idle use."""
     docs = _render_instance_chart()
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
 
     requests = {
         "mindroom": _container(mindroom, "mindroom")["resources"]["requests"],
         "sandbox-runner": _container(mindroom, "sandbox-runner")["resources"]["requests"],
-        "synapse": _container(synapse, "synapse")["resources"]["requests"],
+        "tuwunel": _container(tuwunel, "tuwunel")["resources"]["requests"],
     }
     assert requests == {
         "mindroom": {"cpu": "100m", "memory": "320Mi", "ephemeral-storage": "64Mi"},
         "sandbox-runner": {"cpu": "25m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
-        "synapse": {"cpu": "50m", "memory": "192Mi", "ephemeral-storage": "64Mi"},
+        "tuwunel": {"cpu": "50m", "memory": "192Mi", "ephemeral-storage": "64Mi"},
     }
+    # Tuwunel would otherwise size its database pool to the node's cores and idle well above its request.
+    assert _tuwunel_config(docs, "demo")["db_pool_max_workers"] == 16
 
 
 def test_instance_chart_renders_configurable_control_plane_resources() -> None:
-    """Tenant MindRoom and Synapse resources should be configurable per release."""
+    """Tenant MindRoom and Tuwunel resources should be configurable per release."""
     docs = _render_chart(
         Path("cluster/k8s/instance"),
         "mindroomResources.requests.cpu=300m",
         "mindroomResources.requests.memory=768Mi",
         "mindroomResources.limits.cpu=1500m",
         "mindroomResources.limits.memory=3Gi",
-        "synapseResources.requests.cpu=350m",
-        "synapseResources.requests.memory=1Gi",
-        "synapseResources.limits.memory=4Gi",
-        set_string_args=("synapseResources.limits.cpu=2",),
+        "tuwunelResources.requests.cpu=350m",
+        "tuwunelResources.requests.memory=1Gi",
+        "tuwunelResources.limits.memory=4Gi",
+        set_string_args=("tuwunelResources.limits.cpu=2",),
     )
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
 
     assert _container(mindroom, "mindroom")["resources"] == {
         "requests": {"cpu": "300m", "memory": "768Mi", "ephemeral-storage": "64Mi"},
         "limits": {"cpu": "1500m", "memory": "3Gi", "ephemeral-storage": "16Gi"},
     }
-    assert _container(synapse, "synapse")["resources"] == {
+    assert _container(tuwunel, "tuwunel")["resources"] == {
         "requests": {"cpu": "350m", "memory": "1Gi", "ephemeral-storage": "64Mi"},
         "limits": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "2Gi"},
     }
@@ -1509,11 +1567,11 @@ def test_instance_chart_bounds_ephemeral_storage_of_every_tenant_container(works
     set_args = () if workspace_size_limit is None else (f"sandboxRunnerWorkspaceSizeLimit={workspace_size_limit}",)
     docs = _render_chart(Path("cluster/k8s/instance"), *set_args)
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
     containers = [
         _container(mindroom, "mindroom"),
         _container(mindroom, "sandbox-runner"),
-        _container(synapse, "synapse"),
+        _container(tuwunel, "tuwunel"),
     ]
 
     for container in containers:
@@ -1529,17 +1587,17 @@ def test_instance_chart_renders_with_pre_resource_release_values(tmp_path: Path)
     """Older release values should not break chart upgrades before resources are set."""
     values_path = tmp_path / "old-instance-values.yaml"
     values_path.write_text(
-        "customer: demo\nbaseDomain: mindroom.chat\nmindroomResources:\nsynapseResources:\nsandboxRunnerResources:\n",
+        "customer: demo\nbaseDomain: mindroom.chat\nmindroomResources:\ntuwunelResources:\nsandboxRunnerResources:\n",
         encoding="utf-8",
     )
 
     docs = _render_chart(Path("cluster/k8s/instance"), values_files=(values_path,))
     mindroom = _resource(docs, "Deployment", "mindroom-demo")
-    synapse = _resource(docs, "Deployment", "synapse-demo")
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
 
     assert _container(mindroom, "mindroom")["resources"] == {}
     assert _container(mindroom, "sandbox-runner")["resources"] == {}
-    assert _container(synapse, "synapse")["resources"] == {}
+    assert _container(tuwunel, "tuwunel")["resources"] == {}
 
 
 def test_platform_chart_renders_default_resources_for_stateless_services() -> None:

@@ -83,8 +83,8 @@ def _applied_instance_secret_data(apply_secret: AsyncMock) -> dict[str, str]:
     return bound.arguments["secret_data"]
 
 
-def test_owner_matrix_user_id_from_email_matches_synapse_oidc_template() -> None:
-    """Hosted owner MXIDs should match Synapse's OIDC email localpart mapping."""
+def test_owner_matrix_user_id_from_email_escapes_what_matrix_localparts_forbid() -> None:
+    """Hosted owner MXIDs lowercase the email localpart and escape characters Matrix forbids or reserves."""
     from backend.services.provisioner_service import _owner_matrix_user_id_from_email
 
     assert (
@@ -705,9 +705,9 @@ class TestProvisionerEndpoints:
             "mindroomResources.requests.memory": "640Mi",
             "mindroomResources.requests.cpu": "200m",
             "mindroomResources.requests.ephemeral-storage": "64Mi",
-            "synapseResources.requests.memory": "384Mi",
-            "synapseResources.requests.cpu": "100m",
-            "synapseResources.requests.ephemeral-storage": "64Mi",
+            "tuwunelResources.requests.memory": "384Mi",
+            "tuwunelResources.requests.cpu": "100m",
+            "tuwunelResources.requests.ephemeral-storage": "64Mi",
             "sandboxRunnerResources.requests.memory": "256Mi",
             "sandboxRunnerResources.requests.cpu": "50m",
             "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
@@ -759,7 +759,7 @@ class TestProvisionerEndpoints:
             "backend.services.provisioner_service",
             INSTANCE_MATRIX_OIDC_ENABLED="true",
             INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.test/matrix-oidc",
-            INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-matrix",
         ):
             response = client.post(
                 "/system/provision",
@@ -941,7 +941,7 @@ class TestProvisionerEndpoints:
         ("pvc_names", "keyless"),
         [
             pytest.param([], False, id="torn-down"),
-            pytest.param(["mindroom-storage-456", "synapse-storage-456"], True, id="existing-volume"),
+            pytest.param(["mindroom-storage-456", "tuwunel-storage-456"], True, id="existing-volume"),
         ],
     )
     def test_reprovision_without_a_stored_key_keeps_plaintext_only_on_an_existing_volume(
@@ -1115,7 +1115,7 @@ class TestProvisionerEndpoints:
         # Verify the full tenant stack was started in dependency order.
         mock_kubectl.assert_has_awaits(
             [
-                call(["scale", "deployment/synapse-123", "--replicas=1"], namespace="mindroom-instances"),
+                call(["scale", "deployment/tuwunel-123", "--replicas=1"], namespace="mindroom-instances"),
                 call(["scale", "deployment/mindroom-123", "--replicas=1"], namespace="mindroom-instances"),
             ]
         )
@@ -1158,9 +1158,9 @@ class TestProvisionerEndpoints:
         mock_update_status: Mock,
         valid_auth_header: dict,
     ):
-        """Test start only marks running after Synapse and MindRoom are both scaled."""
+        """Test start only marks running after Tuwunel and MindRoom are both scaled."""
         # Setup
-        mock_kubectl.side_effect = [(0, "synapse scaled", ""), (1, "", "mindroom error")]
+        mock_kubectl.side_effect = [(0, "tuwunel scaled", ""), (1, "", "mindroom error")]
 
         # Make request
         response = client.post("/system/instances/123/start", headers=valid_auth_header)
@@ -1170,7 +1170,7 @@ class TestProvisionerEndpoints:
         assert "Failed to start instance" in response.json()["detail"]
         mock_kubectl.assert_has_awaits(
             [
-                call(["scale", "deployment/synapse-123", "--replicas=1"], namespace="mindroom-instances"),
+                call(["scale", "deployment/tuwunel-123", "--replicas=1"], namespace="mindroom-instances"),
                 call(["scale", "deployment/mindroom-123", "--replicas=1"], namespace="mindroom-instances"),
             ]
         )
@@ -1198,7 +1198,7 @@ class TestProvisionerEndpoints:
         mock_kubectl.assert_has_awaits(
             [
                 call(["scale", "deployment/mindroom-123", "--replicas=0"], namespace="mindroom-instances"),
-                call(["scale", "deployment/synapse-123", "--replicas=0"], namespace="mindroom-instances"),
+                call(["scale", "deployment/tuwunel-123", "--replicas=0"], namespace="mindroom-instances"),
             ]
         )
         assert mock_kubectl.await_count == 2
@@ -1234,7 +1234,7 @@ class TestProvisionerEndpoints:
         # Verify both tenant deployments were restarted.
         mock_kubectl.assert_has_awaits(
             [
-                call(["rollout", "restart", "deployment/synapse-123"], namespace="mindroom-instances"),
+                call(["rollout", "restart", "deployment/tuwunel-123"], namespace="mindroom-instances"),
                 call(["rollout", "restart", "deployment/mindroom-123"], namespace="mindroom-instances"),
             ]
         )
@@ -1290,7 +1290,7 @@ class TestProvisionerEndpoints:
                         "delete",
                         "pvc",
                         "mindroom-storage-123",
-                        "synapse-storage-123",
+                        "tuwunel-storage-123",
                         "--ignore-not-found",
                         "--wait=false",
                     ],

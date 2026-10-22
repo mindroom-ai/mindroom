@@ -19,10 +19,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: synapse-{{ .Values.customer }}
+  name: tuwunel-{{ .Values.customer }}
   namespace: mindroom-instances
   labels:
-    app: synapse
+    app: tuwunel
     customer: {{ .Values.customer | quote }}
 spec:
   type: ClusterIP
@@ -31,5 +31,5 @@ spec:
     targetPort: 8008
     name: http
   selector:
-    app: synapse
+    app: tuwunel
     customer: {{ .Values.customer | quote }}

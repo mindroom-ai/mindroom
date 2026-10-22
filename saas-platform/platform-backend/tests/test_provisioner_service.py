@@ -60,7 +60,7 @@ class TestHelmArgsAssembly:
             provisioner_service,
             INSTANCE_MATRIX_OIDC_ENABLED="true",
             INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.test/matrix-oidc",
-            INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
+            INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-matrix",
         ):
             provisioner_service._append_matrix_oidc_helm_args(helm_args)
 
@@ -68,7 +68,7 @@ class TestHelmArgsAssembly:
         set_string_pairs = [helm_args[i + 1] for i, arg in enumerate(helm_args) if arg == "--set-string"]
         assert "matrixOidc.enabled=true" in set_pairs
         assert "matrixOidc.issuer=https://api.mindroom.test/matrix-oidc" in set_pairs
-        assert "matrixOidc.clientId=mindroom-synapse" in set_pairs
+        assert "matrixOidc.clientId=mindroom-matrix" in set_pairs
         assert "roomDefaults.joinPolicy=public" in set_pairs
         assert "roomDefaults.listed=false" in set_pairs
         assert set_string_pairs[0] == "matrixAutoJoinRoomKeys[0]=personal"
@@ -114,7 +114,7 @@ class TestHelmArgsAssembly:
         chart_values = yaml.safe_load((_REPOSITORY_ROOT / "cluster/k8s/instance/values.yaml").read_text())
         default_keys = {
             f"{component}.{kind}.{resource}"
-            for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources")
+            for component in ("mindroomResources", "tuwunelResources", "sandboxRunnerResources")
             for kind, quantities in chart_values[component].items()
             for resource in quantities
         }
@@ -128,7 +128,7 @@ class TestHelmArgsAssembly:
         pro = provisioner_service._RESOURCE_PROFILE_HELM_VALUES["pro"]
 
         assert chart_values["mindroomResources"]["limits"]["ephemeral-storage"] == "16Gi"
-        for component in ("mindroomResources", "synapseResources", "sandboxRunnerResources"):
+        for component in ("mindroomResources", "tuwunelResources", "sandboxRunnerResources"):
             default_gib = int(chart_values[component]["limits"]["ephemeral-storage"].removesuffix("Gi"))
             assert pro[f"{component}.limits.ephemeral-storage"] == f"{2 * default_gib}Gi"
 
@@ -139,7 +139,7 @@ class TestHelmArgsAssembly:
 
         assert requests == {
             "mindroomResources.requests.ephemeral-storage": "64Mi",
-            "synapseResources.requests.ephemeral-storage": "64Mi",
+            "tuwunelResources.requests.ephemeral-storage": "64Mi",
             "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
         }
 

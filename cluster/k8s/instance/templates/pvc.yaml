@@ -18,14 +18,14 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: synapse-storage-{{ .Values.customer }}
+  name: tuwunel-storage-{{ .Values.customer }}
   namespace: mindroom-instances
   labels:
-    app: synapse
+    app: tuwunel
     customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
-  - {{ .Values.synapseStorageAccessMode | default "ReadWriteOnce" }}
+  - {{ .Values.tuwunelStorageAccessMode | default "ReadWriteOnce" }}
   resources:
     requests:
       storage: {{ .Values.storage }}
