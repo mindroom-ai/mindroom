@@ -18,9 +18,6 @@ from pathlib import Path
 from typing import cast
 
 import yaml
-from agno.models.message import Message
-from agno.utils.models.claude import format_messages
-from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
@@ -29,9 +26,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, runtime_env_path  # noqa: E402
-from mindroom.llm.messages import Message as ProviderMessage  # noqa: E402
+from mindroom.llm.messages import Message  # noqa: E402
 from mindroom.llm.provider import ModelRequest, ModelTurn, complete  # noqa: E402
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider  # noqa: E402
+from mindroom.providers.anthropic.wire import format_claude_messages  # noqa: E402
 from mindroom.providers.cache_ladder import (  # noqa: E402
     MESSAGE_RUNG_COUNT,
     mark_message_cache_rungs,
@@ -88,7 +86,7 @@ class RequestRow:
 
 @dataclass(frozen=True)
 class RunMetrics:
-    """Cache metrics for one persisted Agno run."""
+    """Cache metrics for one persisted run."""
 
     created_at: datetime | None
     input_tokens: int
@@ -522,7 +520,7 @@ def _append_request_row(
     they carry no session id and are joined to request rows by request_log_id.
 
     Corrupt logged rows can fail anywhere in the provider-format rebuild (JSON
-    decoding, pydantic validation, Agno's message formatting), and one bad row
+    decoding, message decoding, Claude message formatting), and one bad row
     must never kill an offline review, so this deliberately catches everything
     and reports the failure instead.
     """
@@ -629,8 +627,11 @@ def build_provider_message_blobs_from_messages(
             break
 
     if is_claude_request(model_id):
-        prompt_messages = [message.model_copy(deep=True) for message in prompt_messages]
-        chat_messages, _ = format_messages(prompt_messages, compress_tool_results=True)
+        chat_messages = format_claude_messages(
+            prompt_messages,
+            append_trailing_user_message=False,
+            enable_citations=True,
+        ).messages
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
             if cache_control is not None:
@@ -654,18 +655,10 @@ def build_provider_message_blobs_from_messages(
 
 
 def parse_logged_messages(messages_raw: object) -> list[Message]:
-    """Parse logged message payloads into Agno messages suitable for comparison."""
+    """Parse logged message payloads, which the request log writes as ``Message.to_dict()``, for comparison."""
     if not isinstance(messages_raw, list):
         return []
-
-    parsed_messages: list[Message] = []
-    for message in messages_raw:
-        if not isinstance(message, dict):
-            continue
-        with suppress(ValidationError):
-            parsed_message = Message.model_validate(message)
-            parsed_messages.append(parsed_message.model_copy(update={"audio": None, "videos": None}, deep=True))
-    return parsed_messages
+    return [Message.from_dict(fields) for message in messages_raw if (fields := object_dict(message)) is not None]
 
 
 def ladder_cache_control(model_params: object) -> dict[str, str] | None:
@@ -1188,7 +1181,7 @@ def run_live_probe_sequence(
 
     for turn_index in range(1, turn_count + 1):
         request_messages = [
-            *[message.model_copy(deep=True) for message in conversation_messages],
+            *conversation_messages,
             Message(role="user", content=build_probe_user_prompt(turn_index, first_user_line_count, scenario_label)),
         ]
         request_row = build_probe_request_row(
@@ -1198,7 +1191,7 @@ def run_live_probe_sequence(
             apply_cache_ladder=install_hook,
         )
         request = ModelRequest(
-            messages=[ProviderMessage(role=message.role, content=message.content) for message in request_messages],
+            messages=tuple(request_messages),
             stream=False,
         )
         response = asyncio.run(closing_model_connections(complete(provider, request)))
@@ -1396,7 +1389,7 @@ def load_db_summaries(db_path: Path) -> dict[str, DbSessionSummary]:
 
 
 def detect_session_table_name(connection: sqlite3.Connection) -> str:
-    """Return the single Agno session table name present in the SQLite DB."""
+    """Return the single session table name present in the SQLite DB."""
     cursor = connection.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_sessions'")
     table_names = [name for (name,) in cursor.fetchall() if isinstance(name, str)]
@@ -1418,7 +1411,7 @@ def parse_nested_json(value: object) -> object:
 
 
 def parse_run_summaries(runs_value: object) -> list[RunMetrics]:
-    """Parse persisted run metrics from the nested Agno session payload."""
+    """Parse persisted run metrics from the nested session payload."""
     if not isinstance(runs_value, list):
         return []
 
