@@ -45,6 +45,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Agno's default function schema: entrypoint processing replaces it with the schema derived from the signature and
+# keeps any other schema the tool authored.
+AGNO_EMPTY_PARAMETERS: Mapping[str, Any] = {"type": "object", "properties": {}, "required": []}
+
 # Agno injects ``fc`` (its FunctionCall) by name beside the reserved framework names; the owned executor has no such
 # object, so the parameter keeps its default, but the model never fills it either way.
 _RESERVED_NAMES = frozenset((*FRAMEWORK_INJECTED_PARAMS, *AGNO_INJECTED_PARAMS, "fc"))
@@ -410,6 +414,7 @@ def _owned_file(file: AgnoFile) -> File:
 
 
 __all__ = [
+    "AGNO_EMPTY_PARAMETERS",
     "AgnoAudio",
     "AgnoFile",
     "AgnoImage",

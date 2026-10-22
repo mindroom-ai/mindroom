@@ -52,6 +52,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -90,8 +91,6 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 
 _MAX_TOOL_RESULT_CHARS = 8000
 _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
-# Agno's default function schema; a second processing pass leaves a schema equal to it open.
-_AGNO_EMPTY_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 
 
 async def _save_call_usage(
@@ -949,7 +948,7 @@ def _realtime_parameters(function: ToolFunction) -> dict[str, Any]:
     schema = dict(function.parameters)
     if not schema:
         return {"type": "object", "properties": {}}
-    if function.entrypoint_processed and schema != _AGNO_EMPTY_PARAMETERS:
+    if function.entrypoint_processed and schema != AGNO_EMPTY_PARAMETERS:
         schema["additionalProperties"] = False
     return schema
 

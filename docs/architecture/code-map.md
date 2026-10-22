@@ -139,7 +139,7 @@ Matrix sync callback
 | `tool_jobs/execution_scope.py` | Response execution envelopes |
 | `tool_jobs/resources.py` | Retained resource cleanup ownership |
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
-| `tool_jobs/execution_authority.py` | Application-entry authority checks |
+| `tool_jobs/execution_authority.py` | `JobTool` and `JobCall`, what job admission and grant checks read about an offered function and one call of it, and the application-entry authority checks on the call a task runs under |
 | `tool_jobs/provenance.py` | Exact MCP bridge identity for grant checks |
 | `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
 | `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |

@@ -21,7 +21,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
+from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, ToolResult
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -44,7 +44,6 @@ _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
-_DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _AUTO_SAVE_READ_HINT = (
     "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
@@ -248,7 +247,7 @@ def _has_output_path_argument(function: Function) -> bool:
 
 def _with_optional_output_path(parameters: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property."""
-    finished = dict(parameters or _DEFAULT_PARAMETERS)
+    finished = dict(parameters or AGNO_EMPTY_PARAMETERS)
     properties = dict(finished.get("properties") or {})
     properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
     finished["type"] = finished.get("type") or "object"
@@ -727,7 +726,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
         )
         return function
 
-    uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
+    uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != AGNO_EMPTY_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
     if uses_custom_parameters:

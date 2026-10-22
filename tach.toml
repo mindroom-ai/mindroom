@@ -4479,6 +4479,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.session_ids",
     "mindroom.approval.tool_approval",
+    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",

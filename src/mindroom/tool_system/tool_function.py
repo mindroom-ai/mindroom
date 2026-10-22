@@ -26,9 +26,9 @@ class ToolFunction:
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` names the entrypoint parameters the framework supplies at call time, which the model never
     sees and whose model-sent values are dropped.
-    ``entrypoint_processed`` marks a schema Agno's entrypoint processing produced, as it does for every Agno function
-    that does not set ``skip_entrypoint_processing`` to supply its schema as is, as MCP tools do; realtime calls
-    repeat the second processing pass Agno ran on such a schema.
+    ``entrypoint_processed`` marks a function whose entrypoint Agno would process again: one that does not set
+    ``skip_entrypoint_processing``, as MCP tools and the ``@tool`` methods a toolkit registers do to keep the schema
+    they were built with. Realtime calls repeat the second processing pass Agno ran on a marked function.
     """
 
     name: str
