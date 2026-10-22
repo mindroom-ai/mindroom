@@ -12,11 +12,9 @@ import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { sharedAgentNote } from "./accountCopy";
 import { AgentTools } from "./AgentTools";
 import { AgentAvatar } from "./AgentAvatar";
-import { EgressServiceRows } from "./EgressServiceRows";
-import { EgressServiceTable } from "./EgressServiceTable";
+import { keyCounts, keysSetText } from "./egressRowText";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type { AgentConnections, ConnectionStatus } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
@@ -40,20 +38,15 @@ const accountKey = (agentName: string, provider: string) =>
  * read anew.
  */
 function accountCounts(agent: AgentTableRow) {
-  // A service that only limits paths is neither an account nor a key.
-  const egress = (agent.egress_services ?? []).filter(
-    (service) => !service.restrict_only,
-  );
+  const keys = keyCounts(agent.egress_services ?? []);
   const connectedServices = agent.services.filter(
     (service) =>
       agent.accounts[accountKey(agent.agent_name, service.provider)] ??
       service.connected,
   );
   return {
-    set:
-      egress.filter((service) => service.configured).length +
-      connectedServices.length,
-    total: agent.services.length + egress.length,
+    set: keys.set + connectedServices.length,
+    total: agent.services.length + keys.total,
   };
 }
 
@@ -192,64 +185,30 @@ const columns: ColumnDef<AgentTableRow>[] = [
   },
 ];
 
-/** An agent's brokered API keys and accounts, when the viewer may use its egress credentials. */
-function AgentEgress({
-  agent,
-  onChanged,
-}: {
-  agent: AgentConnections;
-  onChanged: () => void;
-}) {
+/**
+ * How many of an agent's API keys and accounts are set, when the viewer may
+ * use its egress credentials, with a link to where they are set: the Agent
+ * Keys page, the one place that manages them.
+ */
+function AgentEgress({ agent }: { agent: AgentConnections }) {
   const services = agent.egress_services;
   // An array, even an empty one, marks an agent that can use egress credentials.
   if (!Array.isArray(services)) return null;
-  // The catalog gives the agent's scope only through its services, which all share it.
-  const shared = services.some((service) => service.is_shared);
   // Nobody who can change none of an agent's services manages it; with no services there is no telling.
   const viewOnly =
     services.length > 0 && services.every((service) => !service.can_manage);
   return (
-    <div className="border-t border-border/60">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-5 pt-4">
-        <h3 className="text-xs font-medium text-muted-foreground">
-          API keys and accounts
-        </h3>
-        <a
-          href={`/connections/egress#egress-agent-${agent.agent_name}`}
-          className="text-xs font-medium text-primary underline-offset-4 hover:underline"
-        >
-          {viewOnly ? "View services" : "Manage services"}
-        </a>
-      </div>
-      {shared && (
-        <p className="px-5 pt-2 text-xs text-muted-foreground">
-          {sharedAgentNote(
-            services.some((service) => service.can_manage),
-            agent.managers,
-          )}
-        </p>
-      )}
-      {services.length ? (
-        <EgressServiceTable
-          label={`API keys and accounts for ${agent.agent_display_name}`}
-        >
-          <EgressServiceRows
-            agentName={agent.agent_name}
-            services={services}
-            onChanged={onChanged}
-            agent={{
-              displayName: agent.agent_display_name,
-              shared,
-              managers: agent.managers,
-              services,
-            }}
-          />
-        </EgressServiceTable>
-      ) : (
-        <p className="px-5 py-4 text-sm text-muted-foreground">
-          No services are set up for this agent yet.
-        </p>
-      )}
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 px-5 py-3">
+      <h3 className="text-sm font-medium">API keys and accounts</h3>
+      <span className="text-sm text-muted-foreground">
+        {keysSetText(services)}
+      </span>
+      <a
+        href={`/connections/egress#egress-agent-${agent.agent_name}`}
+        className="ml-auto text-xs font-medium text-primary underline-offset-4 hover:underline"
+      >
+        {viewOnly ? "View services" : "Manage services"}
+      </a>
     </div>
   );
 }
@@ -259,13 +218,11 @@ export function AgentTable({
   mcp,
   refreshVersion,
   onConnectionChange,
-  onEgressChange,
 }: {
   agents: AgentConnections[];
   mcp: McpSelectionState;
   refreshVersion: number;
   onConnectionChange: () => void;
-  onEgressChange: () => void;
 }) {
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [search, setSearch] = useState("");
@@ -433,10 +390,7 @@ export function AgentTable({
                           onConnectionChange={onConnectionChange}
                           onAccountStatus={onAccountStatus}
                         />
-                        <AgentEgress
-                          agent={row.original}
-                          onChanged={onEgressChange}
-                        />
+                        <AgentEgress agent={row.original} />
                       </section>
                     </td>
                   </tr>

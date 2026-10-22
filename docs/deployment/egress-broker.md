@@ -340,7 +340,7 @@ On a standalone deployment the script authenticates with `Authorization: Bearer 
 
 ### Connecting an account
 
-On the personal egress page, the dashboard panel, and the Connections portal, a service with an account provider offers **Connect**, which opens the provider's login in a popup.
+On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which opens the provider's login in a popup.
 A connected row shows "Connected" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
 In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
@@ -431,7 +431,8 @@ Another service of the user's own (or, on a shared agent, its credential manager
 ## Connections pages
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
-Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat, and the portal links each agent to its section on the personal page, where services are added, edited, and deleted.
+Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat.
+The portal shows how many of each agent's keys and accounts are set and links to the agent's section on the personal page, where keys are set and services are added, edited, and deleted.
 The personal page lists each agent with how many of its keys and accounts are set; expand an agent to see its services.
 Each service row shows the action that makes it work, such as **Connect** or **Set key**, as a button, and keeps the rest, such as **Replace key**, **Disconnect**, **Edit service**, and **Delete service**, in its **⋯** menu.
 

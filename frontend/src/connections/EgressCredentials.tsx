@@ -17,7 +17,11 @@ import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
 import { configPlaceholderOwners } from "./egressServiceNotes";
-import type { RowAgent, ServiceEditing } from "./egressRowText";
+import {
+  keysSetText,
+  type RowAgent,
+  type ServiceEditing,
+} from "./egressRowText";
 import { EgressServiceRows, keyPath, servicePath } from "./EgressServiceRows";
 import { EgressServiceTable } from "./EgressServiceTable";
 import {
@@ -527,15 +531,6 @@ function AgentSection({
   );
 }
 
-/** How many of an agent's keys and accounts are set, out of all it can have; a limit has neither. */
-function keyCounts(agent: EgressCredentialAgent) {
-  const services = agent.services.filter((service) => !service.restrict_only);
-  return {
-    set: services.filter((service) => service.configured).length,
-    total: services.length,
-  };
-}
-
 /** The agent the page was opened for, from a `#egress-agent-<name>` link such as Manage services on the Agents tab. */
 function linkedAgent(): string | null {
   const prefix = "#egress-agent-";
@@ -556,7 +551,6 @@ function AgentRow({
   onToggle: () => void;
   onChanged: () => void;
 }) {
-  const { set, total } = keyCounts(agent);
   return (
     <>
       <tr
@@ -605,7 +599,7 @@ function AgentRow({
           data-label="Keys and accounts"
           className={`px-5 py-4 text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
         >
-          {total === 0 ? "None" : `${set} of ${total} set`}
+          {keysSetText(agent.services)}
         </td>
       </tr>
       {/* Hidden rather than removed, so closing the row keeps an open editor

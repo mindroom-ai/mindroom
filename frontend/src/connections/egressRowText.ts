@@ -213,3 +213,18 @@ export function limitOf(
     ) ?? null
   );
 }
+
+/** How many of these services' keys and accounts are set, out of all of them; a limit has neither. */
+export function keyCounts(services: readonly EgressCredentialService[]) {
+  const keyed = services.filter((service) => !service.restrict_only);
+  return {
+    set: keyed.filter((service) => service.configured).length,
+    total: keyed.length,
+  };
+}
+
+/** "2 of 6 set", or "None" when there is no key or account to set. */
+export function keysSetText(services: readonly EgressCredentialService[]) {
+  const { set, total } = keyCounts(services);
+  return total === 0 ? "None" : `${set} of ${total} set`;
+}

@@ -13,7 +13,6 @@ import {
   expectNoAction,
   oauthStatus,
   pressInDialog,
-  rowAction,
 } from "@/test/egressServiceTestKit";
 import { Connections } from "./Connections";
 import type { ConnectionService, EgressCredentialService } from "./types";
@@ -134,41 +133,29 @@ it("keeps account management available without offering MCP access to management
 describe("brokered API keys on agent cards", () => {
   const egressService = credentialService();
 
-  it("lists the agent's API keys and refreshes the catalog after a save", async () => {
-    let configured = false;
-    let catalogRequests = 0;
-    installApi({
-      "/api/connections": async () => {
-        catalogRequests += 1;
-        return json(
-          withEgress([
-            {
-              ...egressService,
-              configured,
-              key_configured: configured,
-              active_source: configured ? "key" : null,
-            },
-          ]),
-        );
-      },
-      "/api/connections/egress/agents/personal/github": async () => {
-        configured = true;
-        return new Response(null, { status: 204 });
-      },
-    });
+  it("says how many of the agent's API keys and accounts are set and links to where they are set", async () => {
+    installEgress([
+      { ...egressService, configured: true, key_configured: true },
+      { ...egressService, name: "openai", display_name: "OpenAI" },
+      // A limit is neither a key nor an account.
+      { ...egressService, name: "github-limited", restrict_only: true },
+    ]);
     render(<Connections />);
     await expandAgent();
-    expect(await screen.findByText("Not set")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Set key for GitHub" }));
-    fireEvent.change(screen.getByLabelText("GitHub API key"), {
-      target: { value: "abc" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(await rowAction("Replace key for GitHub")).toBeInTheDocument();
-    expect(catalogRequests).toBe(2);
+
     expect(
-      screen.getByRole("button", { name: "Collapse Personal assistant" }),
+      await screen.findByRole("heading", { name: "API keys and accounts" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 set")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage services" }),
+    ).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
+    // The keys are set on the Agent Keys page only.
+    expect(screen.queryByRole("row", { name: "GitHub" })).toBeNull();
+    await expectNoAction(/key for |Connect GitHub/);
   });
 
   it("shows no API key section for agents without egress services", async () => {
@@ -206,11 +193,7 @@ describe("brokered API keys on agent cards", () => {
       "href",
       `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
     );
-    expect(
-      screen.getByText("No services are set up for this agent yet."),
-    ).toBeInTheDocument();
-    // There is nothing to set a key on yet.
-    await expectNoAction(/^(Set|Replace|Remove) key for /);
+    expect(screen.getByText("None")).toBeInTheDocument();
   });
 
   it("links the API key section to the agent's services on the personal page", async () => {
@@ -251,68 +234,8 @@ describe("brokered API keys on agent cards", () => {
     expect(screen.queryByRole("link", { name: "View services" })).toBeNull();
   });
 
-  it("shows a limit on the agent's card as a row that only limits, and the administrator's row as limited", async () => {
-    const rule = (host: string, path_prefix: string) => ({
-      host,
-      port: null,
-      path_prefix,
-    });
-    installEgress([
-      {
-        ...egressService,
-        source: "config",
-        rules: [rule("api.github.com", "/"), rule("github.com", "/")],
-      },
-      {
-        ...egressService,
-        name: "github-limited",
-        display_name: "GitHub (octocat/Hello-World)",
-        source: "user",
-        restrict_only: true,
-        rules: [
-          rule("api.github.com", "/repos/octocat/Hello-World"),
-          rule("github.com", "/octocat/Hello-World"),
-          rule("github.com", "/octocat/Hello-World.git"),
-        ],
-      },
-    ]);
-    render(<Connections />);
-    await expandAgent();
-
-    const github = await screen.findByLabelText("GitHub");
-    expect(
-      within(github).getByText("Limited to octocat/Hello-World"),
-    ).toBeVisible();
-    // The portal has no editor, so there is nothing to change or remove here.
-    await expectNoAction(/limit/i);
-    const limit = screen.getByLabelText("GitHub (octocat/Hello-World)");
-    expect(within(limit).getByText("Limit only")).toBeVisible();
-    expect(within(limit).queryByRole("button")).toBeNull();
-  });
-
-  it("tells a personal agent's user that its sandbox is shared, not that the agent is", async () => {
-    installEgress([
-      {
-        ...egressService,
-        oauth: oauthStatus({
-          can_connect: false,
-          unavailable_reason: "shared_sandbox",
-        }),
-      },
-    ]);
-    render(<Connections />);
-    await expandAgent();
-
-    expect(
-      await screen.findByText(
-        "Personal GitHub accounts can't be used in this sandbox, which other users' commands share. Add an API key instead.",
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/shared agents/)).toBeNull();
-  });
-
   describe("one account in both sections", () => {
-    // The tool section and the API keys section show the same Mail account.
+    // The Mail tool and the Gmail key service use the same account.
     let connected: boolean;
     let catalogRequests: number;
     beforeEach(() => {
@@ -350,96 +273,21 @@ describe("brokered API keys on agent cards", () => {
             account_label: connected ? "user@example.com" : null,
           }),
         "/api/connections/agents/personal/mail/disconnect": disconnect,
-        "/api/connections/egress/agents/personal/gmail/disconnect": disconnect,
       });
     });
-    const gmailRow = () => screen.getByRole("row", { name: "Gmail" });
 
-    it("refreshes the API keys section after a disconnect in the tool section", async () => {
+    it("updates the API key count after a disconnect in the tool section", async () => {
       render(<Connections />);
       await expandAgent();
+      expect(await screen.findByText("1 of 1 set")).toBeInTheDocument();
       fireEvent.click(
         await screen.findByRole("button", { name: "Disconnect for Mail" }),
       );
       await pressInDialog("Disconnect");
 
-      expect(await within(gmailRow()).findByText("Not set")).toBeVisible();
+      expect(await screen.findByText("0 of 1 set")).toBeInTheDocument();
       expect(catalogRequests).toBe(2);
     });
-
-    it("refreshes the tool section after a disconnect in the API keys section", async () => {
-      render(<Connections />);
-      await expandAgent();
-      await screen.findByRole("button", { name: "Disconnect for Mail" });
-      fireEvent.click(await rowAction("Disconnect for Gmail", gmailRow()));
-      await pressInDialog("Disconnect");
-
-      expect(
-        await screen.findByRole("button", { name: "Connect Mail" }),
-      ).toBeEnabled();
-      expect(within(gmailRow()).getByText("Not set")).toBeVisible();
-    });
-  });
-
-  it("connects an account from the agent card and refreshes the catalog", async () => {
-    let connected = false;
-    let catalogRequests = 0;
-    const popup = {
-      closed: false,
-      close: vi.fn(),
-      location: { href: "about:blank" },
-      document: document.implementation.createHTMLDocument(),
-    };
-    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
-    installApi({
-      "/api/connections": async () => {
-        catalogRequests += 1;
-        return json(
-          withEgress([
-            {
-              ...egressService,
-              configured: connected,
-              active_source: connected ? "oauth" : null,
-              oauth: oauthStatus({
-                connected,
-                account_label: connected ? "octocat" : null,
-              }),
-            },
-          ]),
-        );
-      },
-      "/api/connections/egress/agents/personal/github/connect": async () =>
-        json({
-          provider: "github",
-          auth_url: "https://github.com/login/oauth/authorize",
-          completion_origin: "https://portal.example.com",
-        }),
-    });
-    render(<Connections />);
-    await expandAgent();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
-    );
-    await waitFor(() =>
-      expect(popup.location.href).toBe(
-        "https://github.com/login/oauth/authorize",
-      ),
-    );
-    connected = true;
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        origin: "https://portal.example.com",
-        source: popup as unknown as Window,
-        data: {
-          type: "mindroom-oauth",
-          provider: "github",
-          status: "connected",
-        },
-      }),
-    );
-    expect(await screen.findByText("octocat")).toBeInTheDocument();
-    expect(catalogRequests).toBe(2);
-    expect(await rowAction("Disconnect for GitHub")).toBeInTheDocument();
   });
 });
 
@@ -1590,7 +1438,7 @@ describe("shared accounts on agent cards", () => {
       await expandAgent("Research Team");
     };
 
-    it("tells a non-manager which managers can change the keys, in the key section and beside the account", async () => {
+    it("tells a non-manager beside the account which managers can change the keys", async () => {
       await open(
         catalogWith(
           { managers: ["@alice:example.org", "@mallory:example.org"] },
@@ -1599,28 +1447,7 @@ describe("shared accounts on agent cards", () => {
       );
       const note =
         "Only @alice:example.org and @mallory:example.org can change keys for this shared agent.";
-      // Once under the API keys heading, once where the account would be connected.
-      await waitFor(() => expect(screen.getAllByText(note)).toHaveLength(2));
-    });
-
-    it("tells a manager they manage the keys", async () => {
-      await open({
-        agents: [
-          {
-            ...catalogWith(
-              { managers: ["@alice:example.org"] },
-              { can_manage: true },
-            ).agents[0],
-            egress_services: [egressRow({ can_manage: true })],
-          },
-        ],
-      });
-      expect(
-        await screen.findByText(
-          "You manage this shared agent's keys. Everyone who uses it shares them.",
-        ),
-      ).toBeVisible();
-      expect(screen.queryByText(/Only .* can change keys/)).toBeNull();
+      expect(await screen.findByText(note)).toBeVisible();
     });
 
     it("says administrators when no manager is named", async () => {
@@ -1666,36 +1493,6 @@ describe("shared accounts on agent cards", () => {
       expect(
         await screen.findByText(
           "Only administrators can change this shared agent's accounts.",
-        ),
-      ).toBeVisible();
-    });
-
-    it("names the managers when a personal account is refused on a shared agent", async () => {
-      const refused = egressRow({
-        name: "github",
-        display_name: "GitHub",
-        configured: false,
-        key_configured: false,
-        active_source: null,
-        oauth: oauthStatus({
-          can_connect: false,
-          unavailable_reason: "shared_sandbox",
-        }),
-      });
-      await open({
-        agents: [
-          {
-            ...catalogWith(
-              { managers: ["@alice:example.org"] },
-              { can_manage: false },
-            ).agents[0],
-            egress_services: [refused],
-          },
-        ],
-      });
-      expect(
-        await screen.findByText(
-          "Personal GitHub accounts can't be used by shared agents. Ask @alice:example.org to add a team API key.",
         ),
       ).toBeVisible();
     });
@@ -2087,34 +1884,6 @@ describe("agent table summary, search, and order", () => {
     expect(button.querySelector("svg.lucide-user-round")).not.toBeNull();
     expect(consoleError).not.toHaveBeenCalled();
     expect(consoleWarn).not.toHaveBeenCalled();
-  });
-
-  it("words an agent's key rows as the personal pages do", async () => {
-    installApi({
-      "/api/connections": async () =>
-        json({
-          agents: [
-            {
-              ...agentWith("personal", "Personal assistant"),
-              egress_services: [
-                egress("openai", "OpenAI", {
-                  configured: true,
-                  key_configured: true,
-                  active_source: "key",
-                  key_updated_at: "2026-10-05T12:00:00+00:00",
-                }),
-              ],
-            },
-          ],
-        }),
-    });
-    render(<Connections />);
-    await expandAgent();
-    expect(
-      await screen.findByText(
-        `Key saved ${new Date("2026-10-05T12:00:00+00:00").toLocaleDateString()}`,
-      ),
-    ).toBeInTheDocument();
   });
 });
 
