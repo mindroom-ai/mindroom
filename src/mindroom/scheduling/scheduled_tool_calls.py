@@ -151,13 +151,10 @@ def _resolve_live_function(
     """Find the function a scheduled call can run, the one the run offers by that name, or return why it cannot."""
     function = None if live is None else live.functions.get(tool_name)
     owner = None if live is None else live.owners.get(tool_name)
-    if (
-        function is None
-        or owner is None
-        or owner == _SCHEDULER_TOOLKIT
-        or (toolkit_name is not None and owner != toolkit_name)
-    ):
+    if function is None or owner is None or owner == _SCHEDULER_TOOLKIT:
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
+    if toolkit_name is not None and owner != toolkit_name:
+        return f"`{tool_name}` now comes from another of this agent's toolkits than the one the call was stored for"
     if function.external_execution or function.stop_after_tool_call or function.injected_params & _MEDIA_PARAMETERS:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
