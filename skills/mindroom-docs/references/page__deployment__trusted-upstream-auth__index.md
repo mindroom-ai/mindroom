@@ -74,7 +74,7 @@ When another app, such as MindRoom Chat, serves `/` on the public host, serve th
 Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
 The setting needs trusted upstream auth, because only the gateway's signed identity reaches both hosts, and a `MINDROOM_PUBLIC_URL` on another host or port; MindRoom refuses to start otherwise.
 The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
-Accounts connected from the dashboard on that host return through the public host's OAuth callback.
+Accounts connected through the [OAuth framework](https://docs.mindroom.chat/oauth-framework/) from that host return through the public host's OAuth callback.
 With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
 
 ## Security Boundary

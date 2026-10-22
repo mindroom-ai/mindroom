@@ -2952,6 +2952,20 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
+    def test_run_refuses_a_dashboard_url_without_trusted_upstream_auth(self, tmp_path: Path) -> None:
+        """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"})
+
+        assert result.exit_code == 1
+        assert "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth" in result.output
+        assert isinstance(result.exception, SystemExit)
+        mock_main.assert_not_called()
+
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
         tmp_path: Path,

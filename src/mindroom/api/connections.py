@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
-from mindroom.api.auth import dashboard_url, is_administrator, require_connections_user
+from mindroom.api.auth import dashboard_link, is_administrator, require_connections_user
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
@@ -379,7 +379,7 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
         email=email if isinstance(email, str) and email else None,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),
-        dashboard_url=dashboard_url(request),
+        dashboard_url=dashboard_link(request),
     )
 
 

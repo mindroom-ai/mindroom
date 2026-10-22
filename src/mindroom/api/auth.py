@@ -1062,7 +1062,7 @@ def dashboard_host_public_origin(request: Request) -> str | None:
     return normalized_origin(settings.public_url) if _reached_dashboard_host(request, settings) else None
 
 
-def dashboard_url(request: Request) -> str:
+def dashboard_link(request: Request) -> str:
     """Return where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`."""
     return f"{_request_auth_state(request).settings.dashboard_origin or ''}/"
 

@@ -286,10 +286,13 @@ def _protect_dashboard_from_workers(
     """Give the dashboard API a generated key when dedicated workers could reach it, then reload that runtime."""
     from mindroom.api.auth import dashboard_requires_credential  # noqa: PLC0415  # lazy: FastAPI import
 
-    if ensure_worker_dashboard_api_key(
-        runtime_paths,
-        dashboard_has_credential=dashboard_requires_credential(runtime_paths),
-    ):
+    try:
+        dashboard_has_credential = dashboard_requires_credential(runtime_paths)
+    except ValueError as exc:
+        # Refuse dashboard auth settings MindRoom cannot serve, such as a dashboard URL without trusted upstream auth.
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
+    if ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=dashboard_has_credential):
         return activate_cli_runtime(path=config_path, storage_path=storage_path)
     return runtime_paths
 
