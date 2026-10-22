@@ -142,3 +142,16 @@ def test_connections_pages_on_the_dashboard_host_move_to_the_public_origin(
     served = public.get("/connections")
     assert served.status_code == 200
     assert served.text == "connections bundle"
+
+
+def test_dashboard_on_another_port_of_the_public_host_moves_only_its_own_requests(
+    gate_client: Callable[..., TestClient],
+) -> None:
+    """Origins that share a host name but not a port are told apart, so the public origin never redirects to itself."""
+    env = {"MINDROOM_PUBLIC_URL": "http://localhost:3000", "MINDROOM_DASHBOARD_URL": "http://localhost:8765"}
+    public = gate_client(trusted_upstream=False, extra_env=env, base_url="http://localhost:3000")
+    assert public.get("/connections").status_code == 200
+    dashboard = gate_client(trusted_upstream=False, extra_env=env, base_url="http://localhost:8765")
+    moved = dashboard.get("/connections")
+    assert moved.status_code == 307
+    assert moved.headers["location"] == "http://localhost:3000/connections"

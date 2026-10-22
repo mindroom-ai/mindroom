@@ -5071,7 +5071,7 @@ def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
 
 
 def test_dashboard_url_origin_may_change_the_dashboard(tmp_path: Path) -> None:
-    """A dashboard on its own host sends that host's origin, which counts as the deployment's own."""
+    """A dashboard on its own host may change things from that host's origin, and only there."""
     env = {
         **trusted_upstream_env(),
         "MINDROOM_PUBLIC_URL": "https://chat.example.org",
@@ -5085,14 +5085,16 @@ def test_dashboard_url_origin_may_change_the_dashboard(tmp_path: Path) -> None:
         return {"changed": True}
 
     signed = {"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"]}
-    with TestClient(api_app, base_url="https://admin.example.org") as client:
-        for origin, expected in (
-            ("https://admin.example.org", 200),
-            ("https://chat.example.org", 200),
-            ("https://evil.example.org", 403),
-        ):
+    for host, origin, expected in (
+        ("https://admin.example.org", "https://admin.example.org", 200),
+        ("https://admin.example.org", "https://chat.example.org", 403),
+        ("https://admin.example.org", "https://evil.example.org", 403),
+        ("https://chat.example.org", "https://chat.example.org", 200),
+        ("https://chat.example.org", "https://admin.example.org", 403),
+    ):
+        with TestClient(api_app, base_url=host) as client:
             response = client.post("/change", headers={**signed, "Origin": origin})
-            assert response.status_code == expected, (origin, response.text)
+        assert response.status_code == expected, (host, origin, response.text)
 
 
 def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:

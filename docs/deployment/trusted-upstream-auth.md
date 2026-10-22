@@ -77,6 +77,8 @@ Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`
 When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
 Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
 The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
+Accounts connected from the dashboard on that host still return through the public host's OAuth callback.
+A Connections sign-in from MindRoom Chat stays on the public host, so administrators reach the dashboard host through the access application or with `MINDROOM_API_KEY`.
 With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
 
 ## Security Boundary
@@ -91,7 +93,7 @@ A personal OAuth link opened by a browser signed in as anyone other than the req
 
 ## Browser Mutation Protection
 
-Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset; dashboard changes may also come from `MINDROOM_DASHBOARD_URL`.
+Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) authenticated by trusted upstream identity, a dashboard cookie, or a Connections sign-in session must send an `Origin` matching `MINDROOM_PUBLIC_URL`, or the request origin when it is unset; on the `MINDROOM_DASHBOARD_URL` host they must send that origin instead.
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the `Origin` matches.
 A validated bearer token skips these checks, but adding a bearer header to a trusted-upstream request does not.
 `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` controls which origins may read credentialed responses and never authorizes cross-origin changes.

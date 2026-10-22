@@ -962,6 +962,56 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     assert response.status_code == expected_status
 
 
+def test_oauth_connect_from_the_dashboard_host_returns_to_the_dashboard(tmp_path: Path) -> None:
+    """A flow started on `MINDROOM_DASHBOARD_URL` uses the public callback and tells the dashboard when it ends."""
+    public_url = "https://chat.mindroom.chat"
+    dashboard_url = "https://admin.mindroom.chat"
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+            "MINDROOM_PUBLIC_URL": public_url,
+            "MINDROOM_DASHBOARD_URL": dashboard_url,
+            "MINDROOM_API_KEY": "test-key",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    _use_runtime_auth_settings(api_app)
+    redirect_uri = f"{public_url}/api/oauth/public_mail/callback"
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            "redirect_uri": redirect_uri,
+            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+            "_source": "oauth_dynamic_client_registration",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=dashboard_url) as client:
+            _login(client)
+            response = client.post("/api/oauth/public_mail/connect?agent_name=general")
+
+    assert response.status_code == 200, response.text
+    state = parse_qs(urlparse(response.json()["auth_url"]).query)["state"][0]
+    state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
+    pending = json.loads(state_store.read_text(encoding="utf-8"))["states"][state]["data"]
+    assert pending["opener_origin"] == dashboard_url
+
+
 @pytest.mark.parametrize(
     ("callback_uri", "request_hostname"),
     [

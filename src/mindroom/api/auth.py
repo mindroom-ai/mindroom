@@ -1037,15 +1037,33 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[s
     return cast("dict[str, Any]", auth_user)
 
 
+def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> bool:
+    """Return whether this request reached the dashboard's own host, a different one from the public origin's."""
+    dashboard = settings.dashboard_origin
+    public = normalized_origin(settings.public_url)
+    if dashboard is None or public is None:
+        return False
+    # Behind a TLS-terminating proxy the request's scheme may differ from the browser's, but its Host header,
+    # port included, does not.
+    dashboard_host = urlsplit(dashboard).netloc
+    return dashboard_host != urlsplit(public).netloc and request.url.netloc.lower() == dashboard_host
+
+
 def dashboard_host_public_origin(request: Request) -> str | None:
     """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
     settings = _request_auth_state(request).settings
-    public = normalized_origin(settings.public_url)
-    dashboard = settings.dashboard_origin
-    if dashboard is None or public is None or public == dashboard:
-        return None
-    # Behind a proxy the request's scheme may differ from the browser's, so compare hosts.
-    return public if urlsplit(str(request.base_url)).hostname == urlsplit(dashboard).hostname else None
+    return normalized_origin(settings.public_url) if _reached_dashboard_host(request, settings) else None
+
+
+def dashboard_url(request: Request) -> str:
+    """Return where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`."""
+    return f"{_request_auth_state(request).settings.dashboard_origin or ''}/"
+
+
+def oauth_callback_hostname(request: Request) -> str | None:
+    """Return the host an OAuth flow started here returns to: the public one when started on the dashboard's host."""
+    public = dashboard_host_public_origin(request)
+    return urlsplit(public).hostname if public is not None else request.url.hostname
 
 
 def require_same_origin(
@@ -1073,8 +1091,8 @@ def _require_browser_mutation_origin(
     origin = deployment_origin(settings.public_url, str(request.base_url))
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
-    # A dashboard served on its own host sends that host's origin.
-    if settings.dashboard_origin is not None and request.headers.get("origin") == settings.dashboard_origin:
+    # A dashboard on its own host sends that host's origin there.
+    if settings.dashboard_origin is not None and _reached_dashboard_host(request, settings):
         origin = settings.dashboard_origin
     require_same_origin(request, origin)
 
