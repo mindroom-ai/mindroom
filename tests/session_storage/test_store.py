@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import sqlite3
@@ -17,7 +18,7 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to
+from mindroom.session_storage.store import ConversationStore, open_conversation_store, persist_to, runs_without
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -460,6 +461,161 @@ def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_o
     assert _stored(store, "m0")[2]["content"] == "after"
     assert _stored(store, "t0")[0] == 3
     assert _loaded_ids(store, "team") == ["m0", "t0"]
+
+
+# --- the loaded session -----------------------------------------------------------------------------------------
+
+
+def _as_stored(session: ConversationSession) -> list[dict[str, Any]]:
+    return [run.to_dict() for run in session.runs]
+
+
+@pytest.mark.asyncio
+async def test_a_persisted_run_joins_the_session_as_its_row_holds_it(store: ConversationStore) -> None:
+    """The session's copy is decoded from the row, never the record handed over, so prompt messages stay out of it."""
+    _seed(store, [_run("r1")])
+    session = _loaded(store)
+    record = _run("r2")
+
+    await persist_to(store, session)(record)
+
+    assert _as_stored(session) == _as_stored(_loaded(store))
+    assert [message.role for message in session.runs[-1].messages] == ["user"]
+    assert session.runs[-1] is not record
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("saved_status", "expected"),
+    [(RunStatus.completed, ["r1", "r0"]), (RunStatus.paused, ["r0", "r1"])],
+    ids=["finished-moves-last", "still-paused-stays"],
+)
+async def test_the_session_places_a_saved_run_where_the_log_does(
+    store: ConversationStore,
+    saved_status: RunStatus,
+    expected: list[str],
+) -> None:
+    """A paused run saved visible goes after the turns it waited for; a run whose row keeps its place keeps it."""
+    _seed(store, [_run("r0", RunStatus.paused), _run("r1")])
+    session = _loaded(store)
+
+    await persist_to(store, session)(_run("r0", saved_status, content="resumed"))
+
+    assert [run.run_id for run in session.runs] == expected
+    assert _as_stored(session) == _as_stored(_loaded(store))
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_team_run_keeps_its_member_runs_in_the_session(store: ConversationStore) -> None:
+    """A member keeps its place and its copy when its team run's save moves the team run after a later turn."""
+    team = _session(kind="team", owner="eng")
+    _seed(
+        store,
+        [
+            _run("m0", RunStatus.paused, parent="t0", agent_id="helper"),
+            _team_run("t0", RunStatus.paused),
+            _team_run("t1"),
+        ],
+        team,
+    )
+    session = _loaded(store, "team")
+    persist = persist_to(store, session)
+
+    await persist(_run("m0", parent="t0", agent_id="helper", content="checked"))
+    await persist(_team_run("t0", content="answered"))
+
+    assert [run.run_id for run in session.runs] == ["m0", "t1", "t0"]
+    assert _as_stored(session) == _as_stored(_loaded(store, "team"))
+
+
+@pytest.mark.asyncio
+async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(store: ConversationStore) -> None:
+    """A run a cut removed while it waited leaves the session with its member runs, as it left the log."""
+    team = _session(kind="team", owner="eng")
+    _seed(
+        store,
+        [
+            _run("m0", RunStatus.paused, parent="t0", agent_id="helper"),
+            _team_run("t0", RunStatus.paused),
+            _team_run("t1"),
+        ],
+        team,
+    )
+    session = _loaded(store, "team")
+    store.delete_run_subtrees(["t0"])
+    _remove(store, "t0")
+
+    await persist_to(store, session)(_team_run("t0", RunStatus.cancelled))
+
+    assert [run.run_id for run in session.runs] == ["t1"]
+    assert _as_stored(session) == _as_stored(_loaded(store, "team"))
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_save_leaves_the_session_s_copy_as_stored(store: ConversationStore) -> None:
+    """A run folded behind a summary since the session loaded refuses the save; the session keeps the stored copy."""
+    _seed(store, [_run("r1", content="original")])
+    session = _loaded(store)
+    _summary_after(store, "r1")
+
+    await persist_to(store, session)(_run("r1", content="stale"))
+
+    [kept] = session.runs
+    stored = store.get_run("r1")
+    assert stored is not None
+    assert kept.to_dict() == stored.to_dict()
+    assert kept.content == "original"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_persist_still_leaves_the_session_as_stored(
+    store: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller cancelled while its save runs finds the session holding what the save wrote."""
+    _seed(store, [_run("r1")])
+    session = _loaded(store)
+    writing, release = threading.Event(), threading.Event()
+    original_write = store_module._write_run_row
+
+    def held_write(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        writing.set()
+        release.wait(10)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(store_module, "_write_run_row", held_write)
+    save = asyncio.create_task(persist_to(store, session)(_run("r2")))
+    assert await asyncio.to_thread(writing.wait, 10)
+    save.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await save
+    assert [run.run_id for run in session.runs] == ["r1", "r2"]
+    assert _as_stored(session) == _as_stored(_loaded(store))
+
+
+def test_a_rewrite_that_makes_a_run_visible_moves_the_session_s_copy_last(store: ConversationStore) -> None:
+    """A conversation rewrite finishing a cancelled run moves it after later turns, in the session as in the log."""
+    _seed(store, [_run("r0", RunStatus.cancelled), _run("r1")])
+    session = _loaded(store)
+
+    store.save_runs(session, [_run("r0", content="interrupted reply")])
+
+    assert [run.run_id for run in session.runs] == ["r1", "r0"]
+    assert _as_stored(session) == _as_stored(_loaded(store))
+
+
+def test_runs_without_removes_every_descendant() -> None:
+    """Grandchildren leave with their root even when stored before it."""
+    runs: list[AnyRunRecord] = [
+        RunRecord(run_id="unrelated"),
+        RunRecord(run_id="child", parent_run_id="root"),
+        RunRecord(run_id="grandchild", parent_run_id="child"),
+        RunRecord(run_id="root"),
+    ]
+
+    assert [run.run_id for run in runs_without(runs, ["root"])] == ["unrelated"]
 
 
 # --- loads ------------------------------------------------------------------------------------------------------

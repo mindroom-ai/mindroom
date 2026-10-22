@@ -204,7 +204,7 @@ async def persist_delegation_state(
     """Save native child ownership on its real parent run, including hidden calls.
 
     The run's row is rewritten in place without touching the usage ledger: the loop recorded the run's usage when
-    it stored the pause, and records the continuation's when that ends.
+    it stored the pause, and records the continuation's when that ends. ``session`` then holds the run as stored.
     """
     response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
     if store is None:

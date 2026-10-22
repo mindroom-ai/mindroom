@@ -89,7 +89,6 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.members import (
@@ -552,17 +551,17 @@ def _team_storage(run: TurnRunState, *, session_id: str) -> _TeamStorage | None:
 
 
 def _persist_into(terminal: _TerminalTeamRecord, storage: _TeamStorage | None) -> Persist[AnyRunRecord]:
-    """Return the persist callback of one team run: keep the team's terminal record, store every record, show it to the session."""
+    """Return the persist callback of one team run: keep the team's terminal record and store every record.
+
+    Storing a record updates the session the run loaded, member rows included.
+    """
     store_persist = persist_to(storage.store, storage.session) if storage is not None else None
 
     async def persist(record: AnyRunRecord) -> None:
         if isinstance(record, TeamRunRecord):
             terminal.record = record
-        if store_persist is None or storage is None:
-            return
-        await store_persist(record)
-        session = storage.session
-        session.runs = [*runs_without(session.runs, [record.run_id]), record]
+        if store_persist is not None:
+            await store_persist(record)
 
     return persist
 

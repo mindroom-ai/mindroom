@@ -340,7 +340,6 @@ async def _run(
         agent.records.append(record)
         if store_persist is not None:
             await store_persist(record)
-            session.runs = [*(run for run in session.runs if run.run_id != record.run_id), record]
 
     events = run_agent(
         agent.spec(),

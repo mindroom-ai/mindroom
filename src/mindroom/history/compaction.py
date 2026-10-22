@@ -40,7 +40,7 @@ from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, Comp
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.providers.registry import build_model_provider, canonical_provider
-from mindroom.session_storage.agent_storage import runs_without
+from mindroom.session_storage.store import runs_without
 from mindroom.timing import timed
 from mindroom.token_budget import (
     CompactionEstimateKind,
