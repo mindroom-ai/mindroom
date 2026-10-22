@@ -383,8 +383,9 @@ To give an agent read access only, set `write: false` on the tool.
 | `too_large` | The file, range, attachment, or message exceeds a limit above; send a OneDrive link instead of a large attachment. |
 | `throttled` | Microsoft Graph is limiting requests; retry after `retry_after_seconds`. |
 | `download_rejected` | SharePoint refused the download link Microsoft Graph returned; retry the download. |
-| `graph_error` | Microsoft Graph refused the request, such as a time zone Outlook does not support or a response to a meeting the requester organizes; `graph_code` names the reason. |
+| `graph_error` | Microsoft Graph refused the request, such as a time zone Outlook does not support or a response to a meeting the requester organizes; `graph_code` and `graph_message` give Microsoft Graph's reason. |
 
+Apart from `throttled`, errors that Microsoft Graph returns carry its error code as `graph_code` and, when Graph gives one, its reason as `graph_message`: one line of plain text without links, cut to 300 characters.
 When Microsoft rejects the connection's access token, the result includes a reconnect link.
 
 ## Security Notes
@@ -392,7 +393,7 @@ When Microsoft rejects the connection's access token, the result includes a reco
 - The tools run in the primary MindRoom runtime, so worker containers never receive the app client configuration or user tokens.
 - Tokens are sent only to Microsoft Graph, never to another host, including the SharePoint hosts that serve downloads.
 - Request logs never contain tokens or pre-authenticated download links.
-- Error results never contain tokens or raw response bodies.
+- Error results never contain tokens or raw response bodies, only Graph's error code and its trimmed reason.
 
 ## Related Docs
 

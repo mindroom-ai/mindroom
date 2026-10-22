@@ -156,6 +156,7 @@ def test_graph_statuses_map_to_stable_codes(
     result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", code, "graphCode")
+    assert result["graph_message"] == "details"
 
 
 def test_other_graph_failures_report_the_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +165,80 @@ def test_other_graph_failures_report_the_status(tmp_path: Path, monkeypatch: pyt
     result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
 
     assert (result["code"], result["status_code"], result["graph_code"]) == ("graph_error", 502, None)
+    assert "graph_message" not in result
+
+
+def test_a_rejected_request_reports_graphs_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reason = "Field 'Colour' is not recognized"
+    FakeGraph(_answer(400, json={"error": {"code": "invalidRequest", "message": reason}})).install(monkeypatch)
+
+    result = _result(tmp_path, lambda session: session.json("POST", "/me/drive"))
+
+    assert result == {
+        "status": "error",
+        "tool": "microsoft_files",
+        "code": "graph_error",
+        "message": "Microsoft Graph rejected the request.",
+        "status_code": 400,
+        "graph_code": "invalidRequest",
+        "graph_message": reason,
+    }
+
+
+@pytest.mark.parametrize(
+    ("graph_message", "shown"),
+    [
+        ("  Field\t'Colour'\r\n is  not recognized. ", "Field 'Colour' is not recognized."),
+        ("Bad\x00 value\x1b[31m\u202e here\x7f", "Bad value [31m here"),
+        ("See https://contoso.sharepoint.com/sites/team?token=abc for details.", "See <url> for details."),
+        ("x" * 300, "x" * 300),
+        ("y" * 301, "y" * 299 + "…"),
+        ("", None),
+        (" \n\t", None),
+        (None, None),
+        (42, None),
+        ({"text": "nested"}, None),
+        (["list"], None),
+    ],
+)
+def test_graphs_reason_is_one_short_line_of_plain_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_message: object,
+    shown: str | None,
+) -> None:
+    error: dict[str, object] = {"code": "invalidRequest"}
+    if graph_message is not None:
+        error["message"] = graph_message
+    FakeGraph(_answer(400, json={"error": error})).install(monkeypatch)
+
+    result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
+
+    assert (result["code"], result["graph_code"]) == ("graph_error", "invalidRequest")
+    assert result.get("graph_message") == shown
+    assert ("graph_message" in result) is (shown is not None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": "invalid_request"},
+        {"error": ["invalidRequest"]},
+        {"message": "outside the error object"},
+        ["invalidRequest"],
+    ],
+)
+def test_a_body_without_a_graph_error_object_reports_no_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: object,
+) -> None:
+    FakeGraph(_answer(400, json=body)).install(monkeypatch)
+
+    result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
+
+    assert (result["code"], result["graph_code"]) == ("graph_error", None)
+    assert "graph_message" not in result
 
 
 def test_throttling_reports_when_to_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,7 +314,7 @@ def test_a_download_refused_after_the_redirect_is_not_a_reconnect(
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.host == "graph.microsoft.com":
             return httpx.Response(302, headers={"Location": "https://contoso-my.sharepoint.com/download"})
-        return httpx.Response(401)
+        return httpx.Response(401, json={"error": {"code": "unauthenticated", "message": "Link expired."}})
 
     FakeGraph(answer).install(monkeypatch)
     workspace = _workspace(tmp_path)
@@ -260,6 +335,7 @@ def test_a_download_refused_after_the_redirect_is_not_a_reconnect(
     )
 
     assert result["code"] == "download_rejected"
+    assert "graph_message" not in result
 
 
 def test_a_download_over_the_limit_leaves_no_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
