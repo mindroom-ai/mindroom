@@ -67,6 +67,7 @@ _SUMMARY_FIELDS = (
 _LIST_SELECT = f"{_SUMMARY_FIELDS},bodyPreview"
 _MESSAGE_SELECT = f"{_SUMMARY_FIELDS},ccRecipients,bccRecipients,replyTo,body"
 _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
+_MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _TEXT_BODY = {"Prefer": 'outlook.body-content-type="text"'}
 _ATTACHMENT_TYPES = {
     "microsoft.graph.fileAttachment": "file",
@@ -369,7 +370,7 @@ class OutlookMailTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if page_token is not None:
-                payload = session.json("GET", page_path(page_token, "/messages"))
+                payload = session.json("GET", page_path(page_token, _MESSAGE_PAGES))
             else:
                 path = (
                     "/me/messages" if folder is None else f"/me/mailFolders/{path_segment(folder, 'folder')}/messages"
@@ -390,7 +391,7 @@ class OutlookMailTools(Toolkit):
 
         def validate() -> None:
             if page_token is not None:
-                page_path(page_token, "/messages")
+                page_path(page_token, _MESSAGE_PAGES)
                 return
             _limit(limit)
             if folder is not None:
@@ -409,7 +410,7 @@ class OutlookMailTools(Toolkit):
             token = next_page_token(payload)
             if token is None or len(attachments) >= _MAX_ATTACHMENTS:
                 return attachments[:_MAX_ATTACHMENTS], len(attachments) > _MAX_ATTACHMENTS or token is not None
-            payload = session.json("GET", page_path(token, "/attachments"))
+            payload = session.json("GET", page_path(token, r"/me/messages/[^/]+/attachments"))
 
     def outlook_mail_get_message(self, message_id: str) -> str:
         """Read one Outlook message as plain text, up to 20,000 characters, with its recipients and attachment list.

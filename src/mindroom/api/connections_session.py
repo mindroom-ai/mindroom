@@ -124,7 +124,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
             headers=CONNECTIONS_HEADERS,
         )
     try:
-        matrix_user_id = await verify_matrix_openid(body.openid_token, paths)
+        matrix_user_id = await verify_matrix_openid(body.openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.

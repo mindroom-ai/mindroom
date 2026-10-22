@@ -100,13 +100,17 @@ class ConnectionsCatalog(BaseModel):
 
 
 class ConnectionStatus(BaseModel):
-    """User-facing account status for one independent service card."""
+    """User-facing account status for one independent service card.
+
+    `service_account` says a shared service account serves the provider, so no personal account can be connected.
+    """
 
     provider: str
     connected: bool
     can_connect: bool
     reset_required: bool
     account_label: str | None
+    service_account: bool
 
 
 class ConnectionsIdentity(BaseModel):
@@ -460,6 +464,7 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
         can_connect=view.can_connect,
         reset_required=view.reset_required,
         account_label=view.account_label,
+        service_account=result.has_service_account_config,
     )
 
 

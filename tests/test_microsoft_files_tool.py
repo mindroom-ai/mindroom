@@ -312,14 +312,19 @@ def test_search_continues_past_the_first_thousand_results(tmp_path: Path, monkey
     assert result["next_page_token"] == "1051"
 
 
-def test_list_folder_follows_its_own_page_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("folder_path", ["/me/drive/root", ITEM_PATH])
+def test_list_folder_follows_its_own_page_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    folder_path: str,
+) -> None:
     files = _Graph()
     files.answer_first = lambda request: (
-        httpx.Response(200, json={"value": [_item()]}) if request.url.path == "/v1.0/me/drive/root/children" else None
+        httpx.Response(200, json={"value": [_item()]}) if request.url.path == f"/v1.0{folder_path}/children" else None
     )
     tools, graph = _tools(tmp_path, monkeypatch, files)
 
-    result = _payload(tools.microsoft_files_list_folder(page_token="/me/drive/root/children?$top=50&$skiptoken=abc"))
+    result = _payload(tools.microsoft_files_list_folder(page_token=f"{folder_path}/children?$top=50&$skiptoken=abc"))
 
     assert result["next_page_token"] is None
     assert graph.requests[0].url.params["$skiptoken"] == "abc"

@@ -262,7 +262,7 @@ class MicrosoftTeamsTools(Toolkit):
         return self._call(
             lambda: _listing(
                 page_token,
-                "/channels",
+                r"/teams/[^/]+/channels",
                 lambda: _Request("GET", f"{_team_path(team_id)}/channels", {"$select": _CHANNEL_SELECT}),
             ),
             lambda payload: {
@@ -306,7 +306,7 @@ class MicrosoftTeamsTools(Toolkit):
         return self._call(
             lambda: _listing(
                 page_token,
-                "/messages",
+                r"/teams/[^/]+/channels/[^/]+/messages",
                 lambda: _Request("GET", f"{_channel_path(team_id, channel_id)}/messages", {"$top": _top(limit)}),
             ),
             _message_page,
@@ -337,7 +337,7 @@ class MicrosoftTeamsTools(Toolkit):
         return self._call(
             lambda: _listing(
                 page_token,
-                "/replies",
+                r"/teams/[^/]+/channels/[^/]+/messages/[^/]+/replies",
                 lambda: _Request(
                     "GET",
                     f"{_post_path(team_id, channel_id, message_id)}/replies",
@@ -361,7 +361,7 @@ class MicrosoftTeamsTools(Toolkit):
         return self._call(
             lambda: _listing(
                 page_token,
-                "/chats",
+                r"(/me)?/chats",
                 lambda: _Request("GET", "/me/chats", {**_CHAT_PARAMS, "$top": _top(limit)}),
             ),
             lambda payload: {
@@ -386,7 +386,7 @@ class MicrosoftTeamsTools(Toolkit):
         return self._call(
             lambda: _listing(
                 page_token,
-                "/messages",
+                r"/chats/[^/]+/messages",
                 lambda: _Request(
                     "GET",
                     f"{_chat_path(chat_id)}/messages",

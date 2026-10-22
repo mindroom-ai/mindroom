@@ -237,7 +237,7 @@ class MicrosoftPeopleTools(Toolkit):
 
         def build() -> str | None:
             if page_token is not None:
-                return page_path(page_token, "/directReports")
+                return page_path(page_token, "/me/directReports")
             _user_path(person)
             return None
 

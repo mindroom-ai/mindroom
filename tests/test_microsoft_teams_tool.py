@@ -408,6 +408,18 @@ _PAGED_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, object], str], str,
     ),
     ("chats", lambda tools, token: tools.microsoft_teams_list_chats(page_token=token), NEXT_CHATS, NEXT_CHANNELS),
     (
+        "my_chats",
+        lambda tools, token: tools.microsoft_teams_list_chats(page_token=token),
+        "/me/chats?$skiptoken=chats2",
+        NEXT_CHANNELS,
+    ),
+    (
+        "user_key_chats",
+        lambda tools, token: tools.microsoft_teams_list_chats(page_token=token),
+        "/users('alex@contoso.com')/chats?$skiptoken=chats2",
+        NEXT_CHANNELS,
+    ),
+    (
         "chat_messages",
         lambda tools, token: tools.microsoft_teams_list_chat_messages(CHAT, page_token=token),
         NEXT_CHAT_MESSAGES,
@@ -452,7 +464,7 @@ def test_listings_follow_their_own_page_token_without_other_parameters(
     assert dict(request.url.params) == dict(expected.params)
 
 
-@pytest.mark.parametrize("bad_token", ["absolute", "traversal", "no_query", "empty", "foreign"])
+@pytest.mark.parametrize("bad_token", ["absolute", "traversal", "no_query", "empty", "foreign", "mail"])
 @pytest.mark.parametrize(("listing", "call", "token", "foreign"), _PAGED_CALLS)
 def test_listings_refuse_a_foreign_page_token_before_any_request(
     tmp_path: Path,
@@ -471,6 +483,7 @@ def test_listings_refuse_a_foreign_page_token_before_any_request(
         "no_query": path,
         "empty": "",
         "foreign": foreign,
+        "mail": "/me/messages?$top=1",
     }[bad_token]
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 

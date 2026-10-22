@@ -361,7 +361,7 @@ class MicrosoftSharePointTools(Toolkit):
         return self._send(
             lambda: _listing(
                 page_token,
-                "/lists",
+                r"/sites/[^/]+/lists",
                 lambda: _Request("GET", f"{_site_path(site_id)}/lists", params={"$select": _LIST_SELECT}),
             ),
             lambda payload: {
@@ -420,7 +420,7 @@ class MicrosoftSharePointTools(Toolkit):
         return self._send(
             lambda: _listing(
                 page_token,
-                "/items",
+                r"/sites/[^/]+/lists/[^/]+/items",
                 lambda: _Request(
                     "GET",
                     f"{_list_path(site_id, list_id)}/items",
@@ -510,7 +510,7 @@ class MicrosoftSharePointTools(Toolkit):
         return self._send(
             lambda: _listing(
                 page_token,
-                _SITE_PAGES,
+                rf"/sites/[^/]+{re.escape(_SITE_PAGES)}",
                 lambda: _Request("GET", f"{_site_path(site_id)}{_SITE_PAGES}", params={"$select": _PAGE_SELECT}),
             ),
             lambda payload: {
