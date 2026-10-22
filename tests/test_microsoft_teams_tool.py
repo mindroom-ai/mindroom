@@ -1161,7 +1161,10 @@ def test_get_presence_reports_each_person_it_cannot_read_and_the_rest(
 ) -> None:
     users = {
         "/v1.0/users/sam@contoso.com": _user(SAM_ID),
-        "/v1.0/users/gone@contoso.com": httpx.Response(404, json={"error": {"code": "Request_ResourceNotFound"}}),
+        "/v1.0/users/gone@contoso.com": httpx.Response(
+            404,
+            json={"error": {"code": "Request_ResourceNotFound", "message": "Resource 'gone' does not exist."}},
+        ),
         "/v1.0/users/hidden@contoso.com": httpx.Response(403, json={"error": {"code": "Authorization_RequestDenied"}}),
         "/v1.0/users/jo@contoso.com": _user(JO_ID),
     }
@@ -1179,8 +1182,17 @@ def test_get_presence_reports_each_person_it_cannot_read_and_the_rest(
         "activity": "Available",
         "status_message": None,
     }
-    assert (gone["email"], gone["error"]) == ("gone@contoso.com", "not_found")
-    assert (hidden["email"], hidden["error"]) == ("hidden@contoso.com", "forbidden")
+    assert (gone["email"], gone["error"], gone["graph_code"], gone["graph_message"]) == (
+        "gone@contoso.com",
+        "not_found",
+        "Request_ResourceNotFound",
+        "Resource 'gone' does not exist.",
+    )
+    assert (hidden["email"], hidden["error"], hidden["graph_code"]) == (
+        "hidden@contoso.com",
+        "forbidden",
+        "Authorization_RequestDenied",
+    )
     assert (jo["email"], jo["error"]) == ("jo@contoso.com", "not_found")
     assert "availability" not in gone
     assert json.loads(graph.requests[-1].content) == {"ids": [SAM_ID, JO_ID]}

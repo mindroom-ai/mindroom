@@ -253,12 +253,14 @@ class _StartChat:
     body: dict[str, object]
 
     def send(self, session: GraphSession) -> dict[str, Any]:
-        me = session.json("GET", "/me", params={"$select": "id,mail,userPrincipalName"})
-        requester = me.get("id")
+        profile = session.json("GET", "/me", params={"$select": "id,mail,userPrincipalName"})
+        requester = profile.get("id")
         if not isinstance(requester, str) or not requester:
             msg = "Microsoft Graph returned no id for the connected account."
             raise MicrosoftGraphError(code="graph_invalid_response", message=msg)
-        own = {address.lower() for field in ("mail", "userPrincipalName") if isinstance(address := me.get(field), str)}
+        own = {
+            address.lower() for field in ("mail", "userPrincipalName") if isinstance(address := profile.get(field), str)
+        }
         if any(person.lower() in own for person in self.people):
             msg = "people must not include the requester, who is always a member."
             raise MicrosoftGraphError(code="invalid_argument", message=msg)
@@ -296,8 +298,8 @@ def _presence(email: str, presence: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
-def _person_error(email: str, code: str, message: str) -> dict[str, object]:
-    return {"email": email, "error": code, "message": message}
+def _person_error(email: str, code: str, message: str, **details: object) -> dict[str, object]:
+    return {"email": email, "error": code, "message": message, **details}
 
 
 @dataclass(frozen=True)
@@ -315,7 +317,7 @@ class _Presence:
             except MicrosoftGraphError as exc:
                 if exc.code not in _PERSON_ERRORS:
                     raise
-                results[person] = _person_error(person, exc.code, exc.message)
+                results[person] = _person_error(person, exc.code, exc.message, **exc.details)
                 continue
             if not isinstance(user_id := user.get("id"), str) or not user_id:
                 msg = "Microsoft Graph returned a user without an id."
