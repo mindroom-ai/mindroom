@@ -44,11 +44,12 @@ from mindroom.tool_jobs.results import (
     read_result_payload,
 )
 from mindroom.tool_jobs.runtime import JobAccessError, job_summary, register_background_runtime
-from mindroom.tool_system.agno_toolkits import AgnoImage, Toolkit, ToolResult, ToolValue
+from mindroom.tool_system.agno_toolkits import AgnoImage, Toolkit, ToolResult
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call

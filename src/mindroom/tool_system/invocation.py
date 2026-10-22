@@ -24,14 +24,9 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.tool_system.agno_toolkits import (
-    StreamCollector,
-    ToolValue,
-    framework_arguments,
-    model_arguments,
-    tool_value,
-)
+from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 
 if TYPE_CHECKING:

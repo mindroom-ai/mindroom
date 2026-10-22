@@ -51,8 +51,9 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     _parse_saved_job,
 )
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, Toolkit, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context

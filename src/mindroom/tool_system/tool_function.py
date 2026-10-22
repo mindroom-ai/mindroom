@@ -1,4 +1,7 @@
-"""The one tool shape the owned loop sees: a finished schema, the run-loop flags, and the callable that runs it."""
+"""The tool values the owned loop sees: ``ToolFunction``, the toolkits that group them, and the values tools return.
+
+They import no Agno module; ``agno_toolkits`` builds them from Agno's tool objects.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,8 @@ from mindroom.llm.provider import ToolSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from mindroom.llm.media import Audio, File, Image, Video
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -35,7 +40,6 @@ class ToolFunction:
     external_execution: bool | None = None
     external_execution_silent: bool | None = None
     stop_after_tool_call: bool = False
-    show_result: bool = False
     entrypoint: Callable[..., Any]
     injected_params: frozenset[str] = frozenset()
     entrypoint_processed: bool = False
@@ -51,3 +55,28 @@ class ToolFunction:
             external_execution=self.external_execution,
             approval_type=self.approval_type,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptedToolkit:
+    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when Agno would add it to the prompt.
+
+    ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
+    it describes the toolkit's functions and minimal mode offers as a context document.
+    """
+
+    name: str
+    functions: tuple[ToolFunction, ...]
+    instructions: str | None
+    guidance: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolValue:
+    """A finished tool value in owned terms: the text the model reads and the media the tool produced."""
+
+    content: str
+    images: tuple[Image, ...] = ()
+    audios: tuple[Audio, ...] = ()
+    videos: tuple[Video, ...] = ()
+    files: tuple[File, ...] = ()

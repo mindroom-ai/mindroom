@@ -18,7 +18,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.agno_toolkits import ToolValue, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:

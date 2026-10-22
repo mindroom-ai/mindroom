@@ -41,12 +41,13 @@ from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
 from mindroom.response_turn import PausedAnswer, PausedAttempt, apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation

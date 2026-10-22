@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.execution_authority import current_job_call
 from mindroom.tool_jobs.results import read_result_payload
-from mindroom.tool_system.agno_toolkits import ToolValue
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

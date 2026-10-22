@@ -1,9 +1,9 @@
-"""The Agno toolkit adapter reproduces every field the C3 tool goldens recorded, for every registered tool."""
+"""The Agno toolkit adapter reproduces the C3 tool goldens' fields the owned loop reads, for every registered tool."""
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.run import RunContext  # noqa: TC002 - pydantic resolves the annotations at wrap time.
@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 # Importing these SDKs to build their tools warns about their own deprecated usage.
 pytestmark = [
@@ -31,16 +32,22 @@ SCHEMAS = json.loads(support.SCHEMAS_PATH.read_text(encoding="utf-8"))
 ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
 
 
-def expected_entry(golden: dict[str, object]) -> dict[str, object]:
-    """Return a golden entry as the adapter reports it: instructions only when Agno adds them, functions verbatim."""
+def expected_entry(golden: dict[str, Any]) -> dict[str, object]:
+    """Return a golden entry as the adapter reports it: instructions only when Agno adds them.
+
+    Each function keeps every recorded field but ``show_result``, which the owned loop does not read; no tool sets it.
+    """
+    assert all(function["show_result"] is False for function in golden["functions"])
     return {
         "instructions": golden["instructions"] if golden["add_instructions"] else None,
-        "functions": golden["functions"],
+        "functions": [
+            {key: value for key, value in function.items() if key != "show_result"} for function in golden["functions"]
+        ],
     }
 
 
 def adapted_entry(adapted: AdaptedToolkit) -> object:
-    """Return every recorded field of an adapted toolkit, in the golden's key order."""
+    """Return the golden-recorded fields an adapted toolkit carries, in the golden's key order."""
     return support.normalize_version(
         {
             "instructions": adapted.instructions,
@@ -54,7 +61,6 @@ def adapted_entry(adapted: AdaptedToolkit) -> object:
                     "external_execution": function.external_execution,
                     "approval_type": function.approval_type,
                     "stop_after_tool_call": function.stop_after_tool_call,
-                    "show_result": function.show_result,
                 }
                 for function in adapted.functions
             ],

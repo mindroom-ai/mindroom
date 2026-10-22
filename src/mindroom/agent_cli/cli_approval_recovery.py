@@ -51,9 +51,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding, PreparedAgentToolCatalog
-    from mindroom.tool_system.agno_toolkits import ToolValue
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolValue
 
 
 @dataclass(frozen=True)

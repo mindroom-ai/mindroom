@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord, RunRecord
     from mindroom.teams.runtime import TeamRunEvent
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
 SQUAD = "!room:example.org:$squad"

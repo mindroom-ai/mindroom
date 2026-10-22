@@ -26,8 +26,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = ["STANDARD_CLI_NOTE", "bind_standard_cli", "standard_cli_eligible", "wrap_native_shell_window"]

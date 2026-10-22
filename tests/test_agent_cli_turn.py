@@ -46,10 +46,11 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import ToolValue, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_function import ToolValue
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit

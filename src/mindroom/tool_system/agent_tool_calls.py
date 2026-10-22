@@ -35,10 +35,9 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit, ToolValue
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
 
 _INNER: ContextVar[bool] = ContextVar("cli_inner_dispatch", default=False)
 

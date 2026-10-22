@@ -36,7 +36,7 @@ from tests.llm.agno_dict_helpers import expected_run_dict
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage" / "loaded_sessions.json"
 

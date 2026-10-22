@@ -21,8 +21,9 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult, ToolValue
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
