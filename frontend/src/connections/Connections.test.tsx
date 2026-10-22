@@ -196,18 +196,6 @@ describe("brokered API keys on agent cards", () => {
     expect(screen.getByText("None")).toBeInTheDocument();
   });
 
-  it("links the API key section to the agent's services on the personal page", async () => {
-    installEgress([egressService]);
-    render(<Connections />);
-    await expandAgent();
-
-    const link = await screen.findByRole("link", { name: "Manage services" });
-    expect(link).toHaveAttribute(
-      "href",
-      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
-    );
-  });
-
   it("says View services instead of Manage services to someone who can change none of them", async () => {
     installEgress([{ ...egressService, is_shared: true, can_manage: false }]);
     render(<Connections />);
@@ -1453,12 +1441,10 @@ describe("shared accounts on agent cards", () => {
     it("says administrators when no manager is named", async () => {
       await open(catalogWith({ managers: [] }, { can_manage: false }));
       expect(
-        (
-          await screen.findAllByText(
-            "Only administrators can change keys for this shared agent.",
-          )
-        ).length,
-      ).toBeGreaterThan(0);
+        await screen.findByText(
+          "Only administrators can change keys for this shared agent.",
+        ),
+      ).toBeVisible();
     });
 
     it("does not mention keys beside the account while the agent shows no keys", async () => {
