@@ -918,7 +918,7 @@ class TestAgentBot(AgentBotTestBase):
         assert result == "$reject"
 
     @pytest.mark.asyncio
-    async def test_team_generate_response_uses_shared_thread_summary_helper_for_summary_gate(
+    async def test_team_generate_response_sizes_the_summary_gate_by_the_refreshed_thread(
         self,
         tmp_path: Path,
     ) -> None:
