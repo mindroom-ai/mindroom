@@ -32,6 +32,7 @@ from mindroom.approval.resume import ResumeDecisions, approval_decisions, forwar
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
+from mindroom.delegation.state import member_delegation_call
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -1301,11 +1302,13 @@ def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session
 def _continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
-    A delegation call adds no marker: the member whose run issued it already shows it pending, and the driver's
-    approval card only asks about that call under the card's own id, so the resume completes the member's marker.
+    The approval card of a member's own delegation call adds no marker: the member's slot already shows that call
+    pending under its own id, and the resume finishes it there.
     """
+    member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
-        if requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES:
+        call_id = requirement.tool_execution.tool_call_id
+        if requirement.member_agent_id is None and call_id and member_delegation_call(call_id, member_names):
             continue
         scope = (
             f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"

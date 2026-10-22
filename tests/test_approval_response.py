@@ -156,6 +156,60 @@ def test_team_pause_rejects_ambiguous_frozen_member_identity(
         require_ordered_pause_presentation(member_pause, show_tool_calls=True)
 
 
+@pytest.mark.parametrize(
+    ("card_id", "anchor_id", "scope_key", "presented"),
+    [
+        # A member's own delegation card is shown by the member's call it asks about.
+        ("test_agent:call-1", "call-1", "agent:test-agent", True),
+        # A marker of its own in the team's slot is not that call.
+        ("test_agent:call-1", "test_agent:call-1", "team", False),
+        # Another member's slot does not show it.
+        ("other:call-1", "call-1", "agent:test-agent", False),
+        # A child's projected call names its delegation, not a member, and keeps its marker in the team's slot.
+        ("delegation-1:call-1", "delegation-1:call-1", "team", True),
+    ],
+)
+def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
+    card_id: str,
+    anchor_id: str,
+    scope_key: str,
+    presented: bool,
+) -> None:
+    """The card the delegation driver raises carries no member identity of its own, only its id."""
+    tool = ToolExecution(tool_call_id=card_id, tool_name="run_subagent", requires_confirmation=True)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(RunRequirement(tool_execution=tool),),
+        response_text="🔧 `run_subagent` [1] ⏳",
+        tool_trace=(
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="run_subagent",
+                tool_call_id=anchor_id,
+                scope_key=scope_key,
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+        toolkit_owners={("test_agent", "run_subagent"): "delegate"},
+    )
+
+    if presented:
+        require_ordered_pause_presentation(paused, show_tool_calls=True)
+    else:
+        with pytest.raises(RuntimeError, match="ordered presentation"):
+            require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
     """A team-level approval requirement must be anchored in the coordinator slot."""
     tool = ToolExecution(

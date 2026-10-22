@@ -49,7 +49,13 @@ from mindroom.delegation.sessions import (
     SubagentSessionError,
     subagent_liveness,
 )
-from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
+from mindroom.delegation.state import (
+    DELEGATION_STATE_KEY,
+    DelegationChild,
+    DelegationPendingTool,
+    DelegationState,
+    delegation_card_id,
+)
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -996,12 +1002,6 @@ def _validate_child_scope(
         raise RuntimeError(msg)
 
 
-def _delegation_requirement_key(requirement: RunRequirement) -> str:
-    """Return the id a delegation's gate and approval card use: ``member_id:call_id`` for a member's call."""
-    call_id = requirement.tool_execution.tool_call_id or ""
-    return f"{requirement.member_agent_id}:{call_id}" if requirement.member_agent_id else call_id
-
-
 async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     requirement: RunRequirement,
     *,
@@ -1040,7 +1040,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not tool.tool_call_id:
         msg = "Delegation requirement has no exact tool-call identity"
         raise RuntimeError(msg)
-    requirement_key = _delegation_requirement_key(requirement)
+    requirement_key = delegation_card_id(requirement.member_agent_id, tool.tool_call_id)
     if on_event is not None:
         on_event(ToolStarted(deepcopy(tool)))
     caller = agent_name

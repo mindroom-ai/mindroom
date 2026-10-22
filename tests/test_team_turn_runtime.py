@@ -2,8 +2,9 @@
 
 The seam is ``run_team`` fed by scripted providers behind the production member and leader builders: what a team
 reply streams and renders, what it stores, how a member's approval pauses and resumes it, which scope its members'
-tools address, and how it ends when a member is stopped. The last test drives a turn through ``ResponseRunner``, the
-lifecycle owner that writes the interrupted-turn record after the loop stored its own terminal record.
+tools address, and how it ends when a member is stopped. The last tests drive turns through ``ResponseRunner``, the
+lifecycle owner: it writes the interrupted-turn record after the loop stored its own terminal record, and it posts the
+approval cards of a member's gated delegations and resumes the turn they approve.
 """
 # ruff: noqa: D103
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
@@ -19,7 +21,9 @@ import pytest
 
 from mindroom import response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
@@ -76,6 +80,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.bot import TeamBot
+    from mindroom.event_journal import MatrixDelivery
     from mindroom.history.types import HistoryScope
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.runtime import TeamRunEvent
@@ -773,8 +779,8 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     )
 
 
-def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
-    """Build the squad's team bot on the team's config, with a mocked Matrix client, and return its runner."""
+def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:
+    """Build the squad's team bot on the team's config, with a mocked Matrix client."""
     bot = make_test_team_bot(
         AgentMatrixUser(
             agent_name="squad",
@@ -792,7 +798,12 @@ def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
     unique_room_send_responses(bot.client)
     install_runtime_journal_support(bot)
     bot.orchestrator = team.orchestrator
-    return bot._response_runner
+    return bot
+
+
+def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
+    """Return the runner of the squad's team bot."""
+    return _team_bot(team, tmp_path)._response_runner
 
 
 def _request(prompt: str = "Hello") -> ResponseRequest:
@@ -868,3 +879,215 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     assert member.status is RunStatus.cancelled
     [row] = _usage_rows(team.storage, member.run_id)
     assert row["metrics"]["input_tokens"] == 30
+
+
+@asynccontextmanager
+async def _approving_team_bot(
+    team: TeamTurn,
+    tmp_path: Path,
+    *,
+    streaming: bool = True,
+) -> AsyncIterator[tuple[TeamBot, list[MatrixDelivery]]]:
+    """Yield the squad's team bot with its approval cards published into the yielded list, the n-th as ``$card-n``."""
+    bot = _team_bot(team, tmp_path)
+    cards: list[MatrixDelivery] = []
+
+    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+        return content
+
+    async def send_card(delivery: MatrixDelivery) -> str:
+        if delivery.edits_event_id is not None:
+            # A decided card's resolution edit.
+            return f"$edit-{delivery.edits_event_id}"
+        cards.append(delivery)
+        return f"$card-{len(cards)}"
+
+    initialize_approval_store(
+        bot.runtime_paths,
+        prepare_event=prepare_event,
+        send_delivery=send_card,
+        resolve_delivery=AsyncMock(return_value=None),
+        cards=bot._journal_store.principal("router@shared"),
+        transport_sender=lambda: "@router:localhost",
+        sending_device=lambda: "DEVICE",
+    )
+    try:
+        with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
+            yield bot, cards
+    finally:
+        await shutdown_approval_runtime()
+
+
+def _card_calls(cards: list[MatrixDelivery]) -> list[tuple[object, object]]:
+    return [(card.payload["tool_name"], card.payload["tool_call_id"]) for card in cards]
+
+
+async def _approve(bot: TeamBot, card_event_id: str) -> None:
+    """Approve one card as the requester does, then hand the woken source to its resume, as the journal's worker does."""
+    manager = get_approval_store()
+    assert manager is not None
+    result = await manager.handle_card_response(
+        room_id=ROOM_ID,
+        sender_id=REQUESTER_ID,
+        card_event_id=card_event_id,
+        status="approved",
+        reason=None,
+        authorize_responder=lambda _entity: True,
+    )
+    assert result.consumed
+    runner = bot._response_runner
+    assert await runner.handoff_approval_source(EVENT_ID) is False
+    await runner.wait_for_source_owned_inbox_responses()
+
+
+def _shown(bot: TeamBot) -> str:
+    """Return what the reply shows now: the body of its last send or edit."""
+    content = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    return str(content.get("m.new_content", content)["body"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply_shows_the_call_finished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner`` with tool calls shown, the card asks about the member's call, shown once in its slot.
+
+    The approved resume finishes that call where the pause showed it pending.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[answer("Dug.")],
+        approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
+    )
+    async with _approving_team_bot(team, tmp_path, streaming=streaming) as (bot, cards):
+        await bot._response_runner.generate_team_response_helper(
+            _request(),
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+
+        assert _card_calls(cards) == [("run_subagent", "writer:call-sub")]
+        assert _shown(bot) == (
+            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]"
+        )
+        continuation = await bot.journal_principal().approval_continuation_for_source(EVENT_ID)
+        assert continuation is not None
+        assert (continuation.state, continuation.show_tool_calls) == ("waiting", True)
+
+        await _approve(bot, "$card-1")
+
+    assert _shown(bot) == (
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
+    )
+    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
+    assert [child.status for child in state.children] == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resume's next pause, on the writer's second gated ``run_subagent``, is presented and approved as the first."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[
+            _delegate_to_helper("Dig"),
+            calls(tool_call("run_subagent", "call-sub-2", agent_name="helper", task="Dig more"), metrics=usage(10, 1)),
+            answer("Writer: dug twice."),
+        ],
+        helper=[answer("Dug."), answer("Dug more.")],
+        approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
+    )
+    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+        await bot._response_runner.generate_team_response_helper(
+            _request(),
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+        await _approve(bot, "$card-1")
+
+        assert _card_calls(cards) == [("run_subagent", "writer:call-sub"), ("run_subagent", "writer:call-sub-2")]
+        assert _shown(bot) == (
+            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2] ⏳\n\n\n"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]"
+        )
+        continuation = await bot.journal_principal().approval_continuation_for_source(EVENT_ID)
+        assert continuation is not None
+        assert continuation.state == "waiting"
+
+        await _approve(bot, "$card-2")
+
+    assert _shown(bot) == (
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2]\n\nWriter: dug twice.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]\n\nConsensus."
+    )
+    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
+    assert [child.status for child in state.children] == ["completed", "completed"]
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_slot_and_finishes_there(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gated ``run_subagent`` of the member's child is asked about under the child's id, in the team's own slot."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[
+            calls(tool_call("run_subagent", "call-deep", agent_name="checker", task="Dig deeper"), metrics=usage(5, 1)),
+            answer("Helper: dug deeper."),
+        ],
+        checker=[answer("Dug deeper.")],
+        approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
+    )
+    team.config.agents["helper"].delegate_to = ["checker"]
+    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+        await bot._response_runner.generate_team_response_helper(
+            _request(),
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+        await _approve(bot, "$card-1")
+
+        _, _, state = _delegation_state(team)
+        [child] = state.children
+        assert _card_calls(cards) == [
+            ("run_subagent", "writer:call-sub"),
+            ("run_subagent", f"{child.delegation_id}:call-deep"),
+        ]
+        # The writer's call still waits on its child; the child's call shows in the team's slot.
+        assert _shown(bot) == (
+            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3] ⏳"
+        )
+        assert team.models["checker-model"].requests == []
+
+        await _approve(bot, "$card-2")
+
+    assert _shown(bot) == (
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3]\n\nConsensus."
+    )
+    assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
+    assert len(team.models["checker-model"].requests) == 1
+    assert "Helper: dug deeper." in str(team.models["writer-model"].requests[-1].messages[-1].content)
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
+    assert [child.status for child in state.children] == ["completed"]

@@ -22,6 +22,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
+from mindroom.delegation.state import member_delegation_call
 from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -142,7 +143,11 @@ def identify_approval_tools(
 
 
 def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls: bool) -> None:
-    """Reject a visible approval handoff whose pending tools have no ordered anchors."""
+    """Reject a visible approval handoff whose pending tools have no ordered anchors.
+
+    The card of a team member's own delegation call, ``member_id:call_id``, is anchored by that call in the member's
+    slot.
+    """
     if not show_tool_calls:
         return
     if not tool_markers_match_trace(paused.response_text, paused.tool_trace):
@@ -157,17 +162,23 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
     for tool in paused.tools:
         call_id = tool.tool_call_id
+        if call_id is None:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
+        requirement = requirements_by_call_id.get(call_id)
+        member_id = requirement.member_agent_id if requirement is not None else None
+        anchor_id = call_id
+        if member_id is None and (card := member_delegation_call(call_id, config_names_by_provider_id.values())):
+            member_id, anchor_id = card
         matches = [
             (index, entry)
             for index, entry in enumerate(paused.tool_trace, start=1)
-            if entry.type == "tool_call_started" and entry.tool_call_id == call_id
+            if entry.type == "tool_call_started" and entry.tool_call_id == anchor_id
         ]
-        if call_id is None or len(matches) != 1:
+        if len(matches) != 1:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
         _, entry = matches[0]
-        requirement = requirements_by_call_id.get(call_id)
-        member_id = requirement.member_agent_id if requirement is not None else None
         if member_id is not None:
             member_id, _ = _resolve_team_member_identity(member_id, config_names_by_provider_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
