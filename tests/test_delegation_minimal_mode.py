@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 
 from mindroom import ai
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolListOperation
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.ai import run_delegated_child_response
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -25,44 +21,32 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
     cli_window,
     install_scripted_shell,
+    offered_tools,
     shell_cli_owner,
 )
-from tests.test_delegate_tools import _delegate_runtime_context
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
-from tests.tool_approval_helpers import with_agno_approval_flags
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _LONG_ROLE = "optional long role " * 200
-
-
-@dataclass
-class _ToolRecordingModel(DelegationModel):
-    """Record which functions and system prompt each child request offered the provider."""
-
-    seen_tools: list[list[str]] = field(default_factory=list)
-
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        tools = kwargs.get("tools") or []
-        self.seen_tools.append([tool["function"]["name"] for tool in tools])  # type: ignore[index, union-attr]
-        return await super().ainvoke(*args, **kwargs)
 
 
 def _config(*, helper_tools: list[str], approval: ToolApprovalConfig | None = None) -> Config:
@@ -99,45 +83,52 @@ def _live_context(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
     )
 
 
+def _leader_turn(identity: ToolExecutionIdentity, *, agent_mode: AgentMode = "standard") -> ResponseTurnContext:
+    return ResponseTurnContext(
+        agent_mode=agent_mode,
+        entity_label="leader",
+        session_id=identity.session_id,
+        run_id=None,
+        correlation_id="correlation",
+        reply_to_event_id="$parent-reply",
+        room_id=identity.room_id,
+        thread_id=identity.resolved_thread_id,
+        requester_id=identity.requester_id,
+        matrix_run_metadata=None,
+    )
+
+
 async def _delegate(
     toolkit: DelegateTools,
     config: Config,
     paths: RuntimePaths,
     tool_name: str,
     *,
-    native: bool,
+    leader: ScriptedModel | None,
     **arguments: object,
 ) -> str:
-    """Call a delegate function directly or through a parent Agent and the native delegation driver."""
-    if not native:
+    """Call a delegate function directly, or, given the ``leader``'s model, through its reply and the native driver.
+
+    The native call's result is what the leader's next request answers the call with.
+    """
+    if leader is None:
         return await toolkit.async_functions[tool_name].entrypoint(**arguments)
-    identity = _identity()
-    with_agno_approval_flags(toolkit, config, registered_tool_name="delegate")
-    storage = create_session_storage("leader", config, paths, identity)
-    parent = Agent(
-        id="leader",
-        db=storage,
-        tools=[toolkit],
-        model=DelegationModel(
-            id="parent",
-            responses=[
-                ModelResponse(tool_calls=[_call(tool_name, f"{tool_name}-call", **arguments)]),
-                ModelResponse(content="Parent done"),
-            ],
-        ),
-    )
-    response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-    response = await drive_delegations(
-        parent,
-        response,
-        agent_name="leader",
-        run_child=run_delegated_child_response,
-        config=config,
+    call_id = f"{tool_name}-call-{len(leader.requests)}"
+    leader.turns.extend([calls(tool_call(tool_name, call_id, **arguments)), answer("Parent done")])
+    result = await ai.ai_response(
+        _leader_turn(_identity()),
+        prompt="Delegate",
         runtime_paths=paths,
-        execution_identity=identity,
+        config=config,
+        execution_identity=_identity(),
+        supports_native_tool_approval=True,
     )
-    assert response.status == RunStatus.completed
-    return next(str(tool.result) for tool in response.tools or () if tool.tool_name == tool_name)
+    assert "Parent done" in result
+    return next(
+        message.get_content_string()
+        for message in leader.requests[-1].messages
+        if message.role == "tool" and message.tool_call_id == call_id
+    )
 
 
 def test_authoring_guidance_mentions_minimal_only_when_offered(tmp_path: Path) -> None:
@@ -219,6 +210,7 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
 )
 async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     target: str,
     approval: ToolApprovalConfig | None,
     native: bool,
@@ -228,6 +220,8 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=_identity())
+    leader = ScriptedModel([])
+    ScriptedAgents({"leader": leader, "helper": ScriptedModel([]), "plain": ScriptedModel([])}).install(monkeypatch)
 
     with tool_runtime_context(_live_context(config, paths)):
         result = await _delegate(
@@ -235,7 +229,7 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
             config,
             paths,
             "run_subagent",
-            native=native,
+            leader=leader if native else None,
             task="Report",
             agent_name=target,
             minimal=True,
@@ -273,23 +267,17 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         listings.append(str(listing))
         return str(listing)
 
-    child_models: list[_ToolRecordingModel] = []
-
-    def load_model(_config: object, _paths: object, _name: str, *_args: object) -> _ToolRecordingModel:
-        model = _ToolRecordingModel(
-            id="gpt-6-astra",
-            responses=[
-                ModelResponse(
-                    tool_calls=[_call("bash", f"bash-{len(child_models)}", command="mindroom-agent tools list")],
-                ),
-                ModelResponse(content=f"Child answer {len(child_models)}"),
-            ],
-        )
-        child_models.append(model)
-        return model
-
+    child = ScriptedModel(
+        [
+            calls(tool_call("bash", "bash-0", command="mindroom-agent tools list")),
+            answer("Child answer 0"),
+            calls(tool_call("bash", "bash-1", command="mindroom-agent tools list")),
+            answer("Child answer 1"),
+        ],
+    )
+    leader = ScriptedModel([])
     install_scripted_shell(monkeypatch, run_shell_command)
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
     toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=identity)
 
     with tool_runtime_context(live):
@@ -298,7 +286,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
             config,
             paths,
             "run_subagent",
-            native=native,
+            leader=leader if native else None,
             task="Report",
             agent_name="helper",
             minimal=True,
@@ -307,23 +295,24 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 
         handles = list((paths.storage_root / "subagent_sessions").glob("*.json"))
         assert len(handles) == 1
-        child = json.loads(handles[0].read_text())["child"]
-        assert child["agent_mode"] == "minimal"
+        saved = json.loads(handles[0].read_text())["child"]
+        assert saved["agent_mode"] == "minimal"
         follow_up = await _delegate(
             toolkit,
             config,
             paths,
             "continue_subagent",
-            native=native,
-            subagent_id=child["subagent_id"],
+            leader=leader if native else None,
+            subagent_id=saved["subagent_id"],
             message="More detail",
         )
         assert "Child answer 1" in follow_up, follow_up
 
-    assert len(child_models) == 2
-    for model in child_models:
-        assert model.seen_tools == [["bash"], ["bash"]]
-        system = str(model.seen_messages[0].content)
+    assert len(child.requests) == 4
+    for request in child.requests:
+        assert offered_tools(request) == ["bash"]
+        system = request.messages[0].get_content_string()
+        assert request.messages[0].role == "system"
         assert "optional long role" not in system
         assert "mindroom-agent" in system
     assert len(listings) == 2
@@ -379,36 +368,15 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
         assert receipt["status"] == "completed", json.dumps(receipt, default=str)
         return str(receipt["outcome"])
 
-    models = {
-        "lead": DelegationModel(
-            id="gpt-6.1-sol",
-            responses=[
-                ModelResponse(tool_calls=[_call("bash", "lead-bash", command="mindroom-agent tools call ...")]),
-                ModelResponse(content="Leader done"),
-            ],
-        ),
-        "default": _ToolRecordingModel(
-            id="gpt-6-astra",
-            responses=[
-                ModelResponse(tool_calls=[_call("bash", "child-bash", command="mindroom-agent tools list")]),
-                ModelResponse(content="Child answer"),
-            ],
-        ),
-    }
-    install_scripted_shell(monkeypatch, run_shell_command)
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda _c, _p, name, *_a: models[name])
-    turn = ResponseTurnContext(
-        agent_mode="minimal",
-        entity_label="leader",
-        session_id=identity.session_id,
-        run_id=None,
-        correlation_id="correlation",
-        reply_to_event_id="$parent-reply",
-        room_id=identity.room_id,
-        thread_id=identity.resolved_thread_id,
-        requester_id=identity.requester_id,
-        matrix_run_metadata=None,
+    lead = ScriptedModel(
+        [calls(tool_call("bash", "lead-bash", command="mindroom-agent tools call ...")), answer("Leader done")],
     )
+    child = ScriptedModel(
+        [calls(tool_call("bash", "child-bash", command="mindroom-agent tools list")), answer("Child answer")],
+    )
+    install_scripted_shell(monkeypatch, run_shell_command)
+    ScriptedAgents({"leader": lead, "helper": child}).install(monkeypatch)
+    turn = _leader_turn(identity, agent_mode="minimal")
 
     with tool_runtime_context(live):
         result = await ai.ai_response(
@@ -421,8 +389,8 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
 
     assert "Leader done" in result, result
     assert len(child_listings) == 1
-    assert models["default"].seen_tools == [["bash"], ["bash"]]
-    assert "Child answer" in str(models["lead"].seen_messages)
+    assert [offered_tools(request) for request in child.requests] == [["bash"], ["bash"]]
+    assert "Child answer" in str(lead.requests[-1].messages)
 
 
 @pytest.mark.asyncio
@@ -434,14 +402,8 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
     config = _config(helper_tools=["shell"])
     paths = _paths(tmp_path, {})
     entity_ids(config, paths)
-    models: list[_ToolRecordingModel] = []
-
-    def load_model(_config: object, _paths: object, _name: str, *_args: object) -> _ToolRecordingModel:
-        model = _ToolRecordingModel(id="gpt-6-astra", responses=[ModelResponse(content=f"Answer {len(models)}")])
-        models.append(model)
-        return model
-
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+    child = ScriptedModel([answer("Answer 0"), answer("Answer 1")])
+    ScriptedAgents({"helper": child}).install(monkeypatch)
     toolkit = DelegateTools("leader", ["helper"], paths, config, execution_identity=_identity())
 
     with tool_runtime_context(_live_context(config, paths)):
@@ -453,5 +415,5 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
         assert DelegationChild(**payload["child"]).agent_mode == "standard"
         assert "Answer 1" in await toolkit.continue_subagent(payload["child"]["subagent_id"], "More")
 
-    assert "bash" not in models[1].seen_tools[0]
-    assert "run_shell_command" in models[1].seen_tools[0]
+    assert "bash" not in offered_tools(child.requests[1])
+    assert "run_shell_command" in offered_tools(child.requests[1])
