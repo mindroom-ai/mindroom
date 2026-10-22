@@ -466,6 +466,9 @@ def test_instance_chart_closes_public_tuwunel_registration(oidc_args: tuple[str,
     )
     assert tuwunel_config["grant_admin_to_first_user"] is False
     assert tuwunel_config["allow_federation"] is False
+    # Synapse kept the platform's display name and accepted 50 MiB uploads.
+    assert tuwunel_config["new_user_displayname_suffix"] == ""
+    assert tuwunel_config["max_request_size"] == "50 MiB"
     # Wrong passwords keep Tuwunel's default brute-force limit; only successful sign-ins get a larger burst.
     assert tuwunel_config["rate_limiting"]["login"] == {"account": {"per_second": 0.05, "burst_count": 10}}
 
@@ -493,6 +496,7 @@ def test_instance_chart_signs_owners_in_through_platform_oidc_with_bound_tokens(
             "callback_url": "https://42.matrix.example.test/_matrix/client/unstable/login/sso/callback/mindroom-matrix",
             "scope": ["openid", "profile", "email"],
             "userid_claims": ["preferred_username"],
+            "unique_id_fallbacks": False,
         },
     ]
     assert "identity_provider" not in _tuwunel_config(_render_instance_chart(), "demo")
@@ -506,7 +510,11 @@ def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None
         for container in deployment["spec"]["template"]["spec"]["initContainers"]
         if container["name"] == "reset-synapse-matrix-state"
     )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     bound = [
+        personal_room_record_path(paths, "router", "@owner:1.mindroom.chat"),
+        invited_rooms_path(paths, "router"),
+        pending_room_invites_path(paths, "router"),
         tmp_path / "matrix_state.yaml",
         tmp_path / "encryption_keys" / "mindroom_router_1.mindroom.chat" / "store.db",
         tmp_path / "sync_continuity" / "router.json",
@@ -514,7 +522,11 @@ def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None
         tmp_path / "tracking" / "event_journal.db-wal",
         tmp_path / "tracking" / "event_journal_binding.json",
     ]
-    kept = [tmp_path / "credentials" / "openrouter_credentials.json", tmp_path / "tracking" / "memory_auto_flush.json"]
+    kept = [
+        tmp_path / "credentials" / "openrouter_credentials.json",
+        tmp_path / "tracking" / "memory_auto_flush.json",
+        tmp_path / "tracking" / "agents" / "router" / "agent_modes.json",
+    ]
 
     def start() -> None:
         subprocess.run([*reset["command"], *reset["args"]], env={**os.environ, "STORAGE": str(tmp_path)}, check=True)
@@ -530,7 +542,7 @@ def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None
         path.write_text("tuwunel\n")
     start()
     assert all(path.read_text() == "tuwunel\n" for path in bound)
-    assert _env_by_name(reset)["STORAGE"]["value"] == "/mindroom_data"
+    assert [mount["mountPath"] for mount in reset["volumeMounts"]] == [_env_by_name(reset)["STORAGE"]["value"]]
 
 
 def test_instance_chart_runs_one_tuwunel_that_reads_its_rendered_config() -> None:
@@ -1576,6 +1588,7 @@ def test_instance_chart_requests_fit_measured_tenant_use() -> None:
     }
     # Tuwunel would otherwise size its database pool to the node's cores and idle well above its request.
     assert _tuwunel_config(docs, "demo")["db_pool_max_workers"] == 16
+    assert _tuwunel_config(docs, "demo")["db_cache_capacity_mb"] == 256
 
 
 def test_instance_chart_renders_configurable_control_plane_resources() -> None:
@@ -1634,7 +1647,7 @@ def test_instance_chart_renders_with_pre_resource_release_values(tmp_path: Path)
     """Older release values should not break chart upgrades before resources are set."""
     values_path = tmp_path / "old-instance-values.yaml"
     values_path.write_text(
-        "customer: demo\nbaseDomain: mindroom.chat\nmindroomResources:\ntuwunelResources:\nsandboxRunnerResources:\n",
+        "customer: demo\nbaseDomain: mindroom.chat\nmindroomResources:\nsynapseResources:\nsandboxRunnerResources:\n",
         encoding="utf-8",
     )
 
@@ -1644,7 +1657,8 @@ def test_instance_chart_renders_with_pre_resource_release_values(tmp_path: Path)
 
     assert _container(mindroom, "mindroom")["resources"] == {}
     assert _container(mindroom, "sandbox-runner")["resources"] == {}
-    assert _container(tuwunel, "tuwunel")["resources"] == {}
+    # Those releases ran Synapse, so Tuwunel gets the chart defaults.
+    assert _container(tuwunel, "tuwunel")["resources"]["requests"]["memory"] == "192Mi"
 
 
 def test_platform_chart_renders_default_resources_for_stateless_services() -> None:

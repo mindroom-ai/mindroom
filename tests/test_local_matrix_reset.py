@@ -74,6 +74,9 @@ _MATRIX_BOUND = (
     "sync_continuity/router.json",
     "tracking/event_journal.db",
     "tracking/event_journal_binding.json",
+    "tracking/agents/router/personal_rooms/owner.json",
+    "tracking/agents/router/invited_rooms.json",
+    "tracking/agents/router/pending_room_invites.json",
 )
 
 
@@ -118,6 +121,7 @@ def test_local_matrix_reset_removes_only_selected_matrix_state(
             (storage / bound).write_text("stale Matrix state\n")
         (storage / "keep.txt").write_text("unrelated persistent data\n")
         (storage / "tracking" / "memory_auto_flush.json").write_text("unrelated tracking record\n")
+        (storage / "tracking" / "agents" / "router" / "agent_modes.json").write_text("unrelated agent record\n")
 
     result = _reset(reset_project)
 
@@ -127,6 +131,9 @@ def test_local_matrix_reset_removes_only_selected_matrix_state(
             assert (storage / bound).exists() == (storage != reset_project / selected_storage), (storage, bound)
         assert (storage / "keep.txt").read_text() == "unrelated persistent data\n"
         assert (storage / "tracking" / "memory_auto_flush.json").read_text() == "unrelated tracking record\n"
+        assert (
+            storage / "tracking" / "agents" / "router" / "agent_modes.json"
+        ).read_text() == "unrelated agent record\n"
 
 
 def test_local_matrix_reset_allows_missing_state(reset_project: Path) -> None:

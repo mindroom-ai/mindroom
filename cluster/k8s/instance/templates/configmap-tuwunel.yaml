@@ -25,13 +25,18 @@ data:
     allow_federation = false
     # Without this, the first owner to sign in would become the server admin.
     grant_admin_to_first_user = false
+    # Owners keep the display name the platform sends; Tuwunel would otherwise append "💕".
+    new_user_displayname_suffix = ""
+    # Synapse's upload limit, which tenants relied on; Tuwunel's default is 24 MiB.
+    max_request_size = "50 MiB"
     # MindRoom fork features: collapse superseded streaming edits in /sync, and bind OpenID tokens to the
     # MindRoom server that asked, so MindRoom Chat can sign in to the server the agents publish.
     mindroom_compact_edits_enabled = true
     mindroom_openid_audience = true
-    # Tuwunel sizes its database thread pool to the node's cores, which on a shared node made one idle tenant
-    # use about 310 MiB instead of about 115 MiB; tenant databases are small.
+    # Tuwunel sizes its database thread pool and cache to the node's cores; on a shared node that made one idle
+    # tenant use about 310 MiB instead of about 115 MiB, and would let the cache outgrow the pod's memory limit.
     db_pool_max_workers = 16
+    db_cache_capacity_mb = 256
 {{- if and $oidcEnabled $autoJoinRoomKeys }}
     auto_join_rooms = [
 {{- range $index, $roomKey := $autoJoinRoomKeys }}{{ if $index }}, {{ end }}{{ printf "#%s:%s" (toString $roomKey) $serverName | quote }}{{ end -}}
@@ -57,6 +62,8 @@ data:
     issuer_url = {{ required "matrixOidc.issuer is required when matrixOidc.enabled=true" $matrixOidc.issuer | toString | quote }}
     callback_url = {{ printf "%s/_matrix/client/unstable/login/sso/callback/%s" $clientUrl $clientId | quote }}
     scope = ["openid", "profile", "email"]
-    # The platform names the localpart, so the owner it authorizes in MindRoom is the account this server creates.
+    # The platform names the localpart, so the owner it authorizes in MindRoom is the account this server creates;
+    # when that name is taken, sign-in fails instead of creating an account MindRoom does not know.
     userid_claims = ["preferred_username"]
+    unique_id_fallbacks = false
 {{- end }}

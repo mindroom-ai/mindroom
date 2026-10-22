@@ -78,7 +78,8 @@ spec:
       # LEGACY_COMPAT: tenant storage from a Synapse homeserver
       # Legacy format: tenant storage with no .homeserver-tuwunel marker holds the Matrix state bound to the tenant's
       # Synapse server, which Tuwunel replaced with an empty database: matrix_state.yaml, encryption_keys/,
-      # sync_continuity/, and the event journal with its binding in tracking/.
+      # sync_continuity/, the event journal with its binding in tracking/, and each agent's personal-room and
+      # invited-room records below tracking/.
       # Last legacy release: v2026.10.461 ran tenants on Synapse; the next release runs them on Tuwunel.
       # Handling: the first start on Tuwunel deletes that set once, as `just local-matrix-reset` does, so the runtime
       # registers its accounts and rooms again instead of refusing to start; the marker keeps later starts from
@@ -93,6 +94,10 @@ spec:
           if [ ! -e "${STORAGE}/.homeserver-tuwunel" ]; then
             rm -rf "${STORAGE}/matrix_state.yaml" "${STORAGE}/encryption_keys" "${STORAGE}/sync_continuity" \
               "${STORAGE}"/tracking/event_journal*
+            if [ -d "${STORAGE}/tracking" ]; then
+              find "${STORAGE}/tracking" \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) \
+                -prune -exec rm -rf {} +
+            fi
             touch "${STORAGE}/.homeserver-tuwunel"
           fi
         env:

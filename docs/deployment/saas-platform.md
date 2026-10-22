@@ -195,7 +195,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/system/provision` | POST | Create or re-provision an instance |
+| `/system/provision` | POST | Create or re-provision an instance; `"keep_stopped": true` redeploys an existing instance without starting it |
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
@@ -278,7 +278,7 @@ The script performs these steps:
 
 1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
 2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
-3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `tuwunel-{id}` and `mindroom-{id}` rollouts.
+3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `tuwunel-{id}` and `mindroom-{id}` rollouts of the instances that run.
 4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance, where `baseDomain` is `provisioner.instanceBaseDomain` or, when that is empty, `domain`.
 
 It reads the domain, environment, Supabase URL, and platform Secret name from the release's computed Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret in the chart's `mindroom-{environment}` namespace; secrets are never printed.
@@ -287,15 +287,14 @@ It reads the domain, environment, Supabase URL, and platform Secret name from th
 Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
 Tenant homeservers run MindRoom's Tuwunel fork, `ghcr.io/mindroom-ai/mindroom-tuwunel:latest` with pull policy `Always`, unless the platform chart sets `provisioner.instanceTuwunelImage` and `provisioner.instanceTuwunelImagePullPolicy`.
 Set them there to pin or upgrade Tuwunel; the script keeps them across releases, and each instance switches when it is re-provisioned.
-Instances deployed with v2026.10.461 or earlier ran Synapse, and their first re-provision on a later release replaces it with an empty Tuwunel server.
-That deletes the instance's Matrix accounts, rooms, messages, and uploaded files, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
-Deploy that release with `--instances all`, so instances held by the subscription lifecycle switch too.
-An instance a customer or admin stopped manually keeps Synapse, and starting it fails until it is re-provisioned through `POST /system/provision`, which also starts it.
+An instance that still runs Synapse gets an empty Tuwunel server on its first re-provision.
+That deletes the instance's Matrix accounts, rooms, messages, uploaded files, and scheduled tasks, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
+Deploy the first release with Tuwunel using `--instances all`, so held and manually stopped instances switch too.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
-The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.
-Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it keeps running the old MindRoom image until it is re-provisioned; run the script with `--instances <id>` after it has been started.
-Deprovisioned instances are never re-provisioned either, because that would recreate them empty.
+An instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`) is redeployed only with `--instances all` or its id, and then scaled back to zero so it stays stopped; the default `running` selection leaves it alone.
+Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it runs the release it was last redeployed with.
+Deprovisioned instances are never re-provisioned, because that would recreate them empty, and the script refuses their ids.
 A failed instance does not stop the run; the script reports every failure at the end and exits non-zero.
 When the node's memory requests are nearly full, rollout pods can stay `Pending`; stop idle instances or resize the node first.
 

@@ -39,8 +39,13 @@ local-matrix-reset:
     for directory in (encryption_keys_dir(paths), paths.storage_root / "sync_continuity"):
         if directory.exists():
             shutil.rmtree(directory)
-    for journal in tracking_dir(paths).glob("event_journal*"):
+    tracking = tracking_dir(paths)
+    for journal in tracking.glob("event_journal*"):
         journal.unlink()
+    for record in [*tracking.rglob("invited_rooms.json"), *tracking.rglob("pending_room_invites.json")]:
+        record.unlink()
+    for personal_rooms in list(tracking.rglob("personal_rooms")):
+        shutil.rmtree(personal_rooms)
     PY
     rm -rf tmp/
     echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."

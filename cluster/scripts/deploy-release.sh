@@ -6,7 +6,8 @@
 # Steps:
 #   1. Pre-pull the release images on the k3s node.
 #   2. Upgrade the platform Helm release with the chart and images from <tag>.
-#   3. Re-provision the selected instances through POST /system/provision.
+#   3. Re-provision the selected instances through POST /system/provision; instances stopped manually or held by the
+#      subscription lifecycle are redeployed and kept stopped.
 #   4. Health-check the platform API and every re-provisioned running instance.
 #
 # Run it from a repo checkout that has <tag> (git fetch --tags), with kubectl and helm pointed at the cluster.
@@ -22,7 +23,7 @@
 set -euo pipefail
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -100,20 +101,21 @@ provisioner_post() {
 # The tier comes from the subscription, like the portal and lifecycle provisioning paths.
 ROWS=$(supabase_get 'instances?select=instance_id,subscription_id,account_id,status,lifecycle_stopped_at,subscriptions(tier)&order=instance_id' |
   jq -c 'map(. + {tier: .subscriptions.tier} | del(.subscriptions))')
-# Manually stopped instances (stopped without lifecycle_stopped_at) are never re-provisioned, because provisioning starts them.
+# Manually stopped instances (stopped without lifecycle_stopped_at) are redeployed with keep_stopped, so they stay stopped.
 RUNNING='.status == "running" and .lifecycle_stopped_at == null'
 HELD='.lifecycle_stopped_at != null and .status != "deprovisioned"'
+STOPPED='.status == "stopped" and .lifecycle_stopped_at == null'
 case "$SELECT" in
   none) SELECTED='[]' ;;
   running) SELECTED=$(jq -c "[.[] | select($RUNNING)]" <<<"$ROWS") ;;
-  all) SELECTED=$(jq -c "[.[] | select(($RUNNING) or ($HELD))]" <<<"$ROWS") ;;
+  all) SELECTED=$(jq -c "[.[] | select(($RUNNING) or ($HELD) or ($STOPPED))]" <<<"$ROWS") ;;
   *)
     [[ "$SELECT" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "--instances must be running, all, none, or comma-separated ids" >&2; exit 2; }
     SELECTED=$(jq -c --arg ids "$SELECT" '($ids | split(",") | map(tonumber)) as $want | [.[] | select(.instance_id as $id | $want | any(. == $id))]' <<<"$ROWS")
     missing=$(jq -r --arg ids "$SELECT" --argjson sel "$SELECTED" '$ids | split(",") | map(tonumber) - ($sel | map(.instance_id)) | join(",")' <<<"null")
     [ -z "$missing" ] || { echo "Unknown instance ids: $missing" >&2; exit 1; }
-    refused=$(jq -r '[.[] | select(.status == "deprovisioned" or (.status == "stopped" and .lifecycle_stopped_at == null)) | .instance_id] | join(",")' <<<"$SELECTED")
-    [ -z "$refused" ] || { echo "Refusing manually stopped or deprovisioned instances: $refused" >&2; exit 1; }
+    refused=$(jq -r '[.[] | select(.status == "deprovisioned") | .instance_id] | join(",")' <<<"$SELECTED")
+    [ -z "$refused" ] || { echo "Refusing deprovisioned instances: $refused" >&2; exit 1; }
     ;;
 esac
 
@@ -169,7 +171,8 @@ while read -r row; do
   [ -n "$row" ] || continue
   id=$(jq -r .instance_id <<<"$row")
   held=$(jq -r 'if .lifecycle_stopped_at then "true" else "false" end' <<<"$row")
-  body=$(jq -c '{subscription_id, account_id, tier, instance_id}' <<<"$row")
+  stopped=$(jq -r "if $STOPPED then \"true\" else \"false\" end" <<<"$row")
+  body=$(jq -c --argjson stopped "$stopped" '{subscription_id, account_id, tier, instance_id} + if $stopped then {keep_stopped: true} else {} end' <<<"$row")
   if $DRY_RUN; then
     echo "  [dry-run] POST $API/system/provision $body"
     continue
@@ -188,6 +191,10 @@ while read -r row; do
   fi
   if $held; then
     log "Instance $id is held by the subscription lifecycle; the provisioner kept it stopped"
+    continue
+  fi
+  if $stopped; then
+    log "Instance $id was stopped manually; the provisioner kept it stopped"
     continue
   fi
   if kubectl rollout status "deployment/tuwunel-$id" -n mindroom-instances --timeout=10m &&

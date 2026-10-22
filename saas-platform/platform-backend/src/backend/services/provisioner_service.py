@@ -731,6 +731,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
     unless the lifecycle itself is resuming it (`resume_lifecycle_hold`) and its account is not pending deletion.
+    With `keep_stopped` in `data`, as the release script sends for an instance a customer or admin stopped, the
+    instance is redeployed onto the current chart and scaled back to zero.
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
@@ -744,6 +746,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
     existing_instance_id = data.get("instance_id")  # For re-provisioning
+    keep_stopped = data.get("keep_stopped") is True
 
     # If re-provisioning, update existing instance; otherwise insert new
     if existing_instance_id:
@@ -970,8 +973,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Record a created key before publishing it, so a run that loses the record never publishes its key.
         if created_openrouter_key is not None:
             await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
-        # Apply before Helm so pods restarted by the new secret hash read the new values;
-        # Tuwunel reads its OIDC client secret only at startup.
+        # Apply before Helm so pods restarted by the new secret hash read the new values.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
@@ -1010,6 +1012,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
+    if keep_stopped:
+        await _scale_tenant_deployments(
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+        )
+        update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
+        return {**held_response, "message": "Instance redeployed and kept stopped"}
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)

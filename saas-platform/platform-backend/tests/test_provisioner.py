@@ -841,6 +841,44 @@ class TestProvisionerEndpoints:
         _assert_helm_uses_external_instance_secret(helm_args)
         assert any(call_.args[0][:2] == ["apply", "-f"] for call_ in mock_kubectl.call_args_list)
 
+    def test_provision_keep_stopped_redeploys_without_starting(
+        self,
+        client: TestClient,
+        mock_supabase: MagicMock,
+        mock_kubectl: AsyncMock,
+        mock_helm: AsyncMock,
+        mock_wait_for_deployment: AsyncMock,
+        valid_auth_header: dict,
+        mock_config,
+    ):
+        """A release redeploys a manually stopped instance onto the current chart and leaves it stopped."""
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
+        mock_kubectl.side_effect = _kubectl_without_credentials_encryption_secret
+
+        response = client.post(
+            "/system/provision",
+            json={
+                "subscription_id": "sub_test_123",
+                "account_id": "acc_test_123",
+                "tier": "byok",
+                "instance_id": "456",
+                "keep_stopped": True,
+            },
+            headers=valid_auth_header,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["message"] == "Instance redeployed and kept stopped"
+        mock_helm.assert_called_once()
+        scales = [call_.args[0] for call_ in mock_kubectl.call_args_list if call_.args[0][0] == "scale"]
+        assert scales == [
+            ["scale", "deployment/mindroom-456", "--replicas=0"],
+            ["scale", "deployment/tuwunel-456", "--replicas=0"],
+        ]
+        mock_wait_for_deployment.assert_not_called()
+        updates = [call_.args[0] for call_ in mock_supabase.table().update.call_args_list if call_.args]
+        assert {"status": updates[-1]["status"], "tier": updates[-1]["tier"]} == {"status": "stopped", "tier": "byok"}
+
     def test_provision_re_provision_existing_preserves_credentials_encryption(
         self,
         client: TestClient,
