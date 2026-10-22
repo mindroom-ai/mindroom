@@ -76,7 +76,7 @@ def _request_record(
         {key: value for key, value in message.to_dict().items() if key not in _NON_API_MESSAGE_FIELDS}
         for message in request.messages
     ]
-    tools = [*(json_safe(tool) for tool in request.native_tools), *(json_safe(tool) for tool in request.tools)]
+    tools = [json_safe(tool) for tool in request.tools]
     return {
         "timestamp": datetime.now().astimezone().isoformat(),
         "request_log_id": request_log_id,

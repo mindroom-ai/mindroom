@@ -40,6 +40,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
@@ -229,6 +230,43 @@ async def test_non_streaming_requests_are_not_retried() -> None:
     assert len(inner.requests) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> None:
+    """An SDK's own timeout inside the idle limit propagates as raised instead of becoming a retried stall."""
+    inner = _ScriptedProvider([[TimeoutError("read timed out")], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=60.0))
+
+    with pytest.raises(TimeoutError, match="read timed out"):
+        await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked() -> None:
+    """The finished turn's token counts stay one request's own, so they still describe its context."""
+    final_usage = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54, duration=2.0)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(MessageMetrics(duration=1.5)), _transient()],
+            [UsageReported(final_usage), _turn(usage=final_usage)],
+        ],
+    )
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    events = await _drain(provider, ModelRequest(messages=[_user()]))
+
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {
+        "input_tokens": 42,
+        "output_tokens": 12,
+        "total_tokens": 54,
+        "duration": 3.5,
+    }
+    assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}}
+
+
 # --- Media fallback -------------------------------------------------------------------------------------------
 
 
@@ -274,6 +312,26 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
 @pytest.mark.asyncio
 async def test_input_specific_rejection_retries_without_learning() -> None:
     rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    await _drain(provider, request)
+    await _drain(provider, request)
+
+    assert inner.requests[1].messages[0].images is None
+    assert inner.requests[2].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [413, 501])
+async def test_a_payload_or_server_rejection_retries_without_learning(status: int) -> None:
+    """A 413 or a final server error proves nothing about the model, even when its text names a capability gap."""
+    rejection = classify_provider_error(
+        "This model does not support image input",
+        provider="Scripted Chat",
+        status_code=status,
+    )
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
     request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
@@ -454,16 +512,27 @@ async def test_portable_tool_search_projects_stored_calls_byte_stably() -> None:
 
 
 @pytest.mark.asyncio
-async def test_portable_tool_search_wraps_unparseable_stored_arguments_as_empty() -> None:
-    """A stored call with malformed arguments must not break every later request in its thread."""
-    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", '{{"id": 1}}')])
+@pytest.mark.parametrize(
+    ("stored", "arguments"),
+    [
+        ("{'order_id': 'A-1'}", {"order_id": "A-1"}),
+        ("[]", {}),
+        ("", {}),
+        ('"A-1"', {}),
+        ('{{"id": 1}}', {}),
+    ],
+    ids=["python-literal", "empty-list", "empty", "not-an-object", "unparseable"],
+)
+async def test_portable_tool_search_wraps_stored_arguments_as_an_object(stored: str, arguments: dict[str, str]) -> None:
+    """Stored arguments Agno accepted keep their values; malformed ones wrap as empty instead of breaking the thread."""
+    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", stored)])
     inner = _ScriptedProvider([[_turn()]])
     request = ModelRequest(messages=[assistant], deferred_tool_names=frozenset({"lookup_order"}))
 
     await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
 
     wrapped = inner.requests[0].messages[0].tool_calls[0]["function"]["arguments"]
-    assert json.loads(wrapped) == {"name": "lookup_order", "arguments": {}}
+    assert json.loads(wrapped) == {"name": "lookup_order", "arguments": arguments}
 
 
 # --- Safeguard refusal ----------------------------------------------------------------------------------------
@@ -696,6 +765,37 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
 
     assert isinstance(events[-1], TurnCompleted)
     assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answer_still_arrives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk that fills between the request and response records costs only the response record."""
+    write_line = request_log_stage._write_line
+    written: list[dict[str, object]] = []
+
+    def fills_after_one_line(path: Path, payload: dict[str, object]) -> None:
+        if written:
+            message = "No space left on device"
+            raise OSError(message)
+        written.append(payload)
+        write_line(path, payload)
+
+    monkeypatch.setattr(request_log_stage, "_write_line", fills_after_one_line)
+    usage = MessageMetrics(input_tokens=3, output_tokens=1)
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+
+    with capture_logs() as logs:
+        events = await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [record.get("record") for record in _log_records(tmp_path)] == [None]
+    assert [entry["event"] for entry in logs if entry["log_level"] in {"info", "error"}] == [
+        "LLM usage",
+        "Failed to emit LLM response telemetry",
+    ]
 
 
 @pytest.mark.asyncio

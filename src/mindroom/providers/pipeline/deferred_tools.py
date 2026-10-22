@@ -39,7 +39,7 @@ def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, A
         return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
     if function.get("name") not in deferred:
         return call
-    arguments = arguments_object(function.get("arguments") or "{}") or {}
+    arguments = arguments_object(function.get("arguments")) or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
     return {**call, "function": {**function, "name": CALL_TOOL_NAME, "arguments": wrapped}}
 
