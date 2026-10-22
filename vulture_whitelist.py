@@ -420,4 +420,3 @@ _.prompt_cache_breakpoints  # Capability read by the owned providers when they l
 _.child_run_id  # Stored tool-execution field of the Agno 3 run dict shape; MindRoom writes None and nothing reads it (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
 _.minimal_required  # EnrichmentItem field minimal mode's renderer reads once F3 renders it from the build surface (src/mindroom/hooks/types.py)
-install_request_preparation  # Agno request hook only tests/test_agno_compat_model_hooks.py still installs; G1 deletes it with the Agno model hooks (src/mindroom/agno_compat_model_hooks.py)

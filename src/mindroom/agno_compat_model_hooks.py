@@ -17,18 +17,14 @@ if TYPE_CHECKING:
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
-    from agno.run.agent import RunOutput, RunOutputEvent
-    from agno.run.team import TeamRunOutput, TeamRunOutputEvent
+    from agno.run.agent import RunOutputEvent
+    from agno.run.team import TeamRunOutputEvent
     from agno.tools.function import Function, FunctionCall
 
 type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
 type _SyncStream = Callable[..., Iterator[ModelResponse]]
 type _RetryPredicate = Callable[[ModelProviderError], bool]
-type _RequestPreparation = Callable[
-    [list[Message], list[dict[str, Any]] | None, RunOutput | TeamRunOutput | None],
-    Awaitable[None],
-]
 
 
 class _ClientProvider(Protocol):
@@ -150,60 +146,6 @@ def install_tool_result_callback(
     except AttributeError:
         return
     model_dict["_handle_function_call_media"] = handle_media
-
-
-# AGNO_COMPAT: Response loops lack an awaitable pre-request hook with mutable messages.
-# Reason: Mid-turn compaction must inspect and rewrite the loop's own message list, with the formatted tools and
-# the run, after Agno appends each tool batch and before the next provider request. Agno's CompressionManager runs
-# at that point but only compresses tool results, is enabled only by compress_tool_results, and never sees the run.
-# Upstream issue: Tracking gap. Related open issues https://github.com/agno-agi/agno/issues/4952 and
-# https://github.com/agno-agi/agno/issues/8342 ask for token-aware compaction but not for a caller-owned hook
-# consulted before each model request.
-# Upstream PR: None identified.
-# Remove when: Agno awaits a public callback before every provider request of its async streaming and
-# non-streaming loops, passing the mutable message list, the formatted tools, and the run; the owner's compaction
-# policy remains MindRoom's.
-# Coverage: tests/test_agno_compat_model_hooks.py::test_request_preparation_runs_before_every_provider_request;
-# tests/test_agno_compat_model_hooks.py::test_tool_call_cap_installed_later_refuses_before_preparation.
-def install_request_preparation(model: Model, *, marker: str, prepare: _RequestPreparation) -> None:
-    """Await ``prepare`` before every provider request of this model's async response loops.
-
-    ``prepare`` receives the loop's own message list, which Agno sends and keeps appending to, so it may rewrite
-    the list in place. A tool-call cap installed later wraps this hook, so a refused request is never prepared.
-    """
-    model_dict = vars(model)
-    if model_dict.get(marker) is True:
-        return
-    model_dict[marker] = True
-    original_process = cast("Callable[..., Awaitable[None]]", model._aprocess_model_response)
-    original_process_stream = cast("Callable[..., AsyncGenerator[ModelResponse]]", model.aprocess_response_stream)
-
-    async def process_model_response(
-        *args: object,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        run_response: RunOutput | TeamRunOutput | None = None,
-        **kwargs: object,
-    ) -> None:
-        await prepare(messages, tools, run_response)
-        await original_process(*args, messages=messages, tools=tools, run_response=run_response, **kwargs)
-
-    async def process_response_stream(
-        *args: object,
-        messages: list[Message],
-        tools: list[dict[str, Any]] | None = None,
-        run_response: RunOutput | TeamRunOutput | None = None,
-        **kwargs: object,
-    ) -> AsyncIterator[ModelResponse]:
-        await prepare(messages, tools, run_response)
-        async with aclosing(
-            original_process_stream(*args, messages=messages, tools=tools, run_response=run_response, **kwargs),
-        ) as stream:
-            async for delta in stream:
-                yield delta
-
-    model_dict["_aprocess_model_response"] = process_model_response
-    model_dict["aprocess_response_stream"] = process_response_stream
 
 
 # AGNO_COMPAT: Model invocation and streaming lack composable middleware.

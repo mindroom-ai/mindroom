@@ -8318,36 +8318,24 @@ depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registr
 path = "mindroom.agno_compat_model_hooks"
 depends_on = []
 visibility = [
-    "mindroom.participation_hook",
-    "mindroom.ai_runtime",
-    "mindroom.approval.receipt",
     "mindroom.llm_request_logging",
     "mindroom.providers.media_fallback",
     "mindroom.providers.stream_retry",
     "mindroom.providers.claude_prompt_cache",
     "mindroom.providers.portable_tool_search",
-    "mindroom.skill_learning.capture",
-    "mindroom.skill_learning.reviewer",
     "mindroom.tool_jobs.notices",
-    "mindroom.history.mid_turn_compaction",
 ]
 
 [[interfaces]]
 from = ["mindroom.agno_compat_model_hooks"]
 expose = [
-    "install_message_projection",
     "install_tool_result_callback",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
-    "temporary_async_invocation_hooks",
-    "temporary_response_observer",
     "install_retry_cycle_hooks",
     "install_client_factories",
-    "install_request_preparation",
     "install_tool_call_rewrite",
 ]
-
-
 
 [[modules]]
 path = "mindroom.tool_system.agno_compat_function_schema"
