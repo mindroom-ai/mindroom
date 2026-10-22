@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectedClients } from "./ConnectedClients";
@@ -10,20 +10,33 @@ import type { AgentState, ConnectionList, ConnectionStatus } from "./types";
 
 /** How many agents' states load at once. */
 const STATE_REQUESTS = 6;
-/** An agent whose state cannot load shows nothing connected and no keys, as an unreadable service or store does. */
-const UNAVAILABLE: AgentState = { connected: {}, egress_services: null };
+
+/** An agent's last loaded state, `null` while none could be loaded, stamped when its request started. */
+interface LoadedState {
+  state: AgentState | null;
+  requestedAt: number;
+}
+
+/** Whether a card's own status found its account connected, stamped when it arrived. */
+interface CardStatus {
+  connected: boolean;
+  at: number;
+}
 
 /**
  * Load every agent's state after the catalog, a few at a time, and merge each
- * into its agent as it arrives. An account change reloads them all, and each
- * agent keeps its previous state until the new one arrives. A status that a
- * card loads corrects its account until the agent's state arrives again.
+ * into its agent as it arrives. An account change reloads them all; an agent
+ * keeps its last state until a new one loads, and one that never loaded is
+ * unknown. A status a card loads after its agent's state was requested wins
+ * over that state, so the newest answer counts.
  */
 function useAgentStates(
   catalog: ConnectionList | null,
   refreshVersion: number,
 ) {
-  const [states, setStates] = useState<Record<string, AgentState>>({});
+  const [states, setStates] = useState<Record<string, LoadedState>>({});
+  const [cards, setCards] = useState<Record<string, CardStatus>>({});
+  const clock = useRef(0);
   useEffect(() => {
     if (!catalog) return;
     const controller = new AbortController();
@@ -31,12 +44,17 @@ function useAgentStates(
     const loadNext = async (): Promise<void> => {
       const name = queue.shift();
       if (name === undefined || controller.signal.aborted) return;
+      const requestedAt = (clock.current += 1);
       const state = await requestConnection<AgentState>(
         `/api/connections/agents/${encodeURIComponent(name)}/state`,
         controller.signal,
-      ).catch(() => UNAVAILABLE);
+      ).catch(() => null);
       if (!controller.signal.aborted)
-        setStates((known) => ({ ...known, [name]: state }));
+        setStates((known) =>
+          state === null && known[name]
+            ? known
+            : { ...known, [name]: { state, requestedAt } },
+        );
       return loadNext();
     };
     for (let started = 0; started < STATE_REQUESTS; started += 1)
@@ -44,31 +62,35 @@ function useAgentStates(
     return () => controller.abort();
   }, [catalog, refreshVersion]);
   const onAccountStatus = useCallback(
-    (agentName: string, provider: string, status: ConnectionStatus) =>
-      setStates((known) => {
-        const state = known[agentName];
-        if (!state || state.connected[provider] === status.connected)
-          return known;
-        const connected = { ...state.connected, [provider]: status.connected };
-        return { ...known, [agentName]: { ...state, connected } };
-      }),
+    (agentName: string, provider: string, status: ConnectionStatus) => {
+      const card = { connected: status.connected, at: (clock.current += 1) };
+      setCards((known) => ({ ...known, [`${agentName}/${provider}`]: card }));
+    },
     [],
   );
   const agents = useMemo(
     () =>
       catalog?.agents.map((agent) => {
-        const state = states[agent.agent_name];
-        if (!state) return agent;
+        const loaded = states[agent.agent_name];
+        if (!loaded) return agent;
+        const { state, requestedAt } = loaded;
+        if (!state) return { ...agent, state_unavailable: true };
         return {
           ...agent,
-          services: agent.services.map((service) => ({
-            ...service,
-            connected: state.connected[service.provider] ?? false,
-          })),
+          services: agent.services.map((service) => {
+            const card = cards[`${agent.agent_name}/${service.provider}`];
+            return {
+              ...service,
+              connected:
+                card && card.at > requestedAt
+                  ? card.connected
+                  : (state.connected[service.provider] ?? false),
+            };
+          }),
           egress_services: state.egress_services,
         };
       }) ?? null,
-    [catalog, states],
+    [catalog, states, cards],
   );
   return { agents, onAccountStatus };
 }

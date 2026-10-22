@@ -1885,17 +1885,130 @@ describe("agent table summary, search, and order", () => {
     expect(requests("/api/connections")).toBe(1);
   });
 
-  it("shows an agent whose state cannot load as having nothing set", async () => {
+  const keyed = () => [
+    egress("github", "GitHub", {
+      configured: true,
+      key_configured: true,
+      active_source: "key",
+    }),
+  ];
+
+  it("says it could not check the accounts of an agent whose state cannot load", async () => {
     installApi({
       "/api/connections/agents/personal/state": async () =>
         json({ detail: "unavailable" }, 500),
     });
     render(<Connections />);
-    await screen.findByRole("button", { name: "Expand Personal assistant" });
     await waitFor(() =>
       expect(agentRow("Personal assistant")).toHaveTextContent(
-        "1 tool / 0 of 1 account set",
+        "1 tool / Could not check accounts",
       ),
+    );
+    expect(agentRow("Personal assistant")).not.toHaveTextContent(/ of \d/);
+  });
+
+  it("keeps an agent's last state, keys included, when reloading it fails", async () => {
+    let stateRequests = 0;
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": async () => {
+        stateRequests += 1;
+        return stateRequests === 1
+          ? json({ connected: { mail: true }, egress_services: keyed() })
+          : json({ detail: "restarting" }, 503);
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 2 of 2 accounts and keys set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+
+    await waitFor(() => expect(stateRequests).toBe(2));
+    // The card's own status says Mail is gone; the key still comes from the last state.
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
+    );
+    expect(
+      screen.getByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a card's status that arrives before its agent's state", async () => {
+    let answer = (_response: Response) => {};
+    installApi({
+      "/api/connections/agents/personal/state": () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      // The account was disconnected after the agent's state was read.
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: false }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+
+    answer(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / 1 of 2 accounts and keys set",
+      ),
+    );
+  });
+
+  it("keeps a card's status over an agent state that was requested before it arrived", async () => {
+    let stateRequests = 0;
+    let answerReload = (_response: Response) => {};
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": () => {
+        stateRequests += 1;
+        if (stateRequests === 1)
+          return Promise.resolve(
+            json({ connected: { mail: true }, egress_services: [] }),
+          );
+        return new Promise((resolve) => {
+          answerReload = resolve;
+        });
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 1 account or key set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+    await screen.findByRole("button", { name: "Connect Mail" });
+    await waitFor(() => expect(stateRequests).toBe(2));
+
+    // The reloaded state was read before the card's status and still says Mail is connected.
+    answerReload(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
     );
   });
 

@@ -33,6 +33,8 @@ export interface AgentConnections {
    * Filled in from the agent's state; absent until it loads.
    */
   egress_services?: EgressCredentialService[] | null;
+  /** Set by the page when the agent's state could not load and none loaded before, so nothing is known yet. */
+  state_unavailable?: boolean;
 }
 
 /** What one agent's connections are, from `GET /api/connections/agents/{agent}/state`. */

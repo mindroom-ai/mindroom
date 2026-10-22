@@ -103,7 +103,10 @@ const columns: ColumnDef<AgentTableRow>[] = [
       if (row.original.egress_services === undefined)
         return (
           <span className="text-muted-foreground tabular-nums">
-            {tools} / Checking accounts…
+            {tools} /{" "}
+            {row.original.state_unavailable
+              ? "Could not check accounts"
+              : "Checking accounts…"}
           </span>
         );
       // An agent that shows no keys, as while Agent Keys is off, counts only accounts.
