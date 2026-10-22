@@ -25,7 +25,7 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted
+from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted, UsageReported
 from mindroom.providers import remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
@@ -590,18 +590,35 @@ async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: P
     ]
 
 
+# Gemini answers a prompt it blocks with feedback and usage but no candidate.
+_GEMINI_BLOCKED_PROMPT = {
+    "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
+    "usageMetadata": {"promptTokenCount": 9, "totalTokenCount": 9},
+}
+
+
 @pytest.mark.asyncio
 async def test_gemini_blocked_prompt_ends_the_turn_without_output(tmp_path: Path) -> None:
-    """A streamed prompt Gemini blocks returns feedback and no candidate, which ends the turn empty, as in Agno."""
-    blocked = {
-        "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
-        "usageMetadata": {"promptTokenCount": 9, "totalTokenCount": 9},
-    }
-
-    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(blocked))
+    """A streamed prompt Gemini blocks ends the turn empty and, as in Agno's streamed parser, reports no usage."""
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_GEMINI_BLOCKED_PROMPT))
 
     completed = _completed(events)
     assert [type(event).__name__ for event in events] == ["StreamProgress", "TurnCompleted"]
+    assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_path: Path) -> None:
+    """A non-streamed blocked prompt, such as a participation decision, still reports its billed prompt tokens."""
+    reply = httpx.Response(200, json=_GEMINI_BLOCKED_PROMPT)
+
+    _, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
+
+    completed = _completed(events)
+    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
+    usage = [event.usage for event in events if isinstance(event, UsageReported)]
+    assert [(metrics.input_tokens, metrics.output_tokens, metrics.total_tokens) for metrics in usage] == [(9, 0, 9)]
+    assert completed.message.metrics.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
 
 

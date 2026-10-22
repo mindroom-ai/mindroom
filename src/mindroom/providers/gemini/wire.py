@@ -607,12 +607,22 @@ class GeminiReply:
     hosted_tool_ran: bool = False
 
 
-def read_chunk(reply: GeminiReply, chunk: GenerateContentResponse, *, provider: str) -> list[StreamEvent]:
-    """Add one streamed chunk (or one whole non-streamed response) to ``reply`` and return the events it carries.
+def read_chunk(
+    reply: GeminiReply,
+    chunk: GenerateContentResponse,
+    *,
+    provider: str,
+    whole_response: bool = False,
+) -> list[StreamEvent]:
+    """Add one streamed chunk (or one ``whole_response`` from a non-streamed call) to ``reply`` and return its events.
 
-    Gemini repeats cumulative usage on every chunk, so only usage on a finished candidate counts.
+    Gemini repeats cumulative usage on every streamed chunk, so only usage on a finished candidate counts.
+    A whole response without candidates, such as a blocked prompt, still counts its prompt usage, as Agno's
+    non-streaming parser did; Agno's streaming parser dropped it, so a streamed one does not.
     """
     if not chunk.candidates:
+        if whole_response and chunk.usage_metadata is not None:
+            reply.usage = _usage_metrics(chunk.usage_metadata)
         return []
     candidate = chunk.candidates[0]
     finish_reason = None if candidate.finish_reason is None else candidate.finish_reason.value

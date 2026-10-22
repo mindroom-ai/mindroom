@@ -138,6 +138,7 @@ class GeminiProvider:
                     reply,
                     await client.aio.models.generate_content(**call),
                     provider=self.identity.provider_name,
+                    whole_response=True,
                 )
                 first_output_at = time.monotonic()
                 for event in events:
