@@ -1973,6 +1973,11 @@ describe("what a row says about how the key is sent", () => {
     expect(screen.queryByText(/Requests are refused/)).toBeNull();
   });
 
+  const toolsOnly = {
+    connected: true,
+    account_label: "octocat",
+    reuse_enabled: false,
+  };
   it.each<[string, Partial<EgressOAuthStatus>, string]>([
     [
       "an account to connect",
@@ -1981,13 +1986,13 @@ describe("what a row says about how the key is sent", () => {
     ],
     [
       "a connected account only its tools use",
-      { connected: true, account_label: "octocat", reuse_enabled: false },
+      toolsOnly,
       "Requests are refused until a key is set or this account is used for Agent Keys.",
     ],
     [
       "a connected account the viewer cannot allow",
       {
-        ...{ connected: true, account_label: "octocat", reuse_enabled: false },
+        ...toolsOnly,
         can_connect: false,
       },
       "Requests are refused until a key is set or this account is used for Agent Keys.",
@@ -2010,7 +2015,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "a personal account connected before a service account",
       {
-        ...{ connected: true, account_label: "octocat", reuse_enabled: false },
+        ...toolsOnly,
         service_account: true,
         can_connect: false,
       },

@@ -91,21 +91,23 @@ function Code({ children }: { children: ReactNode }) {
   );
 }
 
-/** "a", "a and b", or "a, b, and c", as `formatList` joins strings, for items that are not plain text. */
 /** `children` and the comma after it, kept together so the comma never starts a line of its own. */
 function WithComma({ children }: { children: ReactNode }) {
   return <span className="inline-flex max-w-full items-end">{children},</span>;
 }
 
+/** "a", "a and b", or "a, b, and c", as `formatList` joins strings, for items that are not plain text. */
 function listOf(items: { key: string; node: ReactNode }[]): ReactNode {
   return items.map(({ key, node }, index) => (
     <Fragment key={key}>
-      {index === 0 ? null : index < items.length - 1 ? " " : " and "}
-      {items.length > 2 && index < items.length - 1 ? (
-        <WithComma>{node}</WithComma>
-      ) : (
-        node
-      )}
+      {index === 0
+        ? null
+        : index < items.length - 1
+          ? ", "
+          : items.length > 2
+            ? ", and "
+            : " and "}
+      {node}
     </Fragment>
   ));
 }
