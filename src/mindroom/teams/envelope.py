@@ -28,7 +28,7 @@ from mindroom.agents import team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.receipt import approval_receipt_hook
-from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume
+from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
@@ -2024,6 +2024,7 @@ async def continue_paused_team_run(
                 denial_reasons=denial_reasons if delegated else None,
                 approval_calls=approval_calls if delegated else (),
             )
+            events = with_resumed_turn_log_context(events)
             with helper_usage_context(scope):
                 await _publish_team_presentation(progress, presentation)
                 async with closing_async_stream(events):
