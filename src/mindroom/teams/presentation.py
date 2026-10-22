@@ -81,57 +81,18 @@ def strip_team_display(text: str) -> str:
     return text.removesuffix(_format_no_consensus_note()).rstrip()
 
 
-def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
-    """Format a single team member's contribution.
-
-    Args:
-        agent_name: Name of the agent
-        content: The agent's response content
-        indent: Indentation level
-
-    Returns:
-        Formatted contribution string
-
-    """
-    indent_str = "  " * indent
+def _format_member_contribution(agent_name: str, content: str) -> str:
+    """Return one member's contribution: its bold name, then its content."""
     first_line = content.lstrip().splitlines()[0] if content.strip() else ""
     # Content that opens with a tool marker or a block such as a table needs its own paragraph to render.
     own_paragraph = is_visible_tool_marker_line(first_line) or opens_with_markdown_block(content)
     separator = "\n\n" if own_paragraph else " "
-    return f"{indent_str}**{agent_name}**:{separator}{content}"
+    return f"**{agent_name}**:{separator}{content}"
 
 
-def _format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
-    """Format the team consensus section.
-
-    Args:
-        consensus: The consensus content
-        indent: Indentation level
-
-    Returns:
-        List of formatted lines for the consensus
-
-    """
-    indent_str = "  " * indent
-    parts = []
-    if consensus:
-        parts.append(f"\n{indent_str}**Team Consensus**:")
-        parts.append(f"{indent_str}{consensus}")
-    return parts
-
-
-def _format_no_consensus_note(indent: int = 0) -> str:
-    """Format the note when there's no team consensus.
-
-    Args:
-        indent: Indentation level
-
-    Returns:
-        Formatted note string
-
-    """
-    indent_str = "  " * indent
-    return f"\n{indent_str}*No team consensus - showing individual responses only*"
+def _format_no_consensus_note() -> str:
+    """Return the note a reply without a consensus ends with."""
+    return "\n*No team consensus - showing individual responses only*"
 
 
 def render_team_member_slots(
@@ -148,7 +109,7 @@ def render_team_member_slots(
         if per_member[member_id].strip()
     ]
     if consensus.strip():
-        parts.extend(_format_team_consensus(consensus.strip()))
+        parts.extend(("\n**Team Consensus**:", consensus.strip()))
     elif parts:
         parts.append(_format_no_consensus_note())
     return parts
@@ -337,22 +298,18 @@ class TeamStreamPresentation:
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
         return state
 
-    def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
-        """Resolve an event only through its stable member identity."""
-        if isinstance(agent_id, str) and agent_id in self.per_member:
+    def resolve_member_id(self, agent_id: str, reported_name: str | None) -> str:
+        """Resolve an event only through its stable member identity: a member id or a member's config name."""
+        if agent_id in self.per_member:
             return agent_id
-        if isinstance(agent_id, str):
-            for member_id, config_name in self.config_names_by_id.items():
-                if agent_id == config_name:
-                    return member_id
+        for member_id, config_name in self.config_names_by_id.items():
+            if agent_id == config_name:
+                return member_id
         msg = f"Team event has no frozen member slot for {reported_name or agent_id!r}"
         raise RuntimeError(msg)
 
     def append_member(self, member_id: str, content: object | None) -> None:
-        """Append a member content delta to its stable document slot."""
-        if member_id not in self.per_member:
-            msg = f"Team event has no frozen member slot for {member_id!r}"
-            raise RuntimeError(msg)
+        """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned."""
         scope_key = f"agent:{member_id}"
         self.per_member[member_id] = append_stream_text(
             self.per_member[member_id],
@@ -443,17 +400,11 @@ class TeamStreamPresentation:
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
     def start_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
-        """Record a member tool start."""
-        if member_id not in self.per_member:
-            msg = f"Team event has no frozen member slot for {member_id!r}"
-            raise RuntimeError(msg)
+        """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.start_tool(f"agent:{member_id}", tool)
 
     def complete_member_tool(self, member_id: str, tool: ToolExecution | None) -> None:
-        """Record a member tool completion."""
-        if member_id not in self.per_member:
-            msg = f"Team event has no frozen member slot for {member_id!r}"
-            raise RuntimeError(msg)
+        """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.complete_tool(f"agent:{member_id}", tool)
 
     def render_body(self) -> str:
