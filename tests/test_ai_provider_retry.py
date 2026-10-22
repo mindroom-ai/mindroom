@@ -175,13 +175,12 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("steps")
 async def test_partial_stream_failure_stays_one_durable_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    steps: type[_StepTools],
 ) -> None:
     """A request that fails after visible output is not retried, and the turn keeps its partial output once."""
-    del steps
     config, model = _install_agent(
         tmp_path,
         monkeypatch,
