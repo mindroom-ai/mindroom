@@ -289,6 +289,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
@@ -407,6 +408,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -465,6 +467,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
@@ -533,6 +536,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -595,6 +599,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -657,6 +662,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with patch(
@@ -803,6 +809,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         captured_collector: dict[str, Any] = {}
@@ -903,6 +910,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
@@ -974,6 +982,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
@@ -1048,6 +1057,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with (
@@ -1237,6 +1247,7 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
@@ -1292,6 +1303,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
         live_event_ids = AsyncMock(return_value=frozenset({"$active"}))

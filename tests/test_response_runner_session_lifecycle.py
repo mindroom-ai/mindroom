@@ -74,9 +74,9 @@ from tests.conftest import (
     message_origin,
     request_envelope,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
-from tests.scripted_agent_helpers import PROBE_TOOL, install_agent_model, registered_probe_tools
+from tests.scripted_agent_helpers import PROBE_TOOL, install_agent_model, raising, registered_probe_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -109,13 +109,6 @@ def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_
     assert session is not None
     assert session.runs
     return session.runs[0]
-
-
-def _raising(error: BaseException) -> Await:
-    async def raise_it() -> None:
-        raise error
-
-    return Await(raise_it)
 
 
 def _assert_interrupted_messages(
@@ -852,7 +845,7 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
         ScriptedModel(
             [
                 calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Partial answer"),
-                [_raising(ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500))],
+                [raising(ProviderError("Error code: 500 - provider exploded", provider="Synthetic", status_code=500))],
             ],
         ),
     )

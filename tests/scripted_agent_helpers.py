@@ -160,6 +160,15 @@ def registered_probe_tools() -> Iterator[type[ProbeTools]]:
         yield ProbeTools
 
 
+def raising(error: BaseException) -> Await:
+    """A scripted step that fails the request with ``error``, as a provider or a cancellation does mid-stream."""
+
+    async def raise_it() -> None:
+        raise error
+
+    return Await(raise_it)
+
+
 def stop_turn(cancel_source: TaskCancelSource | None = None) -> Await:
     """A scripted step that cancels the task running the model, as a stop or a restart does mid-stream."""
 
@@ -176,6 +185,7 @@ __all__ = [
     "PROBE_TOOL",
     "ProbeTools",
     "install_agent_model",
+    "raising",
     "registered_probe_tools",
     "registered_toolkit",
     "stop_turn",

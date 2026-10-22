@@ -119,6 +119,7 @@ from tests.scripted_agent_helpers import (
     PROBE_TOOL,
     ProbeTools,
     install_agent_model,
+    raising,
     registered_probe_tools,
     stop_turn,
 )
@@ -202,20 +203,13 @@ def _active_model(observed: list[str | None]) -> Await:
     return Await(note)
 
 
-def _final_only(text: str, metrics: Any = None) -> list[ScriptStep]:  # noqa: ANN401
+def _final_only(text: str) -> list[ScriptStep]:
     """A turn that completes with ``text`` but streams no delta of it."""
-    final = metrics or usage(0, 0)
+    final = usage(0, 0)
     return [
         UsageReported(final),
         TurnCompleted(message=Message(role="assistant", content=text, metrics=final), stop_reason="end"),
     ]
-
-
-def _raising(error: BaseException) -> Await:
-    async def raise_it() -> None:
-        raise error
-
-    return Await(raise_it)
 
 
 def _stored_runs(config: Config, runtime_paths: RuntimePaths, session_id: str = "session1") -> list[AnyRunRecord]:
@@ -1322,7 +1316,7 @@ class TestUserIdPassthrough:
         del probe
         config, runtime_paths = _bound(tmp_path)
         error = ProviderError("validation failed upstream", provider="Synthetic", status_code=400)
-        _install(monkeypatch, [_raising(error)])
+        _install(monkeypatch, [raising(error)])
 
         response = await _respond(
             make_turn_context("general", session_id="session1"),
@@ -1519,7 +1513,7 @@ class TestUserIdPassthrough:
         _install(
             monkeypatch,
             calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)),
-            [_raising(ProviderError("provider failed", provider="Synthetic"))],
+            [raising(ProviderError("provider failed", provider="Synthetic"))],
         )
         run_metadata: dict[str, Any] = {}
 

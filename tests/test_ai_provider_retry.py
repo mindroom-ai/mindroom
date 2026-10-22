@@ -22,7 +22,7 @@ from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.scripted_agent_helpers import install_agent_model, registered_toolkit
+from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -63,12 +63,7 @@ def steps() -> Iterator[type[_StepTools]]:
 
 def _overload() -> Await:
     """The provider fails the request with a retryable overload before the model said anything."""
-
-    async def fail() -> None:
-        msg = "overloaded"
-        raise ProviderUnavailable(msg, provider="Synthetic", status_code=529)
-
-    return Await(fail)
+    return raising(ProviderUnavailable("overloaded", provider="Synthetic", status_code=529))
 
 
 def _install_agent(
