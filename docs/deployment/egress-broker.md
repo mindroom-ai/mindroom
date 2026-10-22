@@ -432,6 +432,7 @@ Another service of the user's own (or, on a shared agent, its credential manager
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
 Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat, and the portal links each agent to its section on the personal page, where services are added, edited, and deleted.
+The personal page lists each agent with how many of its keys and accounts are set; expand an agent to see its services.
 
 Each row shows the hosts the service sends to, how it sends the key, and the placeholder variables the agent sees, such as `GH_TOKEN=mindroom-brokered`.
 For a service with no placeholder variables and no account login, the agent is not told the key exists, so mention its host in your request.

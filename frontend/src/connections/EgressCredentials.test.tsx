@@ -86,9 +86,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** The page with every agent opened, as their rows start closed. */
+async function renderPage() {
+  render(<EgressCredentials />);
+  for (const button of await screen.findAllByRole("button", {
+    name: /^Expand /,
+  }))
+    fireEvent.click(button);
+}
+
 describe("egress credentials page", () => {
   it("renders one section per agent with its services", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const personal = await screen.findByRole("region", {
       name: "Personal Mind",
     });
@@ -109,6 +118,76 @@ describe("egress credentials page", () => {
         "No services are configured yet.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("lists the agents closed, with their type and how many keys and accounts are set", async () => {
+    const limit = { ...service, name: "limit", restrict_only: true };
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input) === "/api/connections/me") return json(identity);
+      return json({
+        agents: [
+          {
+            ...agents[0],
+            services: [
+              { ...service, configured: true, key_configured: true },
+              { ...service, name: "other" },
+              limit,
+            ],
+          },
+          agents[1],
+          agents[2],
+        ],
+      });
+    });
+    render(<EgressCredentials />);
+    const table = await screen.findByRole("table", { name: "Agents" });
+    expect(
+      within(table)
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) =>
+          within(row)
+            .getAllByRole("cell")
+            .map((cell) => cell.textContent),
+        ),
+    ).toEqual([
+      // A limit is neither a key nor an account.
+      ["Personal Mind", "Personal", "1 of 2 set"],
+      ["Shared Dev", "Shared", "0 of 1 set"],
+      ["Bare Agent", "Personal", "No services yet"],
+    ]);
+    expect(screen.queryByRole("region")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand Personal Mind" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Personal Mind" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Collapse Personal Mind" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse Personal Mind" }),
+    );
+    expect(screen.queryByRole("region")).toBeNull();
+  });
+
+  it("opens the agent a link names, such as Manage services on the Agents tab", async () => {
+    window.location.hash = "#egress-agent-shared_dev";
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    try {
+      render(<EgressCredentials />);
+      expect(
+        await screen.findByRole("region", { name: "Shared Dev" }),
+      ).toBeInTheDocument();
+      expect(screen.getAllByRole("region")).toHaveLength(1);
+      // Its row is scrolled to once the listing is in.
+      expect(scroll.mock.contexts).toEqual([
+        document.getElementById("egress-agent-shared_dev"),
+      ]);
+    } finally {
+      window.location.hash = "";
+    }
   });
 
   it("explains when no agent is available", async () => {
@@ -152,7 +231,7 @@ describe("egress credentials page", () => {
         ],
       });
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Set key for GitHub" }),
     );
@@ -209,7 +288,7 @@ describe("egress credentials page", () => {
         ],
       });
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
     );
@@ -336,7 +415,7 @@ describe("egress services on the personal page", () => {
   };
 
   it("adds a service and reloads the listing", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await openAdd();
     fill("gh", "github");
     listing[0].services = [
@@ -369,7 +448,7 @@ describe("egress services on the personal page", () => {
       calls.filter((call) => call.path === "/api/connections/egress").length;
 
     it("saves the service, then the key, then closes the editor", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fillOpenAi("sk-secret");
       await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
@@ -382,7 +461,7 @@ describe("egress services on the personal page", () => {
     });
 
     it("saves only the service when no key is typed", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fillOpenAi("");
       await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
@@ -395,7 +474,7 @@ describe("egress services on the personal page", () => {
     it("never writes the key when the service is refused", async () => {
       mutation = () =>
         json({ detail: "service name 'ai' is already used" }, 409);
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fillOpenAi("sk-secret");
       expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -412,7 +491,7 @@ describe("egress services on the personal page", () => {
           return json({ detail: "The key vault is read-only" }, 409);
         return new Response(null, { status: 204 });
       };
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       listing[0].services = [
         ...listing[0].services,
@@ -438,7 +517,7 @@ describe("egress services on the personal page", () => {
     });
 
     it("sets a key while editing a service", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       fireEvent.click(
         await screen.findByRole("button", { name: "Edit service for My API" }),
       );
@@ -465,7 +544,7 @@ describe("egress services on the personal page", () => {
         },
         userService,
       ];
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fireEvent.click(screen.getByRole("button", { name: "More options" }));
       fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
@@ -489,7 +568,7 @@ describe("egress services on the personal page", () => {
       listing[0].services = [
         { ...userService, placeholder_names: ["GH_TOKEN"] },
       ];
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fireEvent.click(screen.getByRole("button", { name: "More options" }));
       fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
@@ -502,7 +581,7 @@ describe("egress services on the personal page", () => {
     });
 
     it("says only this agent uses a user_agent service", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       expect(
         screen.getByText(
@@ -514,7 +593,7 @@ describe("egress services on the personal page", () => {
     it("lists the agents that share a user's store", async () => {
       listing[0].scope = "user";
       listing[0].scope_agents = ["Personal Mind", "Research Mind"];
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       expect(
         screen.getByText(
@@ -525,7 +604,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("refuses a name that is already listed before asking the server", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await openAdd();
     fill("mine", "openai");
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
@@ -536,7 +615,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("closes the editor on cancel", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await openAdd();
     expect(
       screen.getByRole("form", { name: "Add service" }),
@@ -547,7 +626,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("edits a user service from its authored form and keeps the name", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit service for My API" }),
     );
@@ -576,7 +655,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("deletes a user service after confirmation", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete service for My API" }),
     );
@@ -592,7 +671,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("deletes from inside the editor too", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit service for My API" }),
     );
@@ -607,7 +686,7 @@ describe("egress services on the personal page", () => {
   it("shows a failed delete on the row", async () => {
     mutation = () =>
       json({ detail: "Service is not a service of your own" }, 404);
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete service for My API" }),
     );
@@ -619,7 +698,7 @@ describe("egress services on the personal page", () => {
   });
 
   it("shows the administrator's services read-only, without a badge on the row", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const row = await screen.findByLabelText("GitHub");
     expect(within(row).queryByText(/administrator/)).toBeNull();
     expect(
@@ -681,7 +760,7 @@ describe("egress services on the personal page", () => {
         services: [],
       },
     ];
-    render(<EgressCredentials />);
+    await renderPage();
     const section = async (name: string) =>
       screen.findByRole("region", { name });
     expect(
@@ -702,13 +781,16 @@ describe("egress services on the personal page", () => {
     expect(
       within(managed).getByRole("button", { name: "Edit service for My API" }),
     ).toBeInTheDocument();
-    expect(within(managed).getByText("Shared")).toBeInTheDocument();
+    // The agent's row says whether it is shared.
+    const agentRow = (name: string) =>
+      screen.getByRole("button", { name: `Collapse ${name}` }).closest("tr")!;
+    expect(within(agentRow("Managed")).getByText("Shared")).toBeInTheDocument();
     expect(
       within(await section("Empty")).getByRole("button", {
         name: "Add service for Empty",
       }),
     ).toBeInTheDocument();
-    expect(within(await section("Empty")).queryByText("Shared")).toBeNull();
+    expect(within(agentRow("Empty")).getByText("Personal")).toBeInTheDocument();
   });
 
   it("turns off account login for a service on a shared agent", async () => {
@@ -725,7 +807,7 @@ describe("egress services on the personal page", () => {
         services: [{ ...userService, is_shared: true, can_manage: true }],
       },
     ];
-    render(<EgressCredentials />);
+    await renderPage();
     await openAdd();
     fill("gh", "github");
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
@@ -757,7 +839,7 @@ describe("egress services on the personal page", () => {
         ],
       },
     ];
-    render(<EgressCredentials />);
+    await renderPage();
     await limitToRepository();
 
     // The helper opened More options, where the restriction and its help are.
@@ -784,7 +866,7 @@ describe("egress services on the personal page", () => {
     "tells whom the restriction reaches for the agent's scope (%j)",
     async (change, audience) => {
       listing[0] = { ...listing[0], ...change };
-      render(<EgressCredentials />);
+      await renderPage();
       await openAdd();
       fireEvent.click(screen.getByRole("button", { name: "More options" }));
       expect(
@@ -833,7 +915,7 @@ describe("egress services on the personal page", () => {
     ],
   ])("%s", async (_title, status, body, alert) => {
     mutation = () => json(body, status);
-    render(<EgressCredentials />);
+    await renderPage();
     await trySaving();
     expect(await screen.findByRole("alert")).toHaveTextContent(alert);
     // The editor stays open with the user's input.
@@ -856,7 +938,7 @@ describe("egress services on the personal page", () => {
         },
         422,
       );
-    render(<EgressCredentials />);
+    await renderPage();
     await trySaving();
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(
@@ -871,7 +953,7 @@ describe("egress services on the personal page", () => {
         ? json({ agents: listing })
         : json({ detail: "Service is not a service of your own" }, 404),
     );
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit service for My API" }),
     );
@@ -933,7 +1015,7 @@ describe("presets and unsaved edits on the personal page", () => {
     calls.filter((call) => call.path === PRESETS).length;
 
   it("fetches the presets from the personal API only when an editor opens", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await screen.findByRole("button", { name: "Edit service for One" });
     expect(presetRequests()).toBe(0);
 
@@ -952,7 +1034,7 @@ describe("presets and unsaved edits on the personal page", () => {
       new Promise<Response>((done) => {
         finish = done;
       });
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
 
@@ -978,7 +1060,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("asks before replacing an editor that has unsaved changes", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     fireEvent.change(description(), {
       target: { value: "typed but not saved" },
@@ -1011,7 +1093,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("keeps Edit off for the service whose editor is open", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     // Opening it again would only offer to throw away what is typed.
     expect(
@@ -1027,7 +1109,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("drops the question about another service when the editor is cancelled", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     fireEvent.change(description(), {
       target: { value: "typed but not saved" },
@@ -1049,7 +1131,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("drops the question about another service when the editor's service is deleted", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     fireEvent.change(description(), {
       target: { value: "typed but not saved" },
@@ -1065,7 +1147,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("opens another service straight away when nothing was changed", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     fireEvent.click(
       screen.getByRole("button", { name: "Edit service for Two" }),
@@ -1077,7 +1159,7 @@ describe("presets and unsaved edits on the personal page", () => {
   });
 
   it("does not ask again once the changes are undone", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     await edit("One");
     const field = description();
     fireEvent.change(field, { target: { value: "x" } });
@@ -1113,7 +1195,7 @@ describe("what deleting a service says about its scope", () => {
         });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete service for My API" }),
     );
@@ -1200,11 +1282,11 @@ describe("inactive services on the personal page", () => {
   });
 
   const section = async () =>
-    within(await screen.findByRole("region", { name: "Inactive services" }));
+    within(await screen.findByRole("rowgroup", { name: "Inactive services" }));
   const deletes = () => calls.filter((call) => call.method === "DELETE");
 
   it("lists each entry with its reason under the agent's services", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const inactiveServices = await section();
     expect(inactiveServices.getByRole("heading")).toHaveTextContent("Inactive");
     const taken = inactiveServices.getByLabelText("Inactive service taken");
@@ -1218,11 +1300,11 @@ describe("inactive services on the personal page", () => {
     // They are the agent's own entries: they sit inside its section, after its services.
     const agent = screen.getByRole("region", { name: "Personal Mind" });
     expect(agent).toContainElement(
-      screen.getByRole("region", { name: "Inactive services" }),
+      screen.getByRole("rowgroup", { name: "Inactive services" }),
     );
     expect(
       screen
-        .getByRole("region", { name: "Inactive services" })
+        .getByRole("rowgroup", { name: "Inactive services" })
         .compareDocumentPosition(screen.getByLabelText("My API")) &
         Node.DOCUMENT_POSITION_PRECEDING,
     ).toBeTruthy();
@@ -1230,16 +1312,16 @@ describe("inactive services on the personal page", () => {
 
   it("shows nothing for an agent without inactive entries", async () => {
     listing[0].inactive_services = [];
-    render(<EgressCredentials />);
+    await renderPage();
     await screen.findByRole("region", { name: "Personal Mind" });
     expect(
-      screen.queryByRole("region", { name: "Inactive services" }),
+      screen.queryByRole("rowgroup", { name: "Inactive services" }),
     ).toBeNull();
     expect(screen.queryByText("Inactive")).toBeNull();
   });
 
   it("deletes a shadowed entry after confirmation, saying the key stays", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       (await section()).getByRole("button", {
         name: "Delete inactive service taken",
@@ -1273,7 +1355,7 @@ describe("inactive services on the personal page", () => {
   });
 
   it("deletes an invalid entry, saying its key goes too", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       (await section()).getByRole("button", {
         name: "Delete inactive service broken",
@@ -1294,7 +1376,7 @@ describe("inactive services on the personal page", () => {
   });
 
   it("does not delete when the confirmation is cancelled", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       (await section()).getByRole("button", {
         name: "Delete inactive service taken",
@@ -1308,7 +1390,7 @@ describe("inactive services on the personal page", () => {
   it("shows why a delete failed and keeps the entry", async () => {
     remove = () =>
       json({ detail: "Service is not a service of your own" }, 404);
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       (await section()).getByRole("button", {
         name: "Delete inactive service taken",
@@ -1339,7 +1421,7 @@ describe("inactive services on the personal page", () => {
         inactive_services: inactive,
       },
     ];
-    render(<EgressCredentials />);
+    await renderPage();
     const inactiveServices = await section();
     expect(
       inactiveServices.getByLabelText("Inactive service taken"),
@@ -1353,7 +1435,7 @@ describe("inactive services on the personal page", () => {
       new Promise<Response>((done) => {
         finish = done;
       });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", { name: "Edit service for My API" }),
     );
@@ -1457,19 +1539,21 @@ describe("recent requests on the personal page", () => {
           }),
         ),
       });
-    render(<EgressCredentials />);
+    await renderPage();
     return openLog();
   };
 
   it("starts collapsed and does not load anything until it is opened", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     expect(await toggle()).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(
+      screen.queryByRole("table", { name: /^Recent requests for / }),
+    ).toBeNull();
     expect(logRequests()).toEqual([]);
   });
 
   it("loads the caller's 50 latest requests for that agent", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const table = await openLog();
     expect(logRequests()).toEqual([
       "/api/connections/egress/logs?agent_name=personal&limit=50",
@@ -1499,7 +1583,7 @@ describe("recent requests on the personal page", () => {
   });
 
   it("shows a refusal code, and dashes for a missing service or path", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const rows = within(await openLog()).getAllByRole("row");
     const refused = within(rows[2]).getAllByRole("cell");
     expect(refused[4]).toHaveTextContent("-");
@@ -1512,7 +1596,7 @@ describe("recent requests on the personal page", () => {
 
   it("calls a denied request refused when the API sends no code", async () => {
     logs = () => json({ records: [record({ kind: "denied", status: 403 })] });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle());
     expect(
       await screen.findByText("refused", { selector: "div" }),
@@ -1520,23 +1604,25 @@ describe("recent requests on the personal page", () => {
   });
 
   it("collapses and opens again, loading fresh rows each time", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const button = await toggle();
     fireEvent.click(button);
-    await screen.findByRole("table");
+    await screen.findByRole("table", { name: /^Recent requests for / });
     expect(button).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(button);
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(
+      screen.queryByRole("table", { name: /^Recent requests for / }),
+    ).toBeNull();
     expect(button).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(button);
-    await screen.findByRole("table");
+    await screen.findByRole("table", { name: /^Recent requests for / });
     expect(logRequests()).toHaveLength(2);
   });
 
   it("refreshes on request", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle());
-    await screen.findByRole("table");
+    await screen.findByRole("table", { name: /^Recent requests for / });
     logs = () => json({ records: [] });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(
@@ -1546,21 +1632,24 @@ describe("recent requests on the personal page", () => {
   });
 
   it("keeps each agent's log separate", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle("Shared Dev"));
-    await screen.findByRole("table");
+    await screen.findByRole("table", { name: /^Recent requests for / });
     expect(logRequests()).toEqual([
       "/api/connections/egress/logs?agent_name=shared_dev&limit=50",
     ]);
     expect(
       within(screen.getByRole("region", { name: "Personal Mind" })).queryByRole(
         "table",
+        {
+          name: /^Recent requests for /,
+        },
       ),
     ).toBeNull();
   });
 
   it("keeps the caller's own view on a shared agent they do not manage", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle("Shared Dev"));
     const table = await screen.findByRole("table", {
       name: "Recent requests for shared_dev",
@@ -1606,7 +1695,7 @@ describe("recent requests on the personal page", () => {
       if (path.startsWith("/api/connections/egress/logs")) return logs();
       throw new Error(`Unexpected request: ${path}`);
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle("Shared Dev"));
     const table = await screen.findByRole("table", {
       name: "Recent requests for shared_dev",
@@ -1642,17 +1731,19 @@ describe("recent requests on the personal page", () => {
 
   it("shows why the log is unavailable", async () => {
     logs = () => json({ detail: "Egress broker is not running" }, 409);
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle());
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Egress broker is not running",
     );
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(
+      screen.queryByRole("table", { name: /^Recent requests for / }),
+    ).toBeNull();
   });
 
   it("falls back to a general message for other failures", async () => {
     logs = () => json({ detail: "Egress logs are unavailable" }, 503);
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(await toggle());
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Could not complete the request. Try again.",
@@ -1696,7 +1787,7 @@ describe("recent requests on the personal page", () => {
     });
 
     it("says a relayed CONNECT passed through with no key added", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       const rows = within(await openLog()).getAllByRole("row");
       expect(within(rows[1]).getAllByRole("cell")[4]).toHaveTextContent(
         "Passed through (no key added)",
@@ -1711,7 +1802,7 @@ describe("recent requests on the personal page", () => {
     });
 
     it("explains in a caption that other sites pass straight through and that administrators can see the requests", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       const table = await openLog();
       const caption = table.querySelector("caption");
       expect(caption).toHaveTextContent(
@@ -1722,7 +1813,7 @@ describe("recent requests on the personal page", () => {
     });
 
     it("lets a refusal code wrap after each underscore and never mid-word", async () => {
-      render(<EgressCredentials />);
+      await renderPage();
       const table = await openLog();
       const code = within(table)
         .getByText("credential_not_configured")
@@ -1736,14 +1827,14 @@ describe("recent requests on the personal page", () => {
   });
 
   it("keeps the chevron of Recent requests still for someone who prefers reduced motion", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     expect((await toggle()).querySelector("svg")).toHaveClass(
       "motion-reduce:transition-none",
     );
   });
 
   it("points Recent requests at its table only while the table is shown", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     const button = await toggle();
     expect(button).not.toHaveAttribute("aria-controls");
     fireEvent.click(button);
@@ -1778,7 +1869,7 @@ describe("recent requests on the personal page", () => {
 
 describe("the page's header and intro", () => {
   it("says who is signed in and links Agents and Agent Keys", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     expect(
       await screen.findByText("Signed in as Bob Builder"),
     ).toBeInTheDocument();
@@ -1794,7 +1885,7 @@ describe("the page's header and intro", () => {
   });
 
   it("says in one line what the page does and holds the full explanation behind How this works", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     expect(
       await screen.findByText(
         "Connect accounts or add API keys; MindRoom adds them to your agents' requests and your agents never get the keys themselves.",
@@ -1829,26 +1920,29 @@ describe("rows grouped by who added them", () => {
   });
   const agentOf = (
     changes: Partial<EgressCredentialAgent>,
-  ): EgressCredentialAgent => ({ ...agents[0], ...changes });
-  const show = (listing: EgressCredentialAgent[]) => {
+  ): EgressCredentialAgent => ({
+    ...agents[0],
+    ...changes,
+  });
+  const show = async (listing: EgressCredentialAgent[]) => {
     vi.mocked(fetch).mockImplementation(async (input) => {
       if (String(input) === "/api/connections/me") return json(identity);
       return json({ agents: listing });
     });
-    render(<EgressCredentials />);
+    await renderPage();
   };
   const groupsOf = (region: HTMLElement) =>
     within(region)
-      .getAllByRole("group")
+      .getAllByRole("rowgroup", { name: /./ })
       .map((group) => [
         group.getAttribute("aria-label"),
         within(group)
-          .getAllByRole("listitem")
-          .map((item) => item.getAttribute("aria-label")),
+          .getAllByRole("row")
+          .flatMap((item) => item.getAttribute("aria-label") ?? []),
       ]);
 
   it("lists the administrator's services apart from the ones you added", async () => {
-    show([
+    await show([
       agentOf({
         services: [
           own("mine", "My API"),
@@ -1874,7 +1968,7 @@ describe("rows grouped by who added them", () => {
   });
 
   it("names the credential managers as the source on a shared agent", async () => {
-    show([
+    await show([
       agentOf({
         agent_name: "shared_dev",
         agent_display_name: "Shared Dev",
@@ -1892,7 +1986,7 @@ describe("rows grouped by who added them", () => {
   });
 
   it("shows only the groups that have rows", async () => {
-    show([agentOf({ services: [config("github", "GitHub")] })]);
+    await show([agentOf({ services: [config("github", "GitHub")] })]);
     const region = await screen.findByRole("region", { name: "Personal Mind" });
     expect(groupsOf(region).map(([name]) => name)).toEqual([
       "From your administrator",
@@ -1905,7 +1999,7 @@ describe("rows grouped by who added them", () => {
       agentOf({ agent_name: "a", agent_display_name: "Alpha", services: [] }),
       agentOf({ agent_name: "m", agent_display_name: "Mid", services: [] }),
     ];
-    show(listing);
+    await show(listing);
     const names = () =>
       screen
         .getAllByRole("region")
@@ -1927,17 +2021,17 @@ describe("who can change a shared agent's keys", () => {
     managers: ["@bob:example.org", "@carol:example.org"],
     ...changes,
   });
-  const show = (listing: EgressCredentialAgent[]) => {
+  const show = async (listing: EgressCredentialAgent[]) => {
     vi.mocked(fetch).mockImplementation(async (input) =>
       String(input) === "/api/connections/me"
         ? json(identity)
         : json({ agents: listing }),
     );
-    render(<EgressCredentials />);
+    await renderPage();
   };
 
   it("tells a non-manager which managers can", async () => {
-    show([shared({})]);
+    await show([shared({})]);
     const region = await screen.findByRole("region", { name: "Shared Dev" });
     expect(
       within(region).getByText(
@@ -1947,7 +2041,7 @@ describe("who can change a shared agent's keys", () => {
   });
 
   it("falls back to administrators when no manager is named", async () => {
-    show([shared({ managers: [] })]);
+    await show([shared({ managers: [] })]);
     expect(
       await screen.findByText(
         "Only administrators can change keys for this shared agent.",
@@ -1956,7 +2050,7 @@ describe("who can change a shared agent's keys", () => {
   });
 
   it("tells a manager they manage the keys, and that everyone shares them", async () => {
-    show([
+    await show([
       shared({
         can_manage: true,
         services: [{ ...agents[1].services[0], can_manage: true }],
@@ -1971,7 +2065,7 @@ describe("who can change a shared agent's keys", () => {
   });
 
   it("says nothing of the sort on an agent that is only yours", async () => {
-    show([agents[0]]);
+    await show([agents[0]]);
     await screen.findByRole("region", { name: "Personal Mind" });
     expect(screen.queryByText(/shared agent's keys/)).toBeNull();
     expect(screen.queryByText(/can change keys/)).toBeNull();
@@ -1988,14 +2082,14 @@ describe("who can change a shared agent's keys", () => {
         unavailable_reason: "shared_sandbox" as const,
       },
     };
-    show([shared({ services: [refused] })]);
+    await show([shared({ services: [refused] })]);
     expect(
       await screen.findByText(
         "Personal GitHub accounts can't be used by shared agents. Ask @bob:example.org and @carol:example.org to add a team API key.",
       ),
     ).toBeVisible();
     cleanup();
-    show([
+    await show([
       shared({
         can_manage: true,
         services: [{ ...refused, can_manage: true }],
@@ -2023,7 +2117,7 @@ describe("who can change a shared agent's keys", () => {
       can_manage: true,
       oauth: { ...account, provider: "google", display_name: "Google" },
     };
-    show([shared({ can_manage: true, services: [google] })]);
+    await show([shared({ can_manage: true, services: [google] })]);
     fireEvent.click(
       await screen.findByRole("button", { name: "Connect Google for Gmail" }),
     );
@@ -2102,7 +2196,7 @@ describe("limiting a GitHub service to repositories", () => {
   const writes = () => calls.filter((call) => call.method !== "GET");
 
   it("opens a limit with the name github-limited, the repositories, and no key", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Limit to repositories for GitHub",
@@ -2131,7 +2225,7 @@ describe("limiting a GitHub service to repositories", () => {
   });
 
   it("saves the limit as a restrict-only service and closes", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Limit to repositories for GitHub",
@@ -2163,7 +2257,7 @@ describe("limiting a GitHub service to repositories", () => {
   });
 
   it("asks for a repository instead of saving a limit without one", async () => {
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Limit to repositories for GitHub",
@@ -2185,7 +2279,7 @@ describe("limiting a GitHub service to repositories", () => {
       ...limited("github-limited", "a/b"),
       restrict_only: false,
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Limit to repositories for GitHub",
@@ -2202,14 +2296,14 @@ describe("limiting a GitHub service to repositories", () => {
       can_manage: false,
       services: [{ ...github(), can_manage: false }],
     };
-    render(<EgressCredentials />);
+    await renderPage();
     await screen.findByRole("region", { name: "Personal Mind" });
     expect(screen.queryByText("Limit to repositories")).toBeNull();
   });
 
   it("shows the administrator's row as limited, with Change limit and Remove limit", async () => {
     listing[0].services.push(limited("github-limited", "basnijholt/agent-cli"));
-    render(<EgressCredentials />);
+    await renderPage();
     const row = await githubRow();
     expect(
       within(row).getByText("Limited to basnijholt/agent-cli"),
@@ -2247,9 +2341,12 @@ describe("limiting a GitHub service to repositories", () => {
     async (_case, rules) => {
       listing[0].services.push(
         limited("github-limited", "basnijholt/agent-cli"),
-        { ...mine(), rules },
+        {
+          ...mine(),
+          rules,
+        },
       );
-      render(<EgressCredentials />);
+      await renderPage();
       const row = await githubRow();
       expect(
         within(row).getByText(`Limited to basnijholt/agent-cli. ${OVERLAP}`),
@@ -2260,7 +2357,7 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("notes it in the limit's form too, after what the limit refuses", async () => {
     listing[0].services.push(mine());
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       await screen.findByRole("button", {
         name: "Limit to repositories for GitHub",
@@ -2281,12 +2378,12 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("lists the limit itself under what the user added, with its own Change and Remove", async () => {
     listing[0].services.push(limited("github-limited", "basnijholt/agent-cli"));
-    render(<EgressCredentials />);
-    const added = await screen.findByRole("group", { name: "Added by you" });
+    await renderPage();
+    const added = await screen.findByRole("rowgroup", { name: "Added by you" });
     const row = within(added).getByLabelText("GitHub (basnijholt/agent-cli)");
     expect(within(row).getByText("Limit only")).toBeVisible();
     expect(
-      within(row).getByText(/Limits requests to api\.github\.com, github\.com/),
+      within(row).getByText(/^api\.github\.com, github\.com/),
     ).toBeVisible();
     // It has no key, account, or status to set.
     expect(within(row).queryByText("Not set")).toBeNull();
@@ -2300,7 +2397,7 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("opens the limit in the editor with its repositories when Change limit is pressed", async () => {
     listing[0].services.push(limited("github-limited", "a/b"));
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       within(await githubRow()).getByRole("button", {
         name: "Change limit for GitHub",
@@ -2340,7 +2437,7 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("removes the limit after asking, and nothing else", async () => {
     listing[0].services.push(limited("github-limited", "a/b"));
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       within(await githubRow()).getByRole("button", {
         name: "Remove limit for GitHub",
@@ -2387,7 +2484,7 @@ describe("limiting a GitHub service to repositories", () => {
         return json({ detail: "Not allowed" }, 403);
       throw new Error(`Unexpected request: ${path}`);
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       within(await githubRow()).getByRole("button", {
         name: "Remove limit for GitHub",
@@ -2406,7 +2503,7 @@ describe("limiting a GitHub service to repositories", () => {
       { host: "api.github.com", port: null, path_prefix: "/graphql" },
     ];
     listing[0].services.push(withGraphql);
-    render(<EgressCredentials />);
+    await renderPage();
     const caveat =
       "Limited to a/b (plus GraphQL, which reaches every repository the key can reach)";
     expect(within(await githubRow()).getByText(caveat)).toBeVisible();
@@ -2423,7 +2520,7 @@ describe("limiting a GitHub service to repositories", () => {
         });
       return base(input, options);
     });
-    render(<EgressCredentials />);
+    await renderPage();
     fireEvent.click(
       within(await githubRow()).getByRole("button", {
         name: "Remove limit for GitHub",
@@ -2446,12 +2543,12 @@ describe("limiting a GitHub service to repositories", () => {
 });
 
 describe("who uses a personal agent's keys", () => {
-  const show = (changes: Partial<EgressCredentialAgent>) => {
+  const show = async (changes: Partial<EgressCredentialAgent>) => {
     vi.mocked(fetch).mockImplementation(async (input) => {
       if (String(input) === "/api/connections/me") return json(identity);
       return json({ agents: [{ ...agents[0], ...changes }] });
     });
-    render(<EgressCredentials />);
+    await renderPage();
     return screen.findByRole("region", { name: "Personal Mind" });
   };
 

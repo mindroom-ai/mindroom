@@ -8,14 +8,12 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import {
   agentSeesNote,
   canEdit,
-  hostsNote,
   limitedNote,
   limitOverlap,
   limitOf,
   limitTarget,
   removeWarning,
   type RowAgent,
-  sentAsNote,
   type ServiceEditing,
   servicesUsingAccount,
   sharesAccount,
@@ -23,6 +21,7 @@ import {
 } from "./egressRowText";
 import { LimitActions } from "./EgressLimitRows";
 import { ServiceStatus } from "./EgressServiceStatus";
+import { SERVICE_CELL, SERVICE_ROW, ServiceHosts } from "./EgressServiceTable";
 import { coversGithub } from "./githubLimits";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import {
@@ -31,6 +30,7 @@ import {
   requestConnection,
 } from "./request";
 import { SharedAccountDialog } from "./SharedAccountDialog";
+import { ItemName } from "./ToolRow";
 import type { EgressCredentialService } from "./types";
 
 /** The endpoints one service row talks to. */
@@ -104,6 +104,8 @@ export function EgressServiceItem({
   // Everyone using a shared agent acts as the account connected there.
   const asksAboutSharedAccount = sharesAccount(agent, oauth);
   const limitedText = limitedNote(service);
+  const seesText = agentSeesNote(service);
+  const unsetText = unsetNote(service);
 
   useEffect(() => () => operation.current?.abort(), []);
 
@@ -191,35 +193,22 @@ export function EgressServiceItem({
   };
 
   return (
-    <li
-      aria-label={service.display_name}
-      className="border-t border-border/60 px-5 py-3 first:border-t-0"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        {/* What the service is, where it sends, and the limit that narrows it. */}
-        <div className="min-w-0 space-y-0.5">
-          <span className="font-medium">{service.display_name}</span>
-          <p
-            className="max-w-md truncate text-xs text-muted-foreground"
-            title={service.description}
-          >
-            {service.description}
-          </p>
-          {[
-            hostsNote(service),
-            sentAsNote(service),
-            agentSeesNote(service),
-            unsetNote(service),
-          ].map(
-            (text) =>
-              text && (
-                <p
-                  key={text}
-                  className="break-words text-xs text-muted-foreground"
-                >
-                  {text}
-                </p>
-              ),
+    <tr aria-label={service.display_name} className={SERVICE_ROW}>
+      {/* What the service is, what the agent sees, and the limit that narrows it. */}
+      <th scope="row" className={SERVICE_CELL.name}>
+        <ItemName
+          names={[
+            service.name,
+            service.display_name,
+            ...(oauth ? [oauth.provider] : []),
+          ]}
+          title={service.display_name}
+          description={service.description}
+        >
+          {seesText && (
+            <p className="break-words text-xs text-muted-foreground">
+              {seesText}
+            </p>
           )}
           {limitedText && (
             <p className="text-xs text-muted-foreground">{limitedText}</p>
@@ -241,13 +230,25 @@ export function EgressServiceItem({
               )}
             </div>
           )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
+        </ItemName>
+      </th>
+      <td data-label="Hosts" className={SERVICE_CELL.hosts}>
+        <ServiceHosts service={service} />
+      </td>
+      <td data-label="Status" className={SERVICE_CELL.status}>
+        <div className="flex flex-col items-start gap-1">
           <ServiceStatus
             service={service}
             agent={agent}
             serviceEditing={serviceEditing}
           />
+          {unsetText && (
+            <span className="text-xs text-muted-foreground">{unsetText}</span>
+          )}
+        </div>
+      </td>
+      <td className={SERVICE_CELL.actions}>
+        <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
           {/* Connecting reads the saved connection first, so an unreadable one needs a reset before. */}
           {oauth &&
             !hideKeyActions &&
@@ -264,7 +265,10 @@ export function EgressServiceItem({
               >
                 {busy === "connect"
                   ? "Connecting…"
-                  : `Connect ${oauth.display_name}`}
+                  : // The row names the service; only another account needs naming.
+                    oauth.display_name === service.display_name
+                    ? "Connect"
+                    : `Connect ${oauth.display_name}`}
               </Button>
             )}
           {busy === "connect" && (
@@ -371,111 +375,111 @@ export function EgressServiceItem({
             </>
           )}
         </div>
-      </div>
-      {canManageKey && editing && (
-        <form
-          className="mt-3 flex flex-wrap items-center gap-2"
-          onSubmit={save}
-        >
-          <Input
-            type="password"
-            autoComplete="off"
-            aria-label={keyLabel}
-            placeholder="Paste the key"
-            className="h-9 max-w-sm flex-1 max-sm:basis-full"
-            value={secret}
-            disabled={busy !== null}
-            onChange={(event) => setSecret(event.target.value)}
-          />
-          <Button
-            type="submit"
-            size="sm"
-            disabled={busy !== null || !secret.trim()}
+        {canManageKey && editing && (
+          <form
+            className="mt-2 flex flex-wrap items-center gap-2 sm:flex-nowrap"
+            onSubmit={save}
           >
-            {busy === "save" ? (
-              <>
-                <Loader2
-                  className="mr-2 h-3.5 w-3.5 animate-spin"
-                  aria-hidden="true"
-                />
-                Saving…
-              </>
-            ) : (
-              "Save"
-            )}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={busy !== null}
-            onClick={closeEditor}
-          >
-            Cancel
-          </Button>
-        </form>
-      )}
-      {error && (
-        <Alert variant="destructive" className="mt-3 p-2">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-      <ConfirmDialog
-        open={confirm === "key"}
-        title={`Remove ${keyLabel}?`}
-        description={removeWarning(service)}
-        confirmLabel="Remove"
-        onCancel={() => setConfirm(null)}
-        onConfirm={() =>
-          void run(
-            "remove",
-            "Could not remove the key. Try again.",
-            write(paths.secret, "DELETE"),
-          )
-        }
-      />
-      {canEdit(serviceEditing, service) && (
+            <Input
+              type="password"
+              autoComplete="off"
+              aria-label={keyLabel}
+              placeholder="Paste the key"
+              className="h-9 min-w-0 flex-1 max-sm:basis-full"
+              value={secret}
+              disabled={busy !== null}
+              onChange={(event) => setSecret(event.target.value)}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              disabled={busy !== null || !secret.trim()}
+            >
+              {busy === "save" ? (
+                <>
+                  <Loader2
+                    className="mr-2 h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                  Saving…
+                </>
+              ) : (
+                "Save"
+              )}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={busy !== null}
+              onClick={closeEditor}
+            >
+              Cancel
+            </Button>
+          </form>
+        )}
+        {error && (
+          <Alert variant="destructive" className="mt-2 p-2 text-left">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
         <ConfirmDialog
-          open={confirm === "service"}
-          title={`Delete ${service.display_name}?`}
-          description={serviceEditing.deleteWarning(service)}
-          confirmLabel="Delete"
-          onCancel={() => setConfirm(null)}
-          onConfirm={() => void deleteService()}
-        />
-      )}
-      {oauth && (
-        <SharedAccountDialog
-          open={confirm === "shared"}
-          agent={agent.displayName}
-          provider={oauth.display_name}
-          onCancel={() => setConfirm(null)}
-          onContinue={() => {
-            setConfirm(null);
-            connect();
-          }}
-        />
-      )}
-      {oauth && (
-        <ConfirmDialog
-          open={confirm === "account"}
-          title={`${oauth.connected ? "Disconnect" : "Reset"} ${oauth.display_name}?`}
-          description={disconnectDescription(
-            oauth.display_name,
-            agent.displayName,
-            servicesUsingAccount(agent.services, oauth.provider),
-          )}
-          confirmLabel={oauth.connected ? "Disconnect" : "Reset connection"}
+          open={confirm === "key"}
+          title={`Remove ${keyLabel}?`}
+          description={removeWarning(service)}
+          confirmLabel="Remove"
           onCancel={() => setConfirm(null)}
           onConfirm={() =>
             void run(
-              "disconnect",
-              "Could not disconnect. Try again.",
-              write(paths.disconnect, "POST"),
+              "remove",
+              "Could not remove the key. Try again.",
+              write(paths.secret, "DELETE"),
             )
           }
         />
-      )}
-    </li>
+        {canEdit(serviceEditing, service) && (
+          <ConfirmDialog
+            open={confirm === "service"}
+            title={`Delete ${service.display_name}?`}
+            description={serviceEditing.deleteWarning(service)}
+            confirmLabel="Delete"
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => void deleteService()}
+          />
+        )}
+        {oauth && (
+          <SharedAccountDialog
+            open={confirm === "shared"}
+            agent={agent.displayName}
+            provider={oauth.display_name}
+            onCancel={() => setConfirm(null)}
+            onContinue={() => {
+              setConfirm(null);
+              connect();
+            }}
+          />
+        )}
+        {oauth && (
+          <ConfirmDialog
+            open={confirm === "account"}
+            title={`${oauth.connected ? "Disconnect" : "Reset"} ${oauth.display_name}?`}
+            description={disconnectDescription(
+              oauth.display_name,
+              agent.displayName,
+              servicesUsingAccount(agent.services, oauth.provider),
+            )}
+            confirmLabel={oauth.connected ? "Disconnect" : "Reset connection"}
+            onCancel={() => setConfirm(null)}
+            onConfirm={() =>
+              void run(
+                "disconnect",
+                "Could not disconnect. Try again.",
+                write(paths.disconnect, "POST"),
+              )
+            }
+          />
+        )}
+      </td>
+    </tr>
   );
 }

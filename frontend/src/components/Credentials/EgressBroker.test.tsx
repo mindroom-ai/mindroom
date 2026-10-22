@@ -173,7 +173,7 @@ function requests(pathname: string, method = "GET") {
 // without a scope start from it when they are shown first; the loads come after it.
 const listings = () => requests("/api/egress-broker/services").slice(1);
 
-const row = (name: string) => screen.getByRole("listitem", { name });
+const row = (name: string) => screen.getByRole("row", { name });
 const selectTarget = (value: string) =>
   fireEvent.change(screen.getByLabelText("Keys for"), {
     target: { value },
@@ -1123,7 +1123,7 @@ describe("egress broker request log", () => {
     expect(
       await screen.findByText("No requests logged yet."),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("table", { name: "Request log" })).toBeNull();
   });
 
   it("filters the log by user, agent, host and service on refresh", async () => {
@@ -1198,7 +1198,7 @@ describe("egress broker request log", () => {
     render(<EgressBroker />);
 
     expect(await screen.findByText(NOT_RUNNING)).toBeInTheDocument();
-    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("table", { name: "Request log" })).toBeNull();
     // Services stay manageable while the broker is down.
     expect(screen.getByText("GitHub")).toBeInTheDocument();
   });

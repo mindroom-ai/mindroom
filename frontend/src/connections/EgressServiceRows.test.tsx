@@ -17,6 +17,7 @@ import {
 import { githubRepositoryRules } from "./githubRepositoryRules";
 import type { RowAgent, ServiceEditing } from "./egressRowText";
 import { EgressServiceRows as Rows } from "./EgressServiceRows";
+import { EgressServiceTable } from "./EgressServiceTable";
 import type {
   EgressCredentialService,
   EgressOAuthStatus,
@@ -47,11 +48,13 @@ function EgressServiceRows({ onChanged = vi.fn(), ...props }: RowsProps) {
   };
   const target = props.secretPath ? props : { agentName: "personal", ...props };
   return (
-    <Rows
-      {...(target as ComponentProps<typeof Rows>)}
-      onChanged={onChanged}
-      agent={agent}
-    />
+    <EgressServiceTable label="Services">
+      <Rows
+        {...(target as ComponentProps<typeof Rows>)}
+        onChanged={onChanged}
+        agent={agent}
+      />
+    </EgressServiceTable>
   );
 }
 const renderRows = (
@@ -92,7 +95,7 @@ const authorization = {
 const noContent = () => new Response(null, { status: 204 });
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), { status });
-const row = (name: string) => screen.getByRole("listitem", { name });
+const row = (name: string) => screen.getByRole("row", { name });
 
 /** Service editing for the viewer's own services, which says nothing on delete unless a test passes a warning. */
 const editing = (overrides: Partial<ServiceEditing> = {}): ServiceEditing => ({
@@ -1469,10 +1472,17 @@ describe("rows with an agent's wording", () => {
       { name: "work", display_name: "Work GitHub" },
     );
     renderRows([first, second]);
-    const visible = ["Connect GitHub", "Use an API key instead"];
+    const visible = ["Connect", "Connect GitHub", "Use an API key instead"];
     const buttons = screen
       .getAllByRole("button")
       .filter((button) => visible.includes(button.textContent ?? ""));
+    // The row already names its service, so only another account is named on the button.
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "Connect",
+      "Use an API key instead",
+      "Connect GitHub",
+      "Use an API key instead",
+    ]);
     expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
       "Connect GitHub for GitHub",
       "Use an API key instead for GitHub",
@@ -1481,7 +1491,7 @@ describe("rows with an agent's wording", () => {
     ]);
     for (const button of buttons)
       expect(button.getAttribute("aria-label")).toMatch(
-        new RegExp(`^${button.textContent} for `),
+        new RegExp(`^${button.textContent} `),
       );
     const names = buttons.map((button) => button.getAttribute("aria-label"));
     expect(new Set(names).size).toBe(names.length);
@@ -1519,7 +1529,7 @@ describe("rows with an agent's wording", () => {
       ]);
       expect(
         within(row("GitHub")).getByText(
-          "Sends to api.github.com, github.com, localhost:8443",
+          "api.github.com, github.com, localhost:8443",
         ),
       ).toBeVisible();
     });
@@ -1535,15 +1545,14 @@ describe("rows with an agent's wording", () => {
         },
       ]);
       expect(
-        within(row("GitHub")).getByText(
-          "Sends to a.example.com, a.example.com:8080",
-        ),
+        within(row("GitHub")).getByText("a.example.com, a.example.com:8080"),
       ).toBeVisible();
     });
 
-    it("says nothing for a listing without rules", () => {
+    it("shows a dash for a listing without rules", () => {
       renderRows([github, { ...openai, rules: [] }]);
-      expect(screen.queryByText(/^Sends to/)).toBeNull();
+      for (const name of ["GitHub", "OpenAI"])
+        expect(within(row(name)).getByText("—")).toBeVisible();
     });
 
     it("shows it on every row of a shared agent too", () => {
@@ -1555,9 +1564,7 @@ describe("rows with an agent's wording", () => {
       renderRows([shared], {
         agent: agent({ shared: true, services: [shared] }),
       });
-      expect(
-        within(row("OpenAI")).getByText("Sends to api.openai.com"),
-      ).toBeVisible();
+      expect(within(row("OpenAI")).getByText("api.openai.com")).toBeVisible();
     });
   });
 
@@ -1745,12 +1752,12 @@ describe("what a row says about how the key is sent", () => {
     ]);
     expect(
       within(row("httpbin.org")).getByText(
-        "While no key is set, requests to api.github.com and github.com are refused.",
+        "Requests are refused until a key is set.",
       ),
     ).toBeVisible();
     cleanup();
     renderRows([custom([rule("httpbin.org", "bearer")], { configured: true })]);
-    expect(screen.queryByText(/While no key is set/)).toBeNull();
+    expect(screen.queryByText(/Requests are refused/)).toBeNull();
   });
 });
 
@@ -1793,7 +1800,7 @@ describe("a limit's own row", () => {
     const paragraphs = Array.from(
       row("GitHub (a/b)").querySelectorAll("p"),
     ).map((paragraph) => paragraph.textContent);
-    expect(paragraphs).toEqual(["Limits requests to api.github.com"]);
+    expect(paragraphs).toEqual(["api.github.com"]);
   });
 
   it("shows the description when there is one", () => {

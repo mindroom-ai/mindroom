@@ -1,7 +1,9 @@
 import type { RowAgent, ServiceEditing } from "./egressRowText";
 import { LimitRow } from "./EgressLimitRows";
 import { EgressServiceItem, type ServicePaths } from "./EgressServiceItem";
+import { ServiceGroupHeading } from "./EgressServiceTable";
 import { type RequestErrorMessages, requestConnection } from "./request";
+import { STACKED } from "./stackedTable";
 import type { EgressCredentialList, EgressCredentialService } from "./types";
 
 type AccountAction = "connect" | "disconnect";
@@ -83,13 +85,15 @@ function servicePathsFor(
 }
 
 /**
- * Accounts and API keys the egress broker injects into outbound requests.
+ * Accounts and API keys the egress broker injects into outbound requests, as
+ * one row group of an `EgressServiceTable`.
  *
  * Rows target one agent's personal connections API by default. Pass
  * `secretPath`, `accountPath`, and `servicesPath` instead of `agentName` to
  * use another endpoint, such as the dashboard's.
  */
 export function EgressServiceRows({
+  label,
   services,
   onChanged,
   errorMessages,
@@ -98,6 +102,8 @@ export function EgressServiceRows({
   hideKeyActions = false,
   ...target
 }: ServiceTarget & {
+  /** Names the group and heads its rows, when the table has several. */
+  label?: string;
   services: EgressCredentialService[];
   onChanged: () => void;
   /** Wording for 403 and 404 responses outside the Connections portal. */
@@ -110,7 +116,8 @@ export function EgressServiceRows({
   hideKeyActions?: boolean;
 }) {
   return (
-    <ul>
+    <tbody aria-label={label} className={STACKED.body}>
+      {label && <ServiceGroupHeading label={label} />}
       {services.map((service) =>
         service.restrict_only ? (
           <LimitRow
@@ -131,6 +138,6 @@ export function EgressServiceRows({
           />
         ),
       )}
-    </ul>
+    </tbody>
   );
 }

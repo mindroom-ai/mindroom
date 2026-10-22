@@ -26,7 +26,8 @@ export function ServiceStatus({
     <>
       <Badge
         variant={service.configured ? "secondary" : "outline"}
-        className="max-w-full font-normal"
+        // A long label, such as a shared account's, wraps in its column.
+        className="max-w-full rounded-lg font-normal"
       >
         {statusLabel(service, agent)}
       </Badge>

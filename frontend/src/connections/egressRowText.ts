@@ -152,13 +152,10 @@ function ruleHosts(rules: readonly EgressRuleSummary[]): string[] {
   return [...new Set(rules.map(hostPort))];
 }
 
-/** "Sends to a.com, b.com:8443", or another `lead`, for the hosts a service's rules cover, each once; null without rules. */
-export function hostsNote(
-  service: EgressCredentialService,
-  lead = "Sends to",
-): string | null {
+/** "a.com, b.com:8443" for the hosts a service's rules cover, each once; null without rules. */
+export function hostList(service: EgressCredentialService): string | null {
   const hosts = ruleHosts(service.rules);
-  return hosts.length > 0 ? `${lead} ${hosts.join(", ")}` : null;
+  return hosts.length > 0 ? hosts.join(", ") : null;
 }
 
 const SENT_AS: Record<string, (name: string | null | undefined) => string> = {
@@ -203,12 +200,13 @@ export function agentSeesNote(service: EgressCredentialService): string | null {
     : null;
 }
 
-/** What happens to requests while the service has no key or account; null once it has, and for a limit. */
+/** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
-  const hosts = ruleHosts(service.rules);
-  return service.configured || service.restrict_only || hosts.length === 0
+  return service.configured ||
+    service.restrict_only ||
+    service.rules.length === 0
     ? null
-    : `While no key is set, requests to ${formatList(hosts)} are refused.`;
+    : "Requests are refused until a key is set.";
 }
 
 /**

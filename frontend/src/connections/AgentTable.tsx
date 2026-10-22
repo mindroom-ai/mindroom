@@ -16,6 +16,7 @@ import { sharedAgentNote } from "./accountCopy";
 import { AgentTools } from "./AgentTools";
 import { AgentAvatar } from "./AgentAvatar";
 import { EgressServiceRows } from "./EgressServiceRows";
+import { EgressServiceTable } from "./EgressServiceTable";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type { AgentConnections, ConnectionStatus } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
@@ -229,17 +230,21 @@ function AgentEgress({
         </p>
       )}
       {services.length ? (
-        <EgressServiceRows
-          agentName={agent.agent_name}
-          services={services}
-          onChanged={onChanged}
-          agent={{
-            displayName: agent.agent_display_name,
-            shared,
-            managers: agent.managers,
-            services,
-          }}
-        />
+        <EgressServiceTable
+          label={`API keys and accounts for ${agent.agent_display_name}`}
+        >
+          <EgressServiceRows
+            agentName={agent.agent_name}
+            services={services}
+            onChanged={onChanged}
+            agent={{
+              displayName: agent.agent_display_name,
+              shared,
+              managers: agent.managers,
+              services,
+            }}
+          />
+        </EgressServiceTable>
       ) : (
         <p className="px-5 py-4 text-sm text-muted-foreground">
           No services are set up for this agent yet.

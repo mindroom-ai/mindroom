@@ -355,7 +355,7 @@ describe("brokered API keys on agent cards", () => {
         "/api/connections/egress/agents/personal/gmail/disconnect": disconnect,
       });
     });
-    const gmailRow = () => screen.getByRole("listitem", { name: "Gmail" });
+    const gmailRow = () => screen.getByRole("row", { name: "Gmail" });
 
     it("refreshes the API keys section after a disconnect in the tool section", async () => {
       render(<Connections />);

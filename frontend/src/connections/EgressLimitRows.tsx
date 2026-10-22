@@ -3,8 +3,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { canEdit, hostsNote, type ServiceEditing } from "./egressRowText";
+import { canEdit, type ServiceEditing } from "./egressRowText";
+import { SERVICE_CELL, SERVICE_ROW, ServiceHosts } from "./EgressServiceTable";
 import { errorText } from "./request";
+import { ItemName } from "./ToolRow";
 import type { EgressCredentialService } from "./types";
 
 /**
@@ -82,46 +84,40 @@ export function LimitRow({
   serviceEditing?: ServiceEditing;
 }) {
   const [error, setError] = useState<string | null>(null);
-  const hosts = hostsNote(service, "Limits requests to");
   return (
-    <li
-      aria-label={service.display_name}
-      className="border-t border-border/60 px-5 py-3 first:border-t-0"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0 space-y-0.5">
-          <span className="font-medium">{service.display_name}</span>
-          {service.description && (
-            <p
-              className="max-w-md truncate text-xs text-muted-foreground"
-              title={service.description}
-            >
-              {service.description}
-            </p>
-          )}
-          {hosts && (
-            <p className="break-words text-xs text-muted-foreground">{hosts}</p>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
-          <Badge variant="outline" className="font-normal">
-            Limit only
-          </Badge>
-          {canEdit(serviceEditing, service) && (
+    <tr aria-label={service.display_name} className={SERVICE_ROW}>
+      <th scope="row" className={SERVICE_CELL.name}>
+        <ItemName
+          names={[service.name, service.display_name]}
+          title={service.display_name}
+          description={service.description}
+        />
+      </th>
+      <td data-label="Hosts" className={SERVICE_CELL.hosts}>
+        <ServiceHosts service={service} />
+      </td>
+      <td data-label="Status" className={SERVICE_CELL.status}>
+        <Badge variant="outline" className="font-normal">
+          Limit only
+        </Badge>
+      </td>
+      <td className={SERVICE_CELL.actions}>
+        {canEdit(serviceEditing, service) && (
+          <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
             <LimitActions
               limit={service}
               label={service.display_name}
               serviceEditing={serviceEditing}
               onError={setError}
             />
-          )}
-        </div>
-      </div>
-      {error && (
-        <Alert variant="destructive" className="mt-3 p-2">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-    </li>
+          </div>
+        )}
+        {error && (
+          <Alert variant="destructive" className="mt-2 p-2 text-left">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+      </td>
+    </tr>
   );
 }
