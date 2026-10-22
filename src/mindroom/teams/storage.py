@@ -14,7 +14,7 @@ from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.runtime import MemberRunEnded
+from mindroom.teams.runtime import MemberRunEnded, keep_ended_member_run
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
@@ -68,17 +68,12 @@ class TeamRunRecords:
     def keep(self, record: AnyRunRecord) -> None:
         """Keep the team's terminal record, or a member run's latest record where that run first ended.
 
-        A member resumed within this run ends twice; its later record replaces the paused one where it stood, as
-        Agno continued the paused member's output in place, so a blocking reply lists it there.
+        A resumed member's later record stands where its paused one did, so a blocking reply lists it there.
         """
         if isinstance(record, TeamRunRecord):
             self.record = record
             return
-        run_ids = [member.run_id for member in self.members]
-        if record.run_id in run_ids:
-            self.members[run_ids.index(record.run_id)] = record
-        else:
-            self.members.append(record)
+        keep_ended_member_run(self.members, record)
 
     def terminal(self, team_name: str) -> TeamRunRecord:
         """Return the team record the run ended with, which a run that finished without raising always handed over."""

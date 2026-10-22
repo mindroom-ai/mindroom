@@ -3290,6 +3290,7 @@ depends_on = [
     "mindroom.thread_models",
     "mindroom.timing",
     "mindroom.tool_jobs.consumption",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",

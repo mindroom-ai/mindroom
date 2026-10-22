@@ -247,6 +247,58 @@ async def test_a_collaborate_resume_hands_the_leader_only_the_resumed_members_re
     assert len(writer.requests) == 1
 
 
+async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_resumed_one_in_its_place() -> None:
+    """A team run's ended members carry into its resume, and the resumed member's record replaces its paused one.
+
+    Agno's live team run held every finished member and continued a paused member's output in place, so a fold of
+    the resume stores each member run once. A loaded record holds none of them; the stored row keeps only the paused.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Draft it."),
+            metrics=usage(10, 2),
+        ),
+        calls(
+            tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Multiply."),
+            metrics=usage(10, 2),
+        ),
+        answer("Drafted and checked.", usage(10, 2)),
+    )
+    writer = scripted("writer-model", answer("Drafted."))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, writer, checker)
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    ended = [(run.agent_id, run.run_id, run.status) for run in paused.ended_member_runs]
+    assert [(agent, status) for agent, _, status in ended] == [
+        ("writer", RunStatus.completed),
+        ("checker", RunStatus.paused),
+    ]
+    assert TeamRunRecord.from_dict(paused.to_dict()).ended_member_runs == []
+
+    _, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "Drafted and checked.")
+    assert [(run.agent_id, run.run_id, run.status) for run in record.ended_member_runs] == [
+        ended[0],
+        ("checker", ended[1][1], RunStatus.completed),
+    ]
+
+
 async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() -> None:
     leader = scripted(
         "leader-model",

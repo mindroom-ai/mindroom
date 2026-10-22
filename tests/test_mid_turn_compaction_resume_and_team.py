@@ -29,6 +29,7 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import TurnMessages, build_request, replayed_history
 from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import is_compaction_summary
+from mindroom.history.summary_rows import segment_tool_call_ids
 from mindroom.history.types import CompactionOutcome
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -535,6 +536,65 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     folded = record.metadata[COMPACTED_REQUESTS_METADATA_KEY]
     assert [request["metrics"]["input_tokens"] for request in folded] == [1200 * n for n in range(1, len(folded) + 1)]
     assert len(folded) >= 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_each_team_fold_carries_the_members_that_ended_since_and_a_stop_drops_their_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    summary_calls: SummaryCalls,
+) -> None:
+    """Each fold's segment holds the member runs that ended since the run's last fold; a stop leaves their calls out."""
+    stopped = asyncio.Event()
+
+    async def wait_to_be_stopped() -> None:
+        stopped.set()
+        await asyncio.Event().wait()
+
+    # The reported request grows to 3,600 tokens twice, so the fourth and the seventh request compact.
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            *(
+                _delegation(f"call-{n}", "writer", f"Part {n}", usage(tokens, 1))
+                for n, tokens in enumerate((1200, 2400, 3600) * 2, start=1)
+            ),
+            [Await(wait_to_be_stopped)],
+        ],
+        writer=[
+            turn
+            for n in range(1, 7)
+            for turn in (calls(tool_call("touch", f"touch-{n}", label=f"part {n}")), answer(f"Part {n} done"))
+        ],
+        context_window=4000,
+    )
+
+    reply = asyncio.create_task(team.stream())
+    await asyncio.wait_for(stopped.wait(), timeout=5)
+    reply.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reply
+
+    assert summary_calls.inputs
+    record, members = team.stored_runs()
+    assert [member.content for member in members] == [f"Part {n} done" for n in range(1, 7)]
+    [(first_run, first), (second_run, second)] = segments_of(team.storage, TEAM_SCOPE.key, SESSION_ID)
+    assert first_run == second_run == record.run_id
+    assert [member["content"] for member in first["member_responses"]] == ["Part 1 done", "Part 2 done", "Part 3 done"]
+    assert [member["content"] for member in second["member_responses"]] == ["Part 4 done", "Part 5 done", "Part 6 done"]
+    # A segment holds each member run as it ended; its stored row leaves out the prompt, which requests rebuild.
+    without_prompts = [
+        {**member, "messages": [message for message in member["messages"] if message["role"] != "system"]}
+        for member in [*first["member_responses"], *second["member_responses"]]
+    ]
+    assert without_prompts == [member.to_dict() for member in members]
+    member_calls = {f"touch-{n}" for n in range(1, 7)}
+    assert member_calls <= segment_tool_call_ids(team.storage, session_id=SESSION_ID, run_id=record.run_id)
+    assert member_calls <= team.recorder.folded_tool_call_ids
+    snapshot = team.recorder.interrupted_snapshot()
+    assert [tool.tool_name for tool in [*snapshot.completed_tools, *snapshot.interrupted_tools]] == []
 
 
 @pytest.mark.asyncio

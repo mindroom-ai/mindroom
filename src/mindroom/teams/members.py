@@ -29,6 +29,7 @@ from mindroom.teams.formation import (
 from mindroom.teams.prompt import render_leader_system_message
 from mindroom.teams.spec import TeamMember, TeamSpec
 from mindroom.thread_models import resolve_thread_model_override
+from mindroom.tool_jobs.execution import with_job_admission
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
@@ -337,7 +338,9 @@ def _team_member(
     against. The compaction and receipt hooks hold the state of the run they serve, so each run or resume builds
     its own.
     """
-    as_member = replace(build, tool_middleware=(*build.tool_middleware, _as_member(build.spec.id, model_name)))
+    # The binding joins the policy a managed job runs again, so a member's call that becomes a job runs as the member.
+    policy = (*build.tool_policy, _as_member(build.spec.id, model_name))
+    as_member = replace(build, tool_policy=policy, tool_middleware=with_job_admission(build.tool_jobs, policy))
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,

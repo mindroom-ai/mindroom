@@ -30,7 +30,6 @@ from mindroom.history.request_messages import TurnMessages, build_request, scope
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import new_scope_session, read_scope_state, set_force_compaction_state
 from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
-from mindroom.history.summary_rows import folded_tool_call_ids
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
@@ -46,7 +45,7 @@ from mindroom.llm.provider import (
     NativeCompactionReplay,
     ToolSpec,
 )
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.model_usage import response_context_tokens
 from mindroom.native_compaction import record_native_checkpoint
@@ -1712,31 +1711,3 @@ async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compact
 
     assert summary_calls.inputs == []
     assert model.requests[-1].request.native_compaction == _native(20_000)
-
-
-def test_a_team_fold_summarizes_the_tool_calls_of_the_members_it_delegated_to() -> None:
-    """A stopped team reply drops the member tools a fold already covered, including a nested team's."""
-    delegation = Message(
-        role="assistant",
-        tool_calls=[{"id": "delegate", "type": "function", "function": {"name": "delegate_task_to_member"}}],
-    )
-    layout = mid_turn_compaction._Layout(
-        leading=0,
-        kept=(),
-        history=(),
-        folded=(delegation, Message(role="tool", tool_call_id="delegate", content="done")),
-        prompt=None,
-        previous_run_local_summary=None,
-    )
-    nested = TeamRunRecord(
-        run_id="nested",
-        member_responses=[RunRecord(run_id="deep", tools=[ToolExecution(tool_call_id="deep-call")])],
-    )
-    team_run = TeamRunRecord(
-        run_id="team",
-        member_responses=[RunRecord(run_id="member", tools=[ToolExecution(tool_call_id="member-call")]), nested],
-    )
-
-    segment = mid_turn_compaction._segment(team_run, layout, set())
-
-    assert folded_tool_call_ids(segment.payload()) == {"delegate", "member-call", "deep-call"}

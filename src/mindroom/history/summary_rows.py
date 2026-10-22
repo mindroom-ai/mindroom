@@ -270,7 +270,7 @@ def segment_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id
 def folded_tool_call_ids(segment: Mapping[str, Any]) -> set[str]:
     """Return the tool calls one segment folded: its messages' calls and executions, and its members' tools.
 
-    The whole turn folds, so each member response attached so far goes with its delegation, nested members too.
+    The whole turn folds, so each member run that ended before the fold goes with its delegation.
     """
     call_ids = {
         call["id"]
@@ -281,13 +281,12 @@ def folded_tool_call_ids(segment: Mapping[str, Any]) -> set[str]:
     call_ids |= {
         tool["tool_call_id"] for tool in segment.get("tools") or [] if isinstance(tool.get("tool_call_id"), str)
     }
-    members = list(segment.get("member_responses") or [])
-    while members:
-        member = members.pop()
-        call_ids |= {
-            tool["tool_call_id"] for tool in member.get("tools") or [] if isinstance(tool.get("tool_call_id"), str)
-        }
-        members.extend(member.get("member_responses") or [])
+    call_ids |= {
+        tool["tool_call_id"]
+        for member in segment.get("member_responses") or []
+        for tool in member.get("tools") or []
+        if isinstance(tool.get("tool_call_id"), str)
+    }
     return call_ids
 
 
