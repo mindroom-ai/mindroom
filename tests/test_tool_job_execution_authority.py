@@ -4,15 +4,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from agno.tools.function import Function, FunctionCall
 
-from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
+from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
-from tests.tool_job_helpers import completed_delegation_job, managed_team_config, tool_job_runtime
+from tests.tool_job_helpers import completed_delegation_job, job_tool, managed_team_config, tool_job_runtime
+
+
+def _noop() -> None:
+    """Do nothing."""
 
 
 def test_unbound_tool_authority_does_not_access_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,7 +41,12 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
     owner = completed_delegation_job().owner
     config = managed_team_config(tmp_path)
     context = _delegate_runtime_context(config, first, execution_identity=owner)
-    function = Function(name="denied", entrypoint=lambda: None)
+    call = JobCall(
+        tool=job_tool(_noop),
+        arguments={},
+        context=ToolCallContext(run_id="run", session_id="session"),
+        team=False,
+    )
 
     def denied(*_args: object) -> None:
         message = "Revoked"
@@ -50,7 +59,7 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
     second_instance = pin_background_tool_jobs(config, second)
     register_background_runtime(second, second_runtime)
     try:
-        with tool_runtime_context(context), authorized_tool_call(owner, FunctionCall(function=function)):
+        with tool_runtime_context(context), authorized_tool_call(owner, call):
             with pytest.raises(JobAccessError, match="Revoked"):
                 check_current_execution_authority()
             release_background_tool_jobs(second, second_instance)
@@ -58,7 +67,7 @@ async def test_execution_authorizers_are_scoped_to_runtime(tmp_path: Path) -> No
                 check_current_execution_authority()
         with (
             tool_runtime_context(replace(context, runtime_paths=second)),
-            authorized_tool_call(owner, FunctionCall(function=function)),
+            authorized_tool_call(owner, call),
         ):
             check_current_execution_authority()
     finally:

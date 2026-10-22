@@ -7,7 +7,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.hooks.types import EnrichmentItem
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.conversation import current_conversation
@@ -17,13 +16,9 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-    from agno.models.base import Model
-    from agno.models.message import Message
-    from agno.models.response import ModelResponse
-
+    from mindroom.agent_loop.model_loop import AfterToolBatchHook
+    from mindroom.llm.messages import Message
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
-
-_HOOK_ATTR = "_mindroom_job_notice_hook_installed"
 
 logger = get_logger(__name__)
 
@@ -115,41 +110,24 @@ async def append_turn_start_job_note(items: Sequence[EnrichmentItem]) -> tuple[E
     return (*items, EnrichmentItem(key="background_jobs", text=note, cache_policy="volatile", persist=False))
 
 
-async def _append_job_notice(messages: list[Message], *, entity_name: str) -> None:
-    """Append the notice for jobs that ended during the tool batch to the batch's last result.
+def job_notice_hook(entity_name: str) -> AfterToolBatchHook:
+    """Return the loop hook that appends, after each tool batch, the notice of jobs that ended meanwhile.
 
-    Only the answering entity hears it: an agent, or a configured team's leader, never a member it delegated to; an
-    ad hoc team answers as the agent whose account posts its replies, so that member hears it.
+    The notice goes on the batch's last tool result, and only the answering entity ``entity_name`` hears it: an
+    agent, or a configured team's leader, never a member it delegated to; an ad hoc team answers as the agent whose
+    account posts its replies, so that member hears it.
     """
-    notices = _NOTICES.get()
-    context = get_tool_runtime_context()
-    if notices is None or context is None or context.recipient != entity_name:
-        return
-    result = next((message for message in reversed(messages) if message.role == "tool"), None)
-    if result is None or not isinstance(result.content, str | None):
-        return
-    text = await _unnoticed_notice(notices)
-    if text is None:
-        return
-    result.content = f"{result.content}\n\n{text}" if result.content else text
-    if result.compressed_content is not None:
-        result.compressed_content = f"{result.compressed_content}\n\n{text}"
 
+    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> None:
+        notices = _NOTICES.get()
+        context = get_tool_runtime_context()
+        if notices is None or context is None or context.recipient != entity_name:
+            return
+        result = next((message for message in reversed(messages) if message.role == "tool"), None)
+        if result is None or not isinstance(result.content, str | None):
+            return
+        text = await _unnoticed_notice(notices)
+        if text is not None:
+            result.content = f"{result.content}\n\n{text}" if result.content else text
 
-def install_job_notice_hook(model: Model, *, entity_name: str) -> None:
-    """Tell the model of the agent or team ``entity_name``, after each tool batch, about jobs that ended meanwhile."""
-
-    async def after_tools(messages: list[Message], _result: ModelResponse) -> None:
-        await _append_job_notice(messages, entity_name=entity_name)
-
-    async def no_entry_notice(_messages: list[Message]) -> None:
-        return None
-
-    install_tool_result_callback(
-        model,
-        marker=_HOOK_ATTR,
-        callback=lambda _messages, _results: None,
-        before_response=lambda _messages: None,
-        before_response_async=no_entry_notice,
-        after_tools_async=after_tools,
-    )
+    return after_tool_batch

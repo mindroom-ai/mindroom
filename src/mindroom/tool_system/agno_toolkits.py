@@ -262,7 +262,12 @@ class ToolValue:
 
 
 def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value as Agno's loop does: a ``ToolResult`` carries text and media, anything else is text."""
+    """Read a tool's return value as Agno's loop does: a ``ToolResult`` carries text and media, anything else is text.
+
+    A value already in owned terms, as a tool job's saved result is, stands as it is.
+    """
+    if isinstance(result, ToolValue):
+        return result
     if not isinstance(result, ToolResult):
         return ToolValue(content=str(result))
     return ToolValue(

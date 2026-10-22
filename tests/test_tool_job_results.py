@@ -8,13 +8,12 @@ import math
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.media import File, Image
-from agno.models.message import Message
-from agno.tools.function import ToolResult
 
+from mindroom.llm.media import File, Image
 from mindroom.tool_jobs import results
 from mindroom.tool_jobs.results import (
     ToolResultPayload,
@@ -22,11 +21,10 @@ from mindroom.tool_jobs.results import (
     encode_result_payload,
     read_result_payload,
 )
+from mindroom.tool_system.agno_toolkits import ToolValue
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.tool_jobs.runtime import BackgroundOutcome
 
 
@@ -34,22 +32,40 @@ def _saved(payload: ToolResultPayload) -> ToolResultPayload:
     return _decode_result_payload(json.loads(json.dumps(encode_result_payload(payload))))
 
 
+_LEGACY_PAYLOADS = Path(__file__).parent / "fixtures" / "tool_jobs" / "agno_executor_payloads.json"
+
+
 def test_payload_round_trips_every_field_with_exact_types() -> None:
-    """Rich values, state changes, stream layout, and control survive persistence unchanged."""
+    """Rich values, structured values, state changes, and the error survive persistence unchanged."""
     payload = ToolResultPayload(
-        value=ToolResult(
-            content="picture",
-            images=[Image(content=b"\x00\xff")],
-            metadata={"structured_content": {"a": 1}, "pairs": [(1, "two"), ([], (3,))]},
-        ),
+        value=[
+            ToolValue(content="picture", images=(Image(content=b"\x00\xff"),), files=(File(url="https://f.test/a"),)),
+            {"structured_content": {"a": 1}, "pairs": [(1, "two"), ([], (3,))]},
+        ],
         state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
         error="partial failure",
-        elapsed=0.25,
-        replay=((0, {"event": "ToolCallStarted"}), (7, None)),
-        control={"message": "stop", "messages": [Message(role="user", content="why")], "stop_execution": True},
     )
 
     assert _saved(payload) == payload
+
+
+def test_a_payload_the_agno_executor_saved_decodes_to_its_text_and_media() -> None:
+    """A stream's saved event layout is dropped: the value already holds the text the model read, with its media."""
+    saved = json.loads(_LEGACY_PAYLOADS.read_text())["streamed"]
+
+    payload = _decode_result_payload(saved)
+
+    assert payload == ToolResultPayload(
+        value=ToolValue(content="streamed tail", images=(Image(id="image-1", content=b"\x00\xff"),)),
+        state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
+    )
+
+
+def test_a_legacy_control_payload_reads_as_its_error() -> None:
+    """A tool's raised run control was saved with its text as the error, which is what the call reports now."""
+    saved = json.loads(_LEGACY_PAYLOADS.read_text())["control"]
+
+    assert _decode_result_payload(saved) == ToolResultPayload(value=None, error="stop requested")
 
 
 def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
@@ -65,7 +81,9 @@ def test_payload_captures_a_local_artifact_before_cleanup(tmp_path: Path) -> Non
     """Durable media bytes survive deletion of a toolkit-owned file."""
     path = tmp_path / "image.png"
     path.write_bytes(b"artifact bytes")
-    encoded = encode_result_payload(ToolResultPayload(value=ToolResult(content="image", images=[Image(filepath=path)])))
+    encoded = encode_result_payload(
+        ToolResultPayload(value=ToolValue(content="image", images=(Image(filepath=str(path)),))),
+    )
     path.unlink()
 
     image = _decode_result_payload(encoded).value.images[0]
@@ -97,7 +115,7 @@ def test_payload_rejects_an_oversized_artifact_without_reading_it(
     monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: pytest.fail("oversized artifact was read"))
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
-        encode_result_payload(ToolResultPayload(value=File(filepath=path)))
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
 
 
 def test_payload_artifacts_share_one_read_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,7 +134,7 @@ def test_payload_artifacts_share_one_read_allowance(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(os, "fdopen", recording_fdopen)
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
-        encode_result_payload(ToolResultPayload(value=[File(filepath=first), File(filepath=second)]))
+        encode_result_payload(ToolResultPayload(value=[File(filepath=str(first)), File(filepath=str(second))]))
 
     assert read == [first.stat().st_ino]
 
@@ -140,7 +158,7 @@ def test_payload_reads_a_growing_artifact_once_within_its_bound(
     monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: GrowingFile())
 
     with pytest.raises(ValueError, match="encoded JSON limit"):
-        encode_result_payload(ToolResultPayload(value=File(filepath=path)))
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
 
     assert read_sizes == [3 * (2048 // 4) + 1]
 
@@ -151,7 +169,7 @@ def test_payload_keeps_returned_bytes_without_reopening_their_path(tmp_path: Pat
     secret.write_bytes(b"primary secret")
     path = tmp_path / "generated.txt"
     path.symlink_to(secret)
-    encoded = encode_result_payload(ToolResultPayload(value=File(content=b"generated", filepath=path)))
+    encoded = encode_result_payload(ToolResultPayload(value=File(content=b"generated", filepath=str(path))))
 
     restored = _decode_result_payload(encoded).value
 
@@ -170,7 +188,7 @@ def test_payload_reads_a_path_only_artifact_only_as_a_regular_file(tmp_path: Pat
         os.mkfifo(path)
 
     with pytest.raises(OSError if kind == "link" else ValueError):
-        encode_result_payload(ToolResultPayload(value=File(filepath=path)))
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
 
 
 @pytest.mark.asyncio

@@ -50,8 +50,8 @@ from mindroom.session_storage import agent_storage
 from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
-from mindroom.tool_jobs.agno_execution import approval_can_run_as_job
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
+from mindroom.tool_jobs.authorization import authority_snapshot
+from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, job_middleware
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
@@ -149,6 +149,8 @@ class _AgentToolAssembly:
     # Each offered function's authored toolkit, None for a generated one; the first function of a name owns it,
     # as the loop offers them.
     tool_owners: Mapping[str, str | None]
+    # The concrete toolkit each of those functions came from, which tool jobs check its grant and exclusions by.
+    tool_sources: Mapping[str, Toolkit]
     # Toolkits whose surviving functions stay off the provider request until tool search finds them.
     # Keep the owners rather than a pre-projection name snapshot because final
     # MCP collision projection may remove a deferred function while preserving
@@ -1168,7 +1170,6 @@ def apply_tool_approval_capability(
     ``toolkit`` is the Agno toolkit ``adapted`` came from. With ``approvals_as_jobs``, a gated function whose call can
     become a managed job asks for its approval as that job's first phase instead of pausing the run.
     """
-    sources = {function.name: function for function in toolkit.get_async_functions().values()}
 
     def approved(function: ToolFunction) -> ToolFunction:
         if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
@@ -1186,7 +1187,7 @@ def apply_tool_approval_capability(
             registered_tool_name,
         ):
             return function
-        if approvals_as_jobs and approval_can_run_as_job(sources[function.name], toolkit):
+        if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
             return replace(function, approval_type=JOB_APPROVAL_TYPE)
         return replace(function, requires_confirmation=True, approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE)
 
@@ -1457,7 +1458,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             )
             if announcement is not None:
                 tool_middleware.append(announcement)
-            bind_toolkit_authority(toolkit, authored_name=tool_entry.authored_name or tool_name)
         return toolkit
 
     def adapt_entry(toolkit: Toolkit, tool_name: str | None) -> AdaptedToolkit:
@@ -1556,6 +1556,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     return _AgentToolAssembly(
         toolkits=tuple(adapt_entry(toolkit, tool_name) for toolkit, tool_name in entries),
         tool_owners=_tool_owners(tools),
+        tool_sources=_tool_sources(tools),
         deferred_toolkits=tuple(deferred_toolkits),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
@@ -1767,10 +1768,15 @@ def _job_controls(
 
 @dataclass(frozen=True)
 class LeaderJobs:
-    """A team leader's job controls as the owned loop offers them, and the tool-call policy they run under."""
+    """A team leader's job controls as the owned loop offers them, the tool-call policy they run under, and the team.
+
+    ``middleware`` runs outermost first, job admission before the hook bridge; ``actor`` is the team as tool jobs
+    see it, whose leader hears of the jobs that ended.
+    """
 
     controls: AdaptedToolkit
-    middleware: ToolMiddleware
+    middleware: tuple[ToolMiddleware, ...]
+    actor: JobActor
 
 
 def team_background_jobs(
@@ -1788,7 +1794,7 @@ def team_background_jobs(
     if controls is None:
         return None
     plugins = _load_agent_plugins(config, runtime_paths)
-    middleware = _build_agent_tool_middleware(
+    hooks = _build_agent_tool_middleware(
         hook_registry=None,
         plugins=plugins,
         agent_name=owner.recipient,
@@ -1796,7 +1802,20 @@ def team_background_jobs(
         config=config,
         runtime_paths=runtime_paths,
     )
-    return LeaderJobs(controls=adapt_toolkit(controls), middleware=middleware)
+    adapted = adapt_toolkit(controls)
+    actor = JobActor(
+        name=owner.recipient,
+        team=True,
+        depth=0,
+        # A team has no execution scope of its own, so its calls run under the grants of the work around them.
+        tools=assembled_job_tools(
+            {function.name: function for function in adapted.functions},
+            _tool_owners([controls]),
+            _tool_sources([controls]),
+            {},
+        ),
+    )
+    return LeaderJobs(controls=adapted, middleware=(job_middleware(actor, (hooks,)), hooks), actor=actor)
 
 
 _MEMORY_SEARCH_TOOL_NAME = "search_memories"
@@ -1842,6 +1861,15 @@ def _tool_owners(toolkits: Sequence[Toolkit]) -> dict[str, str | None]:
         for name, function in toolkit.get_async_functions().items():
             owners.setdefault(name, function.owning_toolkit)
     return owners
+
+
+def _tool_sources(toolkits: Sequence[Toolkit]) -> dict[str, Toolkit]:
+    """Map each function the agent offers to the toolkit it came from, the first of a name winning as for owners."""
+    sources: dict[str, Toolkit] = {}
+    for toolkit in toolkits:
+        for name in toolkit.get_async_functions():
+            sources.setdefault(name, toolkit)
+    return sources
 
 
 @timed("system_prompt_assembly.agent_create")
@@ -2117,6 +2145,23 @@ def create_agent(
         display_name=agent_config.display_name,
         tool_count=len(tool_assembly.toolkits),
     )
+    # The agent's calls can run as jobs whenever the instance runs them, granted as the agent is now.
+    tool_jobs = (
+        JobActor(
+            name=agent_name,
+            team=False,
+            depth=delegation_depth,
+            tools=assembled_job_tools(
+                prepared.functions,
+                tool_assembly.tool_owners,
+                tool_assembly.tool_sources,
+                authority_snapshot(config, agent_name),
+            ),
+        )
+        if background_tool_jobs_enabled(config, runtime_paths)
+        else None
+    )
+    tool_middleware = bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware)
 
     return AgentBuild(
         spec=spec,
@@ -2125,7 +2170,10 @@ def create_agent(
         history_settings=entity_view.history_settings,
         store=store,
         tool_owners=tool_assembly.tool_owners,
-        tool_middleware=bind_live_tools(prepared.functions, tool_assembly.tool_owners, tool_assembly.tool_middleware),
+        tool_middleware=tool_middleware
+        if tool_jobs is None
+        else (job_middleware(tool_jobs, tool_middleware), *tool_middleware),
+        tool_jobs=tool_jobs,
         surface=AgentSurface(
             mode=agent_mode,
             cli_shell=cli_shell,

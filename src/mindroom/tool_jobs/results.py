@@ -1,4 +1,4 @@
-"""The typed job result payload and its versioned, non-executable encoding of tool values and rich Agno artifacts."""
+"""The typed job result payload and its versioned, non-executable encoding of tool values and their media."""
 
 from __future__ import annotations
 
@@ -8,22 +8,23 @@ import json
 import math
 import os
 import stat
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agno.media import Audio, File, Image, Video
-from agno.models.message import Message
-from agno.tools.function import ToolResult
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.tool_jobs.legacy_results import drop_legacy_payload_fields
+from mindroom.tool_system.agno_toolkits import ToolValue
 
 if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
 
-_MODELS = {model.__name__: model for model in (ToolResult, Image, Audio, Video, File, Message)}
+_MEDIA = {kind.__name__: kind for kind in (Image, Audio, Video, File)}
+# The media of a tool value under the names its wire tag has kept since Agno's ToolResult.
+_TOOL_VALUE_MEDIA = ("images", "audios", "videos", "files")
 _MAX_ENCODED_RESULT_BYTES = 64 * 1024 * 1024
 _SUMMARY_TRUNCATED_NOTICE = "[Truncated: only the start of this runtime message was saved.]"
-# One drained stream item: the length of its text within the value's text, and its typed SDK event without that text.
-type ReplayItem = tuple[int, dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -33,9 +34,6 @@ class ToolResultPayload:
     value: Any
     state_delta: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
-    elapsed: float = 0.0
-    replay: tuple[ReplayItem, ...] = ()
-    control: dict[str, Any] | None = None
 
 
 def _size_error() -> ValueError:
@@ -74,26 +72,20 @@ def _file_bytes(path: Path, allowance: _FileAllowance) -> bytes:
 
 
 def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901, PLR0911 - One explicit branch per supported wire tag.
-    if isinstance(value, ToolResult):
-        fields = {
-            "content": value.content,
-            "metadata": value.metadata,
-            "images": value.images,
-            "audios": value.audios,
-            "videos": value.videos,
-            "files": value.files,
-        }
+    if isinstance(value, ToolValue):
+        fields: dict[str, Any] = {"content": value.content}
+        fields.update(
+            {name: list(media) for name, media in zip(_TOOL_VALUE_MEDIA, _tool_value_media(value), strict=True)},
+        )
         return {"type": "ToolResult", "value": _encode(fields, allowance)}
     if isinstance(value, (Image, Audio, Video, File)):
-        fields = value.model_dump(mode="python")
+        fields = asdict(value)
         if value.filepath is not None:
             fields["filepath"] = None
             # Bytes the tool returned stand; its path is read only when they are missing.
             if value.content is None:
                 fields["content"] = _file_bytes(Path(value.filepath), allowance)
         return {"type": type(value).__name__, "value": _encode(fields, allowance)}
-    if isinstance(value, Message):
-        return {"type": "Message", "value": _encode(value.model_dump(mode="python"), allowance)}
     if isinstance(value, bytes):
         return {"type": "bytes", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, Path):
@@ -112,6 +104,10 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
     return str(value)
 
 
+def _tool_value_media(value: ToolValue) -> tuple[tuple[Any, ...], ...]:
+    return value.images, value.audios, value.videos, value.files
+
+
 def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch per supported wire tag.
     if not isinstance(value, dict):
         return value
@@ -126,10 +122,19 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
         return base64.b64decode(data, validate=True)
     if kind == "path":
         return Path(data)
-    if kind in _MODELS:
-        return _MODELS[kind].model_validate(_decode(data))
+    if kind == "ToolResult":
+        fields = _decode(data)
+        media = {name: tuple(fields.get(name) or ()) for name in _TOOL_VALUE_MEDIA}
+        return ToolValue(content=fields["content"], **media)
+    if kind in _MEDIA:
+        return _media(_MEDIA[kind], _decode(data))
     msg = f"Unsupported durable tool result tag: {kind}"
     raise ValueError(msg)
+
+
+def _media(kind: type[Image | Audio | Video | File], saved: dict[str, Any]) -> Image | Audio | Video | File:
+    """Rebuild one medium from the fields its type models, ignoring the rest, as every owned codec does."""
+    return kind(**{item.name: saved[item.name] for item in dataclass_fields(kind) if saved.get(item.name) is not None})
 
 
 def encode_tool_result(value: Any) -> dict[str, Any]:  # noqa: ANN401 - Public SDK value boundary.
@@ -151,7 +156,8 @@ def _decode_result_payload(envelope: EncodedResultPayload) -> ToolResultPayload:
     if envelope["version"] != 1:
         msg = "Unsupported durable tool result version"
         raise ValueError(msg)
-    return ToolResultPayload(**_decode(envelope["value"]))
+    encoded = envelope["value"]
+    return ToolResultPayload(**_decode({**encoded, "value": drop_legacy_payload_fields(encoded["value"])}))
 
 
 async def read_result_payload(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:

@@ -4,41 +4,58 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool annotations at runtime.
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.media import Image
-from agno.models.fallback import FallbackConfig
-from agno.models.response import ModelResponse
-from agno.run import RunContext
-from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput
-from agno.run.base import RunStatus
-from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall, ToolResult
 
 from mindroom.agent_cli.agno_compat_cli_checkpoint import inner_cli_dispatch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.agno_execution import _drain_result, wait_mode
-from mindroom.tool_jobs.authorization import bind_toolkit_authority
+from mindroom.llm.provider import ToolSpec
+from mindroom.llm.runs import RunStatus
+from mindroom.tool_jobs.background_after import BACKGROUND_AFTER_SCHEMA
 from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.execution import project_definitions, wait_mode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, assembled_function, tool_job_runtime
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.tool_job_helpers import (
+    JOB_TEST_TIMEOUT,
+    call_job_tool,
+    job_actor,
+    job_tool,
+    run_job_turn,
+    tool_job_runtime,
+    toolkit_job_tools,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_jobs.execution_authority import JobTool
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from tests.tool_job_helpers import ProcessRuntime
+
+
+async def _managed_context(tmp_path: Path) -> tuple[ToolRuntimeContext, ProcessRuntime]:
+    """A reply's context in a conversation whose calls can become jobs, with that runtime registered."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    return context, runtime
 
 
 @pytest.mark.asyncio
@@ -51,78 +68,75 @@ async def test_application_background_after_collision_fails_before_execution(tmp
         invoked.append(background_after)
         return str(background_after)
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    context, runtime = await _managed_context(tmp_path)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model, depth=depth)
-    function = assembled_function(application)
-    function._agent = Agent(id="leader", model=model)
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
-    sibling = Function.from_callable(lambda: "other tool")
-    sibling.name = "sibling"
+    actor = job_actor(job_tool(application), depth=depth)
+    model = ScriptedModel([calls(tool_call("application", "collision", background_after=None)), answer("done")])
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                schemas = model._format_tools([sibling, function])
-                assert len(schemas) == 2
-                schema = next(item["function"] for item in schemas if item["function"]["name"] == "application")
-                assert schema["parameters"]["properties"]["background_after"]["type"] == "integer"
-                success, _, call, result = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="collision", arguments={"background_after": None}),
-                )
-        assert success is False
-        assert result.status == "failure"
-        assert "exclude_toolkits" in call.error
+                record = await run_job_turn(actor, model)
+        [schema] = model.requests[0].tools
+        assert schema.parameters["properties"]["background_after"]["type"] == "integer"
+        [tool] = record.tools
+        assert tool.tool_call_error
+        assert "exclude_toolkits" in str(tool.result)
         assert invoked == []
         assert await runtime.list_jobs(owner=owner, depth=depth) == []
-        assert function.parameters["properties"]["background_after"]["type"] == "integer"
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fallback", [False, True])
-async def test_shared_schema_adds_optional_wait_without_changing_application_schema(
-    tmp_path: Path,
-    fallback: bool,
-) -> None:
-    """Concrete fallback and primary schemas expose framework metadata for arbitrary Functions."""
+async def test_shared_schema_adds_optional_wait_without_changing_application_schema(tmp_path: Path) -> None:
+    """A managed function's definition offers the optional wait budget; its own schema and the job controls' stay."""
 
     def application(value: str) -> str:
         return value
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
-    install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
-    function = assembled_function(application)
-    function._agent = Agent(id="leader", model=model)
-    controls = JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()["job"]
-    controls.process_entrypoint()
+    context, runtime = await _managed_context(tmp_path)
+    controls = toolkit_job_tools(
+        JobTools(context.runtime_paths, build_execution_identity_from_runtime_context(context)),
+        authored_name="job",
+    )
+    tool = job_tool(application)
+    actor = job_actor(tool, *controls.values())
+    model = ScriptedModel([answer("done")])
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                formatted = (backup if fallback else model)._format_tools([function, controls])
-        schema = formatted[0]["function"]["parameters"]
-        assert schema["properties"]["background_after"]["anyOf"] == [{"type": "number", "minimum": 0}, {"type": "null"}]
+                await run_job_turn(actor, model)
+        offered = {definition.name: definition for definition in model.requests[0].tools}
+        schema = offered["application"].parameters
+        assert schema["properties"]["background_after"] == BACKGROUND_AFTER_SCHEMA
         assert "background_after" not in schema["required"]
-        assert "background_after" not in function.parameters["properties"]
-        control_schema = next(item["function"] for item in formatted if item["function"]["name"] == "job")
+        assert "background_after" not in tool.function.parameters["properties"]
         # The job controls keep their own wait_timeout, and gain no background_after.
-        assert (
-            control_schema["parameters"]["properties"]["wait_timeout"]
-            == controls.parameters["properties"]["wait_timeout"]
-        )
-        assert "background_after" not in control_schema["parameters"]["properties"]
+        control_schema = offered["job"].parameters
+        assert control_schema == controls["job"].function.parameters
+        assert "background_after" not in control_schema["properties"]
     finally:
         await runtime.shutdown()
+
+
+def test_a_strict_definition_requires_the_wait_budget_and_a_declared_one_stays() -> None:
+    """A strict schema requires every property; a function's own background_after keeps its authored schema."""
+    strict = ToolSpec(name="strict", description=None, parameters={"type": "object", "properties": {}}, strict=True)
+    declared = ToolSpec(
+        name="declared",
+        description=None,
+        parameters={"type": "object", "properties": {"background_after": {"type": "integer"}}},
+    )
+
+    projected = project_definitions((strict, declared), {"strict", "declared"})
+
+    assert projected[0].parameters == {
+        "type": "object",
+        "properties": {"background_after": BACKGROUND_AFTER_SCHEMA},
+        "required": ["background_after"],
+    }
+    assert projected[1] is declared
+    assert strict.parameters == {"type": "object", "properties": {}}
 
 
 @pytest.mark.asyncio
@@ -142,42 +156,34 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
         await gate.wait()
         return "finished"
 
-    async def before(fc: FunctionCall) -> None:
-        hooked.append(fc.arguments)
+    async def before(call: ToolCall, call_next: ToolNext) -> object:
+        hooked.append(call.arguments)
+        return await call_next(call.arguments)
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    context, runtime = await _managed_context(tmp_path)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model)
-    function = assembled_function(application)
-    function.pre_hook = before
-    function._agent = Agent(id="leader")
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
-    call = FunctionCall(function=function, call_id="call", arguments=arguments)
+    actor = job_actor(job_tool(application))
+    sent = dict(arguments)
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                waiting = asyncio.create_task(model.arun_function_call(call))
+                waiting = asyncio.create_task(call_job_tool(actor, "application", sent, middleware=(before,)))
                 if arguments.get("background_after") is None:
-                    await asyncio.wait_for(entered.wait(), 30)
+                    await asyncio.wait_for(entered.wait(), JOB_TEST_TIMEOUT)
                     assert not waiting.done()
                     gate.set()
-                    result = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
-                    assert result[3].result == "finished"
+                    outcome = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
+                    assert outcome.content == "finished"
                 else:
-                    result = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
-                    handle = json.loads(result[3].result)
+                    outcome = await asyncio.wait_for(waiting, JOB_TEST_TIMEOUT)
+                    handle = json.loads(outcome.content)
                     assert handle["status"] == "running"
                     gate.set()
                     completed = await runtime.wait(handle["job_id"], owner=owner, depth=0)
                     assert completed.job.result == "finished"
                 assert invoked == [True]
                 assert hooked == [{}]
-                assert call.arguments == arguments
+                assert sent == arguments
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
                 assert jobs[0].adapter["arguments"] == encode_tool_result(arguments)
     finally:
@@ -206,27 +212,17 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
         invoked.append(True)
         return "finished"
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model)
-    function = assembled_function(application)
-    function._agent = Agent(id="leader")
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    context, runtime = await _managed_context(tmp_path)
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                call = FunctionCall(function=function, call_id="call", arguments={"background_after": budget})
-                success, _, returned_call, result = await model.arun_function_call(call)
-                assert success is False
-                assert returned_call is call
-                assert result.status == "failure"
-                assert "background_after" in call.error
-                assert result.error == call.error
-                assert call.arguments == {"background_after": budget}
+                outcome = await call_job_tool(
+                    job_actor(job_tool(application)),
+                    "application",
+                    {"background_after": budget},
+                )
+        assert outcome.is_error
+        assert "background_after" in outcome.content
         assert invoked == []
         assert await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0) == []
     finally:
@@ -234,106 +230,48 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
 
 
 @pytest.mark.asyncio
-async def test_stream_replay_keeps_rich_chunks_only_as_text_positions() -> None:
-    """Rich chunks merge their artifacts into the value; replay keeps only where each chunk's text lies."""
-    first = ToolResult(content="first", images=[Image(content=b"one")], metadata={"artifact": "one"})
-    second = ToolResult(content="second", metadata={"artifact": "two"})
-    value, replay = await _drain_result(iter([first, second]))
-    assert replay == ((5, None), (6, None))
-    assert value.content == "firstsecond"
-    assert value.images == first.images
-    assert value.metadata == {"artifact": "two"}
-
-
-@pytest.mark.asyncio
 async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None:
-    """A detached plugin Function cannot block a sibling tool or lose its original args."""
+    """A detached call cannot block a sibling call or lose its original arguments."""
     gate = asyncio.Event()
-    calls = []
+    invoked = []
 
     async def slow(value: str) -> str:
-        calls.append(value)
+        invoked.append(value)
         await gate.wait()
         return value
 
     async def fast(value: str) -> str:
-        calls.append(value)
+        invoked.append(value)
         return value
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    context, runtime = await _managed_context(tmp_path)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(
-                tool_calls=[
-                    _call("slow", "slow-call", value="slow-result", background_after=0),
-                    _call("fast", "fast-call", value="fast-result", background_after=None),
-                ],
+    model = ScriptedModel(
+        [
+            calls(
+                tool_call("slow", "slow-call", value="slow-result", background_after=0),
+                tool_call("fast", "fast-call", value="fast-result", background_after=None),
             ),
-            ModelResponse(content="ready"),
+            answer("ready"),
         ],
     )
-    install_tool_job_execution(model)
-    plugin = Toolkit(name="plugin", tools=[Function.from_callable(slow), Function.from_callable(fast)])
-    bind_toolkit_authority(plugin, authored_name="plugin")
-    agent = Agent(id="leader", model=model, tools=[plugin])
+    plugin = Toolkit(name="plugin", tools=[slow, fast])
+    actor = job_actor(*toolkit_job_tools(plugin, authored_name="plugin").values())
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                response = await asyncio.wait_for(agent.arun("start", session_id=context.session_id), JOB_TEST_TIMEOUT)
-                results = {tool.tool_name: tool for tool in response.tools}
-                handle = json.loads(results["slow"].result)
+                record = await asyncio.wait_for(run_job_turn(actor, model), JOB_TEST_TIMEOUT)
+                results = {tool.tool_name: tool for tool in record.tools}
+                handle = json.loads(str(results["slow"].result))
                 assert handle["status"] == "running"
                 assert results["fast"].result == "fast-result"
                 assert results["slow"].tool_args == {"value": "slow-result", "background_after": 0}
                 gate.set()
                 completed = await runtime.wait(handle["job_id"], owner=owner, depth=0)
                 assert completed.job.result == "slow-result"
-        assert sorted(calls) == ["fast-result", "slow-result"]
+        assert sorted(invoked) == ["fast-result", "slow-result"]
     finally:
         gate.set()
-        await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: Path) -> None:
-    """Draining and replaying rich streams preserves the SDK result and event ordering."""
-
-    async def generated() -> AsyncIterator[RunContentEvent | ToolResult | str]:
-        yield RunContentEvent(content="event")
-        yield ToolResult(content="picture", images=[Image(content=b"image")], metadata={"source": "retained"})
-        yield "tail"
-
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model)
-    function = assembled_function(generated)
-    function._agent = Agent(id="leader")
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
-    try:
-        async with execution_resources():
-            with tool_runtime_context(context):
-                success, _, call, result = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="call", arguments={}),
-                )
-        assert success is True
-        assert result.result.metadata == {"source": "retained"}
-        assert result.result.content == "eventpicturetail"
-        assert result.images[0].content == b"image"
-        replayed = list(call.result)
-        assert isinstance(replayed[0], RunContentEvent)
-        assert replayed[0].content == "event"
-        assert replayed[1:] == ["picture", "tail"]
-    finally:
         await runtime.shutdown()
 
 
@@ -353,34 +291,22 @@ async def test_owned_nested_application_cannot_create_detached_job(
         called.append(True)
         return "inline result"
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model)
-    function = assembled_function(application)
-    function._agent = Agent(id="leader")
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    context, runtime = await _managed_context(tmp_path)
+    model = ScriptedModel([calls(tool_call("application", "call", **arguments)), answer("done")])
     try:
         async with execution_resources():
             with tool_runtime_context(context), job_control_context(JobControl()):
-                schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "background_after" not in schema["properties"]
-                call = FunctionCall(function=function, call_id="call", arguments=arguments)
-                if arguments.get("background_after") is None:
-                    success, _, _, result = await model.arun_function_call(call)
-                    assert success is True
-                    assert result.result == "inline result"
-                    assert called == [True]
-                else:
-                    success, _, returned_call, result = await model.arun_function_call(call)
-                    assert success is False
-                    assert returned_call is call
-                    assert result.status == "failure"
-                    assert "outer job" in call.error
-                    assert called == []
+                record = await run_job_turn(job_actor(job_tool(application)), model)
+        assert "background_after" not in model.requests[0].tools[0].parameters["properties"]
+        [tool] = record.tools
+        if arguments.get("background_after") is None:
+            assert not tool.tool_call_error
+            assert tool.result == "inline result"
+            assert called == [True]
+        else:
+            assert tool.tool_call_error
+            assert "outer job" in str(tool.result)
+            assert called == []
         owner = build_execution_identity_from_runtime_context(context)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
@@ -388,7 +314,6 @@ async def test_owned_nested_application_cannot_create_detached_job(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(
     ("nested", "invalid_budget"),
     [
@@ -399,64 +324,40 @@ async def test_owned_nested_application_cannot_create_detached_job(
 )
 async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
     tmp_path: Path,
-    streaming: bool,
     nested: bool,
     invalid_budget: object,
 ) -> None:
-    """Real SDK batches report one tool failure and keep siblings and correction turns alive."""
+    """A batch reports one tool failure and keeps its siblings and the correction turn alive."""
     invoked: list[str] = []
 
     async def application(value: str) -> str:
         invoked.append(value)
         return value
 
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(
-                tool_calls=[
-                    _call("application", "invalid", value="must-not-run", background_after=invalid_budget),
-                    _call("application", "sibling", value="sibling", background_after=None),
-                ],
+    context, runtime = await _managed_context(tmp_path)
+    model = ScriptedModel(
+        [
+            calls(
+                tool_call("application", "invalid", value="must-not-run", background_after=invalid_budget),
+                tool_call("application", "sibling", value="sibling", background_after=None),
             ),
-            ModelResponse(tool_calls=[_call("application", "corrected", value="corrected", background_after=None)]),
-            ModelResponse(content="done"),
+            calls(tool_call("application", "corrected", value="corrected", background_after=None)),
+            answer("done"),
         ],
     )
-    install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[assembled_function(application)])
     try:
         async with execution_resources():
             with tool_runtime_context(context), job_control_context(JobControl()) if nested else nullcontext():
-                if streaming:
-                    events = [
-                        event
-                        async for event in agent.arun(
-                            "start",
-                            session_id=context.session_id,
-                            stream=True,
-                            stream_events=True,
-                            yield_run_output=True,
-                        )
-                    ]
-                    assert not any(isinstance(event, RunErrorEvent) for event in events)
-                    response = next(event for event in reversed(events) if isinstance(event, RunOutput))
-                else:
-                    response = await agent.arun("start", session_id=context.session_id)
-        assert response.status == RunStatus.completed
+                record = await run_job_turn(job_actor(job_tool(application)), model)
+        assert record.status is RunStatus.completed
         assert invoked == ["sibling", "corrected"]
-        rejected = next(tool for tool in response.tools if tool.tool_call_id == "invalid")
+        rejected = next(tool for tool in record.tools if tool.tool_call_id == "invalid")
         assert rejected.tool_call_error
-        assert "background_after" in rejected.result
+        assert "background_after" in str(rejected.result)
         assert rejected.tool_args == {"value": "must-not-run", "background_after": invalid_budget}
         assert any(
-            message.tool_call_id == "invalid" and "background_after" in message.content
-            for message in model.seen_messages
+            message.tool_call_id == "invalid" and "background_after" in str(message.content)
+            for message in model.requests[1].messages
         )
         jobs = await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0)
         assert len(jobs) == (0 if nested else 2)
@@ -472,17 +373,10 @@ class _ConnectedTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="connected", tools=[self.query])
-        bind_toolkit_authority(self, authored_name="connected")
 
     def query(self) -> str:
         """Return synthetic rows."""
         return "rows"
-
-    def connect(self) -> None:
-        """Nothing to open for this synthetic connection."""
-
-    def close(self) -> None:
-        """Nothing to close for this synthetic connection."""
 
 
 class MCPTools(Toolkit):
@@ -490,32 +384,26 @@ class MCPTools(Toolkit):
 
     def __init__(self) -> None:
         super().__init__(name="mcp", tools=[self.query])
-        bind_toolkit_authority(self, authored_name="mcp")
 
     def query(self) -> str:
         """Return synthetic rows."""
         return "rows"
 
 
-def _excluded_function() -> Function:
+def _excluded_tool() -> JobTool:
     """A function of a toolkit built as shell, which the test settings exclude."""
     toolkit = Toolkit(name="shell", tools=[_ordinary])
     bind_toolkit_construction(toolkit, ToolConstruction("shell", None))
-    bind_toolkit_authority(toolkit, authored_name="shell")
-    return toolkit.get_functions()["_ordinary"]
-
-
-def _bound(function: Function, agent: Agent) -> Function:
-    function._agent = agent
-    return function
+    return toolkit_job_tools(toolkit, authored_name="shell")["_ordinary"]
 
 
 def _ordinary() -> str:
     return "ordinary"
 
 
-def _stopping() -> str:
-    return "stopping"
+def _stopping_tool() -> JobTool:
+    tool = job_tool(_ordinary)
+    return replace(tool, function=replace(tool.function, stop_after_tool_call=True))
 
 
 @pytest.mark.parametrize(
@@ -540,41 +428,39 @@ def test_wait_mode_classifies_every_call_from_current_policy(
     owned: bool,
     expected: str,
 ) -> None:
-    """One classifier decides schema projection and execution for each kind of function."""
+    """One classifier decides definition projection and execution for each kind of function."""
     paths = _runtime_paths(tmp_path)
     config = Config(
         background_tool_jobs=BackgroundToolJobsConfig(exclude_toolkits=["shell"]),
         agents={"leader": AgentConfig(display_name="Leader")},
     )
     context = _delegate_runtime_context(config, paths)
-    agent = Agent(id="leader")
-    stopping = assembled_function(_stopping)
-    stopping.stop_after_tool_call = True
-    functions = {
-        "ordinary": lambda: assembled_function(_ordinary),
-        "stops_step": lambda: stopping,
-        "framework": lambda: Function.from_callable(_ordinary),
-        "job": lambda: JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()[
-            "job"
-        ],
-        "run_connection": lambda: _ConnectedTools().get_functions()["query"],
-        "mcp": lambda: MCPTools().get_functions()["query"],
-        "excluded": lambda: _excluded_function(),
+    tools = {
+        "ordinary": lambda: job_tool(_ordinary),
+        "stops_step": _stopping_tool,
+        "framework": lambda: None,
+        "job": lambda: toolkit_job_tools(
+            JobTools(paths, build_execution_identity_from_runtime_context(context)),
+            authored_name="job",
+        )["job"],
+        "run_connection": lambda: toolkit_job_tools(_ConnectedTools(), authored_name="connected")["query"],
+        "mcp": lambda: toolkit_job_tools(MCPTools(), authored_name="mcp")["query"],
+        "excluded": _excluded_tool,
     }
-    function = _bound(functions[case](), agent)
+    tool = tools[case]()
     with tool_runtime_context(context), job_control_context(JobControl()) if owned else nullcontext():
-        assert wait_mode(function, depth=depth) == expected
+        assert wait_mode(tool, depth=depth) == expected
 
 
 def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
     """A CLI call returns to its shell command, whose saved result is the reply's, so it never becomes a job."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
-    function = _bound(assembled_function(_ordinary), Agent(id="leader"))
+    tool = job_tool(_ordinary)
     with tool_runtime_context(context):
-        assert wait_mode(function, depth=0) == "managed"
+        assert wait_mode(tool, depth=0) == "managed"
         with inner_cli_dispatch():
-            assert wait_mode(function, depth=0) == "inline"
+            assert wait_mode(tool, depth=0) == "inline"
 
 
 @pytest.mark.asyncio
@@ -584,32 +470,29 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(
     toolkit: type[Toolkit],
 ) -> None:
     """A connection opened for one run is never detached, so its calls neither advertise nor accept a wait budget."""
-    paths = _runtime_paths(tmp_path)
-    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    context, runtime = await _managed_context(tmp_path)
     owner = build_execution_identity_from_runtime_context(context)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    model = DelegationModel(id="test")
-    install_tool_job_execution(model)
-    function = _bound(toolkit().get_functions()["query"], Agent(id="leader", model=model))
-    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    actor = job_actor(*toolkit_job_tools(toolkit(), authored_name="connected").values())
+    model = ScriptedModel(
+        [
+            calls(
+                tool_call("query", "connected"),
+                # A stale budget is rejected rather than silently running the call without detaching it.
+                tool_call("query", "stale", background_after=0),
+            ),
+            answer("done"),
+        ],
+    )
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                schema = model._format_tools([function])[0]["function"]["parameters"]
-                assert "background_after" not in schema.get("properties", {})
-                success, _, call, _ = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="connected", arguments={}),
-                )
-                assert success is True
-                assert call.result == "rows"
-                # A stale budget is rejected rather than silently running the call without detaching it.
-                success, _, call, _ = await model.arun_function_call(
-                    FunctionCall(function=function, call_id="stale", arguments={"background_after": 0}),
-                )
-                assert success is False
-                assert "background_after" in str(call.error)
+                record = await run_job_turn(actor, model)
+        assert "background_after" not in model.requests[0].tools[0].parameters.get("properties", {})
+        results = {tool.tool_call_id: tool for tool in record.tools}
+        assert not results["connected"].tool_call_error
+        assert results["connected"].result == "rows"
+        assert results["stale"].tool_call_error
+        assert "background_after" in str(results["stale"].result)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await runtime.shutdown()

@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-from agno.tools.function import Function
-
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.model_loop import LoopHooks
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -21,11 +23,21 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
-from mindroom.event_journal import EventJournalStore, ToolJobStore
+from mindroom.event_journal import ApprovalCall, EventJournalStore, ToolJobStore, approval_arguments_digest
 from mindroom.event_journal.offloading import ThreadOffload
 from mindroom.event_journal.opening import event_journal_sqlite_path
+from mindroom.history.request_messages import build_resume_request
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
+from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.authorization import toolkit_authority
+from mindroom.tool_jobs.execution import JobActor, job_definitions_hook, job_middleware
+from mindroom.tool_jobs.execution_authority import JobTool
+from mindroom.tool_jobs.notices import job_notice_hook
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundJob,
@@ -33,6 +45,8 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     _parse_saved_job,
 )
+from mindroom.tool_system.agno_toolkits import AdaptedToolkit, Toolkit, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
@@ -44,7 +58,15 @@ if TYPE_CHECKING:
 
     import pytest
 
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.run import Persist
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import RunRecord
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
@@ -55,7 +77,7 @@ def _authorize_all(_job: BackgroundJob) -> bool:
     return True
 
 
-def _allow_execution(_owner: ToolExecutionIdentity, _function: Function, _arguments: Mapping[str, Any]) -> None:
+def _allow_execution(_owner: ToolExecutionIdentity, _tool: JobTool, _arguments: Mapping[str, Any]) -> None:
     return None
 
 
@@ -76,7 +98,7 @@ class ProcessRuntime(ToolJobRuntime):
         journal: EventJournalStore,
         *,
         authorize: Callable[[BackgroundJob], bool],
-        authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
+        authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
         denied: Callable[[BackgroundJob], bool] | None = None,
     ) -> None:
@@ -106,7 +128,7 @@ async def tool_job_runtime(
     storage_root: Path,
     *,
     authorize: Callable[[BackgroundJob], bool] = _authorize_all,
-    authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
+    authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
     denied: Callable[[BackgroundJob], bool] | None = None,
 ) -> ProcessRuntime:
@@ -230,11 +252,220 @@ def pending_outcome(runtime: ToolJobRuntime, job_id: str) -> BackgroundJob | Non
     return next((job for job in pending_outcomes(runtime) if job.job_id == job_id), None)
 
 
-def assembled_function(entrypoint: Callable[..., object]) -> Function:
-    """Build a function as MindRoom toolkit assembly binds it; only such functions may become jobs."""
-    function = Function.from_callable(entrypoint)
-    function.owning_toolkit = "application"
-    return function
+def toolkit_job_tools(
+    toolkit: Toolkit,
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, JobTool]:
+    """Offer every function of ``toolkit`` as agent assembly does, authored as ``authored_name``.
+
+    ``snapshot`` is the actor's execution scope and file access, as ``authority_snapshot`` freezes it; only such
+    functions may become jobs.
+    """
+    authority = toolkit_authority(snapshot or {}, toolkit)
+    return {
+        function.name: JobTool(function=function, toolkit_name=authored_name, toolkit=toolkit, authority=authority)
+        for function in adapt_toolkit(toolkit).functions
+    }
+
+
+def job_tool(
+    entrypoint: Callable[..., object],
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> JobTool:
+    """Offer one callable as a function of a MindRoom-assembled toolkit; see ``toolkit_job_tools``."""
+    [tool] = toolkit_job_tools(
+        Toolkit(name=authored_name, tools=[entrypoint]),
+        authored_name=authored_name,
+        snapshot=snapshot,
+    ).values()
+    return tool
+
+
+def job_actor(
+    *tools: JobTool,
+    name: str = "leader",
+    team: bool = False,
+    depth: int = 0,
+) -> JobActor:
+    """An agent, or a team, offering ``tools`` as tool jobs see it."""
+    return JobActor(name=name, team=team, depth=depth, tools={tool.function.name: tool for tool in tools})
+
+
+async def call_job_tool(
+    actor: JobActor,
+    name: str,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    call_id: str | None = "call",
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> ToolOutcome:
+    """Run one model call of the actor's function ``name`` through job admission, as the owned loop dispatches it."""
+    context = ToolCallContext(
+        run_id=run_id,
+        session_id=session_id,
+        call_id=call_id,
+        session_state={} if session_state is None else session_state,
+    )
+    return await execute_tool_call(
+        actor.tools[name].function,
+        arguments,
+        context,
+        middleware=(job_middleware(actor, middleware), *middleware),
+    )
+
+
+def _job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    *,
+    session_id: str,
+    session_state: dict[str, Any] | None,
+    store: ConversationStore | None,
+    generated: tuple[ToolFunction, ...],
+    middleware: tuple[ToolMiddleware, ...],
+) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
+    functions = (*(tool.function for tool in actor.tools.values()), *generated)
+    spec = AgentSpec(
+        id=actor.name,
+        name=actor.name,
+        model=model,
+        system_message=None,
+        toolkits=(AdaptedToolkit(name="tools", functions=functions, instructions=None),),
+    )
+    hooks = LoopHooks(
+        before_request=(job_definitions_hook(actor),),
+        tool_middleware=(job_middleware(actor, middleware), *middleware),
+        after_tool_batch=(job_notice_hook(actor.name),),
+    )
+    session = ConversationSession(
+        session_id=session_id,
+        kind="team" if actor.team else "agent",
+        owner_id=actor.name,
+        session_state={} if session_state is None else session_state,
+    )
+    return spec, hooks, session, None if store is None else persist_to(store, session)
+
+
+async def run_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    prompt: str = "start",
+    *,
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    generated: tuple[ToolFunction, ...] = (),
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> RunRecord:
+    """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
+
+    ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
+    reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
+    become jobs.
+    """
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=generated,
+        middleware=middleware,
+    )
+    run = RunContext(run_id=run_id, session_id=session_id, session_state=session.session_state)
+    events = run_agent(spec, [Message(role="user", content=prompt)], ctx=run, hooks=hooks, persist=persist)
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def resume_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    paused: RunRecord,
+    *,
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> RunRecord:
+    """Resume ``paused`` with every call it waits on approved, as an approval card's decision resumes a reply."""
+    session_id = paused.session_id or "session"
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=(),
+        middleware=middleware,
+    )
+    approved = [
+        ApprovalCall(
+            tool_call_id=str(requirement.tool_execution.tool_call_id),
+            tool_name=str(requirement.tool_execution.tool_name),
+            invoking_agent=actor.name,
+            toolkit_name=actor.tools[str(requirement.tool_execution.tool_name)].toolkit_name,
+            expires_at_ns=2**62,
+            arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
+        )
+        for requirement in paused.requirements or ()
+    ]
+    events = resume_agent(
+        spec,
+        paused,
+        build_resume_request(paused=paused.messages, summary=None, history=[]),
+        approved=approved,
+        ctx=RunContext(run_id=paused.run_id, session_id=session_id, session_state=session.session_state),
+        hooks=hooks,
+        persist=persist,
+    )
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def run_built_turn(
+    build: AgentBuild,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    prompt: str = "start",
+    run_id: str = "run",
+    session_id: str = "session",
+) -> RunRecord:
+    """Run one turn of an agent ``create_agent`` built, on the owned loop with the hooks every agent turn installs."""
+    name = build.spec.id
+    hooks = agent_loop_hooks(
+        build,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=name,
+        model_name="default",
+        store=None,
+        session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
+        scope=None,
+        scoped=False,
+        native_compaction=None,
+        prompt_id=None,
+    )
+    finished = [
+        event.record
+        async for event in run_agent(
+            replace(build.spec, system_message=prompt_for_turn(build)),
+            [Message(role="user", content=prompt)],
+            ctx=RunContext(run_id=run_id, session_id=session_id),
+            hooks=hooks,
+            request_template=build.request_template,
+        )
+        if isinstance(event, RunFinished)
+    ]
+    return finished[-1]
 
 
 async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> BackgroundJob:  # noqa: ANN401

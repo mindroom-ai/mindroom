@@ -2,7 +2,6 @@
 
 The gate is the toolkit's own (``requires_confirmation`` on the function), as a tool that insists on a human
 decision declares it: a policy-gated call that can run as a job takes its approval as the job's first phase instead.
-The team continuation still runs through Agno until the team runtime cutover, which owns its variant of this test.
 """
 
 from __future__ import annotations
@@ -102,10 +101,6 @@ async def _wait_for_progress(pending: asyncio.Task[object], progress: asyncio.Ev
         await asyncio.gather(waiter, return_exceptions=True)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F1 projects background_after into the managed tool definitions the owned loop offers (B6-PLAN F1)",
-)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("background_after", [0, 0.001])
 async def test_native_approval_leaves_running_work_to_its_follow_up(

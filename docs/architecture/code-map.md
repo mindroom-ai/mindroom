@@ -133,10 +133,8 @@ Matrix sync callback
 | `delegation/job_approvals.py` | A background child's approval requests, asked through its job's cards |
 | `tool_jobs/instances.py` | One per-storage-root instance: startup-pinned setting and published runtime |
 | `tool_jobs/settings.py` | Startup-pinned feature and toolkit exclusion settings |
-| `tool_jobs/agno_compat_execution.py` | SDK schema and exact tool-dispatch bindings |
-| `tool_jobs/agno_compat_functions.py` | Private SDK actor/context access and dispatch classification |
-| `tool_jobs/agno_execution.py` | Job eligibility, approved SDK call execution, and result capture |
-| `tool_jobs/consumption.py` | Exact durable acknowledgement after the SDK saves a consumed result |
+| `tool_jobs/execution.py` | The loop's job admission middleware, the managed call it runs, and the `background_after` definitions step |
+| `tool_jobs/consumption.py` | Exact durable acknowledgement after the parent run saves a consumed result |
 | `tool_jobs/execution_scope.py` | Response execution envelopes |
 | `tool_jobs/resources.py` | Retained resource cleanup ownership |
 | `tool_jobs/authorization.py` | Current local grants using shared construction policy |
@@ -145,6 +143,7 @@ Matrix sync callback
 | `tool_jobs/control.py` | Newer human messages that release waits, and cancellation checkpoints |
 | `tool_jobs/background_after.py` | The reserved `background_after` argument of managed calls and its validation |
 | `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/legacy_results.py` | Job result payloads in the shape the Agno-based executor saved them |
 | `tool_jobs/conversation.py` | The conversation key a reply finds its jobs by, and how long a reply waits for a job's approval |
 | `tool_jobs/notices.py` | The notice on a tool result and the turn-start note about jobs that ended |
 | `tool_jobs/publication.py` | Each agent's live jobs, published per room as state for the client jobs bar |
