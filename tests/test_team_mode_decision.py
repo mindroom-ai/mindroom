@@ -266,24 +266,6 @@ class TestShouldFormTeam:
         # Provisional heuristic: multiple tagged agents = COORDINATE
         assert result.mode == TeamMode.COORDINATE
 
-    def test_decide_team_formation_no_config_fallback(self, mock_config):
-        """Test team formation when config is None."""
-        result = decide_team_formation_for_test(
-            tagged_agents=[
-                entity_ids(mock_config, runtime_paths_for(mock_config))["email"],
-                entity_ids(mock_config, runtime_paths_for(mock_config))["phone"],
-            ],
-            agents_in_thread=[],
-            all_mentioned_in_thread=[],
-            room=_matrix_room(mock_config),
-            config=None,  # No config provided
-            runtime_paths=runtime_paths_for(mock_config),
-        )
-
-        assert result.outcome is TeamOutcome.TEAM
-        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
-        assert result.mode == TeamMode.COORDINATE
-
     def test_decide_team_formation_no_team_needed(self, mock_config):
         """Test when no team formation is needed."""
         result = decide_team_formation_for_test(
@@ -291,8 +273,7 @@ class TestShouldFormTeam:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=_matrix_room(mock_config),
-            config=None,
-            runtime_paths=runtime_paths_for(mock_config),
+            config=mock_config,
         )
 
         assert result.outcome is TeamOutcome.NONE
@@ -392,21 +373,3 @@ class TestIntegrationScenarios:
             )
 
         assert mode == TeamMode.COLLABORATE
-
-    def test_optional_config_defaults(self, mock_config):
-        """Test that optional config input still falls back cleanly."""
-        result = decide_team_formation_for_test(
-            tagged_agents=[
-                entity_ids(mock_config, runtime_paths_for(mock_config))["email"],
-                entity_ids(mock_config, runtime_paths_for(mock_config))["phone"],
-            ],
-            agents_in_thread=[],
-            all_mentioned_in_thread=[],
-            room=_matrix_room(mock_config),
-            runtime_paths=runtime_paths_for(mock_config),
-        )
-
-        # Should still work with the provisional heuristic
-        assert result.outcome is TeamOutcome.TEAM
-        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
-        assert result.mode == TeamMode.COORDINATE  # Heuristic for multiple tagged
