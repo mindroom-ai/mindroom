@@ -150,7 +150,7 @@ def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> 
     if len(kinds) != 1 or isinstance(error, ContextWindowExceeded):
         return False
     status = error.status_code
-    # A 413 or a server error says nothing about the model; rate limits are retryable and never reach the retry.
+    # A 413 or a server error says nothing about the model; rate limits are retryable, so they never reach this check.
     if status is not None and (status == _PAYLOAD_TOO_LARGE_STATUS or status >= _SERVER_ERROR_STATUS):
         return False
     text = str(error).lower()
