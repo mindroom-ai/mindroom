@@ -28,8 +28,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from agno.tools.function import Function
-
     from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
@@ -68,7 +66,7 @@ __all__ = [
     "withdraw_scheduled_call_approval",
 ]
 
-# Agno copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
+# The loop copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 # A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
 JOB_APPROVAL_TYPE = "mindroom_job"
@@ -182,13 +180,13 @@ def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRule
     return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
 
 
-def approval_gated(function: Function | ToolFunction) -> bool:
+def approval_gated(function: ToolFunction) -> bool:
     """Return whether a call waits for a human decision, by pausing its run or as the first phase of its job."""
     return bool(function.requires_confirmation or function.approval_type == JOB_APPROVAL_TYPE)
 
 
 def tool_may_require_approval(config: Config, tool_name: str) -> bool:
-    """Return whether one tool must use Agno's persisted confirmation boundary."""
+    """Return whether one tool must use the persisted confirmation boundary."""
     rule = _matching_tool_approval_rule(config, tool_name)
     if rule is None:
         return config.tool_approval.default == "require_approval"

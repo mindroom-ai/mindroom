@@ -21,14 +21,11 @@ ALLOWED_MODULES = frozenset(
 # Modules outside the boundary that still import Agno. Remove a path here once its module stops; never add one.
 KNOWN_VIOLATIONS = frozenset(
     {
-        "ai.py",
-        "approval/tool_approval.py",
         "matrix_rtc/call_tools.py",
         "mcp_gateway/toolkits.py",
         "mcp_gateway/tools.py",
         "script_runs/broker.py",
         "script_runs/policy.py",
-        "tool_system/runtime_context.py",
     },
 )
 
