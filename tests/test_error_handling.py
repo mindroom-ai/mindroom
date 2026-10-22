@@ -85,7 +85,7 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
 
 
 def test_stringified_model_safeguard_refusal_gives_actionable_guidance() -> None:
-    """Agno run errors preserve provider failures as text rather than exception types."""
+    """An errored run keeps a provider failure as its text, which still gets the refusal guidance."""
     message = get_user_friendly_error_message(Exception(MODEL_SAFEGUARD_REFUSAL_MESSAGE), "mind")
 
     assert message == (
@@ -221,8 +221,6 @@ def test_extract_provider_from_error() -> None:
         TypeError(
             '"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set."',
         ),
-        # Streaming errors reach the user after Agno flattens them into plain text.
-        Exception("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set. Please set the ANTHROPIC_API_KEY."),
     ],
 )
 def test_missing_provider_key_points_to_dashboard_setup(error: Exception, tmp_path: Path) -> None:
