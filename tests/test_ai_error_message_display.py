@@ -27,7 +27,7 @@ from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.ai_user_id_helpers import _claimed_reply_span
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -334,6 +334,7 @@ class TestAIErrorDisplay:
     ) -> None:
         """A stop the user asks for while the model streams ends the blocking reply as stopped by the user."""
         bot = _mock_bot(tmp_path)
+        unique_room_send_responses(bot.client)
         bot.config.agents["test_agent"].show_tool_calls = show_tool_calls
         install_agent_model(monkeypatch, ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]]))
         _build_response_runner(bot)
@@ -353,6 +354,7 @@ class TestAIErrorDisplay:
     ) -> None:
         """A stop the user asks for mid-stream keeps the text streamed so far and ends as stopped by the user."""
         bot = _mock_bot(tmp_path)
+        unique_room_send_responses(bot.client)
         install_agent_model(monkeypatch, ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]]))
         _build_response_runner(bot)
 

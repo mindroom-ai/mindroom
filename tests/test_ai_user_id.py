@@ -10,11 +10,10 @@ import asyncio
 import json
 from contextvars import Context
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
 from mindroom import agents, ai
@@ -47,7 +46,6 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
     RuntimePaths,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.request_messages import TurnMessages
@@ -117,7 +115,13 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
-from tests.scripted_agent_helpers import install_agent_model, registered_toolkit, stop_turn
+from tests.scripted_agent_helpers import (
+    PROBE_TOOL,
+    ProbeTools,
+    install_agent_model,
+    registered_probe_tools,
+    stop_turn,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Sequence
@@ -129,109 +133,12 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.response_turn import ResponseTurnContext
 
-PROBE_TOOL = "ai_user_id_probe"
-
-
-class _ProbeTools(Toolkit):
-    """The tools these replies call: a shell that answers or keeps running, a save that keeps running, and more.
-
-    A call that keeps running sets ``running`` and waits to be cancelled, so a test can stop the turn mid-call.
-    ``switch_thread_model`` answers as the thread-model tool does and stops the run after it, as that tool does.
-    """
-
-    running: ClassVar[asyncio.Event] = asyncio.Event()
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="ai_probe",
-            tools=[
-                self.run_shell_command,
-                self.save_file,
-                self.read_file,
-                self.inspect,
-                self.dangerous,
-                self.switch_thread_model,
-            ],
-        )
-        self.async_functions["switch_thread_model"].stop_after_tool_call = True
-
-    @classmethod
-    async def _keep_running(cls) -> str:
-        cls.running.set()
-        await asyncio.Event().wait()
-        raise AssertionError
-
-    async def run_shell_command(self, cmd: str) -> str:
-        """Run one shell command; ``pwd`` answers at once and anything else keeps running.
-
-        Args:
-            cmd: The command.
-
-        """
-        return "/app" if cmd == "pwd" else await self._keep_running()
-
-    async def save_file(self, file_name: str) -> str:
-        """Save a file; the save keeps running.
-
-        Args:
-            file_name: The file.
-
-        """
-        del file_name
-        return await self._keep_running()
-
-    async def read_file(self, path: str) -> str:
-        """Read a file.
-
-        Args:
-            path: The file.
-
-        """
-        return f"contents of {path}"
-
-    async def inspect(self, path: str) -> str:
-        """Inspect a file.
-
-        Args:
-            path: The file.
-
-        """
-        del path
-        return "ready"
-
-    async def dangerous(self, value: int) -> str:
-        """Do something that needs approval.
-
-        Args:
-            value: The value.
-
-        """
-        return f"did {value}"
-
-    async def switch_thread_model(self, model_name: str, when: str = "next-turn") -> str:
-        """Switch the thread's model.
-
-        Args:
-            model_name: The configured model.
-            when: When the switch takes effect.
-
-        """
-        if model_name not in {"default", "large"}:
-            return custom_tool_payload(
-                "thread_model",
-                "error",
-                action="switch",
-                message=f"Unknown model '{model_name}'.",
-            )
-        return custom_tool_payload("thread_model", "ok", action="switch", model=model_name, when=when)
-
 
 @pytest.fixture
-def probe() -> Iterator[type[_ProbeTools]]:
+def probe() -> Iterator[type[ProbeTools]]:
     """Register the probe toolkit for the test."""
-    _ProbeTools.running = asyncio.Event()
-    with registered_toolkit(PROBE_TOOL, _ProbeTools):
-        yield _ProbeTools
+    with registered_probe_tools() as tools:
+        yield tools
 
 
 def _bound(
@@ -856,7 +763,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """The run carries the requester as its user and the turn's run id, which cancellation and usage need."""
@@ -879,7 +786,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A turn without a requester runs without a user."""
         del probe
@@ -896,7 +803,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
         del probe
@@ -937,7 +844,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Routine logs stay content-safe while debug logs retain the prepared prompt."""
         del probe
@@ -999,7 +906,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Raw prompt drives memory lookup; the session preamble and system enrichment follow the build's context."""
         del probe
@@ -1048,7 +955,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         include_openai_compat_guidance: bool,
     ) -> None:
         """OpenAI-compatible preparation suppresses the Matrix sender; Matrix turns name it in the prompt."""
@@ -1073,7 +980,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A reply an agent wrote for a human stays that agent's words while the human is the requester."""
         del probe
@@ -1101,7 +1008,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Replies build agents against the orchestrator-owned config file and pass the compat guidance through."""
@@ -1129,7 +1036,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Matrix turns preserve the sender who produced the current prompt in what the model reads."""
@@ -1152,7 +1059,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """The AI entrypoint should preserve the raw user prompt when model_prompt is provided."""
         del probe
@@ -1180,7 +1087,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         turns: tuple[list[ScriptStep], ...],
         status: RunStatus,
     ) -> None:
@@ -1209,7 +1116,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A run stopped mid-stream surfaces as task cancellation to the bot."""
         del probe
@@ -1226,7 +1133,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A stopped stream is rewritten into canonical completed replay history with its finished tools."""
         del probe
@@ -1285,7 +1192,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A confirmation pause escapes as an approval suspension and its run stays paused, never settled as text."""
         del probe
@@ -1329,7 +1236,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """The interrupted record of a stopped run holds only this turn's text, never the replayed history."""
         del probe
@@ -1373,7 +1280,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Lifecycle-owned calls record the interrupted state and leave the interrupted record to the runner."""
         del probe
@@ -1409,7 +1316,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A failed run's provider error reaches the user as friendly text, never as a successful reply."""
         del probe
@@ -1479,7 +1386,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """The AI layer never drops a file before the provider decides what its model accepts."""
@@ -1506,7 +1413,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A refused request with media gets the refusal notice; the request pipeline never resends it without media."""
@@ -1539,7 +1446,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A streamed reply's request log names its turn: agent, session, room, thread, event, and prompts."""
         del probe
@@ -1604,7 +1511,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A run that fails after model requests still reports their tokens in the run metadata."""
         del probe
@@ -1635,7 +1542,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """The blocking path still surfaces structured tool metadata when the reply hides its tool calls."""
         del probe
@@ -1661,7 +1568,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A next-turn model switch rebuilds the agent and continues the same task under a fresh run id."""
@@ -1701,7 +1608,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """An after-toolcall switch rebuilds the agent on the new model, which the tools then see as active."""
@@ -1745,7 +1652,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A continuation stopped mid-run keeps the switch and its own finished tools in the interrupted state."""
         del probe
@@ -1779,7 +1686,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Repeated rejected model switches end with visible fallback text after the continuation limit."""
@@ -1810,7 +1717,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A reply exposes its model, usage, and context metadata, with the context taken from the provider counters."""
@@ -1856,7 +1763,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """A reply stores the same prepared-history metadata it hands its turn recorder."""
@@ -1886,7 +1793,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Claude-family cache tokens count toward context occupancy."""
         del probe
@@ -1992,7 +1899,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         turn: list[ScriptStep],
         recorded: str,
         streamed: str,
@@ -2024,7 +1931,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         streaming: bool,
     ) -> None:
         """Reply metadata reports the room-resolved runtime model and its context window."""
@@ -2065,7 +1972,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A streamed confirmation pause escapes to the lifecycle suspension handler, its run stored paused."""
         del probe
@@ -2103,7 +2010,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """A hidden pause must retain enough internal trace state to separate its continuation."""
         del probe
@@ -2186,7 +2093,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         running: dict[str, Any],
         running_preview: tuple[str, str],
     ) -> None:
@@ -2238,7 +2145,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """External task cancellation still persists the interrupted turn with its model-facing prompt."""
         del probe
@@ -2280,7 +2187,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Streaming metadata reports the request's usage, its time to first token, and the serving model."""
         del probe
@@ -2321,7 +2228,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Usage sums every request while the context block reads the latest request's counters."""
         del probe
@@ -2375,7 +2282,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
     ) -> None:
         """Missing latest-request cache counters stay unknown instead of reusing cumulative totals."""
         del probe
@@ -2425,7 +2332,7 @@ class TestUserIdPassthrough:
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        probe: type[_ProbeTools],
+        probe: type[ProbeTools],
         provider: str,
     ) -> None:
         """Streaming context includes the cache tokens of the latest Claude request on every Claude route."""
