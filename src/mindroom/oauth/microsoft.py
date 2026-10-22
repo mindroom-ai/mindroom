@@ -172,7 +172,7 @@ def outlook_calendar_oauth_provider() -> OAuthProvider:
     return microsoft_oauth_provider(
         provider_id="outlook_calendar",
         display_name="Outlook Calendar",
-        scopes=("Calendars.ReadWrite",),
+        scopes=("Calendars.ReadWrite", "Calendars.ReadWrite.Shared"),
         status_capabilities=("read and change Outlook calendar events",),
     )
 
@@ -188,7 +188,11 @@ def microsoft_todo_oauth_provider() -> OAuthProvider:
 
 
 def microsoft_teams_oauth_provider() -> OAuthProvider:
-    """Return the Teams channels and chats provider."""
+    """Return the Teams channels, chats, and presence provider.
+
+    `ChannelMessage.Read.All` and `User.Read.All`, which finds a person's user id for a presence read, need admin
+    consent.
+    """
     return microsoft_oauth_provider(
         provider_id="microsoft_teams",
         display_name="Microsoft Teams",
@@ -197,10 +201,12 @@ def microsoft_teams_oauth_provider() -> OAuthProvider:
             "Channel.ReadBasic.All",
             "ChannelMessage.Read.All",
             "ChannelMessage.Send",
-            "Chat.Read",
+            "Chat.ReadWrite",
             "ChatMessage.Send",
+            "Presence.Read.All",
+            "User.Read.All",
         ),
-        status_capabilities=("read and send Teams channel and chat messages",),
+        status_capabilities=("read and send Teams channel and chat messages, start chats, and read presence",),
     )
 
 

@@ -323,11 +323,21 @@ def _egress_row(portal: dict[str, Any], user: str, agent: str, service: str) -> 
     return next(item for item in _listed_agents(portal, user)[agent]["services"] if item["name"] == service)
 
 
-def _catalog_services(portal: dict[str, Any], user: str, agent: str) -> list[dict[str, Any]]:
-    """Return the egress rows the Connections portal catalog lists for an agent the user may use egress for."""
-    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
+def _state(portal: dict[str, Any], user: str, agent: str) -> Any:  # noqa: ANN401
+    """Return the response of the Connections portal's state route for one agent."""
+    return portal["client"].get(f"/api/connections/agents/{agent}/state", headers=portal["headers"][user])
+
+
+def _state_egress(portal: dict[str, Any], user: str, agent: str) -> list[dict[str, Any]] | None:
+    """Return the egress rows the Connections portal's state route lists for one agent, after checking it succeeded."""
+    response = _state(portal, user, agent)
     assert response.status_code == 200, response.text
-    services = next(item for item in response.json()["agents"] if item["agent_name"] == agent)["egress_services"]
+    return response.json()["egress_services"]
+
+
+def _state_services(portal: dict[str, Any], user: str, agent: str) -> list[dict[str, Any]]:
+    """Return the egress rows of an agent the user may use egress for, as the portal's state route lists them."""
+    services = _state_egress(portal, user, agent)
     assert services is not None
     return services
 
@@ -825,7 +835,7 @@ def test_credential_manager_without_use_access_sees_no_egress_anywhere(egress_po
     assert catalog.status_code == 200, catalog.text
     shared_dev = next(agent for agent in catalog.json()["agents"] if agent["agent_name"] == "shared_dev")
     assert shared_dev["can_use"] is False
-    assert shared_dev["egress_services"] is None
+    assert _state_egress(egress_portal, "carol", "shared_dev") is None
 
     assert _listing(egress_portal, "carol").json()["agents"] == []
 
@@ -833,24 +843,30 @@ def test_credential_manager_without_use_access_sees_no_egress_anywhere(egress_po
     assert response.status_code == 404, response.text
 
 
-# --- Connections portal catalog ---
+# --- Connections portal agent state ---
 
 
-def test_portal_catalog_includes_egress_services(egress_portal: dict[str, Any]) -> None:
-    """When MINDROOM_CONNECTIONS_AGENT is set, the portal catalog lists the services of eligible agents only."""
-    response = egress_portal["client"].get("/api/connections", headers=egress_portal["headers"]["alice"])
+def _catalog_egress(portal: dict[str, Any], user: str) -> dict[str, list[dict[str, Any]] | None]:
+    """Return each catalog agent's egress rows, as the portal loads them from the agent's state."""
+    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
     assert response.status_code == 200, response.text
-    agents = {agent["agent_name"]: agent for agent in response.json()["agents"]}
+    return {
+        agent["agent_name"]: _state_egress(portal, user, agent["agent_name"]) for agent in response.json()["agents"]
+    }
+
+
+def test_portal_state_includes_egress_services(egress_portal: dict[str, Any]) -> None:
+    """When MINDROOM_CONNECTIONS_AGENT is set, the portal lists the services of eligible agents only."""
+    agents = _catalog_egress(egress_portal, "alice")
     assert {"personal", "shared_dev"} <= agents.keys()
-    for name, agent in agents.items():
-        assert "egress_services" in agent
+    for name, services in agents.items():
         if name in ("personal", "shared_dev"):
-            assert {s["name"] for s in agent["egress_services"]} == {"github", "openai"}
+            assert {s["name"] for s in services or []} == {"github", "openai"}
         else:
-            assert agent["egress_services"] is None
+            assert services is None
 
 
-def test_portal_catalog_sends_an_empty_list_for_an_eligible_agent_without_services(
+def test_portal_state_sends_an_empty_list_for_an_eligible_agent_without_services(
     egress_portal: dict[str, Any],
 ) -> None:
     """An agent the user may use egress for gets a list even when empty, so the portal can link its services page."""
@@ -858,30 +874,25 @@ def test_portal_catalog_sends_an_empty_list_for_an_eligible_agent_without_servic
     portal["payload"]["egress_broker"]["services"] = {}
     _republish(portal)
 
-    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    agents = _catalog_egress(portal, "alice")
 
-    assert response.status_code == 200, response.text
-    agents = {agent["agent_name"]: agent for agent in response.json()["agents"]}
-    assert agents["personal"]["egress_services"] == []
-    assert agents["shared_dev"]["egress_services"] == []
-    assert {name for name, agent in agents.items() if agent["egress_services"] is None} == set(agents) - {
-        "personal",
-        "shared_dev",
-    }
+    assert agents["personal"] == []
+    assert agents["shared_dev"] == []
+    assert {name for name, services in agents.items() if services is None} == set(agents) - {"personal", "shared_dev"}
     # The user of the agent keeps writing services, so the list fills as soon as one exists.
     assert _put_service(portal, "alice", "personal", "notes").status_code == 204
-    assert [row["name"] for row in _catalog_services(portal, "alice", "personal")] == ["notes"]
+    assert [row["name"] for row in _state_services(portal, "alice", "personal")] == ["notes"]
 
 
 def _storage_dirs(portal: dict[str, Any]) -> set[Path]:
     return {path for path in portal["paths"].storage_root.rglob("*") if path.is_dir()}
 
 
-def test_portal_catalog_reads_no_egress_state_while_the_broker_is_off(
+def test_portal_state_reads_no_egress_state_while_the_broker_is_off(
     egress_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without a broker port the catalog sends no egress rows and reads no egress store or scope directory."""
+    """Without a broker port the portal sends no egress rows and reads no egress store or scope directory."""
     _restart_with_env(egress_portal, MINDROOM_EGRESS_BROKER_PORT="")
     services_read: list[object] = []
     read_services = egress_status.effective_config
@@ -892,21 +903,19 @@ def test_portal_catalog_reads_no_egress_state_while_the_broker_is_off(
     )
     dirs_before = _storage_dirs(egress_portal)
 
-    response = egress_portal["client"].get("/api/connections", headers=egress_portal["headers"]["alice"])
+    agents = _catalog_egress(egress_portal, "alice")
 
-    assert response.status_code == 200, response.text
-    agents = response.json()["agents"]
-    assert {"personal", "shared_dev"} <= {agent["agent_name"] for agent in agents}
-    assert [agent["egress_services"] for agent in agents] == [None] * len(agents)
+    assert {"personal", "shared_dev"} <= agents.keys()
+    assert list(agents.values()) == [None] * len(agents)
     assert services_read == []
     assert _storage_dirs(egress_portal) == dirs_before
 
 
-def test_portal_catalog_survives_egress_state_that_cannot_be_read(
+def test_portal_state_survives_egress_state_that_cannot_be_read(
     egress_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unreadable egress store hides the agent's egress rows and neither fails the catalog nor leaks the error."""
+    """An unreadable egress store hides the agent's egress rows and neither fails its state nor leaks the error."""
 
     def unreadable(*_args: object) -> Never:
         msg = "internal-store-detail"
@@ -915,12 +924,13 @@ def test_portal_catalog_survives_egress_state_that_cannot_be_read(
     monkeypatch.setattr(egress_status, "effective_config", unreadable)
 
     with capture_logs() as logs:
-        response = egress_portal["client"].get("/api/connections", headers=egress_portal["headers"]["alice"])
+        responses = [_state(egress_portal, "alice", agent) for agent in ("personal", "shared_dev", "no_shell")]
 
-    assert response.status_code == 200, response.text
-    assert all(agent["egress_services"] is None for agent in response.json()["agents"])
-    assert "internal-store-detail" not in response.text
-    warnings = [log for log in logs if log["event"] == "connection_catalog_egress_unavailable"]
+    for response in responses:
+        assert response.status_code == 200, response.text
+        assert response.json()["egress_services"] is None
+        assert "internal-store-detail" not in response.text
+    warnings = [log for log in logs if log["event"] == "connection_state_egress_unavailable"]
     assert {log["agent_name"] for log in warnings} == {"personal", "shared_dev"}
     assert {log["error_type"] for log in warnings} == {"OSError"}
 
@@ -1336,17 +1346,17 @@ def test_personal_connection_stored_before_a_service_account_can_still_be_discon
     assert row["active_source"] is None
 
 
-def test_portal_catalog_includes_the_oauth_status(oauth_egress_portal: dict[str, Any]) -> None:
+def test_portal_state_includes_the_oauth_status(oauth_egress_portal: dict[str, Any]) -> None:
     """The Connections portal shows the same OAuth status as the egress page, the opt-in included."""
     portal = oauth_egress_portal
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
-    tools_only = {service["name"]: service for service in _catalog_services(portal, "alice", "personal")}["drive"]
+    tools_only = {service["name"]: service for service in _state_services(portal, "alice", "personal")}["drive"]
     assert (tools_only["oauth"]["connected"], tools_only["oauth"]["reuse_enabled"]) == (True, False)
     assert tools_only["active_source"] is None
     assert tools_only == _egress_row(portal, "alice", "personal", "drive")
     assert _allow_reuse(portal, "alice", "personal", "drive").status_code == 204
 
-    rows = {service["name"]: service for service in _catalog_services(portal, "alice", "personal")}
+    rows = {service["name"]: service for service in _state_services(portal, "alice", "personal")}
     drive = rows["drive"]
     assert drive["active_source"] == "oauth"
     assert drive["oauth"]["connected"] is True
@@ -1494,7 +1504,7 @@ def test_a_personal_connection_beside_a_service_account_stays_visible_to_allow_s
 
 
 def test_listing_never_refreshes_tokens(oauth_egress_portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    """The listing and the portal catalog read stored state, so they never wait on a provider's token endpoint."""
+    """The listing and the portal's agent state read stored state, so they never wait on a provider's token endpoint."""
     portal = oauth_egress_portal
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
 
@@ -1504,7 +1514,8 @@ def test_listing_never_refreshes_tokens(oauth_egress_portal: dict[str, Any], mon
 
     monkeypatch.setattr(oauth, "refresh_oauth_credentials", refresh_must_not_run)
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["connected"] is True
-    assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 200
+    drive = next(row for row in _state_services(portal, "alice", "personal") if row["name"] == "drive")
+    assert drive["oauth"]["connected"] is True
 
 
 @pytest.mark.parametrize(
@@ -1528,12 +1539,12 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     monkeypatch.setattr(oauth, "agent_connection_status", fails_for_drive)
     degraded = _oauth_block(can_connect=False)
     listing = _listing(portal, "alice")
-    catalog = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
-    assert catalog.status_code == 200, catalog.text
-    assert "internal-client-secret" not in listing.text + catalog.text
+    state = _state(portal, "alice", "personal")
+    assert state.status_code == 200, state.text
+    assert "internal-client-secret" not in listing.text + state.text
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"] == degraded
     assert _egress_row(portal, "alice", "personal", "gh")["oauth"]["can_connect"] is True
-    rows = {service["name"]: service for service in _catalog_services(portal, "alice", "personal")}
+    rows = {service["name"]: service for service in state.json()["egress_services"]}
     assert rows["drive"]["oauth"] == degraded
     assert rows["gh"]["oauth"]["can_connect"] is True
 
@@ -1542,7 +1553,7 @@ def test_portal_routes_never_load_egress_oauth_status(
     oauth_egress_portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the catalog reads egress OAuth state; status, connect and disconnect of other providers do not."""
+    """Only an agent's state reads egress OAuth state; the catalog, status, connect and disconnect do not."""
     portal = oauth_egress_portal
     client, headers = portal["client"], portal["headers"]["alice"]
     calls: list[str] = []
@@ -1558,10 +1569,21 @@ def test_portal_routes_never_load_egress_oauth_status(
     connect = client.post(f"{base}/connect", headers=headers, json={})
     assert connect.status_code == 200, connect.text
     assert client.post(f"{base}/disconnect", headers=headers, json={}).status_code == 200
+    assert client.get("/api/connections", headers=headers).status_code == 200
     assert calls == []
 
-    assert client.get("/api/connections", headers=headers).status_code == 200
-    assert "personal" in calls
+    assert client.get("/api/connections/agents/personal/state", headers=headers).status_code == 200
+    assert calls == ["personal"]
+
+
+def test_listing_accounts_never_connected_creates_no_credential_store(oauth_egress_portal: dict[str, Any]) -> None:
+    """The listing and the portal's agent state read accounts nobody connected without leaving empty stores behind."""
+    portal = oauth_egress_portal
+    for user in ("alice", "bob"):
+        _listing(portal, user)
+        for agent in ("personal", "shared_dev"):
+            assert _state(portal, user, agent).status_code == 200
+    assert list(portal["paths"].storage_root.rglob("*.sqlite3")) == []
 
 
 def test_key_status_is_read_off_the_event_loop(
@@ -1572,7 +1594,7 @@ def test_key_status_is_read_off_the_event_loop(
     portal = oauth_egress_portal
     on_loop = calls_on_event_loop(secrets, "load_egress_document")
     _listing(portal, "alice")
-    assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 200
+    _state_services(portal, "alice", "personal")
     assert on_loop
     assert not any(on_loop)
 
@@ -1903,7 +1925,7 @@ def test_an_unreadable_worker_backend_degrades_one_service_without_failing_the_p
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    """The shared-sandbox check can fail on its own, and that spares the listing and the catalog but that service."""
+    """The shared-sandbox check can fail on its own, and that spares the listing and the agent state but that service."""
     portal = oauth_egress_portal
     if failure == "unsupported backend":
         _restart_with_env(portal, MINDROOM_WORKER_BACKEND="no-such-backend")
@@ -1919,10 +1941,10 @@ def test_an_unreadable_worker_backend_degrades_one_service_without_failing_the_p
         monkeypatch.setattr(egress_status, "shared_worker_oauth", broken)
 
     listing = _listing(portal, "alice")
-    catalog = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    state = _state(portal, "alice", "personal")
 
-    assert catalog.status_code == 200, catalog.text
-    assert "internal-backend-detail" not in listing.text + catalog.text
+    assert state.status_code == 200, state.text
+    assert "internal-backend-detail" not in listing.text + state.text
     gh = _egress_row(portal, "alice", "personal", "gh")["oauth"]
     assert (gh["connected"], gh["can_connect"], gh["unavailable_reason"]) == (False, False, None)
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["can_connect"] is True
@@ -2272,7 +2294,7 @@ def test_service_routes_require_a_signed_user(egress_portal: dict[str, Any]) -> 
 
 
 def test_personal_services_never_reach_another_requester(egress_portal: dict[str, Any]) -> None:
-    """Alice's services on a private agent are invisible to Bob's listing, catalog, reads, and writes."""
+    """Alice's services on a private agent are invisible to Bob's listing, portal state, reads, and writes."""
     portal = egress_portal
     assert _put_service(portal, "alice", "personal", "notes").status_code == 204
 
@@ -2280,7 +2302,7 @@ def test_personal_services_never_reach_another_requester(egress_portal: dict[str
     assert _listed_names(portal, "bob", "personal") == ["github", "openai"]
     assert _listed_names(portal, "alice", "shared_dev") == ["github", "openai"]
     for user, expected in (("alice", True), ("bob", False)):
-        assert ("notes" in {s["name"] for s in _catalog_services(portal, user, "personal")}) is expected
+        assert ("notes" in {s["name"] for s in _state_services(portal, user, "personal")}) is expected
 
     assert _get_service(portal, "bob", "personal", "notes").status_code == 404
     assert _delete_service(portal, "bob", "personal", "notes").status_code == 404
@@ -2358,7 +2380,7 @@ def test_listing_marks_the_source_of_each_service(egress_portal: dict[str, Any])
     )
     assert (notes["configured"], notes["key_configured"], notes["oauth"]) == (False, False, None)
 
-    assert {(s["name"], s["source"]) for s in _catalog_services(portal, "alice", "personal")} == {
+    assert {(s["name"], s["source"]) for s in _state_services(portal, "alice", "personal")} == {
         ("github", "config"),
         ("openai", "config"),
         ("notes", "user"),
@@ -2588,7 +2610,7 @@ def test_user_services_are_loaded_off_the_event_loop(
     on_loop = calls_on_event_loop(egress_status, "effective_config")
     client, headers = portal["client"], portal["headers"]["alice"]
     _listing(portal, "alice")
-    assert client.get("/api/connections", headers=headers).status_code == 200
+    _state_services(portal, "alice", "personal")
     connect = client.post("/api/connections/egress/agents/personal/mygh/connect", headers=headers, json={})
     assert connect.status_code == 200, connect.text
     assert client.put(_service_url("personal", "second"), json=_NOTES, headers=headers).status_code == 204
@@ -2979,8 +3001,8 @@ def test_listing_summarizes_where_each_service_applies_and_how_it_sends_the_key(
         assert hidden not in listing
     # Another requester's private services never show up in the summaries.
     assert "own" not in {service["name"] for service in _listed_services(portal, "bob", "personal")}
-    catalog_rows = {row["name"]: row for row in _catalog_services(portal, "alice", "personal")}
-    assert catalog_rows["own"]["rules"] == rows["own"]["rules"]
+    state_rows = {row["name"]: row for row in _state_services(portal, "alice", "personal")}
+    assert state_rows["own"]["rules"] == rows["own"]["rules"]
 
 
 def test_query_auth_and_restrict_only_rules_are_summarized(egress_portal: dict[str, Any]) -> None:
@@ -3035,9 +3057,9 @@ def test_listing_names_the_placeholder_variables_each_service_sets(egress_portal
     assert rows["notes"]["placeholder_names"] == ["NOTES_API_KEY"]
     listing = _listing(portal, "alice").text
     assert "mindroom-brokered" not in listing
-    # The portal catalog carries the same names for its egress rows.
-    catalog_rows = {row["name"]: row for row in _catalog_services(portal, "alice", "personal")}
-    assert catalog_rows["billing"]["placeholder_names"] == ["BILLING_API_KEY", "BILLING_TOKEN"]
+    # The portal's agent state carries the same names for its egress rows.
+    state_rows = {row["name"]: row for row in _state_services(portal, "alice", "personal")}
+    assert state_rows["billing"]["placeholder_names"] == ["BILLING_API_KEY", "BILLING_TOKEN"]
     # Another requester never sees the names of a service defined in alice's own scope.
     assert "notes" not in {service["name"] for service in _listed_services(portal, "bob", "personal")}
 

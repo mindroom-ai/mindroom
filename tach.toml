@@ -6874,6 +6874,7 @@ expose = [
     "load_oauth_reset_connection_generation",
     "oauth_account_label",
     "oauth_credential_generation",
+    "oauth_credential_store_exists",
     "oauth_credentials_have_required_scopes",
     "oauth_credentials_have_scopes",
     "oauth_credentials_match_client_id",

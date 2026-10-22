@@ -9,11 +9,11 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `microsoft_sharepoint` | SharePoint sites, list items, and site pages the requester can open | `microsoft_sharepoint` | `Sites.ReadWrite.All` |
 | `outlook_mail` | The requester's Outlook mailbox and automatic replies, and shared mailboxes the requester can open | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`, `MailboxSettings.ReadWrite` |
-| `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
+| `outlook_calendar` | The requester's Outlook calendars and events, and calendars others shared with or delegated to them | `outlook_calendar` | `Calendars.ReadWrite`, `Calendars.ReadWrite.Shared` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
-| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
+| `microsoft_teams` | Teams channels and chats the requester belongs to, new chats, and people's presence | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `ChatMessage.Send`, `Presence.Read.All`, `User.Read.All` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
-| `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
+| `microsoft_onenote` | OneNote notebooks of the requester, of their Teams teams and SharePoint sites, and of people who share notebooks with them | `microsoft_onenote` | `Notes.ReadWrite.All` |
 | `microsoft_people` | People, managers, and direct reports in the requester's organization directory | `microsoft_people` | `User.Read.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
@@ -29,7 +29,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
 
-`ChannelMessage.Read.All`, which `microsoft_teams` requests, always needs administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
+`ChannelMessage.Read.All` and `User.Read.All`, which `microsoft_teams` requests, always need administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
 `OnlineMeetingTranscript.Read.All`, which `microsoft_meetings` requests, likewise always needs administrator consent.
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
@@ -86,7 +86,7 @@ agents:
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
-| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats; with `false`, those functions are not offered. |
 | `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
@@ -222,6 +222,15 @@ Responding to a meeting also takes the organizer's email from the event as `expe
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
 
+Listing calendars and events, reading an event, and creating, changing, and deleting events also take an optional `calendar_owner`: the email address or sign-in name of another person whose calendar the requester can open in Outlook because that person shared it with them or made them a delegate.
+Reading needs at least read access to that calendar and writing needs edit or delegate access; otherwise Microsoft Graph answers `forbidden` or `not_found`.
+Calendar IDs, event IDs, and page tokens from such a call belong to that person's mailbox, so follow-up calls pass the same `calendar_owner`, and a page token from another mailbox fails with `invalid_page_token`.
+A calendar shared with the requester can also appear in their own calendar list, with that person as owner, and its ID works without `calendar_owner`.
+On another person's calendar, that person organizes a new event, and Outlook sends its invitations, updates, and cancellations in that person's name, sent by the requester on their behalf.
+A call with `calendar_owner` shows it on its approval card and repeats it in every result, errors included.
+Responding to invitations covers only the requester's own invitations, and free/busy already looks up other people.
+`Calendars.ReadWrite.Shared` needs no administrator consent; calendar connections made before the tool requested it lack it, so each requester reconnects once.
+
 ## To Do
 
 | Function | Changes data | Purpose |
@@ -248,9 +257,11 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
 | `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
+| `microsoft_teams_get_presence` | no | Read the availability, activity, and status message of up to 20 people. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
 | `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
+| `microsoft_teams_start_chat` | yes, creates a chat and posts to it | Start a chat with up to 20 people and send its first message. |
 
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
@@ -259,7 +270,12 @@ Sent messages appear under the requester's name and keep their line breaks, and 
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 A chat message takes the email address of every chat member, the requester's own included, as `recipients`, and a channel post or reply takes the team and channel names as `expected_team` and `expected_channel`, so an approval card shows who reads the message.
 When a member's email address is missing or not listed, or a name differs, nothing is sent and the call fails with `recipients_mismatch`, listing every member, or `target_mismatch`, naming the real team and channel.
-The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
+Starting a chat takes the other people's sign-in addresses (userPrincipalName), usually their email addresses, so its approval card shows who reads the first message.
+One person gives a one-on-one chat, and Teams keeps one per pair, so the message lands in the existing one-on-one chat when there is one; two or more people give a new group chat, which can have a topic.
+Before posting, it reads the chat's members and sends nothing, failing with `recipients_mismatch` and the `chat_id`, when a member's email address is missing or differs from the addresses given.
+Presence looks up each person's user id by sign-in address, reports a person Microsoft Graph cannot find or show with `not_found` or `forbidden` without failing the others, and returns status messages as plain text.
+Connections made before `microsoft_teams` requested `Chat.ReadWrite`, `Presence.Read.All`, and `User.Read.All` ask their users to connect again once.
+The tool sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
 ## Teams Meetings
@@ -284,17 +300,20 @@ Two Teams administrator settings also govern transcripts: with Graph access to t
 
 | Function | Changes data | Purpose |
 | --- | --- | --- |
-| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, by name, and which one is the default. |
+| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, or those of a team, a site, or a person who shares them, by name, and which one is the default. |
 | `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
 | `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
 | `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
 | `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
 | `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
 
-Only the notebooks the requester owns are listed; notebooks other people share with the requester, and group or SharePoint site notebooks, are not.
-Sections inside section groups are not listed either.
+Without `container`, the functions reach the notebooks the requester owns.
+Every function also takes an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_list_teams` (a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_search_sites` or `microsoft_sharepoint_get_site` (`host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
+A bare id always names a team, so a person is named by sign-in email address and not by id; a container of any other form is refused before any request.
+Results repeat the `container`, and calls on the sections and pages of those notebooks pass it again; `Notes.ReadWrite.All` already covers every notebook the requester can open, so containers need no new consent.
+Sections inside section groups are not listed.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
-Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
+Listings and page text return a `next_page_token` while more follows; passing it back with the same container and the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
 Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
@@ -357,6 +376,8 @@ tool_approval:
     - match: microsoft_teams_reply_to_channel_message
       action: require_approval
     - match: microsoft_teams_send_chat_message
+      action: require_approval
+    - match: microsoft_teams_start_chat
       action: require_approval
     - match: microsoft_onenote_create_page
       action: require_approval
