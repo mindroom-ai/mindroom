@@ -112,19 +112,19 @@ def reject_legacy_defaults_fields(value: object) -> object:
 
 # LEGACY_COMPAT: Retired Agno Learning switch.
 # Legacy format: Agent and defaults config accepted learning to enable Agno Learning.
-# Last legacy release: v2026.10.471; replacement: unreleased.
+# Last legacy release: v2026.10.474; replacement: unreleased.
 # Handling: Warn once per process and drop the value; existing learning databases stay on disk unread.
 # Coverage: tests/test_agents.py::test_config_ignores_retired_learning_with_one_warning.
 
 # LEGACY_COMPAT: Retired Agno Learning mode.
 # Legacy format: Agent and defaults config accepted learning_mode (always or agentic) for Agno Learning.
-# Last legacy release: v2026.10.471; replacement: unreleased.
+# Last legacy release: v2026.10.474; replacement: unreleased.
 # Handling: Warn once per process and drop the value.
 # Coverage: tests/test_agents.py::test_config_ignores_retired_learning_mode_with_one_warning.
 
 # LEGACY_COMPAT: Retired tool-result compression switch.
 # Legacy format: Agent and defaults config accepted compress_tool_results to compress replayed tool results.
-# Last legacy release: v2026.10.471; replacement: unreleased.
+# Last legacy release: v2026.10.474; replacement: unreleased.
 # Handling: Warn once per process and drop the value; tool results replay uncompressed.
 # Coverage: tests/test_agents.py::test_config_ignores_retired_compress_tool_results_with_one_warning.
 _RETIRED_FIELD_REASONS = {
@@ -175,7 +175,7 @@ _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 # Legacy format: extra_kwargs went to the provider's Agno model class as keyword arguments, so every Agno model field
 #   loaded: the base Model fields on any provider, and the feature fields of Agno's OpenAI Chat, OpenAI Responses,
 #   Claude, and Gemini classes on the providers built from them.
-# Last legacy release: v2026.10.471; replacement: unreleased.
+# Last legacy release: v2026.10.474; replacement: unreleased.
 #   These keys are authored input that no MindRoom model wrote, so no release stored them.
 # Handling: Warn once per field and drop it on the providers whose Agno class took it; every other key the provider's
 #   adapter does not accept still fails when the model is built, with the accepted keys listed.
@@ -285,7 +285,7 @@ def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> 
 # LEGACY_COMPAT: Retired website tool knowledge option.
 # Legacy format: A website tool entry accepted a text knowledge override, which swapped read_url for a knowledge-base
 #   insert that always failed, because config can supply only a string.
-# Last legacy release: v2026.10.471; replacement: unreleased.
+# Last legacy release: v2026.10.474; replacement: unreleased.
 # Handling: Warn once and drop the override, so the tool offers read_url; the tool layer itself rejects the field.
 # Coverage: tests/test_website_tool.py::test_a_retired_knowledge_option_loads_with_one_warning_and_reads_urls.
 _RETIRED_TOOL_OVERRIDE_REASONS = {
