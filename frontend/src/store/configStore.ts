@@ -2,7 +2,9 @@ import { create } from "zustand";
 import {
   Config,
   Agent,
+  AgentConfig,
   AgentPoliciesByAgent,
+  LearningMode,
   Team,
   Room,
   RoomConfig,
@@ -266,46 +268,71 @@ function deriveRooms(
   });
 }
 
+// Authored agents and teams may omit these fields; for example, an agent
+// reached only through personal rooms or invitations lists no rooms. Loading
+// fills them in, and saving drops a filled-in value that is still unchanged,
+// so config.yaml keeps its authored shape.
+function agentFieldDefaults(config: Config) {
+  return {
+    tools: [] as string[],
+    skills: [] as string[],
+    instructions: [] as string[],
+    rooms: [] as string[],
+    knowledge_bases: [] as string[],
+    delegate_to: [] as string[],
+    context_files: [] as string[],
+    learning: config.defaults?.learning ?? true,
+    learning_mode: config.defaults?.learning_mode ?? ("always" as LearningMode),
+  };
+}
+
+function teamFieldDefaults() {
+  return { rooms: [] as string[], mode: "coordinate" as Team["mode"] };
+}
+
+function withFieldDefaults<T extends object, D extends object>(
+  entity: T,
+  defaults: D,
+): T & D {
+  const filled = { ...entity } as Record<string, unknown>;
+  for (const [field, value] of Object.entries(defaults)) {
+    filled[field] ??= value;
+  }
+  return filled as T & D;
+}
+
+function withoutUnchangedFieldDefaults<T extends object, D extends object>(
+  entity: T,
+  authored: Partial<Record<keyof D, unknown>> | undefined,
+  defaults: D,
+): Omit<T, keyof D> & Partial<D> {
+  const result = { ...entity } as Record<string, unknown>;
+  for (const [field, value] of Object.entries(defaults)) {
+    const current = result[field];
+    const unchanged = Array.isArray(value)
+      ? Array.isArray(current) && current.length === 0
+      : current === value;
+    if (unchanged && authored?.[field as keyof D] === undefined) {
+      delete result[field];
+    }
+  }
+  return result as Omit<T, keyof D> & Partial<D>;
+}
+
 function deriveConfigCollections(
   config: Config,
 ): Pick<ConfigState, "agents" | "teams" | "rooms"> {
-  const defaultLearning = config.defaults?.learning ?? true;
-  const defaultLearningMode = config.defaults?.learning_mode ?? "always";
   const agents = Object.entries(config.agents).map(([id, agent]) => ({
     id,
-    ...agent,
-    skills: agent.skills ?? [],
-    rooms: agent.rooms ?? [],
-    knowledge_bases: agent.knowledge_bases || [],
-    delegate_to: agent.delegate_to || [],
-    context_files: agent.context_files ?? [],
-    learning: agent.learning ?? defaultLearning,
-    learning_mode: agent.learning_mode ?? defaultLearningMode,
+    ...withFieldDefaults(agent, agentFieldDefaults(config)),
   }));
-  const teams = config.teams
-    ? Object.entries(config.teams).map(([id, team]) => ({
-        id,
-        ...team,
-        rooms: team.rooms ?? [],
-      }))
-    : [];
+  const teams = Object.entries(config.teams ?? {}).map(([id, team]) => ({
+    id,
+    ...withFieldDefaults(team, teamFieldDefaults()),
+  }));
   const rooms = deriveRooms(config, agents, teams);
 
   return { agents, teams, rooms };
-}
-
-// Agents and teams reached only through personal rooms or invitations omit
-// `rooms`. Saving drops the `[]` that loading filled in so their config keeps
-// its authored shape.
-function withAuthoredRooms<T extends { rooms: string[] }>(
-  entity: T,
-  authored: { rooms?: string[] } | undefined,
-): Omit<T, "rooms"> & { rooms?: string[] } {
-  if (entity.rooms.length > 0 || authored?.rooms !== undefined) {
-    return entity;
-  }
-  const { rooms: _rooms, ...rest } = entity;
-  return rest;
 }
 
 function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
@@ -551,6 +578,16 @@ function setRememberedRawToolEntries(
   rawToolEntriesByConfig.set(config, nextEntriesByAgent);
 }
 
+// Agents that omit `tools` keep omitting them in the saved config.
+function withRawToolEntries(
+  agentConfig: AgentConfig,
+  rawEntries: ToolEntry[] | undefined,
+): configService.RawAgentConfig {
+  return agentConfig.tools === undefined
+    ? agentConfig
+    : { ...agentConfig, tools: rawEntries ?? agentConfig.tools };
+}
+
 function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   normalizedConfig: Config;
   rawEntriesByAgent: Map<string, ToolEntry[]>;
@@ -572,10 +609,9 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
       rawEntriesByAgent.set(agentId, rawEntries);
       return [
         agentId,
-        {
-          ...agentConfig,
-          tools: normalizeToolEntries(rawEntries),
-        },
+        agentConfig.tools === undefined
+          ? agentConfig
+          : { ...agentConfig, tools: normalizeToolEntries(rawEntries) },
       ];
     }),
   );
@@ -1088,10 +1124,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const baseRawDefaultToolEntries =
         getRememberedRawDefaultToolEntries(baseConfig);
 
+      const baseAgentDefaults = agentFieldDefaults(baseConfig);
       const currentAgentsObject = agents.reduce(
         (acc, agent) => {
           const { id, ...rest } = agent;
-          acc[id] = withAuthoredRooms(rest, baseConfig.agents[id]);
+          acc[id] = withoutUnchangedFieldDefaults(
+            rest,
+            baseConfig.agents[id],
+            baseAgentDefaults,
+          );
           return acc;
         },
         {} as Config["agents"],
@@ -1099,17 +1140,18 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const payloadAgentsObjectFromAgents = Object.fromEntries(
         Object.entries(currentAgentsObject).map(([id, agentConfig]) => [
           id,
-          {
-            ...agentConfig,
-            tools: currentRawEntriesByAgent.get(id) ?? agentConfig.tools,
-          },
+          withRawToolEntries(agentConfig, currentRawEntriesByAgent.get(id)),
         ]),
       );
 
       const currentTeamsObject = teams.reduce(
         (acc, team) => {
           const { id, ...rest } = team;
-          acc[id] = withAuthoredRooms(rest, baseConfig.teams?.[id]);
+          acc[id] = withoutUnchangedFieldDefaults(
+            rest,
+            baseConfig.teams?.[id],
+            teamFieldDefaults(),
+          );
           return acc;
         },
         {} as NonNullable<Config["teams"]>,
@@ -1135,12 +1177,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         : Object.fromEntries(
             Object.entries(baseConfig.agents).map(([agentId, agentConfig]) => [
               agentId,
-              {
-                ...agentConfig,
-                tools:
-                  getRememberedRawToolEntries(baseConfig, agentId) ??
-                  agentConfig.tools,
-              },
+              withRawToolEntries(
+                agentConfig,
+                getRememberedRawToolEntries(baseConfig, agentId),
+              ),
             ]),
           );
       const defaultTools = updatedConfig.defaults?.tools;

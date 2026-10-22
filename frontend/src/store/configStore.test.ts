@@ -595,91 +595,137 @@ describe("configStore", () => {
       expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
-    it("loads agents and teams without authored rooms and saves them without rooms", async () => {
-      const mockConfig = {
-        agents: {
-          test: {
+    describe("agents and teams that omit defaulted fields", () => {
+      const authoredAgent = { display_name: "Test Agent" };
+      const authoredTeam = {
+        display_name: "Ops Team",
+        role: "Coordinates operations",
+        agents: ["test"],
+      };
+
+      async function loadAuthored(
+        agent: object = authoredAgent,
+        team: object = authoredTeam,
+      ) {
+        (global.fetch as any).mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            agents: { test: agent },
+            teams: { ops: team },
+            models: { default: { provider: "ollama", id: "test-model" } },
+            defaults: { markdown: true },
+            router: { model: "default" },
+            memory: {
+              embedder: {
+                provider: "openai",
+                config: { model: "text-embedding-3-small" },
+              },
+            },
+          }),
+        });
+        (global.fetch as any).mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            agent_policies: { test: makeAgentPolicy("test") },
+          }),
+        });
+        await useConfigStore.getState().loadConfig();
+      }
+
+      async function savedPayload() {
+        (global.fetch as any).mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ success: true }),
+        });
+        await useConfigStore.getState().saveConfig();
+        const saveCall = (global.fetch as any).mock.calls.find(
+          ([url]: [string]) => url === "/api/config/save",
+        );
+        return JSON.parse(saveCall[1].body);
+      }
+
+      it("fills them in on load", async () => {
+        await loadAuthored();
+
+        const state = useConfigStore.getState();
+        expect(state.syncStatus).toBe("synced");
+        expect(state.agents).toEqual([
+          {
+            id: "test",
             display_name: "Test Agent",
-            role: "Test role",
             tools: [],
             skills: [],
             instructions: [],
+            rooms: [],
+            knowledge_bases: [],
+            delegate_to: [],
+            context_files: [],
+            learning: true,
+            learning_mode: "always",
           },
-        },
-        teams: {
-          ops: {
-            display_name: "Ops Team",
-            role: "Coordinates operations",
-            agents: ["test"],
-            mode: "coordinate",
-          },
-        },
-        models: {
-          default: {
-            provider: "ollama",
-            id: "test-model",
-          },
-        },
-        defaults: {
-          markdown: true,
-        },
-        router: {
-          model: "default",
-        },
-        memory: {
-          embedder: {
-            provider: "openai",
-            config: {
-              model: "text-embedding-3-small",
-            },
-          },
-        },
-      };
-
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockConfig,
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          agent_policies: { test: makeAgentPolicy("test") },
-        }),
+        ]);
+        expect(state.teams).toEqual([
+          { id: "ops", ...authoredTeam, rooms: [], mode: "coordinate" },
+        ]);
+        expect(state.rooms).toEqual([]);
       });
 
-      await useConfigStore.getState().loadConfig();
+      it("saves only the edited fields of agents and teams", async () => {
+        await loadAuthored();
 
-      const state = useConfigStore.getState();
-      expect(state.syncStatus).toBe("synced");
-      expect(state.agents[0].rooms).toEqual([]);
-      expect(state.teams).toEqual([
-        {
-          id: "ops",
-          display_name: "Ops Team",
-          role: "Coordinates operations",
-          agents: ["test"],
+        useConfigStore.getState().updateAgent("test", {
+          role: "Edited role",
+          instructions: ["Be brief"],
+          learning: false,
+        });
+        useConfigStore.getState().updateTeam("ops", { mode: "collaborate" });
+
+        const payload = await savedPayload();
+        expect(payload.agents.test).toEqual({
+          ...authoredAgent,
+          role: "Edited role",
+          instructions: ["Be brief"],
+          learning: false,
+        });
+        expect(payload.teams.ops).toEqual({
+          ...authoredTeam,
+          mode: "collaborate",
+        });
+      });
+
+      it("saves untouched agents as authored", async () => {
+        await loadAuthored();
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["router"], { model: "default" });
+
+        expect((await savedPayload()).agents.test).toEqual(authoredAgent);
+      });
+
+      it("keeps authored values, including empty ones", async () => {
+        const agent = {
+          ...authoredAgent,
+          tools: [],
+          skills: [],
+          instructions: [],
           rooms: [],
-          mode: "coordinate",
-        },
-      ]);
-      expect(state.rooms).toEqual([]);
+          knowledge_bases: [],
+          delegate_to: [],
+          context_files: [],
+          learning: true,
+          learning_mode: "always",
+        };
+        const team = { ...authoredTeam, rooms: [], mode: "coordinate" };
+        await loadAuthored(agent, team);
 
-      state.updateAgent("test", { role: "Edited role" });
-      state.updateTeam("ops", { role: "Edited team role" });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true }),
+        useConfigStore.getState().updateAgent("test", { role: "Edited role" });
+        useConfigStore.getState().updateTeam("ops", { role: "Edited role" });
+
+        const payload = await savedPayload();
+        expect(payload.agents.test).toEqual({ ...agent, role: "Edited role" });
+        expect(payload.teams.ops).toEqual({ ...team, role: "Edited role" });
       });
-      await useConfigStore.getState().saveConfig();
-
-      const saveCall = (global.fetch as any).mock.calls.find(
-        ([url]: [string]) => url === "/api/config/save",
-      );
-      const saveBody = JSON.parse(saveCall[1].body);
-      expect(saveBody.agents.test.role).toBe("Edited role");
-      expect(saveBody.agents.test).not.toHaveProperty("rooms");
-      expect(saveBody.teams.ops.role).toBe("Edited team role");
-      expect(saveBody.teams.ops).not.toHaveProperty("rooms");
     });
 
     it("should preserve explicit learning=false from configuration", async () => {
