@@ -1038,7 +1038,10 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     status_code: int | None,
     final_message: str,
 ) -> None:
-    """A network failure while minting the Vertex token is retryable; rejected credentials report as such."""
+    """A network failure while minting the Vertex token is retryable and ends as temporary unavailability.
+
+    Rejected credentials end as an authentication failure.
+    """
     monkeypatch.setattr(google.auth, "default", lambda scopes: (_RefreshFailingCredentials(failure), "adc-project"))  # noqa: ARG005
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")

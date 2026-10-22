@@ -654,7 +654,7 @@ async def test_request_log_names_the_deferred_tools(
     deferred: frozenset[str],
     expected: list[str],
 ) -> None:
-    """A route that searches tools natively receives only the deferred names, so the record carries them too."""
+    """The record lists the deferred tool names, sorted, beside the provider-neutral specs of every tool."""
     inner = _ScriptedProvider([[_turn()]])
     request = ModelRequest(
         messages=[_user()],
