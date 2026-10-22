@@ -547,10 +547,7 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     )
     lifecycle = RecordingCompactionLifecycle()
 
-    await team.stream(
-        ctx=replace(team.ctx(), matrix_run_metadata=_SEEDED_METADATA),
-        compaction_lifecycle=lifecycle,
-    )
+    await team.stream(ctx=team.ctx(matrix_run_metadata=_SEEDED_METADATA), compaction_lifecycle=lifecycle)
 
     assert summary_calls.inputs
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)

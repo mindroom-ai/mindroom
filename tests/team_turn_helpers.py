@@ -19,7 +19,11 @@ from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.config.main import Config
-from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope_context
+from mindroom.history.session_context import (
+    create_scope_session_storage,
+    resolve_bound_history_owner,
+    resolve_bound_team_scope_context,
+)
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.message_target import MessageTarget
@@ -202,16 +206,11 @@ class TeamTurn:
     @property
     def storage(self) -> ConversationStore:
         """The store of the team's history scope."""
-        bound = resolve_bound_team_scope_context(
-            member_names=self.member_names,
-            config=self.config,
-            team_name=self.team_name,
-            execution_identity=self.identity,
-        )
-        assert bound is not None
+        owner = resolve_bound_history_owner(self.member_names)
+        assert owner is not None
         return create_scope_session_storage(
-            agent_name=bound.owner_agent_name,
-            scope=bound.scope,
+            agent_name=owner,
+            scope=self.scope,
             config=self.config,
             runtime_paths=self.runtime_paths,
             execution_identity=self.identity,

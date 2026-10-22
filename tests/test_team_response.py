@@ -69,7 +69,7 @@ from tests.team_turn_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.tool_system.events import StructuredStreamChunk
@@ -153,9 +153,9 @@ def _leader_turn_messages(team: TeamTurn) -> list[tuple[str, str]]:
 
 
 @pytest.mark.parametrize("entry", [team_response, team_response_stream])
-def test_team_entries_require_a_turn_recorder(entry: object) -> None:
+def test_team_entries_require_a_turn_recorder(entry: Callable[..., object]) -> None:
     """Teams have no recorder-less production caller, so the recorder stays required."""
-    turn_recorder = inspect.signature(entry).parameters["turn_recorder"]  # type: ignore[arg-type]
+    turn_recorder = inspect.signature(entry).parameters["turn_recorder"]
     assert turn_recorder.default is inspect.Parameter.empty
     assert turn_recorder.kind is inspect.Parameter.KEYWORD_ONLY
 
