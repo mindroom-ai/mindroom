@@ -48,12 +48,10 @@ from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.tools import Toolkit
-    from agno.tools.function import Function
-
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 _MESSAGES: dict[GatewayErrorCode, str] = {
