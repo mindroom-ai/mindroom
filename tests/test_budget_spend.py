@@ -19,7 +19,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
@@ -78,7 +78,7 @@ def _source(scope: str = "shared_agent") -> UsageStorageSource:
 
 
 def _provider(config: Config, tmp_path: Path, model_name: str) -> str:
-    return get_model_instance(config, _paths(tmp_path), model_name).get_provider()
+    return build_model_provider(config, _paths(tmp_path), model_name).identity.provider_name
 
 
 def _run(
@@ -266,7 +266,7 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
     """Usage written by real session storage must match the price table's model identities."""
     config = _config()
     paths = _paths(tmp_path)
-    model = get_model_instance(config, paths, "astra")
+    model = build_model_provider(config, paths, "astra").identity
     storage = create_state_storage(
         "code",
         paths.storage_root / "agents" / "code",
@@ -280,7 +280,7 @@ def test_spend_prices_usage_recorded_through_agno_storage(tmp_path: Path) -> Non
             "model": [
                 ModelMetrics(
                     id=model.id,
-                    provider=model.get_provider(),
+                    provider=model.provider_name,
                     input_tokens=1_000_000,
                     output_tokens=100_000,
                     total_tokens=1_100_000,
@@ -320,7 +320,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
     """A run paused last month and resumed this month is charged for its requests made this month."""
     config = _config()
     paths = _paths(tmp_path)
-    model = get_model_instance(config, paths, "astra")
+    model = build_model_provider(config, paths, "astra").identity
     started = int(datetime(2026, 9, 24, tzinfo=UTC).timestamp())
     resumed = int(datetime(2026, 10, 2, tzinfo=UTC).timestamp())
 
@@ -328,14 +328,14 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         return Message(
             role="assistant",
             created_at=created_at,
-            provider_data={"mindroom_model": {"id": model.id, "provider": model.get_provider()}},
+            provider_data={"mindroom_model": {"id": model.id, "provider": model.provider_name}},
             metrics=MessageMetrics(input_tokens=1_000_000, total_tokens=1_000_000),
         )
 
     def metrics(tokens: int) -> RunMetrics:
         model_metrics = ModelMetrics(
             id=model.id,
-            provider=model.get_provider(),
+            provider=model.provider_name,
             input_tokens=tokens,
             total_tokens=tokens,
         )

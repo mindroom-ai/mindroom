@@ -5,9 +5,8 @@ breakpoints, and only probes the last twenty or so blocks before each one. The l
 cacheable content block, one earlier fallback boundary, the last tool definition, and the shared system
 prefix ahead of the session context, all under one TTL, within the API limit of four markers.
 
-The owned Claude adapter (``providers/anthropic/prompt_cache.py``), the OpenRouter Claude ladder
-(``providers/openai/openrouter_cache.py``), and the Agno-path ``claude_prompt_cache`` compose these primitives,
-so neither provider family depends on the other.
+The Claude adapter (``providers/anthropic/prompt_cache.py``) and the OpenRouter Claude ladder
+(``providers/openai/openrouter_cache.py``) compose these primitives, so neither provider family depends on the other.
 """
 
 from __future__ import annotations

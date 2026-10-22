@@ -2,8 +2,7 @@
 
 Each scenario builds its agents, teams, or helper agents through the production builders and runs one turn; the
 recorder keeps every request the model received: messages, tools, tool choice, and response format.
-Requests MindRoom sends through its own provider layer are recorded below the request pipeline, where the provider
-adapter would receive them; requests the Agno team runtime still sends are recorded at the Agno model call.
+Requests are recorded below the request pipeline, where the provider adapter would receive them.
 A scenario that starts with a Matrix reply also exposes that reply as an ``AgentTurn``, so the agent it builds can
 be compared with the golden before the reply itself runs on the owned loop.
 `tests/fixtures/agno_parity/README.md` (Prompt goldens) describes the goldens these scenarios pin.
@@ -55,8 +54,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
-from mindroom.providers import model_loading, registry
-from mindroom.providers.claude_prompt_cache import claude_deferred_tool_names
+from mindroom.providers import registry
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
@@ -93,9 +91,6 @@ from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
-
-    from agno.models.base import Model
-    from agno.models.message import Message
 
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
@@ -161,14 +156,12 @@ class ModelCall:
     # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
     model_index: int
     stream: bool
-    messages: list[Message] | list[OwnedMessage]
+    messages: list[OwnedMessage]
     tools: list[dict[str, Any]] | None
     tool_choice: str | dict[str, Any] | None
     response_format: dict[str, Any] | type[BaseModel] | None
-    # Claude's request hook sends these tools with defer_loading below the recorder, so the record names them.
+    # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
-    # Whether the request came through the owned provider layer rather than an Agno model.
-    owned: bool = True
 
 
 type Responder = Callable[[ModelCall], ModelResponse]
@@ -194,31 +187,6 @@ class Recorder:
         """
         return sorted(self.calls, key=lambda call: call.model_index)
 
-    def _respond(
-        self,
-        model: Model,
-        index: int,
-        *,
-        stream: bool,
-        messages: list[Message],
-        kwargs: dict[str, Any],
-    ) -> ModelResponse:
-        call = ModelCall(
-            model_id=model.id,
-            model_provider=model.provider,
-            model_index=index,
-            stream=stream,
-            # The loop keeps mutating its list after the request, so the record keeps copies.
-            messages=[message.model_copy(deep=True) for message in messages],
-            tools=deepcopy(kwargs.get("tools")),
-            tool_choice=deepcopy(kwargs.get("tool_choice")),
-            response_format=kwargs.get("response_format"),
-            deferred_tool_names=sorted(claude_deferred_tool_names(model)),
-            owned=False,
-        )
-        self.calls.append(call)
-        return self.responder(call)
-
     def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> ModelResponse:
         call = ModelCall(
             model_id=identity.id,
@@ -240,38 +208,18 @@ class Recorder:
         self._built_models += 1
         return index
 
-    def _bind(self, model: Model) -> Model:
-        respond = partial(self._respond, model, self._next_index())
-
-        async def ainvoke(messages: list[Message], **kwargs: Any) -> ModelResponse:  # noqa: ANN401
-            return respond(stream=False, messages=messages, kwargs=kwargs)
-
-        async def ainvoke_stream(messages: list[Message], **kwargs: Any) -> AsyncIterator[ModelResponse]:  # noqa: ANN401
-            yield respond(stream=True, messages=messages, kwargs=kwargs)
-
-        # Bound before MindRoom installs its request hooks, so every hook wraps the recorder like the provider call.
-        model.__dict__.update(ainvoke=ainvoke, ainvoke_stream=ainvoke_stream)
-        return model
-
     def _bind_adapter(self, adapter: Any) -> _RecordingAdapter:  # noqa: ANN401 - any family's adapter
         return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter.identity, self._next_index()))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
-        """Record every model ``model_loading.get_model_instance`` and every adapter the provider registry builds."""
-        create_model = model_loading._create_model_for_provider
+        """Record every adapter the provider registry builds."""
         build_adapter = registry._build_adapter
-
-        def create_recording_model(*args: Any, **kwargs: Any) -> Model:  # noqa: ANN401
-            return self._bind(create_model(*args, **kwargs))
 
         def build_recording_adapter(*args: Any, **kwargs: Any) -> _RecordingAdapter:  # noqa: ANN401
             return self._bind_adapter(build_adapter(*args, **kwargs))
 
-        with (
-            patch.object(model_loading, "_create_model_for_provider", create_recording_model),
-            patch.object(registry, "_build_adapter", build_recording_adapter),
-        ):
+        with patch.object(registry, "_build_adapter", build_recording_adapter):
             yield
 
 
@@ -335,7 +283,7 @@ class Scenario:
     turn: Callable[[Path], AgentTurn] | None = None
 
 
-def message_dict(message: Message | OwnedMessage) -> dict[str, Any]:
+def message_dict(message: OwnedMessage) -> dict[str, Any]:
     """Return a request message as the prompt goldens record it: no volatile keys, transient context marked."""
     data = {key: value for key, value in message.to_dict().items() if key not in {"id", "created_at", "metrics"}}
     if not message.add_to_agent_memory:

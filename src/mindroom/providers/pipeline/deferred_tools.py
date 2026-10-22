@@ -4,7 +4,7 @@ The request keeps one fixed tool list without the deferred schemas, and the mode
 function through ``call_tool`` after ``tool_search`` returned its definition. Stored calls to deferred
 functions are shown to the provider as ``call_tool`` calls, so the request prefix stays byte-stable and
 discovery never invalidates the prompt cache. Incoming ``call_tool`` calls are resolved by the run loop
-with ``mindroom.providers.portable_tool_search.resolve_call_tool_calls``.
+with ``mindroom.agent_loop.tool_search.resolve_call_tool_calls``.
 """
 
 from __future__ import annotations

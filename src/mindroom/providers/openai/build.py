@@ -1,9 +1,8 @@
 """Build the OpenAI-family adapter for one configured model.
 
-Credential and endpoint resolution follow the Agno-backed loader: the model's configured key (the provider
-registry folds in a key the dashboard saved for the model), then the provider's shared key, then the variable
-the provider's SDK class read. A route without a usable key fails at its first request, worded like the
-Agno-era error.
+A model's key is its configured key (the provider registry folds in a key the dashboard saved for the model),
+then the provider's shared key, then the provider's own key variable. A route without a usable key fails at its
+first request.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from mindroom.model_defaults import (
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.model_loading import canonical_provider
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire
@@ -193,10 +193,6 @@ class ProviderRuntime:
     execution_identity: ToolExecutionIdentity | None = None
     codex_default_instructions: str = CODEX_DEFAULT_INSTRUCTIONS
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
-
-
-def _canonical(provider: str) -> str:
-    return provider.strip().lower().replace("-", "_")
 
 
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
@@ -558,7 +554,8 @@ def build_provider(model_config: ModelConfig, runtime: ProviderRuntime) -> ChatA
     model and endpoint support native tool search; otherwise Chat Completions.
     Raises ``ValueError`` for providers outside the family and for ``extra_kwargs`` the route does not accept.
     """
-    route_key = _ROUTE_ALIASES.get(_canonical(model_config.provider), _canonical(model_config.provider))
+    provider = canonical_provider(model_config.provider)
+    route_key = _ROUTE_ALIASES.get(provider, provider)
     model_id = model_config.id
     if route_key == "codex":
         return _build_responses("codex", model_id, model_config, runtime)

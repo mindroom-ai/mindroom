@@ -1,18 +1,18 @@
 """Build the provider a configured model answers with: its family's adapter inside the request pipeline.
 
-Credentials and identity follow the Agno-backed loader (``model_loading.get_model_instance``): a key the dashboard
-saved for the model (``model:<name>``) beats the configured key, which beats the provider's shared key; Codex gets
-the configured default instructions; and every request goes through the same idle limit, media fallback prompt,
-and request log.
+A key the dashboard saved for the model (``model:<name>``) beats the configured key, which beats the provider's
+shared key; Codex gets the configured default instructions; and every request goes through the same idle limit,
+media fallback prompt, and request log.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
-from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
+from mindroom.providers.model_loading import canonical_provider, dashboard_api_key
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
@@ -33,25 +33,14 @@ if TYPE_CHECKING:
     from mindroom.providers.synthetic_adapter import SyntheticProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-__all__ = ["build_model_provider", "canonical_provider"]
+__all__ = ["build_model_provider"]
 
 logger = get_logger(__name__)
 
 type _Adapter = ChatAdapter | ResponsesAdapter | ClaudeProvider | GeminiProvider | OllamaProvider | SyntheticProvider
 
-_CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
+_CLAUDE_PROVIDERS = frozenset(get_args(ClaudeRouteKind.__value__))
 _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
-
-
-def canonical_provider(provider: str) -> str:
-    """Return the normalized ``provider`` key that dispatch and serving-model comparisons use."""
-    return provider.strip().lower().replace("-", "_")
-
-
-def _dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Return the key the dashboard saved for one model config (``model:<name>``), if any."""
-    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
-    return credentials.get("api_key") if credentials else None
 
 
 def _build_adapter(
@@ -104,7 +93,7 @@ def build_model_provider(
         msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
     model_config = config.models[model_name]
-    if dashboard_key := _dashboard_api_key(model_name, runtime_paths):
+    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
         model_config = model_config.model_copy(update={"api_key": dashboard_key})
     adapter = _build_adapter(
         model_config,

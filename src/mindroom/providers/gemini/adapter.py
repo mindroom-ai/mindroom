@@ -2,9 +2,9 @@
 """Gemini provider adapter over google-genai, for the Gemini API and Vertex AI (``vertexai: true``).
 
 The SDK is imported on first use, so importing this module stays cheap.
-Credentials resolve as the Agno-backed model resolved them: the configured or shared Google key, then
-``GOOGLE_API_KEY``, and on Vertex AI ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and the SDK's
-application default credentials from the process environment.
+Credentials resolve to the configured or shared Google key, then ``GOOGLE_API_KEY``, and on Vertex AI
+``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and the SDK's application default credentials from the
+process environment.
 """
 
 from __future__ import annotations

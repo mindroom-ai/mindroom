@@ -1804,21 +1804,6 @@ def test_call_tool_wire_definition_has_a_description() -> None:
     assert function.to_dict().get("description")
 
 
-def test_cerebras_accepts_the_call_tool_definition() -> None:
-    """Agno's Cerebras adapter indexes the description directly, so the wrapper must carry one."""
-    pytest.importorskip("cerebras.cloud.sdk")
-    from mindroom.providers.cerebras_model import MindRoomCerebras  # noqa: PLC0415
-
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
-
-    params = MindRoomCerebras(id="llama-4.1", api_key="test").get_request_params(
-        tools=[{"type": "function", "function": function.to_dict()}],
-    )
-
-    assert params["tools"][0]["function"]["name"] == "call_tool"
-
-
 def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
     """Malformed wrapper calls still get the retry guidance instead of a Python signature error."""
     entrypoint = _search_toolkit().functions["call_tool"].entrypoint

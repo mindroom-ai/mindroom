@@ -11,13 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.agent import Agent as AgnoAgent
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.tools.function import Function
 
 from mindroom import interactive
-from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
@@ -25,29 +20,24 @@ from mindroom.approval.manager import (
     initialize_approval_store,
 )
 from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
     MatrixApprovalAction,
     shutdown_approval_runtime,
 )
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.coalescing.batch import PendingEvent, PreparedTurn, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import (
     AdmissionResult,
-    DeliveryStage,
     DepartureSource,
     EventClass,
     EventKind,
     InboundEvent,
-    MatrixDelivery,
     ProjectedEvent,
     SemanticConsumer,
 )
@@ -60,14 +50,10 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -97,8 +83,6 @@ from tests.reply_span_helpers import paused_for_approval
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
@@ -1473,214 +1457,6 @@ class TestAgentBot(AgentBotTestBase):
                 await asyncio.gather(handoff, return_exceptions=True)
                 await bot._response_runner.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
-
-    @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
-    @pytest.mark.asyncio
-    async def test_persisted_pause_resumes_once_in_fresh_bot_runtime(  # noqa: PLR0915 - full restart boundary
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        requires_human: bool,
-    ) -> None:
-        """A fresh bot must execute the persisted tool once after policy or card consent."""
-        config = self._config_for_storage(tmp_path)
-        config.agents[mock_agent_user.agent_name].tools = [ToolConfigEntry(name="shell")]
-        runtime_paths = runtime_paths_for(config)
-        executed: list[list[str]] = []
-        target = MessageTarget.resolve("!test:localhost", None, "$source")
-        identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name=mock_agent_user.agent_name,
-            requester_id="@user:localhost",
-            room_id=target.room_id,
-            thread_id=target.source_thread_id,
-            resolved_thread_id=target.resolved_thread_id,
-            session_id=target.session_id,
-        )
-
-        def run_shell_command(args: list[str]) -> str:
-            executed.append(args)
-            return "ok"
-
-        def new_agent(history_storage: BaseDb | None = None) -> AgnoAgent:
-            return AgnoAgent(
-                id=mock_agent_user.agent_name,
-                model=SyntheticModel(
-                    id="synthetic",
-                    seed=1,
-                    min_response_chars=20,
-                    max_response_chars=20,
-                    chars_per_second=0,
-                    tool_call_probability=1,
-                ),
-                tools=[
-                    Function(
-                        name="run_shell_command",
-                        entrypoint=run_shell_command,
-                        requires_confirmation=True,
-                        owning_toolkit="shell",
-                    ),
-                ],
-                db=history_storage
-                if history_storage is not None
-                else create_session_storage(mock_agent_user.agent_name, config, runtime_paths, identity),
-            )
-
-        first_agent = new_agent()
-        paused_response = await first_agent.arun(
-            "exercise the tool",
-            session_id=target.session_id,
-            user_id="@user:localhost",
-            stream=False,
-        )
-        assert isinstance(paused_response, RunOutput)
-        assert paused_response.status is RunStatus.paused
-        paused = paused_attempt_from_response(
-            paused_response,
-            fallback_session_id=target.session_id,
-            fallback_run_id=paused_response.run_id,
-            toolkit_owners=toolkit_owners_for_agents([first_agent]),
-        )
-        assert paused is not None
-        paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
-        paused = _attach_blocking_pause_presentation(
-            paused,
-            paused_response,
-            show_tool_calls=True,
-        )
-
-        first = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
-        first.client.room_send.return_value = nio.RoomSendResponse("$waiting", "!test:localhost")
-        router_principal_id = "router@@mindroom_router:localhost"
-        if requires_human:
-
-            async def prepare_event(
-                _room_id: str,
-                _thread_id: str | None,
-                content: dict[str, Any],
-            ) -> dict[str, Any]:
-                return content
-
-            async def send_delivery(delivery: MatrixDelivery) -> str:
-                return "$approval" if delivery.stage is DeliveryStage.INITIAL else "$approval-edit"
-
-            initialize_approval_store(
-                runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
-                cards=first._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
-            )
-        source = InboundEvent(
-            event_id="$source",
-            room_id="!test:localhost",
-            thread_id=None,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@user:localhost",
-            origin_server_ts=1,
-            source={"event_id": "$source", "content": {"body": "exercise the tool"}},
-        )
-        projected = ProjectedEvent(
-            event_id="$source",
-            room_id="!test:localhost",
-            thread_id=None,
-            sender="@user:localhost",
-            origin_server_ts=1,
-            content={"body": "exercise the tool"},
-            replaces_event_id=None,
-            redacts_event_id=None,
-        )
-        assert await first.approval_store.admit(source, projected)
-        request = _direct_response_request(target, "exercise the tool", "$source")
-        identity = first._response_runner.deps.tool_runtime.build_execution_identity(
-            target=target,
-            user_id="@user:localhost",
-            agent_name=mock_agent_user.agent_name,
-        )
-
-        first_runner = unwrap_extracted_collaborator(first._response_runner)
-        history_scope = first_runner.deps.state_writer.history_scope()
-        with patch(
-            "mindroom.approval.response.evaluate_tool_approval",
-            new=AsyncMock(return_value=(requires_human, 60.0)),
-        ):
-            # The turn's reply span pauses for the approval, as the locked generation does.
-            async with first_runner.deps.replies.span_scope():
-                claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
-                assert claimed_request is not None
-                suspended = await first_runner._suspend_for_approval(
-                    paused,
-                    request=claimed_request,
-                    target=target,
-                    execution_identity=identity,
-                    entity_kind="agent",
-                    history_scope=history_scope,
-                    show_tool_calls=True,
-                )
-
-        assert suspended.terminal_status == "suspended"
-        assert executed == []
-        persisted = await first.approval_store.approval_continuation_for_source("$source")
-        if requires_human:
-            await shutdown_approval_runtime()
-        assert persisted is not None
-        assert persisted.state == ("waiting" if requires_human else "ready")
-        if first_agent.db is not None:
-            first_agent.db.close()
-
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        restarted.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
-        restarted.client.room_send.return_value = nio.RoomSendResponse("$final", "!test:localhost")
-
-        async def drain_restarted_runtime() -> None:
-            restarted._journal_dispatcher.release_turn_replay()
-            await restarted._journal_dispatcher.drain_once()
-            await restarted._response_runner.wait_for_source_owned_inbox_responses()
-            await restarted._journal_dispatcher.drain_once()
-
-        with patch(
-            "mindroom.approval.execution.create_agent",
-            side_effect=lambda *_args, **kwargs: new_agent(kwargs["history_storage"]),
-        ):
-            if requires_human:
-                manager = initialize_approval_store(
-                    runtime_paths,
-                    prepare_event=prepare_event,
-                    send_delivery=send_delivery,
-                    resolve_delivery=AsyncMock(return_value=None),
-                    cards=restarted._journal_store.principal(router_principal_id),
-                    transport_sender=lambda: "@mindroom_router:localhost",
-                    sending_device=lambda: "DEVICE",
-                    continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
-                        room_id,
-                        source_ids,
-                    ),
-                )
-                restarted._journal_dispatcher.release_turn_replay()
-                try:
-                    resolved = await manager.handle_card_response(
-                        room_id="!test:localhost",
-                        sender_id="@user:localhost",
-                        card_event_id="$approval",
-                        status="approved",
-                        reason=None,
-                        authorize_responder=lambda _entity_name: True,
-                    )
-                    assert resolved.consumed is True
-                    await drain_restarted_runtime()
-                finally:
-                    await shutdown_approval_runtime()
-            else:
-                await drain_restarted_runtime()
-
-        remaining = await restarted.approval_store.approval_continuation_for_source("$source")
-        assert len(executed) == 1, remaining
-        assert remaining is None
-        assert not await restarted.approval_store.is_pending("$source")
 
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(

@@ -174,7 +174,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "attach_media_to_run_input",
             "copy_run_input",
             "cached_agent_run",
-            "get_model_instance",
             "install_queued_message_notice_hook",
             "queued_message_signal_context",
             "scrub_queued_notice_session_context",
@@ -188,8 +187,8 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
                 getattr(module, attr)
             assert attr not in getattr(module, "__all__", ())
 
-    model_loading_module = importlib.import_module("mindroom.providers.model_loading")
-    assert callable(model_loading_module.get_model_instance)
+    registry_module = importlib.import_module("mindroom.providers.registry")
+    assert callable(registry_module.build_model_provider)
 
 
 def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:

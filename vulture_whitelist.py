@@ -174,7 +174,6 @@ _._validate_api_provider  # Pydantic model validator (src/mindroom/config/models
 _._normalize_api_key  # Pydantic field validator (src/mindroom/config/models.py, src/mindroom/config/memory.py)
 _._normalize_extra_kwargs_api_key  # Pydantic field validator (src/mindroom/config/models.py)
 _._validate_single_api_key  # Pydantic model validator (src/mindroom/config/models.py)
-_._using_reasoning_model  # Agno Responses continuation hook (src/mindroom/providers/agno_compat_openai_responses.py)
 _.handle_starttag  # unused method (src/mindroom/matrix/message_builder.py)
 _.validate_history_settings  # unused method (src/mindroom/config/agent.py)
 _.normalize_display_name  # unused method (src/mindroom/config/agent.py, src/mindroom/mcp/config.py)
@@ -420,4 +419,3 @@ _.prompt_cache_breakpoints  # Capability read by the owned providers when they l
 _.child_run_id  # Stored tool-execution field of the Agno 3 run dict shape; MindRoom writes None and nothing reads it (src/mindroom/llm/runs.py)
 _.end_time  # Stored tool-call timing field written by the owned agent loop when it lands (src/mindroom/llm/usage.py)
 _.minimal_required  # EnrichmentItem field minimal mode's renderer reads once F3 renders it from the build surface (src/mindroom/hooks/types.py)
-install_request_preparation  # Agno request hook only tests/test_agno_compat_model_hooks.py still installs; G1 deletes it with the Agno model hooks (src/mindroom/agno_compat_model_hooks.py)

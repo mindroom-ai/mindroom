@@ -28,7 +28,6 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
 from mindroom.llm.messages import Message
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.teams.envelope import BuiltTeam
 from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection
 from mindroom.teams.spec import TeamMode, TeamSpec
@@ -105,10 +104,10 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(tmp_path: 
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     orchestrator = MagicMock(knowledge_refresh_scheduler=None)
     coordinator.deps.runtime.orchestrator = orchestrator
-    model = SyntheticModel(id="synthetic", min_response_chars=10, max_response_chars=10, chars_per_second=0)
+    model = ScriptedModel([answer("Done.")])
 
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.agents._build_agent_model_provider", return_value=model),
         patch_response_runner_module(typing_indicator=_noop_typing, should_use_streaming=AsyncMock(return_value=False)),
     ):
         await coordinator.generate_response(_plain_request(_target()))

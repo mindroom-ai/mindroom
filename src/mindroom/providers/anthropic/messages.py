@@ -86,6 +86,7 @@ from mindroom.providers.assistant_turn import one_message_per_result, stamp_fini
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.model_loading import canonical_provider
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
@@ -122,7 +123,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
 def _canonical_route(provider: str) -> ClaudeRouteKind:
-    canonical = provider.strip().lower().replace("-", "_")
+    canonical = canonical_provider(provider)
     if canonical not in PROVIDER_NAMES:
         msg = f"Provider {provider!r} is not a Claude route; expected one of {', '.join(sorted(PROVIDER_NAMES))}"
         raise ValueError(msg)
@@ -688,7 +689,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
 
     The direct route takes the model's own key, else the shared Anthropic key, unless the model authenticates
     with ``auth_token``; Vertex and Bedrock resolve their project, region, and credentials from the runtime
-    env as the Agno-backed loader did. A key the dashboard saved for the model arrives as ``model_config.api_key``.
+    env. A key the dashboard saved for the model arrives as ``model_config.api_key``.
     """
     route = _canonical_route(model_config.provider)
     authored = dict(model_config.extra_kwargs or {})

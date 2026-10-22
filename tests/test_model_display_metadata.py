@@ -9,8 +9,9 @@ from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.providers.pipeline.wrapped import bare_adapter
+from mindroom.providers.registry import build_model_provider
+from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -96,7 +97,7 @@ def test_icon_canonicalizes_mixed_case_matrix_scheme() -> None:
 
 
 def test_display_metadata_is_not_forwarded_to_model_provider(tmp_path: Path) -> None:
-    """Presentation metadata should remain outside provider constructor kwargs."""
+    """Presentation metadata should remain outside the provider settings."""
     config = bind_runtime_paths(
         Config(
             models={
@@ -112,8 +113,8 @@ def test_display_metadata_is_not_forwarded_to_model_provider(tmp_path: Path) -> 
         test_runtime_paths(tmp_path),
     )
 
-    model = get_model_instance(config, runtime_paths_for(config), "presented")
+    adapter = bare_adapter(build_model_provider(config, runtime_paths_for(config), "presented"))
 
-    assert isinstance(model, SyntheticModel)
-    assert model.id == "synthetic-test"
-    assert model.seed == 7
+    assert isinstance(adapter, SyntheticProvider)
+    assert adapter.identity.id == "synthetic-test"
+    assert adapter.settings.seed == 7

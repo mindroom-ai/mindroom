@@ -103,7 +103,8 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
-from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.providers.synthetic_adapter import SyntheticProvider
+from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -179,6 +180,7 @@ from tests.conftest import (
     replace_response_runner_deps,
     request_envelope,
     seed_session,
+    test_runtime_paths,
     unwrap_extracted_collaborator,
 )
 from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
@@ -8550,13 +8552,20 @@ class _RecordedSkillReviews:
             raise OSError(msg)
 
 
+def _synthetic_model(tmp_path: Path) -> SyntheticProvider:
+    """Return the built-in synthetic model answering with 30 characters and no tool calls."""
+    settings = {"min_response_chars": 30, "max_response_chars": 30, "chars_per_second": 0, "tool_call_probability": 0}
+    model_config = ModelConfig(provider="synthetic", id="synthetic", extra_kwargs=settings)
+    return build_synthetic_provider(model_config, test_runtime_paths(tmp_path))
+
+
 async def _respond_with_skill_learning(
     tmp_path: Path,
     request_update: Callable[[ResponseRequest], ResponseRequest] = lambda request: request,
     *,
     streaming: bool = False,
     fail: bool = False,
-) -> tuple[_RecordedSkillReviews, SyntheticModel, AsyncMock]:
+) -> tuple[_RecordedSkillReviews, SyntheticProvider, AsyncMock]:
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -8564,15 +8573,9 @@ async def _respond_with_skill_learning(
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     reviews = _RecordedSkillReviews(fail=fail)
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
-    model = SyntheticModel(
-        id="synthetic",
-        min_response_chars=30,
-        max_response_chars=30,
-        chars_per_second=0,
-        tool_call_probability=0,
-    )
+    model = _synthetic_model(tmp_path)
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.agents._build_agent_model_provider", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=streaming),
@@ -8681,16 +8684,10 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     automations = _RecordedAutomations()
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
-    model = SyntheticModel(
-        id="synthetic",
-        min_response_chars=30,
-        max_response_chars=30,
-        chars_per_second=0,
-        tool_call_probability=0,
-    )
+    model = _synthetic_model(tmp_path)
     request = _plain_request(_target())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.agents._build_agent_model_provider", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=False),

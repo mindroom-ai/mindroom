@@ -23,12 +23,11 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from mindroom.ai import ResponseTurnContext
+    from mindroom.llm.provider import StreamEvent
 
 import pytest
 from agno.metrics import RunMetrics
-from agno.models.message import Message
 from agno.models.ollama import Ollama
-from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -72,7 +71,7 @@ from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm.events import ContentDelta, RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
-from mindroom.llm.provider import ModelIdentity, ModelRequest
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, TextDelta
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
 from mindroom.llm_request_logging import current_llm_request_log_context
@@ -80,8 +79,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.providers.media_fallback import install_provider_media_fallback
-from mindroom.providers.portable_tool_search import portable_deferred_tool_names
+from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.routing import ResponderSelection
 from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
 from mindroom.teams.members import ResolvedExactTeamMembers
@@ -566,7 +564,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
     search_result = json.loads(toolkits["dynamic_tools"].tool_search("todo"))
 
     assert search_result["matches"] == []
-    assert portable_deferred_tool_names(agent.model) == frozenset({"sleep"})
+    assert agent.request_template.deferred_tool_names == frozenset({"sleep"})
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
@@ -1259,7 +1257,6 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-            patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             patch(
                 "mindroom.ai._run_cached_agent_attempt",
@@ -1760,23 +1757,38 @@ class TestStreamingCompletion:
         spec_version: str,
     ) -> None:
         """The real API prefetch and ASGI response may advance a model in different tasks."""
-        model = Ollama(id="synthetic-model")
         closed = False
 
-        async def provider(**_kwargs: object) -> AsyncIterator[ModelResponse]:
-            nonlocal closed
-            try:
-                yield ModelResponse(content="Hello")
-                yield ModelResponse(content=" world")
-            finally:
-                closed = True
+        class _TwoChunkProvider:
+            identity = ModelIdentity(id="synthetic-model", provider="Ollama", provider_name="Ollama")
+            capabilities = Capabilities()
 
-        model.ainvoke_stream = provider
-        install_provider_media_fallback(model, fallback_prompt="Continue without inline media.")
+            async def stream(self, _request: ModelRequest) -> AsyncIterator[StreamEvent]:
+                nonlocal closed
+                try:
+                    yield TextDelta("Hello")
+                    yield TextDelta(" world")
+                finally:
+                    closed = True
+
+            def format_tool_results(
+                self,
+                _messages: Sequence[OwnedMessage],
+                results: Sequence[OwnedMessage],
+            ) -> list[OwnedMessage]:
+                return list(results)
+
+        model = wrap_provider(
+            _TwoChunkProvider(),
+            idle_timeout_seconds=None,
+            media_fallback_prompt="Continue without inline media.",
+            request_log=None,
+        )
 
         async def agent_stream(_ctx: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
-            async for chunk in model._ainvoke_stream_with_retry(messages=[Message(role="user", content="Hello")]):
-                yield RunContentEvent(content=chunk.content)
+            async for event in model.stream(ModelRequest(messages=[OwnedMessage(role="user", content="Hello")])):
+                if isinstance(event, TextDelta):
+                    yield RunContentEvent(content=event.text)
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=agent_stream):
             response = await openai_compat._stream_completion(

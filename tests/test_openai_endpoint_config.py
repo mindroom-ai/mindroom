@@ -1,4 +1,4 @@
-"""OpenAI endpoint resolution must reach both SDK clients without network access."""
+"""OpenAI endpoint resolution must reach the request the SDK client sends."""
 
 from __future__ import annotations
 
@@ -11,16 +11,18 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.providers.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, complete
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.pipeline.wrapped import bare_adapter
+from mindroom.providers.registry import build_model_provider
+from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _reject_request(request: httpx.Request) -> httpx.Response:
-    msg = f"Unexpected HTTP request: {request.method} {request.url}"
-    raise AssertionError(msg)
 
 
 @pytest.mark.parametrize("api", [None, "chat_completions", "responses"])
@@ -69,26 +71,16 @@ async def test_openai_endpoint_precedence_reaches_sdk_clients(
             "default": ModelConfig(provider="openai", id="gpt-6-astra", api=api, extra_kwargs=extra_kwargs),
         },
     )
-    model = get_model_instance(config, runtime_paths)
-    expected_class = (
-        MindRoomOpenAIResponses
-        if api == "responses" or (api is None and endpoint_source == "default")
-        else MindRoomOpenAIChat
-    )
-    assert isinstance(model, expected_class)
+    wire = Wire(httpx.Response(400, json={"error": {"message": "bad", "type": "invalid_request_error"}}))
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", wire.client.send)
+    provider = build_model_provider(config, runtime_paths)
+    responses = api == "responses" or (api is None and endpoint_source == "default")
+    assert isinstance(bare_adapter(provider), ResponsesAdapter if responses else ChatAdapter)
 
-    transport = httpx.MockTransport(_reject_request)
-    with httpx.Client(transport=transport) as http_client:
-        model.http_client = http_client
-        client = model.get_client()
-        sync_url = str(client.base_url)
-        client.close()
-    async with httpx.AsyncClient(transport=transport) as async_http_client:
-        model.http_client = async_http_client
-        async_client = model.get_async_client()
-        async_url = str(async_client.base_url)
-        await async_client.close()
+    with pytest.raises(ProviderError):
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], stream=False))
 
-    assert (sync_url, async_url) == (expected_url, expected_url)
+    [request] = wire.requests
+    assert str(request.url) == expected_url + ("responses" if responses else "chat/completions")
     if endpoint_source in {"default", "dotenv", "dotenv_with_null_model_url", "process_snapshot"}:
         assert "OPENAI_BASE_URL" not in os.environ

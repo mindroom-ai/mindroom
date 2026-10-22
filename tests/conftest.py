@@ -135,7 +135,7 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
-from mindroom.providers.media_fallback import reset_model_media_capability_cache
+from mindroom.providers.pipeline.media import forget_learned_media_limits
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -3056,9 +3056,9 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _reset_model_media_capabilities() -> Generator[None, None, None]:
     """Keep process-local learned media support isolated per test."""
-    reset_model_media_capability_cache()
+    forget_learned_media_limits()
     yield
-    reset_model_media_capability_cache()
+    forget_learned_media_limits()
 
 
 @pytest.fixture(autouse=True)

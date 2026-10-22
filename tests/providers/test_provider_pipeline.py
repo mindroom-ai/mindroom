@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
@@ -36,9 +37,11 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
+from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
@@ -295,6 +298,38 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_fresh_media_limits")
+async def test_a_mixed_media_rejection_retries_without_learning() -> None:
+    """A rejection of a request with two media kinds cannot say which kind the model lacks."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    audio = Audio(content=b"RIFF", mime_type="audio/wav")
+    request = ModelRequest(messages=[_user(_PROMPT, audio=[audio], images=[_image()])])
+
+    await _drain(provider, request)
+    await _drain(provider, request)
+
+    assert (inner.requests[1].messages[0].images, inner.requests[1].messages[0].audio) == (None, None)
+    assert (inner.requests[2].messages[0].images, inner.requests[2].messages[0].audio) == ([_image()], [audio])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_media_limits")
+async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
+    """The same model id behind another endpoint keeps sending the media one endpoint rejected."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
+    first = _ScriptedProvider([[rejection], [_turn()]], identity=replace(_IDENTITY, endpoint="http://one/v1"))
+    other = _ScriptedProvider([[_turn()]], identity=replace(_IDENTITY, endpoint="http://two/v1"))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    await _drain(WrappedProvider(first, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+    await _drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+
+    assert other.requests[0].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_retryable_failures_and_visible_output_are_not_media_retries() -> None:
     transient = _ScriptedProvider([[_transient()]])
     visible = _ScriptedProvider(
@@ -407,6 +442,43 @@ async def test_portable_tool_search_renames_combined_gemini_results() -> None:
     assert inner.requests[0].messages[0].tool_calls == [
         {"tool_call_id": "call_1", "tool_name": "call_tool", "content": "shipped"},
     ]
+
+
+def _stored_call(call_id: str, name: str, arguments: str) -> dict[str, object]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+@pytest.mark.asyncio
+async def test_portable_tool_search_projects_stored_calls_byte_stably() -> None:
+    """Repeated requests wrap the same deferred call identically and leave eager and unknown calls untouched."""
+    eager = _stored_call("call_2", "shell", "{}")
+    legacy = _stored_call("call_3", "load_tool", '{"tool_name": "crm"}')
+    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", '{"note": "é"}'), eager])
+    untouched = Message(role="assistant", tool_calls=[legacy])
+    inner = _ScriptedProvider([[_turn()], [_turn()]])
+    request = ModelRequest(messages=[assistant, untouched], deferred_tool_names=frozenset({"lookup_order"}))
+
+    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    first, second = (sent.messages for sent in inner.requests)
+    assert first[0].tool_calls == second[0].tool_calls
+    assert first[0].tool_calls[0]["function"]["arguments"] == '{"name": "lookup_order", "arguments": {"note": "é"}}'
+    assert first[0].tool_calls[1] is eager
+    assert first[1] is untouched
+
+
+@pytest.mark.asyncio
+async def test_portable_tool_search_wraps_unparseable_stored_arguments_as_empty() -> None:
+    """A stored call with malformed arguments must not break every later request in its thread."""
+    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", '{{"id": 1}}')])
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(messages=[assistant], deferred_tool_names=frozenset({"lookup_order"}))
+
+    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    wrapped = inner.requests[0].messages[0].tool_calls[0]["function"]["arguments"]
+    assert json.loads(wrapped) == {"name": "lookup_order", "arguments": {}}
 
 
 # --- Safeguard refusal ----------------------------------------------------------------------------------------
@@ -524,6 +596,139 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
         "cache_read_tokens": 30,
         "cache_write_tokens": 0,
     }
+
+
+def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "openai") -> RequestLog:
+    return RequestLog(
+        model_name="default",
+        configured_provider=provider,
+        debug=DebugConfig(log_llm_requests=enabled, llm_request_log_dir=str(tmp_path) if enabled else None),
+        default_log_dir=tmp_path / "default",
+    )
+
+
+def _log_records(tmp_path: Path) -> list[dict[str, object]]:
+    (log_file,) = tmp_path.glob("llm-requests-*.jsonl")
+    return [json.loads(line) for line in log_file.read_text().splitlines()]
+
+
+@pytest.mark.asyncio
+async def test_request_log_masks_credentials_before_writing(tmp_path: Path) -> None:
+    inner = _ScriptedProvider([[_turn()]])
+    leaked = "call failed with Authorization: Bearer auth-secret and api_key=api-secret"
+    request = ModelRequest(messages=[_user(leaked)])
+
+    with bind_llm_request_log_context(callback_url="https://example.test/cb?code=code-secret&keep=1"):
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert record["messages"][0]["content"] == (
+        "call failed with Authorization: Bearer ***redacted*** and api_key=***redacted***"
+    )
+    assert record["callback_url"] == "https://example.test/cb?code=***redacted***&keep=1"
+    assert record["agent_id"] == "default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "context_tokens", "uncached", "ratio"),
+    [("OpenAI", 1_000, 200, 0.8), ("Anthropic", 1_900, 1_100, 0.421053)],
+    ids=["cache-inside-input", "cache-beside-input"],
+)
+async def test_usage_telemetry_is_logged_without_the_request_log(
+    tmp_path: Path,
+    provider: str,
+    context_tokens: int,
+    uncached: int,
+    ratio: float,
+) -> None:
+    """Every request reports its usage; Anthropic counts cached tokens beside the input, not inside it."""
+    usage = MessageMetrics(input_tokens=1_000, output_tokens=50, reasoning_tokens=20, cache_read_tokens=800)
+    usage.cache_write_tokens = 100
+    identity = replace(_IDENTITY, provider=provider)
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)
+    log = _request_log(tmp_path, enabled=False, provider=provider.lower())
+
+    with capture_logs() as logs, bind_llm_request_log_context(correlation_id="corr-1", full_prompt="private"):
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+
+    assert list(tmp_path.iterdir()) == []
+    assert [entry for entry in logs if entry["event"] == "LLM usage"] == [
+        {
+            "event": "LLM usage",
+            "log_level": "info",
+            "model_name": "default",
+            "model_id": "scripted",
+            "provider": provider,
+            "usage_available": True,
+            "correlation_id": "corr-1",
+            "input_tokens": 1_000,
+            "context_input_tokens": context_tokens,
+            "output_tokens": 50,
+            "reasoning_tokens": 20,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 100,
+            "uncached_input_tokens": uncached,
+            "cache_read_ratio": ratio,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_request_without_usage_is_reported_and_writes_no_response_record(tmp_path: Path) -> None:
+    served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
+    inner = _ScriptedProvider([[TurnCompleted(message=served, stop_reason="end")]])
+
+    with capture_logs() as logs:
+        await _drain(
+            WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))),
+            ModelRequest(messages=[_user()]),
+        )
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["served_provider"]) == (False, "OpenInference")
+    assert [record.get("record") for record in _log_records(tmp_path)] == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unwritable(_path: Path, _payload: dict[str, object]) -> None:
+        message = "disk full"
+        raise OSError(message)
+
+    monkeypatch.setattr(request_log_stage, "_write_line", unwritable)
+    usage = MessageMetrics(input_tokens=3, output_tokens=1)
+    answered = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    failed = _ScriptedProvider([[InvalidRequest("bad request", provider="Scripted Chat", status_code=400)]])
+
+    with capture_logs() as logs:
+        events = await _drain(WrappedProvider(answered, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        with pytest.raises(InvalidRequest, match="bad request"):
+            await _drain(WrappedProvider(failed, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_path: Path) -> None:
+    usage = MessageMetrics(input_tokens=3, cache_read_tokens=42)
+    inner = _ScriptedProvider([[UsageReported(usage), TextDelta("ok"), TextDelta("never read"), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+
+    assert isinstance(await anext(stream), UsageReported)
+    await stream.aclose()
+
+    request_record, response_record = _log_records(tmp_path)
+    assert response_record["request_log_id"] == request_record["request_log_id"]
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+def _request() -> ModelRequest:
+    return ModelRequest(messages=[_user()])
 
 
 # --- Composition ----------------------------------------------------------------------------------------------

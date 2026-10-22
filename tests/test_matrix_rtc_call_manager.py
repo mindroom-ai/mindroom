@@ -81,7 +81,9 @@ from mindroom.matrix_rtc.voice_agent import (
     _RealtimeResponseUsage,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.pipeline.wrapped import bare_adapter
+from mindroom.providers.registry import build_model_provider
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
@@ -91,8 +93,6 @@ from tests.conftest import test_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from agno.models.openai.chat import OpenAIChat
 
     from mindroom.constants import RuntimePaths
 
@@ -968,7 +968,8 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config(local=True))
 
     backend = manager._resolve_voice_backend(ROOM_ID)
-    model = cast("OpenAIChat", get_model_instance(manager._config, manager._runtime_paths))
+    model = bare_adapter(build_model_provider(manager._config, manager._runtime_paths))
+    assert isinstance(model, ChatAdapter)
 
     assert backend is not None
     assert backend.stt is not None
@@ -977,9 +978,9 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     assert backend.tts.base_url == "http://127.0.0.1:9001/v1"
     assert backend.stt.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
     assert backend.tts.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
-    assert model.id == "local-chat-model"
-    assert model.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
-    assert model.base_url == "http://127.0.0.1:9292/v1"
+    assert model.identity.id == "local-chat-model"
+    assert model.settings.api_key == LOCAL_OPENAI_API_KEY_DEFAULT
+    assert model.identity.endpoint == "http://127.0.0.1:9292/v1"
     assert manager._config.memory.backend == "none"
 
 

@@ -19,17 +19,20 @@ from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCal
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
-from mindroom.providers.agno_compat_openai_responses_items import RESPONSE_OUTPUT_KEY, TOOL_SEARCH_ITEMS_KEY
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.errors import responses_event_error
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
+from mindroom.providers.openai.prompt_cache import formatted_input_with_shared_system_prefix
+from mindroom.providers.openai.response_replay import (
+    RESPONSE_OUTPUT_KEY,
+    TOOL_SEARCH_ITEMS_KEY,
+    formatted_input_with_provider_items,
+)
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
-from mindroom.providers.openai_prompt_cache import formatted_input_with_shared_system_prefix
-from mindroom.providers.openai_response_replay import formatted_input_with_provider_items
 from mindroom.providers.tool_policy import disable_tool_selection
 
 if TYPE_CHECKING:
@@ -204,7 +207,7 @@ def responses_input(
     # Ordered output is restored only for the spans the request still sends.
     prepared, _ = _continued_messages(prepared, store=replay_store)
     formatted = formatted_input_with_provider_items(
-        cast("Any", prepared),
+        prepared,
         formatted,
         native_route=route,
         replay_reasoning=replay_store is False,

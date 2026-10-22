@@ -29,137 +29,33 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider
+from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
-from tests.providers.golden_support import Wire, encoded_response
+from mindroom.system_prompt import render_session_context
+from tests.providers.anthropic_family_support import (
+    CLAUDE_USAGE,
+    ROUTE_CONFIGS,
+    claude_events,
+    claude_message,
+    claude_turn,
+    isolated_provider_environment,
+    json_reply,
+    provider_for,
+    route_provider,
+    sse_reply,
+)
+from tests.providers.golden_support import Wire, sse_response
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_ROUTE_CONFIGS: dict[str, dict[str, Any]] = {
-    "anthropic": {"provider": "anthropic", "id": "claude-sonnet-5-5", "api_key": "test-key"},
-    "vertexai_claude": {
-        "provider": "vertexai_claude",
-        "id": "claude-sonnet-5-5",
-        "extra_kwargs": {"project_id": "test-project", "region": "us-east5"},
-    },
-    "bedrock_claude": {
-        "provider": "bedrock_claude",
-        "id": "anthropic.claude-sonnet-5-5",
-        "extra_kwargs": {"aws_region": "us-east-1", "aws_access_key": "test-access", "aws_secret_key": "test-secret"},
-    },
-}
-_USAGE = {"input_tokens": 40, "output_tokens": 9, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5}
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
 )
 
 
-def _message(
-    blocks: list[dict[str, Any]],
-    *,
-    stop_reason: str = "end_turn",
-    usage: dict[str, Any] | None = None,
-) -> dict:
-    return {
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-sonnet-5-5",
-        "content": blocks,
-        "stop_reason": stop_reason,
-        "stop_sequence": None,
-        "usage": usage or _USAGE,
-    }
-
-
-def _json_reply(
-    blocks: list[dict[str, Any]],
-    *,
-    stop_reason: str = "end_turn",
-    usage: dict | None = None,
-) -> httpx.Response:
-    return httpx.Response(200, json=_message(blocks, stop_reason=stop_reason, usage=usage))
-
-
-def _sse_reply(
-    blocks: list[dict[str, Any]],
-    *,
-    stop_reason: str = "end_turn",
-    usage: dict | None = None,
-) -> httpx.Response:
-    """Stream the blocks the way the API does: a start event, deltas per block, the stop reason, the stop."""
-    final_usage = usage or _USAGE
-    events: list[dict[str, Any]] = [
-        {
-            "type": "message_start",
-            "message": _message([], stop_reason="end_turn", usage={**final_usage, "output_tokens": 1})
-            | {"stop_reason": None},
-        },
-    ]
-    for index, block in enumerate(blocks):
-        kind = block["type"]
-        deltas: list[dict[str, Any]]
-        if kind == "text":
-            start: dict[str, Any] = {"type": "text", "text": ""}
-            deltas = [{"type": "text_delta", "text": block["text"]}]
-        elif kind == "thinking":
-            start = {"type": "thinking", "thinking": "", "signature": ""}
-            deltas = [
-                {"type": "thinking_delta", "thinking": block["thinking"]},
-                {"type": "signature_delta", "signature": block["signature"]},
-            ]
-        elif kind == "tool_use":
-            start = {**block, "input": {}}
-            deltas = [
-                {"type": "input_json_delta", "partial_json": block.pop("partial_json", json.dumps(block["input"]))},
-            ]
-        else:
-            # Other blocks arrive whole, unless the block names deltas of its own.
-            deltas = block.pop("deltas", [])
-            start = block
-        events.append({"type": "content_block_start", "index": index, "content_block": start})
-        events.extend({"type": "content_block_delta", "index": index, "delta": delta} for delta in deltas)
-        events.append({"type": "content_block_stop", "index": index})
-    events.append(
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": final_usage["output_tokens"]},
-        },
-    )
-    events.append({"type": "message_stop"})
-    return encoded_response(
-        {
-            "status": 200,
-            "headers": {"content-type": "text/event-stream"},
-            "sse": [{"event": event["type"], "data": event} for event in events],
-        },
-    )
-
-
-def _provider(route: str, tmp_path: Path, wire: Wire, **config: Any) -> ClaudeProvider:  # noqa: ANN401
-    model_config = {**_ROUTE_CONFIGS[route], **config}
-    if "extra_kwargs" in config:
-        model_config["extra_kwargs"] = {**_ROUTE_CONFIGS[route].get("extra_kwargs", {}), **config["extra_kwargs"]}
-    return provider_for(model_config, tmp_path, wire.client)
-
-
 def _user(text: str = "Hello") -> list[Message]:
     return [Message(role="system", content="Be brief."), Message(role="user", content=text)]
-
-
-async def _events(provider: ClaudeProvider, request: ModelRequest) -> list[Any]:
-    with isolated_provider_environment():
-        return [event async for event in provider.stream(request)]
-
-
-async def _turn(provider: ClaudeProvider, request: ModelRequest) -> TurnCompleted:
-    events = await _events(provider, request)
-    completed = events[-1]
-    assert isinstance(completed, TurnCompleted)
-    return completed
 
 
 def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
@@ -174,6 +70,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     assert (settings.aws_profile, settings.cache_system_prompt, settings.extended_cache_time) == ("dev", False, True)
     assert settings.max_tokens == 8192
     assert settings.timeout == 3600.0
+    assert parse_claude_settings("anthropic", {"timeout": 120.0}).timeout == 120.0
 
 
 @pytest.mark.parametrize(
@@ -192,7 +89,7 @@ def test_identity_and_capabilities_per_route(
     native_tool_search: bool,
 ) -> None:
     """Identity strings stay what stored runs and usage rows carry, and capabilities replace class probes."""
-    provider = _provider(route, tmp_path, Wire(_json_reply([])))
+    provider = route_provider(route, tmp_path, Wire(json_reply([])))
     assert (provider.identity.provider, provider.identity.provider_name) == (provider_name, provider_name)
     capabilities = provider.capabilities
     assert capabilities.structured_output == structured_output
@@ -208,7 +105,7 @@ def test_identity_and_capabilities_per_route(
 async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_message(tmp_path: Path) -> None:
     """The partial usage comes first, output events follow the blocks, and the turn ends with the parsed message."""
     wire = Wire(
-        _sse_reply(
+        sse_reply(
             [
                 {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
                 {"type": "text", "text": "Looking it up."},
@@ -217,9 +114,9 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             stop_reason="tool_use",
         ),
     )
-    provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
-    streamed = await _events(provider, ModelRequest(messages=_user(), tools=tools))
+    streamed = await claude_events(provider, ModelRequest(messages=_user(), tools=tools))
 
     # Block starts, the signature delta, and the tool-call argument piece show up as provider activity.
     events = [event for event in streamed if not isinstance(event, StreamProgress)]
@@ -263,6 +160,33 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cumulative", [False, True], ids=["output_only", "cumulative"])
+async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumulative: bool) -> None:
+    """Input usage reported at the start is not counted again when the final delta repeats it."""
+    start_usage = {"input_tokens": 1200, "cache_read_input_tokens": 48000, "cache_creation_input_tokens": 800}
+    delta_usage = {**start_usage, "output_tokens": 50} if cumulative else {"output_tokens": 50}
+    events = [
+        {"type": "message_start", "message": claude_message([], usage={**start_usage, "output_tokens": 1})},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Ready"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": delta_usage},
+        {"type": "message_stop"},
+    ]
+    wire = Wire(sse_response(events, named=True))
+
+    completed = await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
+
+    metrics = completed.message.metrics
+    assert (metrics.input_tokens, metrics.output_tokens, metrics.cache_read_tokens, metrics.cache_write_tokens) == (
+        1200,
+        50,
+        48000,
+        800,
+    )
+
+
+@pytest.mark.asyncio
 async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_limit(tmp_path: Path) -> None:
     """A call the output limit cut off is kept with the arguments that parsed, so the loop can answer it."""
     truncated = {
@@ -272,8 +196,8 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
         "input": {},
         "partial_json": '{"name": "notes.md", "content": "# Not',
     }
-    wire = Wire(_sse_reply([truncated], stop_reason="max_tokens"))
-    completed = await _turn(_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
+    wire = Wire(sse_reply([truncated], stop_reason="max_tokens"))
+    completed = await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
     assert completed.stop_reason == "output_limit"
     assert completed.message.tool_calls == [
         {"id": "toolu_1", "type": "function", "function": {"name": "save_file", "arguments": '{"name": "notes.md"}'}},
@@ -288,11 +212,11 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
     unknown = {"type": "future_block", "payload": "p"}
     text = {"type": "text", "text": "Hi."}
     if stream:
-        reply = _sse_reply([{**unknown, "deltas": [{"type": "future_delta", "payload": "q"}]}, dict(text)])
+        reply = sse_reply([{**unknown, "deltas": [{"type": "future_delta", "payload": "q"}]}, dict(text)])
     else:
-        reply = _json_reply([unknown, text])
-    events = await _events(
-        _provider("anthropic", tmp_path, Wire(reply)),
+        reply = json_reply([unknown, text])
+    events = await claude_events(
+        route_provider("anthropic", tmp_path, Wire(reply)),
         ModelRequest(messages=_user(), stream=stream),
     )
     outputs = [event for event in events if isinstance(event, (TextDelta, ReasoningDelta, ToolCallReady))]
@@ -310,9 +234,9 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
 @pytest.mark.asyncio
 async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) -> None:
     """A safeguard refusal is a completed turn the loop recognizes by its stop reason, not an adapter error."""
-    wire = Wire(_json_reply([], stop_reason="refusal"))
-    provider = _provider("anthropic", tmp_path, wire)
-    completed = await _turn(provider, ModelRequest(messages=_user(), stream=False))
+    wire = Wire(json_reply([], stop_reason="refusal"))
+    provider = route_provider("anthropic", tmp_path, wire)
+    completed = await claude_turn(provider, ModelRequest(messages=_user(), stream=False))
     assert completed.stop_reason == "refusal"
     assert completed.message.content is None
     assert completed.message.metrics.input_tokens == 40
@@ -344,10 +268,10 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
 ) -> None:
     """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
     wire = Wire(httpx.Response(status, json={"type": "error", "error": body}))
-    provider = _provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire)
     request = ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0))
     with pytest.raises(expected) as raised:
-        await _turn(provider, request)
+        await claude_turn(provider, request)
     assert raised.value.retryable is retryable
     assert raised.value.status_code == status
     assert raised.value.provider == "Anthropic"
@@ -363,9 +287,9 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
         msg = "connection refused"
         raise httpx.ConnectError(msg, request=request)
 
-    provider = _provider("anthropic", tmp_path, Wire(fail))
+    provider = route_provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
-        await _turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0)))
+        await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0)))
     assert raised.value.retryable is True
     assert raised.value.status_code is None
 
@@ -373,8 +297,8 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 @pytest.mark.asyncio
 async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(tmp_path: Path) -> None:
     """One-off summary requests run without thinking or cache writes, with their own limits."""
-    wire = Wire(_sse_reply([{"type": "text", "text": "Summary."}]))
-    provider = _provider(
+    wire = Wire(sse_reply([{"type": "text", "text": "Summary."}]))
+    provider = route_provider(
         "anthropic",
         tmp_path,
         wire,
@@ -387,7 +311,7 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
     )
     overrides = RequestOverrides(temperature=0.1, max_output_tokens=512, prompt_cache=False, disable_thinking=True)
     messages = [*_user("Summarize."), Message(role="assistant", content="Earlier answer.")]
-    await _turn(provider, ModelRequest(messages=messages, overrides=overrides))
+    await claude_turn(provider, ModelRequest(messages=messages, overrides=overrides))
     body = wire.body()
     assert "thinking" not in body
     assert body["max_tokens"] == 512
@@ -401,14 +325,14 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
 @pytest.mark.asyncio
 async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_path: Path) -> None:
     """The newest Claude generations reject non-default sampling, so authored and overriding values are dropped."""
-    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
-    provider = _provider(
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(
         "anthropic",
         tmp_path,
         wire,
         extra_kwargs={"temperature": 0.7, "top_p": 0.9, "request_params": {"extra_body": {"top_k": 3}}},
     )
-    await _turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
+    await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
     assert not {"temperature", "top_p", "top_k"} & body.keys()
     # The conversation ends with a user turn already, and thinking is off, yet Sonnet 5.5 rejects prefill.
@@ -418,8 +342,8 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_pat
 @pytest.mark.asyncio
 async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(tmp_path: Path) -> None:
     """Models without prefill, and any model with thinking on, need the request to end with a user turn."""
-    wire = Wire(_sse_reply([{"type": "text", "text": "More."}]))
-    provider = _provider("anthropic", tmp_path, wire)
+    wire = Wire(sse_reply([{"type": "text", "text": "More."}]))
+    provider = route_provider("anthropic", tmp_path, wire)
     stored = {
         "content_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
     }
@@ -428,7 +352,7 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
         Message(role="assistant", content="A", provider_data=stored),
         Message(role="assistant", content="B"),
     ]
-    await _turn(provider, ModelRequest(messages=messages))
+    await claude_turn(provider, ModelRequest(messages=messages))
     turns = wire.body()["messages"]
     assert turns[-1]["role"] == "user"
     assert [(block["type"], block["text"]) for block in turns[-1]["content"]] == [("text", "continue")]
@@ -439,10 +363,10 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
 @pytest.mark.asyncio
 async def test_audio_inputs_are_not_sent(tmp_path: Path) -> None:
     """Claude takes images and documents; audio stays out of the request for the media fallback to describe."""
-    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
-    provider = _provider("anthropic", tmp_path, wire)
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider("anthropic", tmp_path, wire)
     audio = Audio(content=b"RIFF....WAVE", mime_type="audio/wav")
-    await _turn(provider, ModelRequest(messages=[Message(role="user", content="Listen.", audio=[audio])]))
+    await claude_turn(provider, ModelRequest(messages=[Message(role="user", content="Listen.", audio=[audio])]))
     assert [block["type"] for block in wire.body()["messages"][0]["content"]] == ["text"]
 
 
@@ -453,10 +377,10 @@ class _Answer(BaseModel):
 @pytest.mark.asyncio
 async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_outputs_beta(tmp_path: Path) -> None:
     """Strict tools and a pydantic response format use the beta endpoint with its header."""
-    wire = Wire(_json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
-    provider = _provider("anthropic", tmp_path, wire)
+    wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
+    provider = route_provider("anthropic", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
-    completed = await _turn(
+    completed = await claude_turn(
         provider,
         ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False),
     )
@@ -476,10 +400,10 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
 @pytest.mark.asyncio
 async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Path) -> None:
     """Vertex rejects provider-level strict fields and has no structured output, so the schema stays out."""
-    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
-    provider = _provider("vertexai_claude", tmp_path, wire)
+    wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
+    provider = route_provider("vertexai_claude", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
-    await _turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False))
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False))
     request = wire.requests[0]
     assert request.url.path.endswith(":rawPredict")
     assert "anthropic-beta" not in request.headers
@@ -509,8 +433,8 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
     through the beta endpoint without one.
     """
-    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
-    provider = _provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
     schema = {"type": "object", "properties": {"city": {"type": "string"}}}
     tools = [
         ToolSpec(name="unset", description=None, parameters=schema, strict=None),
@@ -532,7 +456,7 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
             external_execution=False,
         ),
     ]
-    await _turn(provider, ModelRequest(messages=_user(), tools=tools))
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
     input_schema = {
         "type": "object",
         "properties": {"city": {"type": "string", "description": ""}},
@@ -567,20 +491,20 @@ async def test_request_tool_choice_replaces_an_authored_one(
     expected: dict[str, str],
 ) -> None:
     """A request's choice wins over ``request_params``, including the ``extra_body`` copy the SDK merges last."""
-    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
     authored = {"request_params": {"tool_choice": {"type": "auto"}, "extra_body": {"tool_choice": {"type": "any"}}}}
-    provider = _provider("anthropic", tmp_path, wire, extra_kwargs=authored)
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
     tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
-    await _turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice, stream=False))
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice, stream=False))
     assert wire.body()["tool_choice"] == expected
 
 
 @pytest.mark.asyncio
 async def test_tool_choice_is_left_out_of_a_request_without_tools(tmp_path: Path) -> None:
     """The API rejects a tool choice without tools, so a decision request that offers none sends no choice."""
-    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
-    await _turn(
-        _provider("anthropic", tmp_path, wire),
+    wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
+    await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
         ModelRequest(messages=_user(), tool_choice="none", stream=False),
     )
     assert "tool_choice" not in wire.body()
@@ -591,7 +515,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     """The request asks Claude to compact; the checkpoint it returns replaces the earlier prefix next time."""
     checkpoint = {"type": "compaction", "content": "Summary so far.", "encrypted_content": "opaque"}
     usage = {
-        **_USAGE,
+        **CLAUDE_USAGE,
         "iterations": [
             {
                 "type": "compaction",
@@ -611,17 +535,17 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         ],
     }
     wire = Wire(
-        _json_reply([checkpoint, {"type": "text", "text": "Done."}], usage=usage),
-        _sse_reply([{"type": "text", "text": "Next."}]),
+        json_reply([checkpoint, {"type": "text", "text": "Done."}], usage=usage),
+        sse_reply([{"type": "text", "text": "Next."}]),
     )
-    provider = _provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire)
     replay = provider.native_compaction_settings(threshold=60000, history_generation="gen-1")
     assert replay is not None
     assert replay.threshold == 60000
     assert provider.native_compaction_settings(threshold=1000) is None, "Claude needs at least 50,000 input tokens"
     assert provider.native_compaction_settings(threshold=60000, history_generation="gen-2") != replay
 
-    first = await _turn(
+    first = await claude_turn(
         provider,
         ModelRequest(
             messages=_user("Long history."),
@@ -648,7 +572,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     }
 
     messages = [*_user("Long history."), first.message, Message(role="user", content="Continue.")]
-    second = await _turn(provider, ModelRequest(messages=messages, native_compaction=replay))
+    second = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=replay))
     turns = wire.body(1)["messages"]
     assert [turn["role"] for turn in turns] == ["assistant", "user"], "the checkpoint replaces the earlier user prefix"
     assert turns[0]["content"][0] == checkpoint
@@ -666,21 +590,21 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
 async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_path: Path) -> None:
     """A model that authored its own compaction edit replays checkpoints without MindRoom's trigger."""
     authored = {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 80000}}]}
-    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
-    provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     assert provider.capabilities.native_compaction is False
     assert provider.native_compaction_settings(threshold=60000) is None
     replay = provider.native_compaction_settings(threshold=60000, allow_authored=True)
     assert replay is not None
     assert replay.threshold is None
-    await _turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
     assert wire.body()["context_management"] == authored
     assert wire.requests[0].headers["anthropic-beta"] == "compact-2026-01-12"
 
     paused = {"edits": [{"type": "compact_20260112", "pause_after_compaction": True}]}
-    pausing = _provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": paused})
+    pausing = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": paused})
     with pytest.raises(ValueError, match="pause_after_compaction"):
-        await _turn(pausing, ModelRequest(messages=_user()))
+        await claude_turn(pausing, ModelRequest(messages=_user()))
 
 
 @pytest.mark.asyncio
@@ -691,8 +615,8 @@ async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: 
     tool_use = {"type": "tool_use", "id": "toolu_save", "name": "save_file", "input": {"file_name": "notes.md"}}
     unfinished = {"type": "tool_use", "id": "toolu_shell", "name": "run_shell_command", "input": {}}
     stored = [signed, tool_use, unsigned, unfinished]
-    wire = Wire(_sse_reply([{"type": "text", "text": "Saved."}]))
-    provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
+    wire = Wire(sse_reply([{"type": "text", "text": "Saved."}]))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     messages = [
         Message(role="user", content="Save the notes."),
         Message(
@@ -703,7 +627,7 @@ async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: 
         ),
         Message(role="tool", tool_call_id="toolu_save", content="saved"),
     ]
-    await _turn(provider, ModelRequest(messages=messages))
+    await claude_turn(provider, ModelRequest(messages=messages))
     assert wire.body()["messages"][1]["content"] == [signed, tool_use]
     assert (messages[1].provider_data or {})["content_blocks"] == stored
 
@@ -729,15 +653,15 @@ async def test_bedrock_session_credentials_are_resolved_for_every_request(tmp_pa
             self.resolutions += 1
             return _Credentials()
 
-    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     config = {
         "provider": "bedrock_claude",
         "id": "anthropic.claude-sonnet-5-5",
         "extra_kwargs": {"session": _Session()},
     }
     provider = provider_for(config, tmp_path, wire.client)
-    await _turn(provider, ModelRequest(messages=_user()))
-    await _turn(provider, ModelRequest(messages=_user()))
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    await claude_turn(provider, ModelRequest(messages=_user()))
     session = provider.settings.session
     assert isinstance(session, _Session)
     assert session.resolutions == 2
@@ -757,20 +681,20 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         "AWS_REGION": "us-west-2",
     }
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
-    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     with isolated_provider_environment():
         direct = build_provider(
             ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="config-key"),
             runtime_paths,
         )
-        await _turn(replace(direct, http_client=wire.client), ModelRequest(messages=_user()))
+        await claude_turn(replace(direct, http_client=wire.client), ModelRequest(messages=_user()))
         assert wire.requests[-1].headers["x-api-key"] == "config-key"
 
         bedrock = build_provider(
             ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5"),
             runtime_paths,
         )
-        await _turn(replace(bedrock, http_client=wire.client), ModelRequest(messages=_user()))
+        await claude_turn(replace(bedrock, http_client=wire.client), ModelRequest(messages=_user()))
         assert wire.requests[-1].url.host == "bedrock-mantle.us-west-2.api.aws"
         assert (bedrock.settings.aws_access_key, bedrock.settings.session) == ("env-access", None)
 
@@ -795,7 +719,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
 
 def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path: Path) -> None:
     """Results stay separate tool messages in history; the formatter merges them into one user turn on the wire."""
-    provider = _provider("anthropic", tmp_path, Wire(_json_reply([])))
+    provider = route_provider("anthropic", tmp_path, Wire(json_reply([])))
     results = [Message(role="tool", tool_call_id="a", content="1"), Message(role="tool", tool_call_id="b", content="2")]
     assert provider.format_tool_results(_user(), results) == results
 
@@ -803,8 +727,8 @@ def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path:
 @pytest.mark.asyncio
 async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
     """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""
-    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
-    direct = _provider(
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    direct = route_provider(
         "anthropic",
         tmp_path,
         wire,
@@ -818,13 +742,13 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
             },
         },
     )
-    await _turn(direct, ModelRequest(messages=_user()))
+    await claude_turn(direct, ModelRequest(messages=_user()))
     request = wire.requests[-1]
     assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
     assert request.headers["x-api-key"] == "params-key"
     assert request.headers["x-mindroom"] == "authored"
 
-    vertex = _provider(
+    vertex = route_provider(
         "vertexai_claude",
         tmp_path,
         wire,
@@ -832,19 +756,19 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
             "client_params": {"base_url": "https://vertex.example/v1", "project_id": "params-project", "region": "eu"},
         },
     )
-    await _turn(vertex, ModelRequest(messages=_user()))
+    await claude_turn(vertex, ModelRequest(messages=_user()))
     assert str(wire.requests[-1].url) == (
         "https://vertex.example/v1/projects/params-project/locations/eu/publishers/anthropic/models/"
         "claude-sonnet-5-5:streamRawPredict"
     )
 
-    bedrock = _provider(
+    bedrock = route_provider(
         "bedrock_claude",
         tmp_path,
         wire,
         extra_kwargs={"client_params": {"aws_region": "eu-central-1"}},
     )
-    await _turn(bedrock, ModelRequest(messages=_user()))
+    await claude_turn(bedrock, ModelRequest(messages=_user()))
     assert wire.requests[-1].url.host == "bedrock-mantle.eu-central-1.api.aws"
 
 
@@ -866,7 +790,7 @@ async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
-    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     with isolated_provider_environment():
         built = build_provider(
             ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs={"region": "us-east5"}),
@@ -874,8 +798,8 @@ async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
         )
     assert built.google_credentials.credentials is None, "discovery waits for the first request"
     provider = replace(built, http_client=wire.client)
-    await _turn(provider, ModelRequest(messages=_user()))
-    await _turn(provider, ModelRequest(messages=_user()))
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    await claude_turn(provider, ModelRequest(messages=_user()))
     assert discoveries == 1
     assert [request.headers["authorization"] for request in wire.requests] == ["Bearer ambient-token"] * 2
     assert all(request.url.path.startswith("/v1/projects/adc-project/locations/us-east5/") for request in wire.requests)
@@ -887,7 +811,7 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.host != "media.example":
-            return _sse_reply([{"type": "text", "text": "Seen."}])
+            return sse_reply([{"type": "text", "text": "Seen."}])
         if request.url.path == "/photo":
             return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
         if request.url.path == "/pic.png":
@@ -895,7 +819,7 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
         return httpx.Response(200, content=b"# Notes\n", headers={"content-type": "text/markdown; charset=utf-8"})
 
     wire = Wire(respond)
-    provider = _provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire)
     message = Message(
         role="user",
         content="Look.",
@@ -905,7 +829,7 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
             File(url="https://media.example/report.pdf", mime_type="application/pdf"),
         ],
     )
-    await _turn(provider, ModelRequest(messages=[message]))
+    await claude_turn(provider, ModelRequest(messages=[message]))
     blocks = wire.body()["messages"][0]["content"]
     assert [block["type"] for block in blocks] == ["text", "image", "image", "document", "document"]
     png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
@@ -928,21 +852,68 @@ async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_pa
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.host != "media.example":
-            return _sse_reply([{"type": "text", "text": "Ok."}])
+            return sse_reply([{"type": "text", "text": "Ok."}])
         if request.url.path == "/gone":
             return httpx.Response(404)
         msg = "connection refused"
         raise httpx.ConnectError(msg, request=request)
 
     wire = Wire(respond)
-    provider = _provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire)
     message = Message(
         role="user",
         content="Look.",
         images=[Image(url="https://media.example/gone")],
         files=[File(url="https://media.example/down", mime_type="text/plain")],
     )
-    completed = await _turn(provider, ModelRequest(messages=[message]))
+    completed = await claude_turn(provider, ModelRequest(messages=[message]))
     assert completed.message.content == "Ok."
     blocks = wire.body()["messages"][0]["content"]
     assert [(block["type"], block["text"]) for block in blocks] == [("text", "Look.")]
+
+
+def _markers(payload: object) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        found = [payload["cache_control"]] if "cache_control" in payload else []
+        return found + [marker for value in payload.values() for marker in _markers(value)]
+    if isinstance(payload, list):
+        return [marker for item in payload for marker in _markers(item)]
+    return []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+@pytest.mark.parametrize("cache", ["extended", "short", "disabled"])
+async def test_the_shared_instructions_stay_cacheable_when_the_session_context_changes(
+    tmp_path: Path,
+    route: str,
+    cache: str,
+) -> None:
+    """The instructions before the session context keep one marked block, so a new date reuses the cached prefix."""
+    settings = {"extended_cache_time": cache == "extended", "cache_system_prompt": cache != "disabled"}
+    bodies = []
+    for day in ("Monday", "Tuesday"):
+        wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+        (tmp_path / day).mkdir()
+        provider = route_provider(route, tmp_path / day, wire, extra_kwargs=settings)
+        system = "Shared instructions.\n\n" + render_session_context(f"Current date: {day}")
+        messages = [
+            Message(role="system", content=system),
+            Message(role="user", content="First request."),
+            Message(role="assistant", content="First answer."),
+            Message(role="user", content="Follow-up request."),
+        ]
+        await claude_turn(provider, ModelRequest(messages=messages))
+        bodies.append(wire.body())
+
+    monday, tuesday = bodies
+    if cache == "disabled":
+        assert _markers(monday) == []
+        return
+    cache_control = {"type": "ephemeral", **({"ttl": "1h"} if cache == "extended" else {})}
+    assert monday["system"][0] == tuesday["system"][0]
+    assert monday["system"][0] == {"type": "text", "text": "Shared instructions.\n\n", "cache_control": cache_control}
+    assert "cache_control" not in monday["system"][1]
+    assert monday["system"][1] != tuesday["system"][1]
+    assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control
+    assert len(_markers(monday)) <= 4

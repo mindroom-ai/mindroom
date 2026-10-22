@@ -122,6 +122,12 @@ def _request_record(
     }
 
 
+def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
+    """Return the day's request-log file under the configured directory, else under ``default_log_dir``."""
+    base_dir = Path(log_dir) if log_dir else default_log_dir
+    return base_dir / f"llm-requests-{now.date().isoformat()}.jsonl"
+
+
 def _write_line(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -182,8 +188,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     log_path: Path | None = None
     request_log_id = uuid4().hex
     if log.debug.log_llm_requests:
-        base_dir = Path(log.debug.llm_request_log_dir) if log.debug.llm_request_log_dir else log.default_log_dir
-        log_path = base_dir / f"llm-requests-{datetime.now().astimezone().date().isoformat()}.jsonl"
+        log_path = _daily_log_path(log.debug.llm_request_log_dir, log.default_log_dir, datetime.now().astimezone())
         try:
             record = _request_record(
                 request,

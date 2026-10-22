@@ -162,6 +162,23 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
         "OpenAI",
         "OpenAI Chat",
     ),
+    "openai-unset-older-model": (
+        {"provider": "openai", "id": "gpt-4o"},
+        ChatAdapter,
+        "OpenAI",
+        "OpenAI Chat",
+    ),
+    "openai-responses-custom-endpoint": (
+        {
+            "provider": "openai",
+            "id": "reasoning-alias",
+            "api": "responses",
+            "extra_kwargs": {"base_url": "http://x/v1"},
+        },
+        ResponsesAdapter,
+        "OpenAI",
+        "OpenAI Responses",
+    ),
     "codex": ({"provider": "codex", "id": "gpt-6.1-sol"}, ResponsesAdapter, "OpenAI Codex", "OpenAI Codex Responses"),
     "openai_codex": (
         {"provider": "openai_codex", "id": "gpt-6.1-sol"},
@@ -329,6 +346,84 @@ async def test_the_dashboard_key_reaches_every_keyed_family(
         await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
 
     assert wire.requests[0].headers[header] == template.format(key="sk-dashboard")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"provider": "openrouter", "id": "z-ai/glm-5.3"},
+        {"provider": "zai", "id": "glm-5.3"},
+        {"provider": "llama_cpp", "id": "qwen"},
+        {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"},
+    ],
+    ids=lambda fields: fields["provider"],
+)
+async def test_a_configured_key_beats_the_shared_key_on_routes_with_their_own_key_rules(
+    fields: dict[str, Any],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(fields["provider"], {"api_key": "sk-shared"})
+    extra_kwargs = {"client_params": {"transport": wire.transport}} if fields["provider"] == "ollama" else {}
+    config = Config(models={"target": ModelConfig(api_key="sk-config", extra_kwargs=extra_kwargs, **fields)})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-config"
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer tok"
+    assert "x-api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "kimi", "vertexai_claude", "bedrock_claude"])
+async def test_routes_without_api_keys_never_send_a_configured_one(
+    provider: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """CLI-login, Google Cloud, and AWS routes authenticate their own way, so a stray configured key stays local."""
+    logins = write_cli_logins(tmp_path)
+    fields: dict[str, dict[str, Any]] = {
+        "codex": {"id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": logins["<codex_home>"]}},
+        "kimi": {"id": "k3", "extra_kwargs": {"kimi_home": logins["<kimi_home>"]}},
+        "vertexai_claude": {
+            "id": "claude-sonnet-5-5",
+            "extra_kwargs": {
+                "project_id": "p",
+                "region": "us-east5",
+                "client_params": {"credentials": Credentials(token=_GOOGLE_TOKEN)},
+            },
+        },
+        "bedrock_claude": {"id": "anthropic.claude-sonnet-5-5", "extra_kwargs": _BEDROCK_KEYS},
+    }
+    model_config = ModelConfig(provider=provider, api_key="sk-config", **fields[provider])
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert all("sk-config" not in value for value in wire.requests[0].headers.values())
 
 
 # --- One golden per family, through the registry ------------------------------------------------------------

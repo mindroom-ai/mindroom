@@ -29,74 +29,9 @@ class _ProviderDataHolder(Protocol):
     provider_data: dict[str, Any] | None
 
 
-class NativeCompactionModel:
-    """Capability seam implemented by MindRoom's native provider adapters."""
-
-    native_compaction: NativeCompactionReplay | None = None
-    id: str
-    provider: str
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
-        """Return a provider-aware estimate, or None for canonical history sizing.
-
-        Callers retain the canonical transport floor unless
-        portable_replay_uses_visual_tokens() returns True. In that case, this
-        estimate must include the cost of all images whose transport data the
-        shared history estimator removes. Returning None always preserves the
-        canonical transport estimate.
-        """
-        return None
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether portable estimates replace image transport with visual cost."""
-        return False
-
-    def native_compaction_supported(self) -> bool:
-        """Return whether this concrete route can use automatic compaction."""
-        raise NotImplementedError
-
-    def native_compaction_endpoint(self) -> str:
-        """Return the endpoint identity used to bind opaque replay state."""
-        raise NotImplementedError
-
-    def authored_native_compaction_supported(self) -> bool:
-        """Return whether this adapter can replay its caller-authored native policy."""
-        return False
-
-    def configure_native_compaction(
-        self,
-        *,
-        threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
-    ) -> None:
-        """Enable replay for this route and portable-history generation."""
-        self.native_compaction = None
-        if threshold is None or not self.native_compaction_supported():
-            if not allow_authored or not self.authored_native_compaction_supported():
-                return
-            threshold = None
-        endpoint = self.native_compaction_endpoint()
-        if not endpoint:
-            return
-        route = native_compaction_route(
-            provider=self.provider,
-            model_id=self.id,
-            endpoint=endpoint,
-            history_generation=history_generation,
-        )
-        self.native_compaction = NativeCompactionReplay(route=route, threshold=threshold)
-
-
 def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
     """Return the replay route one model, endpoint, and history generation share."""
     return hashlib.sha256(json.dumps([provider, model_id, endpoint, history_generation]).encode()).hexdigest()
-
-
-def common_native_endpoint(identities: Sequence[str]) -> str:
-    """Return one compatible client route, or disable ambiguous native replay."""
-    routes = set(identities)
-    return next(iter(routes)) if len(routes) == 1 else ""
 
 
 def record_native_checkpoint(

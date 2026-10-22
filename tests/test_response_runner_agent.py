@@ -14,13 +14,9 @@ from zoneinfo import ZoneInfo
 
 import nio
 import pytest
-from agno.agent import Agent
-from agno.compression.manager import CompressionManager
-from agno.models.response import ModelResponse, ToolExecution
+from agno.models.response import ToolExecution
 from agno.session.agent import AgentSession
 
-from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
@@ -59,8 +55,6 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.judgment.client import JudgmentClient
-from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -87,7 +81,6 @@ from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch
-from tests.ai_user_id_helpers import _prepared_prompt_result
 from tests.bot_helpers import (
     AgentBotTestBase,
     _handled_response_event_id,
@@ -119,17 +112,13 @@ from tests.conftest import (
     seed_session,
     unwrap_extracted_collaborator,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.journal_membership_helpers import admit_room_membership
-from tests.participation_helpers import ParticipationModel
 from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
-
-    from agno.models.message import Message
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
@@ -3301,231 +3290,6 @@ class TestAgentBot(AgentBotTestBase):
 
 class TestAdaptiveResponse(AgentBotTestBase):
     """Exercise quiet participation through the real agent and Matrix lifecycle."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("streaming", [False, True])
-    @pytest.mark.parametrize(
-        "action",
-        ["respond", "stay_silent", "compression_failure", "sync_restart", "decision_failure"],
-    )
-    @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
-    @pytest.mark.parametrize("reaction", [None, "👍"])
-    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        streaming: bool,
-        action: str,
-        backend: str,
-        reaction: str | None,
-    ) -> None:
-        """A silent decision must not send placeholders, typing, retry notices, or a Stop button."""
-        config = self._config_for_storage(tmp_path)
-        # Keep background summaries out of foreground participation call counts.
-        config.defaults.thread_summary_first_threshold = 100
-        paths = replace(runtime_paths_for(config), process_env={"TYPESAFE_API_KEY": "test-key"})
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
-        install_direct_response_admission(bot)
-        bot.client = _make_matrix_client_mock()
-        unique_room_send_responses(bot.client, prefix="$response")
-        # The requester is online, so a running reply shows its Stop button.
-        monkeypatch.setattr("mindroom.response_attempt.is_user_online", AsyncMock(return_value=True))
-        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        model = ParticipationModel(
-            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-            if action == "sync_restart"
-            else ModelResponse(content=json.dumps({"action": action, "reason": "Conversation context."})),
-        )
-        if action == "decision_failure":
-            model.decision = RuntimeError("Decision provider unavailable")
-        typesafe_calls: list[bytes] = []
-
-        async def post(_self: JudgmentClient, body: bytes) -> bytes:
-            typesafe_calls.append(body)
-            if action == "sync_restart":
-                raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-            if action == "decision_failure":
-                msg = "Decision provider unavailable"
-                raise RuntimeError(msg)
-            return json.dumps(
-                {
-                    "model": _PINNED_MODEL,
-                    "answers": {"participation": {"type": "noul", "noul": 0.95 if action == "respond" else 0.05}},
-                    "usage": {"input_tokens": 100, "output_tokens": 1},
-                },
-            ).encode()
-
-        monkeypatch.setattr(JudgmentClient, "_post", post)
-
-        async def fail_judge() -> None:
-            if action == "sync_restart":
-                raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-            msg = "Decision provider unavailable"
-            raise RuntimeError(msg)
-
-        judge = ScriptedModel(
-            [
-                [Await(fail_judge)]
-                if action in {"sync_restart", "decision_failure"}
-                else answer(json.dumps({"decision": action == "respond"})),
-            ],
-        )
-        monkeypatch.setattr("mindroom.judgment.llm.build_model_provider", lambda *_: judge)
-        if backend != "model" and action != "decision_failure":
-            model.decision = ModelResponse(content="Useful answer")
-        model.cache_response = True
-        monkeypatch.setattr(
-            model,
-            "_get_cached_model_response",
-            MagicMock(
-                return_value={
-                    "result": {"content": "Cached answer"},
-                    "streaming_responses": [{"content": "Cached answer"}],
-                },
-            ),
-        )
-        compression = CompressionManager() if action == "compression_failure" else None
-        if compression is not None:
-            monkeypatch.setattr(
-                compression,
-                "ashould_compress",
-                AsyncMock(side_effect=RuntimeError("Compression failed")),
-            )
-        if streaming and action == "respond":
-            # Hold the answer until the approved reply's placeholder reached the room.
-            placeholder_sent = asyncio.Event()
-            unique_room_send = bot.client.room_send.side_effect
-
-            async def room_send(**kwargs: Any) -> MagicMock:  # noqa: ANN401
-                if kwargs["content"].get("body") == "Thinking...":
-                    placeholder_sent.set()
-                return unique_room_send(**kwargs)
-
-            bot.client.room_send.side_effect = room_send
-            answer_stream = model.ainvoke_stream
-
-            async def stream_after_placeholder(
-                messages: list[Message],
-                **kwargs: object,
-            ) -> AsyncIterator[ModelResponse]:
-                await asyncio.wait_for(placeholder_sent.wait(), timeout=5)
-                async for chunk in answer_stream(messages, **kwargs):
-                    yield chunk
-
-            monkeypatch.setattr(model, "ainvoke_stream", stream_after_placeholder)
-        agent = Agent(model=model, name=bot.agent_name, telemetry=False, compression_manager=compression)
-        monkeypatch.setattr(
-            "mindroom.ai._prepare_agent_and_prompt",
-            AsyncMock(return_value=_prepared_prompt_result(agent)),
-        )
-        monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
-        # Summary inference is separate from the participation judge being counted here.
-        thread_summary = AsyncMock()
-        monkeypatch.setattr("mindroom.post_response_effects.maybe_generate_thread_summary", thread_summary)
-        memory_queued: list[str] = []
-        monkeypatch.setattr(
-            ResponseRunner,
-            "_memory_persistence",
-            lambda *_args, **_kwargs: lambda: memory_queued.append("stored"),
-        )
-        source_settled: list[str] = []
-
-        async def settled() -> None:
-            source_settled.append("quiet")
-
-        request = ResponseRequest(
-            prompt="Any thoughts?",
-            sources=ResponseSources(
-                pending_event_ids=("$event", "$earlier"),
-                logical_source_event_ids=("$earlier", "$event"),
-            ),
-            thread_history=[],
-            user_id="@alice:localhost",
-            response_envelope=request_envelope(
-                room_id="!test:localhost",
-                reply_to_event_id="$event",
-                thread_id="$thread",
-                prompt="Any thoughts?",
-                user_id="@alice:localhost",
-                agent_name=bot.agent_name,
-            ),
-            participation=ParticipationConfig.model_validate(
-                {
-                    "decline_reaction": reaction,
-                    "judgment": (
-                        {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
-                    )
-                    if backend != "model"
-                    else None,
-                },
-            ),
-            on_no_response_handled=settled,
-        )
-        try:
-            result = await bot._response_runner.generate_response(request)
-        except asyncio.CancelledError:
-            if action != "sync_restart":
-                raise
-            result = None
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
-        assert thread_summary.await_count == (1 if action == "respond" else 0)
-        sends = bot.client.room_send.await_args_list
-        bodies = [call.kwargs["content"].get("body", "") for call in sends]
-        stop_buttons = [
-            (f"$response{index}", call.kwargs["content"]["m.relates_to"]["event_id"])
-            for index, call in enumerate(sends, start=1)
-            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] == "🛑"
-        ]
-        reactions = [
-            call.kwargs
-            for call in sends
-            if call.kwargs["message_type"] == "m.reaction" and call.kwargs["content"]["m.relates_to"]["key"] != "🛑"
-        ]
-        # The approved reply's first streamed event carries its Stop button until the reply ends. A blocking
-        # answer is the reply's first event and ends the reply at once, leaving nothing to stop.
-        streamed_answer = action == "respond" and streaming
-        assert [target for _button, target in stop_buttons] == (["$response1"] if streamed_answer else [])
-        assert [call.args[1] for call in bot.client.room_redact.await_args_list] == [
-            button for button, _target in stop_buttons
-        ]
-        if action == "stay_silent" and reaction is not None:
-            assert len(reactions) == 1
-            assert reactions[0]["room_id"] == "!test:localhost"
-            assert reactions[0]["content"] == {
-                "m.relates_to": {"rel_type": "m.annotation", "event_id": "$event", "key": reaction},
-            }
-            assert reactions[0]["tx_id"]
-        else:
-            assert reactions == []
-        bodies = [body for body in bodies if body]
-        assert all('"action"' not in body for body in bodies)
-        # Only an approved streamed reply shows its placeholder, and only before its answer.
-        if streaming and action == "respond":
-            assert bodies[0] == "Thinking..."
-            bodies = bodies[1:]
-        assert all("Thinking" not in body for body in bodies)
-        if action != "respond":
-            assert result is None
-            assert bodies == []
-            assert bot.client.room_typing.await_count == 0
-            if action != "sync_restart":
-                # The declined reply's records settled its sources; the no-reply callback is not needed.
-                assert source_settled == []
-                reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
-                assert reply is not None
-                assert reply.terminal
-            assert memory_queued == []
-            assert len(model.requests) == (
-                0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
-            )
-        else:
-            assert result == "$response1"
-            assert any("Useful answer" in body for body in bodies)
-            assert source_settled == []
-            assert len(model.requests) == (1 if backend != "model" else 2)
-        assert len(typesafe_calls) == (1 if backend == "typesafe" and action != "compression_failure" else 0)
-        assert len(judge.requests) == (1 if backend == "llm" and action != "compression_failure" else 0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["history", "payload", "runtime", "knowledge"])

@@ -54,8 +54,7 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
     assert recorder.calls or output.exported is not None
     ordered = recorder.ordered_calls()
     # Every request, the compaction summary included, went through the provider registry rather than an Agno model.
-    assert all(call.owned for call in ordered)
-    assert all(isinstance(message, Message) for call in ordered if call.owned for message in call.messages)
+    assert all(isinstance(message, Message) for call in ordered for message in call.messages)
     assert normalize([call_dict(call) for call in ordered], tmp_path) == golden["requests"]
 
 

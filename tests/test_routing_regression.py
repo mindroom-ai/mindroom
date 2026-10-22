@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.models.ollama import Ollama
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot, TeamBot
@@ -1751,12 +1750,10 @@ class TestRoutingRegression:
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.teams.formation.build_model_provider")
-    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
-        mock_get_model_instance: MagicMock,
         mock_build_model_provider: MagicMock,
         mock_ai_response: AsyncMock,
         mock_resolve_agent_knowledge_access: MagicMock,
@@ -1791,8 +1788,6 @@ class TestRoutingRegression:
         mock_research_agent.user_id = f"@mindroom_research:{domain}"
         mock_news_agent.user_id = f"@mindroom_news:{domain}"
 
-        # Mock get_model_instance to return a mock model
-        mock_get_model_instance.return_value = Ollama(id="test-model")
         # The team mode choice goes through the owned provider layer.
         team_mode_model = ScriptedModel([answer(json.dumps({"mode": "collaborate", "reasoning": "Both weigh in"}))])
         mock_build_model_provider.return_value = team_mode_model

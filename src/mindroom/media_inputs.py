@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.llm.media import Audio, File, Image, Video
-
-type MediaKind = Literal["audio", "image", "file", "video"]
 
 
 @dataclass(frozen=True)
