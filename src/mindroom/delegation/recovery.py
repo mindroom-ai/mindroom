@@ -1,4 +1,4 @@
-"""Recover retained child turns above the handle and Agno session stores."""
+"""Recover retained child turns above the handle and conversation stores."""
 
 from __future__ import annotations
 

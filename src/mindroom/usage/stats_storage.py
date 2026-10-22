@@ -1,4 +1,4 @@
-"""Small read-only adapter for retained Agno SQLite sessions."""
+"""Small read-only adapter for retained conversation SQLite sessions."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ _USAGE_SINCE_CONDITION = (
 
 @dataclass(frozen=True, slots=True)
 class UsageStorageSource:
-    """One fixed-layout Agno session database."""
+    """One fixed-layout conversation database."""
 
     path: Path
     path_label: str
@@ -133,7 +133,7 @@ class UsageRunNode:
 
 @dataclass(frozen=True, slots=True)
 class UsageSessionRow:
-    """Usage runs from one retained Agno session."""
+    """Usage runs from one retained session."""
 
     source: UsageStorageSource
     entity_id: str
@@ -755,7 +755,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
 
 
 def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:
-    """Read Agno's per-role model lists without discarding usable run totals."""
+    """Read the per-role model lists of stored metrics details without discarding usable run totals."""
     if details is None:
         return ()
     if not isinstance(details, dict):

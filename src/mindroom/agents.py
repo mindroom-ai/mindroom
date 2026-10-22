@@ -147,8 +147,9 @@ class _AgentToolAssembly:
     """Toolkits and dynamic-tool visibility assembled for one agent instance."""
 
     toolkits: tuple[AdaptedToolkit, ...]
-    # Each offered function's authored toolkit, None for a generated one; the first function of a name owns it,
-    # as the loop offers them.
+    # Each configured function's authored toolkit, None for one without an authored toolkit; the functions generated
+    # for the agent, such as the knowledge search, are absent. The first function of a name owns it, as the loop
+    # offers them.
     tool_owners: Mapping[str, str | None]
     # The concrete toolkit each of those functions came from, which tool jobs check its grant and exclusions by.
     tool_sources: Mapping[str, Toolkit]

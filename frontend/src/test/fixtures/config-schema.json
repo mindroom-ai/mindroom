@@ -323,7 +323,7 @@
             }
           ],
           "default": null,
-          "description": "Number of prior Agno runs to include as history context (per-agent override)",
+          "description": "Number of prior runs to include as history context (per-agent override)",
           "title": "Num History Runs"
         },
         "num_history_messages": {
@@ -1394,7 +1394,7 @@
             }
           ],
           "default": null,
-          "description": "Default number of prior Agno runs to include as history context (None = all)",
+          "description": "Default number of prior runs to include as history context (None = all)",
           "title": "Num History Runs"
         },
         "num_history_messages": {
