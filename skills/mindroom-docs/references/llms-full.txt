@@ -1602,7 +1602,7 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead, and set this too when the port changes | `8765` |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | `true` allows every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
@@ -8117,9 +8117,12 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 }
 ```
 
-The shipped value is empty, which hides the Computer action.
+When it is empty, as shipped, Chat on a homeserver that binds tokens uses the runtime origin that the room's MindRoom agents publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`; on other homeservers the Computer action stays hidden.
+The iOS app ignores a published `localhost` origin, which on a phone is the phone itself, so for computers there set `MINDROOM_PUBLIC_URL` to an address the phone can reach.
 Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
-Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
+Chat shows the Computer action when an origin is known and the room has a joined MindRoom agent with a worker computer.
+With a configured Computers URL, an agent whose MindRoom does not yet publish its server counts as having one; without one, each agent must publish its own server with `computer: true`.
+With several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
@@ -12724,7 +12727,7 @@ A call with `mailbox` repeats it in every result, errors included.
 
 Automatic replies are always the requester's own.
 Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
-Turning them on names both messages and the external audience, so an approval card shows everything senders get.
+Turning them on names the internal message and an external audience of `internal_only`, `contactsOnly`, or `all`, plus the external message unless the audience is `internal_only`, so an approval card shows everything senders get.
 Outlook Mail asks a requester to connect again when their connection lacks any of the permissions above.
 
 Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
@@ -14854,8 +14857,9 @@ In MindRoom Chat, the user opens **Connections** in Settings, General, which ope
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
+Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
+When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
+On other homeservers, users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
@@ -14923,7 +14927,7 @@ Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongsid
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
@@ -15397,6 +15401,8 @@ Do not report or "fix" these; they are deliberate.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
+- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
+  MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.

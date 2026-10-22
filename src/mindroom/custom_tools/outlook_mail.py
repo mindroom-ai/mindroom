@@ -77,7 +77,18 @@ _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
-_EXTERNAL_AUDIENCES = frozenset({"none", "contactsOnly", "all"})
+# AGNO_COMPAT: Tool-call argument parsing turns the strings none, null, true, and false into None and booleans.
+# Reason: Agno 3.0.9 get_function_call rewrites any string argument equal to one of them, ignoring case and spaces,
+# before the tool runs, so an external_audience of Graph's "none" always arrived as no audience; the choice that sets
+# Graph's "none" is therefore named internal_only.
+# Upstream issue: Tracking gap; a search of agno-agi/agno issues found none (checked October 22, 2026).
+# Upstream PR: None identified.
+# Remove when: Agno passes string arguments through unchanged; internal_only can stay as the choice's name.
+# Coverage: tests/test_outlook_mail_tool.py::test_every_choice_reaches_the_tool_through_agnos_argument_parsing
+_EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
+# Graph writes these values in either case; reads report them as the setter takes them.
+_READ_STATUSES = {status.casefold(): status for status in _AUTOMATIC_REPLY_STATUSES}
+_READ_AUDIENCES = {graph.casefold(): choice for choice, graph in _EXTERNAL_AUDIENCES.items()}
 _TEXT_BODY = {"Prefer": 'outlook.body-content-type="text"'}
 _ATTACHMENT_TYPES = {
     "microsoft.graph.fileAttachment": "file",
@@ -207,7 +218,7 @@ def _reply_messages(
     if external_audience is not None and (
         not isinstance(external_audience, str) or external_audience not in _EXTERNAL_AUDIENCES
     ):
-        msg = "external_audience must be none, contactsOnly, or all."
+        msg = "external_audience must be internal_only, contactsOnly, or all."
         raise _invalid(msg)
     if any(value is not None and not isinstance(value, str) for value in (internal_message, external_message)):
         msg = "internal_message and external_message must be text."
@@ -215,17 +226,17 @@ def _reply_messages(
     if status != "disabled" and (
         internal_message is None
         or external_audience is None
-        or (external_message is None and external_audience != "none")
+        or (external_message is None and external_audience != "internal_only")
     ):
         msg = (
             "Turning automatic replies on needs internal_message, external_audience, and, unless external_audience "
-            "is none, external_message; outlook_mail_get_automatic_replies returns the current ones."
+            "is internal_only, external_message; outlook_mail_get_automatic_replies returns the current ones."
         )
         raise _invalid(msg)
     messages = {"internalReplyMessage": internal_message, "externalReplyMessage": external_message}
     setting = {field: text_to_html(value) for field, value in messages.items() if isinstance(value, str)}
     if isinstance(external_audience, str):
-        setting["externalAudience"] = external_audience
+        setting["externalAudience"] = _EXTERNAL_AUDIENCES[external_audience]
     return setting
 
 
@@ -237,9 +248,10 @@ def _automatic_replies(setting: object) -> dict[str, Any]:
         value = fields.get(field)
         return html_to_text(value) if isinstance(value, str) else None
 
+    status, audience = fields.get("status"), fields.get("externalAudience")
     return {
-        "status": fields.get("status"),
-        "external_audience": fields.get("externalAudience"),
+        "status": _READ_STATUSES.get(status.casefold(), status) if isinstance(status, str) else None,
+        "external_audience": _READ_AUDIENCES.get(audience.casefold(), audience) if isinstance(audience, str) else None,
         "scheduled_start": graph_time(fields.get("scheduledStartDateTime")),
         "scheduled_end": graph_time(fields.get("scheduledEndDateTime")),
         "internal_message": message("internalReplyMessage"),
@@ -805,8 +817,9 @@ class OutlookMailTools(Toolkit):
         """Read the requester's own automatic replies (out of office): whether they are on, when, and their messages.
 
         status is disabled, alwaysEnabled, or scheduled; scheduled_start and scheduled_end, ending in Z for UTC,
-        apply only to scheduled. external_audience says which senders outside the organization get external_message: none,
-        contactsOnly, or all. The messages come back as plain text.
+        apply only to scheduled. external_audience says which senders outside the organization get external_message:
+        internal_only for none of them, contactsOnly, or all; status and external_audience come back as
+        outlook_mail_set_automatic_replies takes them. The messages come back as plain text.
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
@@ -826,16 +839,16 @@ class OutlookMailTools(Toolkit):
         start: str | None = None,
         end: str | None = None,
         time_zone: str = "UTC",
-        external_audience: Literal["none", "contactsOnly", "all"] | None = None,
+        external_audience: Literal["internal_only", "contactsOnly", "all"] | None = None,
     ) -> str:
         """Turn the requester's own automatic replies (out of office) off, on, or on for a period, and set their text.
 
         Before calling, tell the requester the status, the period in their time zone, both messages, and who outside
         the organization gets the external one, because an approval prompt may show only part of them. Turning
         them on, always or scheduled, needs internal_message, external_audience, and, unless external_audience is
-        none, external_message, so the call shows everything senders get; to keep the current text, read it with
-        outlook_mail_get_automatic_replies first. With status disabled, a message or external_audience left out
-        keeps its current value. Messages are plain text and keep their line breaks. Outlook schedules only a
+        internal_only, external_message, so the call shows everything senders get; to keep the current text, read
+        it with outlook_mail_get_automatic_replies first. With status disabled, a message or external_audience left
+        out keeps its current value. Messages are plain text and keep their line breaks. Outlook schedules only a
         period that has not ended yet.
 
         Args:
@@ -848,8 +861,8 @@ class OutlookMailTools(Toolkit):
             end: With status scheduled only: the local end date and time, after start, in time_zone.
             time_zone: The zone of start and end: a Windows name such as "Pacific Standard Time", an IANA name such
                 as "Europe/Berlin", or "UTC".
-            external_audience: Which senders outside the organization get external_message: none, contactsOnly for
-                the requester's contacts, or all.
+            external_audience: Which senders outside the organization get external_message: internal_only for none
+                of them, so only senders inside get a reply, contactsOnly for the requester's contacts, or all.
 
         """
 

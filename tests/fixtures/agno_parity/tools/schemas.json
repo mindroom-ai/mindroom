@@ -21893,7 +21893,7 @@
       },
       {
         "name": "outlook_mail_get_automatic_replies",
-        "description": "Read the requester's own automatic replies (out of office): whether they are on, when, and their messages.\nstatus is disabled, alwaysEnabled, or scheduled; scheduled_start and scheduled_end, ending in Z for UTC,\napply only to scheduled. external_audience says which senders outside the organization get external_message: none,\ncontactsOnly, or all. The messages come back as plain text.",
+        "description": "Read the requester's own automatic replies (out of office): whether they are on, when, and their messages.\nstatus is disabled, alwaysEnabled, or scheduled; scheduled_start and scheduled_end, ending in Z for UTC,\napply only to scheduled. external_audience says which senders outside the organization get external_message:\ninternal_only for none of them, contactsOnly, or all; status and external_audience come back as\noutlook_mail_set_automatic_replies takes them. The messages come back as plain text.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -22231,7 +22231,7 @@
       },
       {
         "name": "outlook_mail_set_automatic_replies",
-        "description": "Turn the requester's own automatic replies (out of office) off, on, or on for a period, and set their text.\nBefore calling, tell the requester the status, the period in their time zone, both messages, and who outside\nthe organization gets the external one, because an approval prompt may show only part of them. Turning\nthem on, always or scheduled, needs internal_message, external_audience, and, unless external_audience is\nnone, external_message, so the call shows everything senders get; to keep the current text, read it with\noutlook_mail_get_automatic_replies first. With status disabled, a message or external_audience left out\nkeeps its current value. Messages are plain text and keep their line breaks. Outlook schedules only a\nperiod that has not ended yet.",
+        "description": "Turn the requester's own automatic replies (out of office) off, on, or on for a period, and set their text.\nBefore calling, tell the requester the status, the period in their time zone, both messages, and who outside\nthe organization gets the external one, because an approval prompt may show only part of them. Turning\nthem on, always or scheduled, needs internal_message, external_audience, and, unless external_audience is\ninternal_only, external_message, so the call shows everything senders get; to keep the current text, read\nit with outlook_mail_get_automatic_replies first. With status disabled, a message or external_audience left\nout keeps its current value. Messages are plain text and keep their line breaks. Outlook schedules only a\nperiod that has not ended yet.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -22289,7 +22289,7 @@
             "external_audience": {
               "type": "string",
               "enum": [
-                "none",
+                "internal_only",
                 "contactsOnly",
                 "all"
               ]

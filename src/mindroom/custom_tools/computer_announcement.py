@@ -6,11 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.custom_tools.chat_ui import show_computer_once
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.computer_runtime import computer_browser_provider
-from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
+from mindroom.orchestration.computer_runtime import worker_computer_provider
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.worker_computer.sessions import ComputerError
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -37,14 +35,9 @@ def computer_announcement_middleware(
     """
     if (
         tool_name not in {"browser", "browser_mcp"}
-        or not runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
         or "chat_ui" not in config.resolve_entity(agent_name).available_tools
+        or worker_computer_provider(agent_name, config, runtime_paths) != tool_name
     ):
-        return None
-    try:
-        if computer_browser_provider(agent_name, config, runtime_paths) != tool_name:
-            return None
-    except ComputerError:
         return None
     return _announcement_middleware(
         agent_name,

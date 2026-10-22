@@ -11,12 +11,13 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 from tests.access_schema_support import membership_config
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -113,6 +114,23 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
     captured_prompt = request.messages[-1].get_content_string()
     assert "- Configured agents and teams: Ops Team" in captured_prompt
     assert "No specific agents or teams configured yet" not in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path) -> None:
+    """A provider failure, such as a bad API key, raises instead of answering, so the room gets no topic."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        runtime_paths,
+    )
+
+    async def fail() -> None:
+        message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
+        raise ProviderError(message, provider="Synthetic")
+
+    with patch("mindroom.topic_generator.build_model_provider", return_value=ScriptedModel([[Await(fail)]])):
+        assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
 
 
 @pytest.mark.asyncio

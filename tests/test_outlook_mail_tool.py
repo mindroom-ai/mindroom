@@ -11,6 +11,7 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from agno.tools.function import Function
+from agno.utils.functions import get_function_call
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
@@ -1220,6 +1221,34 @@ def test_get_automatic_replies_reads_the_requesters_own_setting_as_text(
     }
 
 
+@pytest.mark.parametrize(
+    ("graph_status", "graph_audience", "status", "audience"),
+    [
+        ("alwaysEnabled", "none", "alwaysEnabled", "internal_only"),
+        ("Scheduled", "None", "scheduled", "internal_only"),
+        ("disabled", "ContactsOnly", "disabled", "contactsOnly"),
+        ("AlwaysEnabled", "All", "alwaysEnabled", "all"),
+    ],
+)
+def test_get_automatic_replies_reports_values_the_setter_takes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_status: str,
+    graph_audience: str,
+    status: str,
+    audience: str,
+) -> None:
+    # Graph's examples write these values in either case.
+    mail = _Graph()
+    setting = _automatic_replies(status=graph_status, externalAudience=graph_audience)
+    mail.override = lambda _request: httpx.Response(200, json=setting)
+    tools, _graph = _tools(tmp_path, monkeypatch, mail)
+
+    result = _payload(tools.outlook_mail_get_automatic_replies())["automatic_replies"]
+
+    assert (result["status"], result["external_audience"]) == (status, audience)
+
+
 def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mail = _Graph()
     mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies()})
@@ -1259,7 +1288,7 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
         ({"status": "disabled"}, {"status": "disabled"}),
         ({"status": "disabled", "external_message": ""}, {"status": "disabled", "externalReplyMessage": ""}),
         (
-            {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "none"},
+            {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "internal_only"},
             {"status": "alwaysEnabled", "internalReplyMessage": "Away", "externalAudience": "none"},
         ),
         (
@@ -1309,6 +1338,7 @@ PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
         {**ON, **PERIOD},
         {"status": "disabled", "end": PERIOD["end"]},
         {**ON, "external_audience": "everyone"},
+        {**ON, "external_audience": "none"},
         {**ON, "external_audience": ["all"]},
         {**ON, "internal_message": 3},
         {**ON, "external_message": ["Away"]},
@@ -1330,3 +1360,33 @@ def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
 
     assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
     assert graph.requests == []
+
+
+def _enum_values(schema: object) -> list[object]:
+    if isinstance(schema, dict):
+        return [*schema.get("enum", []), *(value for item in schema.values() for value in _enum_values(item))]
+    if isinstance(schema, list):
+        return [value for item in schema for value in _enum_values(item)]
+    return []
+
+
+def test_every_choice_reaches_the_tool_through_agnos_argument_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Agno turns an argument such as "none", "null", "true", or "false" into None or a boolean before the tool runs.
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+    choices = [
+        (name, parameter, value)
+        for name in tools.functions
+        for parameter, schema in Function.from_callable(getattr(tools, name))
+        .to_dict()["parameters"]["properties"]
+        .items()
+        for value in _enum_values(schema)
+    ]
+
+    assert ("outlook_mail_set_automatic_replies", "external_audience", "internal_only") in choices
+    for name, parameter, value in choices:
+        call = get_function_call(name, json.dumps({parameter: value}), functions=tools.functions)
+        assert call is not None
+        assert call.arguments == {parameter: value}, (name, parameter, value)

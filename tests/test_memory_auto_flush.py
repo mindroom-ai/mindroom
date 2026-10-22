@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
@@ -32,7 +33,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.usage.storage import quote_identifier
 from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1079,6 +1080,32 @@ async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
     )
 
     assert requested == [used_model]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_extraction_run_is_a_failure_not_a_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider failure raises out of extraction, so the pass backs off instead of saving the error as a memory."""
+    config = _config(tmp_path)
+    session = _thread("t1")
+
+    async def fail() -> None:
+        message = "Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}"
+        raise ProviderError(message, provider="Synthetic")
+
+    monkeypatch.setattr(auto_flush, "build_model_provider", lambda *_args: ScriptedModel([[Await(fail)]]))
+    with pytest.raises(ProviderError, match=r"^Error code: 401"):
+        await auto_flush._extract_memory_summary(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="general",
+            session_id=session,
+            lines=_lines("r1"),
+            existing_context="",
+            execution_identity=None,
+        )
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:
