@@ -289,7 +289,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     # ``files``, ``response_audio``, ``citations``, ``references``, ``reasoning_*``, ``followups``,
     # ``model_provider_data``, fork and queue lineage fields, and per-tool ``requires_user_input``,
     # ``user_input_schema``, ``user_feedback_schema``, ``answered``, ``approval_id``.
-    # Last legacy release: v2026.10.467; replacement: unreleased.
+    # Last legacy release: v2026.10.468; replacement: unreleased.
     # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
     # Coverage: tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys,
     #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
