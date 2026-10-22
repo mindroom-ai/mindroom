@@ -18,10 +18,6 @@ ALLOWED_PACKAGES = frozenset({"tools", "custom_tools", "oauth", "mcp"})
 ALLOWED_MODULES = frozenset(
     {"tool_system/agno_toolkits.py", "tool_system/skills.py", "knowledge/readers.py", "logging_config.py"},
 )
-# Modules outside the boundary that still import Agno. Remove a path here once its module stops; never add one.
-KNOWN_VIOLATIONS = frozenset(
-    {},
-)
 
 
 def agno_imports(source: str) -> set[str]:
@@ -69,11 +65,8 @@ def build() -> None:
     assert agno_imports(source) == {"agno", "agno.tools", "agno.run", "agno.media"}
 
 
-def test_agno_imports_outside_the_boundary_only_shrink() -> None:
-    """No module outside the allowed paths newly imports Agno, and every listed one still does, so the list only shrinks."""
+def test_no_module_outside_the_boundary_imports_agno() -> None:
+    """Every ``agno`` import under ``src/mindroom`` sits in an allowed package or module."""
     violations = boundary_violations()
 
-    new = set(violations) - KNOWN_VIOLATIONS
-    assert not new, f"new Agno imports outside the boundary: {sorted(new)}"
-    cleared = KNOWN_VIOLATIONS - set(violations)
-    assert not cleared, f"no longer import Agno; remove them from KNOWN_VIOLATIONS: {sorted(cleared)}"
+    assert not violations, f"Agno imports outside the boundary: {violations}"
