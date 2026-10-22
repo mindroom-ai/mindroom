@@ -19,7 +19,6 @@ from pydantic import BaseModel
 
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta
 from mindroom.llm.usage import MessageMetrics
-from mindroom.logging_config import get_logger
 from mindroom.providers.assistant_turn import split_thinking
 from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
@@ -48,8 +47,6 @@ __all__ = [
     "parse_chat_completion",
     "with_sdk_options",
 ]
-
-logger = get_logger(__name__)
 
 type ChatDialect = Literal["openai", "groq", "cerebras"]
 
@@ -126,8 +123,6 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
             *(part for image in message.images or () if (part := chat_image_part(image)) is not None),
             *(part for audio in message.audio or () if (part := chat_audio_part(audio)) is not None),
         ]
-    if message.videos:
-        logger.warning("Video input is not supported by Chat Completions; the video is omitted")
     if message.tool_calls is not None and len(message.tool_calls) == 0:
         formatted["tool_calls"] = None
     if message.files is not None:
@@ -154,8 +149,6 @@ def _groq_message(message: Message) -> dict[str, Any]:
             {"type": "text", "text": message.content},
             *(part for image in message.images if (part := chat_image_part(image)) is not None),
         ]
-    if message.files or message.audio or message.videos:
-        logger.warning("Groq accepts no file, audio, or video input; the media is omitted")
     return formatted
 
 
@@ -214,16 +207,7 @@ def function_definition(tool: ToolSpec) -> dict[str, Any]:
     return definition
 
 
-def _tool_sort_key(tool: dict[str, Any]) -> str:
-    function = tool.get("function")
-    return str(function.get("name", "")) if isinstance(function, Mapping) else str(tool.get("name", ""))
-
-
-def _chat_tools(
-    tools: Sequence[ToolSpec],
-    native_tools: Sequence[Mapping[str, Any]],
-    wire: ChatWire,
-) -> list[dict[str, Any]]:
+def _chat_tools(tools: Sequence[ToolSpec], wire: ChatWire) -> list[dict[str, Any]]:
     """Return tool definitions sorted by name, the order every cached prompt prefix depends on."""
     formatted: list[dict[str, Any]]
     if wire.dialect == "cerebras":
@@ -241,8 +225,7 @@ def _chat_tools(
         ]
     else:
         formatted = [{"type": "function", "function": function_definition(tool)} for tool in tools]
-    combined: list[dict[str, Any]] = [*(dict(tool) for tool in native_tools), *formatted]
-    return sorted(combined, key=_tool_sort_key)
+    return sorted(formatted, key=lambda tool: tool["function"]["name"])
 
 
 def _json_schema_format(response_format: type[BaseModel] | Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
@@ -277,16 +260,15 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
         _close_cerebras_objects(child)
 
 
-def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: bool) -> dict[str, Any] | None:
-    """Return the JSON-schema format Cerebras accepts; other formats are not sent."""
-    json_schema = response_format.get("json_schema")
-    if response_format.get("type") != "json_schema" or not isinstance(json_schema, Mapping):
-        return None
+def _cerebras_response_format(response_format: Mapping[str, Any], *, strict: bool) -> dict[str, Any]:
+    """Return the JSON-schema format with every object closed, as Cerebras structured output requires.
+
+    Cerebras advertises ``json_schema`` structured output, so the format always carries a JSON schema.
+    """
     prepared = deepcopy(dict(response_format))
     schema = prepared["json_schema"]
-    if isinstance(schema.get("schema"), dict):
-        schema.setdefault("strict", strict)
-        _close_cerebras_objects(schema["schema"])
+    schema.setdefault("strict", strict)
+    _close_cerebras_objects(schema["schema"])
     return prepared
 
 
@@ -473,7 +455,6 @@ def chat_request_kwargs(
     model_id: str,
     messages: Sequence[Message],
     tools: Sequence[ToolSpec],
-    native_tools: Sequence[Mapping[str, Any]],
     tool_choice: object,
     response_format: type[BaseModel] | Mapping[str, Any] | None,
     stream: bool,
@@ -489,7 +470,7 @@ def chat_request_kwargs(
     params = _dialect_params(settings, wire, response_format)
     _add_tools(
         params,
-        _chat_tools(tools, native_tools, wire),
+        _chat_tools(tools, wire),
         tool_choice,
         model_id=model_id,
         settings=settings,

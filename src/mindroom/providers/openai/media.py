@@ -167,16 +167,12 @@ def _responses_file_mime_type(file: File, filename: str) -> str:
 
 
 def responses_file_part(file: File) -> dict[str, Any] | None:
-    """Return a Responses ``input_file`` part: a URL reference, inline data, or an uploaded file id."""
+    """Return a Responses ``input_file`` part, a URL reference or inline data, or None for a file without either."""
     filename = file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or "document"
     if file.url:
         return {"type": "input_file", "file_url": file.url}
-    if file.filepath is not None or file.content is not None:
-        data = _content_bytes(file)
-        if data is None:
-            return None
-        data_url = f"data:{_responses_file_mime_type(file, filename)};base64,{base64.b64encode(data).decode('utf-8')}"
-        return {"type": "input_file", "filename": filename, "file_data": data_url}
-    if file.id.startswith("file-"):
-        return {"type": "input_file", "file_id": file.id}
-    return None
+    data = _content_bytes(file)
+    if data is None:
+        return None
+    data_url = f"data:{_responses_file_mime_type(file, filename)};base64,{base64.b64encode(data).decode('utf-8')}"
+    return {"type": "input_file", "filename": filename, "file_data": data_url}

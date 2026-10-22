@@ -42,13 +42,10 @@ def sdk_failures() -> tuple[type[Exception], ...]:
 
 
 def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
-    """Return the message, code, and type of an OpenAI-style error body."""
+    """Return the message, code, and type of an error body the SDK already unwrapped from its ``error`` envelope."""
     if not isinstance(body, Mapping):
         return (body if isinstance(body, str) and body else None), None, None
     fields = cast("Mapping[str, Any]", body)
-    nested = fields.get("error")
-    if isinstance(nested, Mapping):
-        fields = cast("Mapping[str, Any]", nested)
     message, code, error_type = fields.get("message"), fields.get("code"), fields.get("type")
     return (
         message if isinstance(message, str) else None,

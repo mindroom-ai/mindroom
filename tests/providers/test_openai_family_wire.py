@@ -483,7 +483,7 @@ async def test_responses_failure_after_exposed_output_is_final(
     built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
 
     with pytest.raises(ProviderError) as info:
-        await _turn(built, ModelRequest(messages=[_user()], native_tools=[{"type": "web_search"}]))
+        await _turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.retryable, len(built.requests)) == (retryable, requests)
     assert (info.value.code == "incomplete_stream") is not retryable

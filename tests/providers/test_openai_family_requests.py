@@ -647,21 +647,13 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
     ]
 
 
-@pytest.mark.parametrize(
-    ("file", "expected"),
-    [
-        (
-            File(url="https://example.com/report.pdf", filename="notes.txt"),
-            {"type": "input_file", "file_url": "https://example.com/report.pdf"},
-        ),
-        (File(id="file-document", filename="notes.txt"), {"type": "input_file", "file_id": "file-document"}),
-    ],
-)
-def test_remote_file_references_stay_references(file: File, expected: dict[str, str]) -> None:
-    """Filename inference never turns a remote or uploaded file into a local data block."""
+def test_remote_file_references_stay_references() -> None:
+    """Filename inference never turns a remote file into a local data block."""
+    file = File(url="https://example.com/report.pdf", filename="notes.txt")
+
     replay = _input([Message(role="user", content="Read the attachment.", files=[file])])
 
-    assert replay[0]["content"][1] == expected
+    assert replay[0]["content"][1] == {"type": "input_file", "file_url": "https://example.com/report.pdf"}
 
 
 # --- Usage ----------------------------------------------------------------------------------------------------
