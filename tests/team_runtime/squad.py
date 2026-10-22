@@ -31,6 +31,7 @@ from tests.llm.agno_dict_helpers import expected_run_dict
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord, RunRecord
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -92,7 +93,7 @@ def calculator(*, gate_multiply: bool) -> AdaptedToolkit:
 def member(
     agent_id: str,
     name: str,
-    model: ScriptedModel,
+    model: ModelProvider,
     *toolkits: AdaptedToolkit,
     system: str | None = None,
 ) -> TeamMember:
@@ -109,8 +110,8 @@ def member(
 
 def squad(
     leader: ScriptedModel,
-    writer: ScriptedModel,
-    checker: ScriptedModel,
+    writer: ModelProvider,
+    checker: ModelProvider,
     *,
     mode: TeamMode = TeamMode.COORDINATE,
     team_id: str = "squad",

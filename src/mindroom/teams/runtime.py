@@ -116,7 +116,7 @@ def run_team(
     messages = [spec.system_message, *run_input]
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist)
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=request_template.stream)
         leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
         await _forward(
             drive_run(
@@ -178,7 +178,7 @@ def continue_team(
     decisions.require_consumed()
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(spec, record, ctx, emit, persist)
+        members = _MemberRuns(spec, record, ctx, emit, persist, stream=request_template.stream)
         leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
         prepared = prepare_run_tools(leader)
 
@@ -405,13 +405,18 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
 
 @dataclass(frozen=True, slots=True)
 class _MemberRuns:
-    """Run and resume the members of one team run, forwarding their events tagged with the member."""
+    """Run and resume the members of one team run, forwarding their events tagged with the member.
+
+    ``stream`` is whether the team run's leader requests stream; every member request follows it, as Agno ran and
+    continued each member with its team run's ``stream``.
+    """
 
     spec: TeamSpec
     record: TeamRunRecord
     ctx: RunContext
     emit: Emit
     persist: Persist[AnyRunRecord] | None
+    stream: bool
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input."""
@@ -423,7 +428,7 @@ class _MemberRuns:
             ctx=ctx,
             hooks=member.hooks(False),
             persist=self._capture(ended),
-            request_template=member.request_template,
+            request_template=self._request_template(member),
         )
         return await self._finish(member, ctx.run_id, stream, ended)
 
@@ -437,9 +442,12 @@ class _MemberRuns:
             ctx=self._member_context(paused.run_id),
             hooks=member.hooks(True),
             persist=self._capture(ended),
-            request_template=member.request_template,
+            request_template=self._request_template(member),
         )
         return await self._finish(member, paused.run_id, stream, ended)
+
+    def _request_template(self, member: TeamMember) -> ModelRequest:
+        return replace(member.request_template, stream=self.stream)
 
     def _member_context(self, run_id: str) -> RunContext:
         return RunContext(

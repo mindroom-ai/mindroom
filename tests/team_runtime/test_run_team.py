@@ -8,8 +8,10 @@ failed), ``team-paused`` (a member's call waits for approval), and the streamed 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 from structlog.testing import capture_logs
 
@@ -24,6 +26,7 @@ from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, t
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.providers.gemini_ollama_support import build_adapter, hide_provider_environment, ollama_ndjson
 from tests.team_runtime.squad import (
     PANEL,
     SQUAD,
@@ -40,6 +43,8 @@ from tests.team_runtime.squad import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.llm.usage import MessageMetrics
 
 pytestmark = pytest.mark.asyncio
@@ -51,6 +56,8 @@ def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetric
 
 # A blocking turn's leader requests do not stream, which is how Agno's team knew to run its non-stream delegation.
 _BLOCKING = ModelRequest(messages=(), stream=False)
+
+_OLLAMA_MEMBER = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
 
 
 async def _overloaded() -> None:
@@ -65,6 +72,17 @@ def _silent() -> list[Any]:
 
 def _member_events(events: list[Any], member_id: str) -> list[Any]:
     return [event.event for event in events if isinstance(event, MemberEvent) and event.member_id == member_id]
+
+
+def _delegation_to_both(mode: TeamMode) -> list[Any]:
+    """Return the leader's first turn: the same sub-task to each member, by the mode's delegation tool."""
+    if mode is TeamMode.COLLABORATE:
+        return calls(tool_call("delegate_task_to_members", "call-all", task="Add 2 and 3."), metrics=usage(10, 2))
+    return calls(
+        tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Add 2 and 3."),
+        tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Add 2 and 3."),
+        metrics=usage(10, 2),
+    )
 
 
 async def test_a_coordinate_run_with_a_member_tool_call_stores_agno_s_rows() -> None:
@@ -532,3 +550,78 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_del
     assert record.tools is not None
     assert record.tools[0].result == expected
     assert leader.requests[1].messages[-1].content == expected
+
+
+@pytest.mark.parametrize("mode", [TeamMode.COORDINATE, TeamMode.COLLABORATE])
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
+async def test_every_member_request_streams_exactly_when_the_team_turn_does(mode: TeamMode, stream: bool) -> None:
+    # Agno ran each member with the team run's own ``stream``, so a blocking turn sends no member a streamed request.
+    leader = scripted("leader-model", _delegation_to_both(mode), answer("Both found 5."))
+    writer = scripted("writer-model", calls(tool_call("add", "call-add", a=2, b=3)), answer("5"))
+    checker = scripted("checker-model", answer("5"))
+    team = squad(leader, writer, checker, mode=mode, checker_toolkits=())
+
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert (len(writer.requests), len(checker.requests)) == (2, 1)
+    assert [request.stream for request in (*leader.requests, *writer.requests, *checker.requests)] == [stream] * 5
+
+
+async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_without_its_thinking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A thinking model's ``<think>`` text stays the member's reasoning, as Agno's non-stream member run split it.
+    hide_provider_environment(monkeypatch)
+    reply = "<think>Five has two divisors.</think>Five is prime."
+    sent: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        # Ollama puts a thinking model's tags in the content, whether the reply streams or arrives whole.
+        body = json.loads(request.content)
+        sent.append(body)
+        done = {
+            "model": _OLLAMA_MEMBER["id"],
+            "created_at": "2026-10-20T00:00:00Z",
+            "done": True,
+            "done_reason": "stop",
+            "message": {"role": "assistant", "content": reply},
+            "prompt_eval_count": 7,
+            "eval_count": 5,
+        }
+        if not body["stream"]:
+            return httpx.Response(200, json=done)
+        text = {key: done[key] for key in ("model", "created_at", "message")} | {"done": False}
+        return ollama_ndjson(text, done | {"message": {"role": "assistant", "content": ""}})
+
+    leader = scripted(
+        "leader-model",
+        _delegate("call-w", "writer", "Is five prime?", metrics=usage(10, 2)),
+        answer("Yes."),
+    )
+    writer = build_adapter(_OLLAMA_MEMBER, tmp_path, respond)
+    team = squad(leader, writer, scripted("checker-model"), writer_toolkits=())
+
+    events, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            request_template=_BLOCKING,
+        ),
+    )
+
+    assert leader.requests[1].messages[-1].content == "Five is prime."
+    assert record.tools is not None
+    assert record.tools[0].result == "Five is prime."
+    [member] = member_records(events)
+    assert (member.content, member.messages[-1].reasoning_content) == ("Five is prime.", "Five has two divisors.")
+    assert [body["stream"] for body in sent] == [False]
