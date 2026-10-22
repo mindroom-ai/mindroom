@@ -14,11 +14,12 @@ import pytest
 from agno.agent import Agent  # noqa: TC002 - pydantic resolves the annotations at wrap time.
 from agno.media import File as AgnoFile
 from agno.media import Image as AgnoImage
+from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
-from mindroom.llm.media import Image
+from mindroom.llm.media import Image, Video
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
@@ -188,12 +189,14 @@ async def test_middleware_rewrites_cannot_replace_injected_objects() -> None:
 
 @pytest.mark.asyncio
 async def test_result_media_comes_back_owned() -> None:
-    """``ToolResult`` media reaches the outcome as owned media."""
+    """``ToolResult`` media reaches the outcome as owned media, as the attachments and fal tools return it."""
+    clip = b"\x00\x00\x00\x18ftypmp42"
 
     def tool() -> ToolResult:
         return ToolResult(
             content="made",
             images=[AgnoImage(url="https://example.invalid/out.png", id="out", alt_text="out")],
+            videos=[AgnoVideo(content=clip, mime_type="video/mp4", format="mp4", id="clip")],
             files=[AgnoFile(content=b"data", mime_type="text/plain", filename="out.txt")],
         )
 
@@ -203,6 +206,7 @@ async def test_result_media_comes_back_owned() -> None:
 
     assert outcome.content == "made"
     assert outcome.images == (Image(id="out", url="https://example.invalid/out.png", alt_text="out"),)
+    assert outcome.videos == (Video(id="clip", content=clip, mime_type="video/mp4", format="mp4"),)
     [file] = outcome.files
     assert (file.content, file.mime_type, file.filename) == (b"data", "text/plain", "out.txt")
 
@@ -303,6 +307,18 @@ async def test_generators_are_drained_into_text_and_media() -> None:
     assert sync_outcome.images == (Image(id="a", url="https://example.invalid/a.png"),)
     assert async_outcome == ToolOutcome(content="012!")
     assert closed == ["sync", "async"]
+
+
+@pytest.mark.asyncio
+async def test_a_returned_iterator_is_drained_like_a_generator() -> None:
+    """A synchronous tool that returns an iterator without being a generator is drained too, as Agno drained any."""
+
+    def letters() -> Iterator[str]:
+        return iter(["a", "b"])
+
+    [function] = _functions(letters).values()
+
+    assert await run_tool_call(function, {}, _context()) == "ab"
 
 
 @pytest.mark.asyncio
