@@ -57,20 +57,29 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
 
 
 async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[BackgroundJob]) -> None:
-    """Mark noticed cancelled jobs acknowledged: a cancellation has no result to collect."""
+    """Mark noticed cancelled jobs acknowledged: a cancellation has no result to collect.
+
+    An acknowledgement can fail when the job expired or lost its access after it was listed, or when its save fails;
+    the reply carries on, and a later reply notices the unacknowledged cancellation again.
+    """
     for job in jobs:
         if job.status != "cancelled":
             continue
-        waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth, timeout=0)
-        if waited.claim is None:
-            continue
         try:
-            await runtime.acknowledge_wait(job.job_id, waited.claim)
+            await _acknowledge_cancellation(runtime, job)
         except Exception:
-            # Unacknowledged, the cancellation is noticed again by a later reply.
             logger.warning("Background job cancellation was not acknowledged", job_id=job.job_id, exc_info=True)
-        finally:
-            await runtime.release_wait(job.job_id, waited.claim)
+
+
+async def _acknowledge_cancellation(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
+    """Claim one cancelled job's outcome and mark it consumed, releasing the claim either way."""
+    waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth, timeout=0)
+    if waited.claim is None:
+        return
+    try:
+        await runtime.acknowledge_wait(job.job_id, waited.claim)
+    finally:
+        await runtime.release_wait(job.job_id, waited.claim)
 
 
 async def _unnoticed_notice(notices: JobNotices) -> str | None:

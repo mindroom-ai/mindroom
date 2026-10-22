@@ -6,9 +6,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sqlite3
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
 
 import pytest
@@ -1548,6 +1549,41 @@ async def test_a_fold_that_loses_its_append_reports_the_change_and_keeps_the_req
     assert lifecycle.events[1].failure_reason == "The conversation changed during compaction."
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
     assert segments_of(storage, TEST_AGENT_SCOPE.key) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+@pytest.mark.parametrize("failing", ["read", "append"])
+async def test_a_storage_failure_while_folding_costs_no_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """A fold whose stored conversation cannot be read or appended to stores nothing and sends the turn whole."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    failures: list[str] = []
+
+    def locked(*_args: object, **_kwargs: object) -> Never:
+        failures.append(failing)
+        msg = "database is locked"
+        raise sqlite3.OperationalError(msg)
+
+    if failing == "read":
+        monkeypatch.setattr(mid_turn_compaction, "read_fold_basis", locked)
+    else:
+        monkeypatch.setattr(compaction, "append_fold", locked)
+
+    output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
+
+    # The run tries once, then sends every later request uncompacted.
+    assert failures == [failing]
+    assert output.status is RunStatus.completed
+    assert str(output.content).endswith("done")
+    assert [request.roles.count("tool") for request in model.requests] == [0, 1, 2, 3, 4, 5]
+    assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
