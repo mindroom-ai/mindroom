@@ -1,10 +1,10 @@
 """Only the tool and knowledge-reader boundary under ``src/mindroom`` imports Agno.
 
 Agno stays MindRoom's tool library: ``Toolkit``, ``Function``, ``@tool``, and ``ToolResult`` remain the tool authoring
-API, and Agno's knowledge readers stay. The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the
-skills toolkit, and the knowledge reader module may import Agno; ``logging_config`` may too, because it routes Agno's
-loggers, which vendor toolkits log through. Every other module must take Agno's tool types from
-``mindroom.tool_system.agno_toolkits``.
+API, and Agno's knowledge readers stay. The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter and
+the toolkit connection lifecycle beside it, the skills toolkit, and the knowledge reader module may import Agno;
+``logging_config`` may too, because it routes Agno's loggers, which vendor toolkits log through. Every other module
+must take Agno's tool types from ``mindroom.tool_system.agno_toolkits``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,13 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 # Paths under ``src/mindroom`` that may import Agno: whole packages, then single modules.
 ALLOWED_PACKAGES = frozenset({"tools", "custom_tools", "oauth", "mcp"})
 ALLOWED_MODULES = frozenset(
-    {"tool_system/agno_toolkits.py", "tool_system/skills.py", "knowledge/readers.py", "logging_config.py"},
+    {
+        "tool_system/agno_toolkits.py",
+        "tool_system/toolkit_connections.py",
+        "tool_system/skills.py",
+        "knowledge/readers.py",
+        "logging_config.py",
+    },
 )
 # Modules outside the boundary that still import Agno. Remove a path here once its module stops; never add one.
 KNOWN_VIOLATIONS = frozenset(
