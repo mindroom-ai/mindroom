@@ -470,9 +470,7 @@ export function ToolConfigPanel({
             />
             <Label
               htmlFor={`${lazyId}-initial`}
-              className={`cursor-pointer text-sm ${
-                deferEnabled ? "" : "text-muted-foreground"
-              }`}
+              className={`cursor-pointer text-sm ${deferEnabled ? "" : "text-muted-foreground"}`}
             >
               Send on every request
             </Label>
@@ -512,10 +510,7 @@ export function ToolConfigPanel({
                   {field.label}
                 </Label>
                 {isEnabled && (
-                  <Badge
-                    variant="outline"
-                    className="text-[10px] uppercase tracking-wide"
-                  >
+                  <Badge variant="outline" className="text-[11px]">
                     Overridden
                   </Badge>
                 )}

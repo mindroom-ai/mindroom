@@ -18,13 +18,10 @@
   gap: 20px;
 }
 .home-heading h2 {
-  font-family:
-    "Bricolage Grotesque Variable", "Hanken Grotesk Variable", system-ui,
-    sans-serif;
-  font-size: 34px;
+  font-size: 24px;
   font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.03em;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
   outline: none;
 }
 .home-heading p {
@@ -43,7 +40,6 @@
   border: 1px solid hsl(var(--border));
   border-radius: calc(var(--radius) + 8px);
   background: hsl(var(--card));
-  box-shadow: 0 1px 2px hsl(var(--foreground) / 0.04);
 }
 .home-today {
   min-width: 0;
@@ -93,10 +89,10 @@
 }
 .home-run-count strong,
 .home-count-placeholder {
-  font-size: 52px;
+  font-size: 32px;
   font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.04em;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .home-run-count > span {
@@ -272,17 +268,7 @@
   min-height: 100px;
   padding: 14px 10px;
   margin: 0 -10px;
-  border-radius: 12px;
-  background-image: linear-gradient(
-    90deg,
-    transparent,
-    hsl(var(--border) / 0.6) 8%,
-    hsl(var(--border) / 0.6) 92%,
-    transparent
-  );
-  background-size: 100% 1px;
-  background-position: bottom;
-  background-repeat: no-repeat;
+  border-bottom: 1px solid hsl(var(--border) / 0.6);
   text-align: left;
   cursor: pointer;
 }
@@ -402,7 +388,7 @@
     gap: 16px;
   }
   .home-heading h2 {
-    font-size: 28px;
+    font-size: 22px;
   }
   .home-browse {
     font-size: 12px;
@@ -414,7 +400,7 @@
     gap: 10px;
   }
   .home-run-count strong {
-    font-size: 44px;
+    font-size: 28px;
   }
   .home-bars {
     gap: 9px;

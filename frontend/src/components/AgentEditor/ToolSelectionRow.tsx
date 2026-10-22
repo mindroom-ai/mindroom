@@ -69,7 +69,7 @@ export function ToolSelectionRow({
               {hasOverrides && (
                 <Badge
                   variant="secondary"
-                  className="flex-shrink-0 text-[10px] uppercase tracking-wide"
+                  className="flex-shrink-0 text-[11px]"
                 >
                   Customized
                 </Badge>

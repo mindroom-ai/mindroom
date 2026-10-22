@@ -135,9 +135,7 @@ function DetailRow({
 }) {
   return (
     <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-3 border-t border-border py-2.5 first:border-t-0">
-      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
       <dd className="min-w-0 break-words text-sm text-foreground">
         {children}
       </dd>
@@ -598,7 +596,7 @@ export function WorkspaceDirectory() {
                     name={selectedEntity.display_name}
                   />
                   <div className="min-w-0">
-                    <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">
                       {KIND_LABELS[selection.kind]} details
                     </p>
                     <h3 className="break-words text-lg font-semibold">
@@ -684,7 +682,7 @@ export function WorkspaceDirectory() {
                             <span className="text-sm font-medium text-foreground">
                               {item.name}
                             </span>
-                            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                            <span className="text-[11px] font-medium text-muted-foreground">
                               {KIND_LABELS[item.kind]}
                             </span>
                           </span>
