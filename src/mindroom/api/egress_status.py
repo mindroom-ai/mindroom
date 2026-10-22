@@ -13,7 +13,13 @@ from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.egress_broker.env import egress_broker_enabled
-from mindroom.egress_broker.oauth_source import oauth_status, shared_worker_oauth, shared_worker_unavailable_status
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
+from mindroom.egress_broker.oauth_source import (
+    broker_credential_context,
+    oauth_status,
+    shared_worker_oauth,
+    shared_worker_unavailable_status,
+)
 from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import (
@@ -266,11 +272,23 @@ class PutSecretRequest(BaseModel):
     secret: str
 
 
+class OAuthReuseRequest(BaseModel):
+    """Body that lets Agent Keys use a service's connected account.
+
+    The account's tools ask for approval before they write, but the agent's shell and python then act as the account
+    with its full access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledge_approval_bypass: Literal[True]
+
+
 class EgressSourceStatus(BaseModel):
     """Which secret sources a service has in one scope.
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
-    explicit key wins over OAuth.
+    explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
     """
 
     configured: bool
@@ -291,12 +309,15 @@ async def egress_oauth_status(
     manager: CredentialsManager,
     can_manage: bool,
     connection_status: Callable[[OAuthProvider], Awaitable[oauth.OAuthStatusResponse]],
+    reuse_target: Callable[[OAuthProvider], ResolvedWorkerTarget | None],
 ) -> OAuthStatus | None:
     """Return a service's OAuth status as the broker sees it, or None without a provider the registry knows.
 
     `connection_status` loads the provider's state without a token refresh, so a stalled provider never stalls a page:
-    the personal page passes the helper behind the portal's status route, the admin panel the dashboard's. A provider
-    the broker refuses in a shared sandbox (`shared_worker_oauth`) is reported unavailable before any state is read.
+    the personal page passes the helper behind the portal's status route, the admin panel the dashboard's.
+    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` is read through
+    `broker_credential_context` as the broker reads it. A provider the broker refuses in a shared sandbox
+    (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
     connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
     account is not a token the broker can inject, so with one `connected` only reflects a stored personal connection
@@ -316,6 +337,8 @@ async def egress_oauth_status(
         if access == "refused":
             return shared_worker_unavailable_status(provider, runtime_paths)
         result = await connection_status(provider)
+        context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
+        reuse_enabled = await asyncio.to_thread(oauth_reuse_enabled, context, name, provider.id)
         if result.has_service_account_config:
             stored = await asyncio.to_thread(
                 oauth_status,
@@ -334,6 +357,7 @@ async def egress_oauth_status(
                 can_connect=False,
                 reset_required=result.reset_required,
                 service_account=True,
+                reuse_enabled=reuse_enabled,
             )
         else:
             view: oauth.PersonalConnectionView = oauth.personal_connection_view(
@@ -347,6 +371,7 @@ async def egress_oauth_status(
                 account_label=view.account_label,
                 can_connect=view.can_connect,
                 reset_required=view.reset_required,
+                reuse_enabled=reuse_enabled,
             )
     except Exception as exc:
         # OAuth provider code, plugin providers included, can raise anything.

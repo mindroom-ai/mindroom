@@ -24,11 +24,14 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.config.main import Config
 from mindroom.egress_broker import dial
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA, materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.messages import ScopeInfo
+from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
+from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.proxy import EgressBroker
 from mindroom.egress_broker.rules import EgressRules
 from mindroom.egress_broker.secrets import Secret, SecretMissing
@@ -42,6 +45,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.audit import AuditRecord
     from mindroom.egress_broker.secrets import SecretResult
@@ -129,6 +133,20 @@ def connect_account(
         credentials_manager=manager,
         worker_target=store,
     )
+
+
+def allow_oauth_reuse(
+    manager: CredentialsManager,
+    runtime_paths: RuntimePaths,
+    target: ResolvedWorkerTarget | None,
+    service: str = "github",
+    *,
+    provider: OAuthProvider | None = None,
+) -> None:
+    """Let Agent Keys use, for `service`, the `provider` (default GitHub) connection that `target` resolves to."""
+    provider = provider or github_oauth_provider()
+    context = broker_credential_context(provider, Config(), runtime_paths, manager, target)
+    set_oauth_reuse(context, service, provider.id, enabled=True, by="@alice:example.org")
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,9 @@
 """Personal egress credentials API for non-admin users, mounted under `/api/connections/egress`.
 
 It lists every agent the user may use with its services and the preset catalog, sets or deletes a service's key,
-reads, saves, and deletes the services a scope defines for itself, connects or disconnects a service's OAuth account,
-and shows the caller's own brokered requests, or everyone's on a shared or unscoped agent the caller manages.
+reads, saves, and deletes the services a scope defines for itself, connects or disconnects a service's OAuth account
+and allows or stops Agent Keys using it, and shows the caller's own brokered requests, or everyone's on a shared or
+unscoped agent the caller manages.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from mindroom.api.egress_status import (
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
+    OAuthReuseRequest,
     PresetsResponse,
     PutSecretRequest,
     audit_logs_response,
@@ -43,6 +45,8 @@ from mindroom.authorization import is_sender_allowed_for_agent_credential_manage
 from mindroom.config.egress_broker import EgressService
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
+from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
+from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (
@@ -52,6 +56,7 @@ from mindroom.egress_broker.user_services import (
     UserServiceConflictError,
     delete_user_service,
     inactive_user_services,
+    load_user_services,
     save_user_service,
     service_source,
     user_service_hosts_not_allowed,
@@ -322,6 +327,7 @@ async def egress_services_for_agent(
                 config=config,
                 refresh=False,
             ),
+            reuse_target=lambda _provider: target,
         )
         sources = await egress_service_status(manager, target, service, name, oauth_part)
         rows.append(
@@ -552,7 +558,7 @@ def delete_user_service_route(
     name: str,
     requester_id: _EgressUser,
 ) -> None:
-    """Delete one of the scope's own services together with its stored key.
+    """Delete one of the scope's own services together with its stored key and its account's opt-in.
 
     Returns 404 when the scope has no such service. A config service cannot be deleted, so its name is a 409. An
     inactive entry (see `InactiveUserService`) can still be removed: one stored under a name that a config service
@@ -562,7 +568,11 @@ def delete_user_service_route(
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
     operator = agent.config.egress_broker
+    own = None if name in operator.services else load_user_services(agent.manager, agent.target).get(name)
     if delete_user_service(agent.manager, agent.target, name, config_services=operator.services):
+        provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), own)
+        if provider is not None:
+            _set_account_reuse(agent, provider, name, enabled=False, by=requester_id)
         return
     if name in operator.services:
         detail = f"Service '{name}' is configured by your administrator and cannot be deleted here"
@@ -584,8 +594,8 @@ async def _account_provider(
     service: str,
     *,
     connecting: bool,
-) -> OAuthProvider:
-    """Run the connect and disconnect gates in order: same origin, agent and service access, then the provider."""
+) -> tuple[_ResolvedAgent, OAuthProvider]:
+    """Run the account gates in order: same origin, agent and service access, then the provider."""
     _require_egress_same_origin(request)
     agent, egress_service = await asyncio.to_thread(
         _resolve_agent_and_service,
@@ -595,13 +605,20 @@ async def _account_provider(
         service,
         requester_owned_oauth=True,
     )
-    return oauth_provider_of_service(
+    provider = oauth_provider_of_service(
         request,
         egress_service,
         agent.target,
         connecting=connecting,
         headers=CONNECTIONS_HEADERS,
     )
+    return agent, provider
+
+
+def _set_account_reuse(agent: _ResolvedAgent, provider: OAuthProvider, service: str, *, enabled: bool, by: str) -> None:
+    """Allow or stop Agent Keys using the service's account, in the store the broker reads it from for this agent."""
+    context = broker_credential_context(provider, agent.config, agent.runtime_paths, agent.manager, agent.target)
+    set_oauth_reuse(context, service, provider.id, enabled=enabled, by=by)
 
 
 @router.post("/agents/{agent_name}/{service}/connect")
@@ -613,7 +630,7 @@ async def connect_egress_account(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
-    provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
+    _agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
     return await masked_oauth_call(
         oauth.connect(provider.id, request, agent_name=agent_name),
         "Could not start account connection",
@@ -628,12 +645,41 @@ async def disconnect_egress_account(
     requester_id: _EgressUser,
     _body: _EmptyMutation,
 ) -> dict[str, str]:
-    """Reset the OAuth connection of a service's provider for one agent's credential scope."""
-    provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    """Reset the OAuth connection of a service's provider for one agent's credential scope; its opt-in stays."""
+    _agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
     return await masked_oauth_call(
         oauth.disconnect(provider.id, request, agent_name=agent_name),
         "Could not disconnect account",
     )
+
+
+@router.put("/agents/{agent_name}/{service}/oauth-reuse", status_code=204)
+async def allow_egress_account_reuse(
+    request: Request,
+    agent_name: str,
+    service: str,
+    requester_id: _EgressUser,
+    _body: OAuthReuseRequest,
+) -> None:
+    """Let Agent Keys use the service's connected account for this agent; the body must confirm the approval bypass.
+
+    The account's own connection, connected now or later, is then injected for the agent's shell and python. Who may
+    do this, and the 403, 404, and 409 answers, follow the connect route; a body without the confirmation is a 422.
+    """
+    agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    await asyncio.to_thread(_set_account_reuse, agent, provider, service, enabled=True, by=requester_id)
+
+
+@router.delete("/agents/{agent_name}/{service}/oauth-reuse", status_code=204)
+async def stop_egress_account_reuse(
+    request: Request,
+    agent_name: str,
+    service: str,
+    requester_id: _EgressUser,
+) -> None:
+    """Stop Agent Keys using the service's connected account for this agent; the connection stays for its tools."""
+    agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    await asyncio.to_thread(_set_account_reuse, agent, provider, service, enabled=False, by=requester_id)
 
 
 # Request log

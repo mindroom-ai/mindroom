@@ -29,9 +29,11 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker import secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
+from mindroom.egress_broker.env import egress_agent_scope
 from mindroom.egress_broker.oauth_source import resolve_oauth_token
 from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.rules import EgressRules, route_request
+from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.egress_broker.user_services import (
     MAX_RULES_PER_SERVICE,
     MAX_SERVICE_BYTES,
@@ -47,6 +49,7 @@ from mindroom.oauth import credential_store as oauth_credential_store
 from mindroom.oauth import github as github_oauth
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth.github import LOGIN_LOOKUP_TIMEOUT_SECONDS, github_oauth_provider
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
@@ -67,6 +70,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 # --- Fixtures ---
@@ -352,6 +356,30 @@ def _connect_account(portal: dict[str, Any], user: str, agent: str, service: str
     _finish_oauth(portal["client"], connect, provider, portal["headers"][user])
 
 
+def _reuse_url(agent: str, service: str) -> str:
+    return f"{_key_url(agent, service)}/oauth-reuse"
+
+
+def _allow_reuse(portal: dict[str, Any], user: str, agent: str, service: str) -> Any:  # noqa: ANN401
+    """Let Agent Keys use the service's connected account, as `user`, confirming the approval bypass."""
+    return portal["client"].put(
+        _reuse_url(agent, service),
+        headers=portal["headers"][user],
+        json={"acknowledge_approval_bypass": True},
+    )
+
+
+def _stop_reuse(portal: dict[str, Any], user: str, agent: str, service: str) -> Any:  # noqa: ANN401
+    return portal["client"].delete(_reuse_url(agent, service), headers=portal["headers"][user])
+
+
+def _connect_and_allow(portal: dict[str, Any], user: str, agent: str, service: str, provider: str) -> None:
+    """Connect the service's account and let Agent Keys use it."""
+    _connect_account(portal, user, agent, service, provider)
+    allowed = _allow_reuse(portal, user, agent, service)
+    assert allowed.status_code == 204, allowed.text
+
+
 def _oauth_block(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
     """Return the `oauth` block of a Drive service nobody has connected, with `changes` applied."""
     return {
@@ -364,6 +392,7 @@ def _oauth_block(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
         "service_account": False,
         "unavailable_reason": None,
         "shared_worker_opt_in": False,
+        "reuse_enabled": False,
         **changes,
     }
 
@@ -950,7 +979,7 @@ def test_status_shows_the_oauth_connection_and_a_stored_key_wins(oauth_egress_po
     assert before["key_configured"] is False
     assert before["oauth"] == _oauth_block()
 
-    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "drive", "google_drive")
 
     row = _egress_row(portal, "alice", "personal", "drive")
     assert row["active_source"] == "oauth"
@@ -1248,7 +1277,7 @@ def test_requester_scoped_provider_on_a_personal_agent_is_unavailable_on_the_sta
 ) -> None:
     """The static runner serves every user's calls from one process, so a personal agent shares its sandbox there."""
     portal = oauth_egress_portal
-    _connect_account(portal, "bob", "personal", "gh", "github")
+    _connect_and_allow(portal, "bob", "personal", "gh", "github")
     assert _egress_row(portal, "bob", "personal", "gh")["oauth"]["connected"] is True
 
     _restart_with_env(portal, MINDROOM_WORKER_BACKEND="static_runner")
@@ -1295,7 +1324,7 @@ def test_personal_connection_stored_before_a_service_account_can_still_be_discon
 ) -> None:
     """The broker keeps injecting a stored personal token, so the user must be able to revoke it."""
     portal = oauth_egress_portal
-    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "drive", "google_drive")
     _restart_with_env(portal, GOOGLE_SERVICE_ACCOUNT_FILE="service-account.json")
     assert _egress_row(portal, "alice", "personal", "drive")["active_source"] == "oauth"
 
@@ -1308,9 +1337,14 @@ def test_personal_connection_stored_before_a_service_account_can_still_be_discon
 
 
 def test_portal_catalog_includes_the_oauth_status(oauth_egress_portal: dict[str, Any]) -> None:
-    """The Connections portal shows the same OAuth status as the egress page."""
+    """The Connections portal shows the same OAuth status as the egress page, the opt-in included."""
     portal = oauth_egress_portal
     _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    tools_only = {service["name"]: service for service in _catalog_services(portal, "alice", "personal")}["drive"]
+    assert (tools_only["oauth"]["connected"], tools_only["oauth"]["reuse_enabled"]) == (True, False)
+    assert tools_only["active_source"] is None
+    assert tools_only == _egress_row(portal, "alice", "personal", "drive")
+    assert _allow_reuse(portal, "alice", "personal", "drive").status_code == 204
 
     rows = {service["name"]: service for service in _catalog_services(portal, "alice", "personal")}
     drive = rows["drive"]
@@ -1384,11 +1418,11 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
 ) -> None:
     """A stored personal token is injected whatever the service account, so the status matches the broker."""
     portal = oauth_egress_portal
-    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "drive", "google_drive")
     _restart_with_env(portal, GOOGLE_SERVICE_ACCOUNT_FILE="service-account.json")
 
     row = _egress_row(portal, "alice", "personal", "drive")
-    assert row["oauth"] == _oauth_block(connected=True, can_connect=False, service_account=True)
+    assert row["oauth"] == _oauth_block(connected=True, can_connect=False, service_account=True, reuse_enabled=True)
     assert row["active_source"] == "oauth"
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
     token = resolve_oauth_token(
@@ -1511,7 +1545,7 @@ def test_plain_user_of_a_shared_agent_connects_their_own_requester_scoped_accoun
     before = _egress_row(portal, "alice", "shared_dev", "gh")
     assert before["can_manage"] is False
     assert before["oauth"]["can_connect"] is True
-    _connect_account(portal, "alice", "shared_dev", "gh", "github")
+    _connect_and_allow(portal, "alice", "shared_dev", "gh", "github")
 
     alice = _egress_row(portal, "alice", "shared_dev", "gh")
     assert alice["oauth"]["connected"] is True
@@ -1538,6 +1572,232 @@ def test_agent_scoped_provider_on_a_shared_agent_still_needs_management(
     assert _egress_row(portal, "alice", "shared_dev", "drive")["oauth"]["can_connect"] is False
     response = _account_action(portal, "alice", "shared_dev", "drive", action)
     assert response.status_code == 403, response.text
+
+
+def _broker_target(portal: dict[str, Any], requester_id: str, agent: str) -> ResolvedWorkerTarget:
+    """Return the target the broker rebuilds from the proxy token of a tool call by `requester_id` on `agent`.
+
+    It is built from the agent's worker scope and a tool call's identity, independently of the API's own target.
+    """
+    config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
+    scope = egress_agent_scope(config, agent)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent,
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id=None,
+        account_id=None,
+    )
+    target = resolve_worker_target(None if scope == "unscoped" else scope, agent, identity)
+    # An unscoped call's token names the worker it was routed to.
+    claims = WorkerClaims.from_worker_target(replace(target, worker_key=target.worker_key or "v1:local:unscoped:w"))
+    assert claims is not None
+    return claims.to_worker_target()
+
+
+def _broker_reads(portal: dict[str, Any], requester_id: str, agent: str, service: str, provider: str) -> object:
+    """Return what the broker resolves for `service` in a tool call by `requester_id` on `agent`."""
+    return resolve_oauth_token(
+        service=service,
+        provider_id=provider,
+        config=Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]}),
+        runtime_paths=portal["paths"],
+        credentials_manager=get_runtime_credentials_manager(portal["paths"]),
+        worker_target=_broker_target(portal, requester_id, agent),
+    )
+
+
+def _add_agent(portal: dict[str, Any], name: str, **agent: Any) -> None:  # noqa: ANN401
+    """Add an agent with Agent Keys and the Drive tool that Alice and Bob may use, then republish."""
+    portal["payload"]["agents"][name] = _agent_config(
+        name.title(),
+        "Round trip agent",
+        users=("@alice:example.org", "@bob:example.org"),
+        tools=("shell", "egress_credentials"),
+        **agent,
+    )
+    portal["payload"]["agents"][name]["tools"].append({"name": "google_drive", "defer": True})
+    _republish(portal)
+
+
+@pytest.mark.parametrize(
+    ("agent", "agent_config", "user", "service", "provider", "also_reads"),
+    [
+        ("workspace", {"private": "user"}, "alice", "drive", "google_drive", None),
+        ("personal", None, "alice", "drive", "google_drive", None),
+        ("shared_dev", None, "bob", "drive", "google_drive", "alice"),
+        ("unscoped", {"credential_managers": ["@bob:example.org"]}, "bob", "drive", "google_drive", "alice"),
+        ("personal", None, "alice", "gh", "github", None),
+        ("shared_dev", None, "alice", "gh", "github", None),
+    ],
+    ids=["user", "user_agent", "shared", "unscoped", "github-user_agent", "github-shared-opted-in"],
+)
+def test_an_opt_in_written_by_the_api_is_the_one_the_broker_reads(
+    oauth_egress_portal: dict[str, Any],
+    agent: str,
+    agent_config: dict[str, Any] | None,
+    user: str,
+    service: str,
+    provider: str,
+    also_reads: str | None,
+) -> None:
+    """Allowing an account on the page unlocks exactly the store the broker reads for a tool call in that scope.
+
+    Before, the broker answers that Agent Keys may not use the account; after, it gets the token, and so does everyone
+    who shares an agent's own account; stopping it locks the account again.
+    """
+    portal = oauth_egress_portal
+    if agent_config is not None:
+        _add_agent(portal, agent, **agent_config)
+    if service == "gh" and agent == "shared_dev":
+        _opt_in_to_shared_workers(portal)
+    requester = f"@{user}:example.org"
+    requester_owned = provider == "github"
+    off = secrets.SecretMissing(provider=provider, reuse_off=True, requester_owned=requester_owned)
+    _connect_account(portal, user, agent, service, provider)
+
+    before = _broker_reads(portal, requester, agent, service, provider)
+    allowed = _allow_reuse(portal, user, agent, service)
+    after = _broker_reads(portal, requester, agent, service, provider)
+    row = _egress_row(portal, user, agent, service)
+    other = (
+        None if also_reads is None else _broker_reads(portal, f"@{also_reads}:example.org", agent, service, provider)
+    )
+    stopped = _stop_reuse(portal, user, agent, service)
+    locked = _broker_reads(portal, requester, agent, service, provider)
+
+    assert before == off
+    assert (allowed.status_code, stopped.status_code) == (204, 204), (allowed.text, stopped.text)
+    assert isinstance(after, secrets.Secret)
+    assert (row["oauth"]["reuse_enabled"], row["active_source"]) == (True, "oauth")
+    assert other is None or other == after
+    assert locked == off
+
+
+def test_allowing_an_account_requires_acknowledging_the_approval_bypass(oauth_egress_portal: dict[str, Any]) -> None:
+    """Commands act as the account without approval prompts, so enabling needs that confirmation in the body (422)."""
+    portal = oauth_egress_portal
+    url = _reuse_url("personal", "drive")
+    headers = portal["headers"]["alice"]
+
+    responses = [
+        portal["client"].put(url, headers=headers),
+        portal["client"].put(url, headers=headers, json={}),
+        portal["client"].put(url, headers=headers, json={"acknowledge_approval_bypass": False}),
+        portal["client"].put(url, headers=headers, json={"acknowledge_approval_bypass": True, "agent_name": "x"}),
+    ]
+
+    assert [response.status_code for response in responses] == [422] * 4
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_enabled"] is False
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+@pytest.mark.parametrize(
+    ("user", "agent", "service", "expected"),
+    [
+        ("alice", "personal", "drive", 204),
+        ("bob", "shared_dev", "drive", 204),
+        ("alice", "personal", "gh", 204),
+        ("alice", "shared_dev", "drive", 403),
+        ("alice", "shared_dev", "github", 403),
+        ("bob", "shared_dev", "gh", 409),
+        ("carol", "shared_dev", "drive", 404),
+        ("alice", "no_shell", "drive", 404),
+        ("alice", "other_private", "drive", 404),
+        ("alice", "unknown", "drive", 404),
+        ("alice", "personal", "unknown", 404),
+        ("alice", "personal", "github", 404),
+        ("alice", "personal", "ghost", 404),
+    ],
+)
+def test_allowing_and_stopping_an_account_use_the_account_route_gates(
+    oauth_egress_portal: dict[str, Any],
+    method: str,
+    user: str,
+    agent: str,
+    service: str,
+    expected: int,
+) -> None:
+    """Whoever may connect or disconnect the account may allow or stop it; a shared sandbox's refusal is a 409."""
+    portal = oauth_egress_portal
+    body = {"json": {"acknowledge_approval_bypass": True}} if method == "put" else {}
+
+    response = getattr(portal["client"], method)(_reuse_url(agent, service), headers=portal["headers"][user], **body)
+
+    assert response.status_code == expected, response.text
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_a_requester_scoped_account_on_a_shared_agent_is_each_users_own_to_allow(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """With the opt-in a plain user allows their own GitHub account there, which leaves everyone else's alone."""
+    portal = oauth_egress_portal
+    _opt_in_to_shared_workers(portal)
+    _connect_account(portal, "alice", "shared_dev", "gh", "github")
+    _connect_account(portal, "bob", "shared_dev", "gh", "github")
+
+    allowed = _allow_reuse(portal, "alice", "shared_dev", "gh")
+
+    assert allowed.status_code == 204, allowed.text
+    assert _egress_row(portal, "alice", "shared_dev", "gh")["active_source"] == "oauth"
+    bob = _egress_row(portal, "bob", "shared_dev", "gh")
+    assert (bob["oauth"]["connected"], bob["oauth"]["reuse_enabled"], bob["active_source"]) == (True, False, None)
+
+
+@pytest.mark.parametrize("method", ["put", "delete"])
+def test_allowing_and_stopping_an_account_reject_other_origins(
+    oauth_egress_portal: dict[str, Any],
+    method: str,
+) -> None:
+    """Cross-site requests and query selectors cannot change whether Agent Keys uses an account."""
+    portal = oauth_egress_portal
+    url = _reuse_url("personal", "drive")
+    headers = portal["headers"]["alice"]
+    body = {"json": {"acknowledge_approval_bypass": True}} if method == "put" else {}
+    send = getattr(portal["client"], method)
+    no_origin = {key: value for key, value in headers.items() if key != "Origin"}
+
+    assert send(url, headers={**headers, "Origin": "https://evil.example.org"}, **body).status_code == 403
+    assert send(url, headers=no_origin, **body).status_code == 403
+    assert send(f"{url}?agent_name=other", headers=headers, **body).status_code == 400
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_enabled"] is False
+
+
+def test_disconnecting_keeps_the_opt_in_so_the_broker_offers_a_connect_link(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """Disconnect removes the connection, not the opt-in: the broker then offers to connect an account again."""
+    portal = oauth_egress_portal
+    _connect_and_allow(portal, "alice", "personal", "drive", "google_drive")
+
+    disconnect = _account_action(portal, "alice", "personal", "drive", "disconnect")
+    missing = _broker_reads(portal, "@alice:example.org", "personal", "drive", "google_drive")
+
+    assert disconnect.status_code == 200, disconnect.text
+    row = _egress_row(portal, "alice", "personal", "drive")
+    assert (row["oauth"]["connected"], row["oauth"]["reuse_enabled"], row["active_source"]) == (False, True, None)
+    assert isinstance(missing, secrets.SecretMissing)
+    assert (missing.provider, missing.reuse_off) == ("google_drive", False)
+    assert missing.connect_url is not None
+
+
+def test_deleting_a_service_of_ones_own_removes_its_opt_in(oauth_egress_portal: dict[str, Any]) -> None:
+    """A service saved again under the same name starts without the account allowed."""
+    portal = oauth_egress_portal
+    assert _put_service(portal, "alice", "personal", "mygh", _MY_GITHUB).status_code == 204
+    _connect_and_allow(portal, "alice", "personal", "mygh", "github")
+
+    deleted = _delete_service(portal, "alice", "personal", "mygh")
+    assert deleted.status_code == 204, deleted.text
+    assert _put_service(portal, "alice", "personal", "mygh", _MY_GITHUB).status_code == 204
+
+    row = _egress_row(portal, "alice", "personal", "mygh")
+    assert (row["oauth"]["connected"], row["oauth"]["reuse_enabled"], row["active_source"]) == (True, False, None)
 
 
 @pytest.mark.parametrize("action", ["connect", "disconnect"])
@@ -2086,7 +2346,7 @@ def test_user_service_can_connect_its_providers_account(oauth_egress_portal: dic
     portal = oauth_egress_portal
     assert _put_service(portal, "alice", "personal", "mygh", _MY_GITHUB).status_code == 204
 
-    _connect_account(portal, "alice", "personal", "mygh", "github")
+    _connect_and_allow(portal, "alice", "personal", "mygh", "github")
     row = _egress_row(portal, "alice", "personal", "mygh")
     assert row["source"] == "user"
     assert (row["oauth"]["provider"], row["oauth"]["connected"], row["active_source"]) == ("github", True, "oauth")

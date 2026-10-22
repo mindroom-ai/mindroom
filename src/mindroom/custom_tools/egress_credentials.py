@@ -3,8 +3,8 @@
 Listing this tool is what opts an agent into Agent Keys: only its shell and python calls get the broker env.
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
-credentials for, which of them have a key or a connected account in this
-agent's scope, and where to add the missing ones. Each service says whether
+credentials for, which of them have a key or a connected account Agent Keys
+may use in this agent's scope, and where to add the missing ones. Each service says whether
 the administrator defined it (``source: "config"``) or the user added it in
 this scope (``source: "user"``). The tool reports names and flags only; it
 never reads a secret, access token, or connect link into its output.
@@ -68,10 +68,12 @@ class EgressCredentialsTools(Toolkit):
         which credential they need. Returns each configured service with whether this agent has a
         credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
         `source` says who defined the service: `config` for the administrator, `user` for the user's own.
-        A service with nothing configured also says whether the user can connect an account instead of
-        adding a key (`can_connect_account`, with the account's `provider` when it can). The result carries the link
-        where the user connects accounts and adds or replaces keys. Never ask the user to paste a key into
-        the chat; send them to the link instead.
+        `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and
+        `account_connected` whether one is connected. A service with nothing configured also says whether the
+        user can connect an account instead of adding a key (`can_connect_account`), with the account's
+        `provider` when it can or when the account still needs allowing. The result carries the link
+        where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
+        into the chat; send them to the link instead.
         """
         # Only the personal page sets a personal scope's keys and accounts, so without it there is no page to name.
         settable = not is_personal_target(self._worker_target) or personal_page_served(self._runtime_paths)
@@ -93,7 +95,8 @@ class EgressCredentialsTools(Toolkit):
         if not services:
             return self._payload([], link, _NO_SERVICES_NOTE)
         entries = [self._entry(manager, config, name, service) for name, service in services.items()]
-        return self._payload(entries, link, self._note(link, settable=settable))
+        note = self._note(link, settable=settable, shared=not is_personal_target(self._worker_target))
+        return self._payload(entries, link, note)
 
     def _entry(
         self,
@@ -128,23 +131,39 @@ class EgressCredentialsTools(Toolkit):
             )
         except Exception as exc:
             logger.warning("egress_credentials_status_failed", service=name, error_type=type(exc).__name__)
-            return {**entry, "configured": False, "active_source": None, "can_connect_account": False, "provider": None}
-        entry |= {"configured": status.configured, "active_source": status.active_source}
+            return {
+                **entry,
+                "configured": False,
+                "active_source": None,
+                "oauth_reuse": None,
+                "account_connected": False,
+                "can_connect_account": False,
+                "provider": None,
+            }
+        oauth = status.oauth
+        # An account the broker never uses in this sandbox has nothing to allow, like a service without one.
+        reuse = None if oauth is None or oauth.unavailable_reason is not None else oauth.reuse_enabled
+        entry |= {
+            "configured": status.configured,
+            "active_source": status.active_source,
+            "oauth_reuse": reuse,
+            "account_connected": oauth is not None and oauth.connected,
+        }
         if not status.configured:
             # An unreadable stored connection must be reset before a new one can be stored, so it is not connectable.
-            # Like the broker's 403 body, name the provider only when the user can connect it.
-            oauth = status.oauth
-            connectable = oauth is not None and oauth.can_connect and not oauth.reset_required
+            # Like the broker's 403 body, name the provider only when the user can connect or allow it.
+            connectable = oauth is not None and oauth.reuse_enabled and oauth.can_connect and not oauth.reset_required
             entry["can_connect_account"] = connectable
-            entry["provider"] = oauth.provider if oauth is not None and connectable else None
+            entry["provider"] = oauth.provider if oauth is not None and (connectable or reuse is False) else None
         return entry
 
     @staticmethod
-    def _note(link: str | None, *, settable: bool) -> str:
+    def _note(link: str | None, *, settable: bool, shared: bool) -> str:
         """Explain the entries and where the user fixes a missing credential; `settable` is false without such a page.
 
         That is a personal scope where the personal page is not served: the note then says so, as the broker's
-        refusal does, and points at the connect link in the refusal for an account.
+        refusal does, and points at the connect link in the refusal for an account. `shared` (a shared or unscoped
+        agent) says who may allow an account there.
         """
         if settable:
             where = (
@@ -152,19 +171,30 @@ class EgressCredentialsTools(Toolkit):
                 if link is not None
                 else "on the page where egress credentials are managed (ask the operator for it, usually the dashboard Credentials tab)"
             )
+            who = (
+                "On this shared agent only its credential managers or an administrator can allow its accounts, "
+                "except a per-user account such as GitHub, which each user allows for themselves. "
+                if shared
+                else "Only the user can allow it. "
+            )
             fix = (
                 f"When `can_connect_account` is true, the user can connect their `provider` account {where}; "
                 "otherwise, or to use their own key instead, they can add an API key there. "
+                "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service "
+                "(`account_connected` says whether one is connected): allowing it there lets this agent's shell and "
+                "python commands act as that account with its full access, without the approval prompts its tools "
+                f"ask for. {who}"
             )
         else:
             fix = (
                 f"Each user sets this agent's keys and accounts {CONNECTIONS_PAGE_NOT_SERVED} "
                 "When `can_connect_account` is true, the user can still connect their `provider` account at the "
-                "`connect_url` in the broker's refusal. "
+                "`connect_url` in the broker's refusal. `oauth_reuse: false` means Agent Keys may not use the "
+                "`provider` account, and only that page can allow it. "
             )
         return (
-            "Services with `configured: false` have neither an API key nor a connected account in this agent's scope, "
-            "so brokered requests to them fail with `credential_not_configured`. "
+            "Services with `configured: false` have neither an API key nor a connected account Agent Keys may use in "
+            "this agent's scope, so brokered requests to them fail with `credential_not_configured`. "
             "`active_source` names what a configured service uses; an API key wins over a connected account. "
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             f"{fix}"

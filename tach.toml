@@ -1635,6 +1635,7 @@ path = "mindroom.api.egress_broker"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials_target",
+    "mindroom.api.dashboard_credential_scope",
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.egress_broker",

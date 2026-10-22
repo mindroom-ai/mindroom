@@ -206,10 +206,14 @@ class SecretMissing:
 
     `provider` and `connect_url` name the OAuth account the user can connect instead, when the service has a
     connectable provider. The URL carries a one-time connect token, so it stays out of reprs and logs.
+    `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
+    and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
     """
 
     provider: str | None = None
     connect_url: str | None = field(default=None, repr=False)
+    reuse_off: bool = False
+    requester_owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -251,7 +255,8 @@ class OAuthStatus:
     and its provider is never connectable. `unavailable_reason` says why the broker never uses this provider's
     accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
     `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
-    act with the connected account.
+    act with the connected account. `reuse_enabled` says whether Agent Keys may use the connection for this service;
+    without it a connected account serves only its tools.
     """
 
     provider: str
@@ -263,6 +268,7 @@ class OAuthStatus:
     service_account: bool = False
     unavailable_reason: Literal["shared_sandbox"] | None = None
     shared_worker_opt_in: bool = False
+    reuse_enabled: bool = False
 
 
 type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]
@@ -270,7 +276,7 @@ type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatu
 
 @dataclass(frozen=True)
 class EgressServiceStatus:
-    """Which secret source a service has in one scope; an explicit key wins over OAuth."""
+    """Which secret source a service has in one scope; an explicit key wins over an OAuth connection it may use."""
 
     configured: bool
     active_source: Literal["key", "oauth"] | None
@@ -297,7 +303,7 @@ def service_status(
     active_source: Literal["key", "oauth"] | None = None
     if key is not None:
         active_source = "key"
-    elif oauth is not None and oauth.connected:
+    elif oauth is not None and oauth.connected and oauth.reuse_enabled:
         active_source = "oauth"
     return EgressServiceStatus(
         configured=active_source is not None,

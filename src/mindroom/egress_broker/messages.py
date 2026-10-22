@@ -50,6 +50,26 @@ _CONNECTABLE = (
 )
 _SHARED = _SHARED_MISSING + "Only its credential managers ({managers}) can add one, at manage_url."
 _SHARED_WITHOUT_MANAGERS = _SHARED_MISSING + "Only an administrator can add one, at manage_url."
+# A connected account nobody allowed Agent Keys to use for the service: a personal scope's user allows their own, a
+# shared agent's account is its managers' to allow, and a requester's own account on a shared agent is theirs.
+_REUSE_OFF = (
+    "No {service} key is set for this agent, and Agent Keys may not use a connected {provider} account. "
+    "Ask the user to add a key or allow that account at manage_url, then retry."
+)
+_REUSE_OFF_SHARED_ACCOUNT = (
+    "No {service} key is set for this shared agent, and Agent Keys may not use its connected {provider} account. "
+)
+_REUSE_OFF_SHARED = (
+    _REUSE_OFF_SHARED_ACCOUNT
+    + "Only its credential managers ({managers}) can add a key or allow that account, at manage_url."
+)
+_REUSE_OFF_SHARED_WITHOUT_MANAGERS = (
+    _REUSE_OFF_SHARED_ACCOUNT + "Only an administrator can add a key or allow that account, at manage_url."
+)
+_REUSE_OFF_OWN_ACCOUNT = (
+    "No {service} key is set for this shared agent, and Agent Keys may not use the user's own {provider} account. "
+    "Ask the user to allow it at manage_url, then retry."
+)
 _PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can change this, at manage_url."
 _PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
 # The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
@@ -73,6 +93,9 @@ _WITHOUT_PAGE = {
     ),
     "path_not_allowed": _PATH_OUTSIDE + "Each user sets this agent's services " + CONNECTIONS_PAGE_NOT_SERVED,
 }
+_REUSE_OFF_WITHOUT_PAGE = (
+    "No {service} key or allowed {provider} account: each user sets these " + CONNECTIONS_PAGE_NOT_SERVED
+)
 _WITHOUT_PAGE_LINKED = {
     **_WITHOUT_PAGE,
     "credential_not_configured": (
@@ -98,7 +121,7 @@ class ScopeInfo:
     personal_page: bool
 
 
-def _template(
+def _template(  # noqa: PLR0911 - one text per case, checked in order
     code: str,
     *,
     path: str | None,
@@ -107,8 +130,12 @@ def _template(
     personal_page: bool,
     connectable: bool,
     by_operator: bool,
+    reuse_off: bool,
+    requester_owned: bool,
 ) -> str:
     without_page = not (shared or personal_page)
+    if code == "credential_not_configured" and reuse_off:
+        return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -129,6 +156,16 @@ def _template(
         raise ValueError(msg) from None
 
 
+def _reuse_off_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
+    if without_page:
+        return _REUSE_OFF_WITHOUT_PAGE
+    if not shared:
+        return _REUSE_OFF
+    if requester_owned:
+        return _REUSE_OFF_OWN_ACCOUNT
+    return _REUSE_OFF_SHARED if managers else _REUSE_OFF_SHARED_WITHOUT_MANAGERS
+
+
 def refusal_body(
     code: str,
     *,
@@ -142,6 +179,8 @@ def refusal_body(
     personal_page: bool = True,
     connectable: bool = False,
     by_operator: bool = False,
+    reuse_off: bool = False,
+    requester_owned: bool = False,
     **extra: object,
 ) -> dict[str, object]:
     """Return the JSON body for a refusal: its `error` code, `message`, `service` and `provider` when given, and `extra`.
@@ -152,7 +191,9 @@ def refusal_body(
     well as adding a key, and otherwise a `shared` scope names its `managers` (or an administrator when there are
     none); a `shared` `path_not_allowed` names them as the ones who can change the limit. A `path_not_allowed` set by
     the operator's service (`by_operator`) names an administrator whatever the scope, since only an administrator
-    edits it.
+    edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
+    adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
+    requester's own (`requester_owned`).
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
@@ -167,6 +208,8 @@ def refusal_body(
         personal_page=personal_page,
         connectable=connectable,
         by_operator=by_operator,
+        reuse_off=reuse_off,
+        requester_owned=requester_owned,
     )
     if "manage_url" not in template:
         # A body carries the manage link only where its text names it.
@@ -184,6 +227,8 @@ def refusal_body(
         body["service"] = service
     if provider is not None:
         body["provider"] = provider
+    if reuse_off:
+        body["oauth_reuse"] = "off"
     return {**body, **extra, "message": message}
 
 

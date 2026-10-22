@@ -29,7 +29,7 @@ from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, Tool
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup
-from tests.egress_broker.conftest import account_store, connect_account, worker_target
+from tests.egress_broker.conftest import account_store, allow_oauth_reuse, connect_account, worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
 
 if TYPE_CHECKING:
@@ -115,9 +115,24 @@ def _unconfigured(name: str, display_name: str | None = None, **changes: object)
         "source": "config",
         "configured": False,
         "active_source": None,
+        "oauth_reuse": None,
+        "account_connected": False,
         "can_connect_account": False,
         "provider": None,
         **changes,
+    }
+
+
+def _keyed(name: str, display_name: str | None = None, source: str = "config") -> dict[str, object]:
+    """Return the entry of a service without an account login whose key is set."""
+    return {
+        "name": name,
+        "display_name": display_name or name,
+        "source": source,
+        "configured": True,
+        "active_source": "key",
+        "oauth_reuse": None,
+        "account_connected": False,
     }
 
 
@@ -151,6 +166,11 @@ def _connect_github(manager: CredentialsManager) -> None:
     connect_account(manager, account_store(_ALICE), _ACCESS_TOKEN)
 
 
+def _allow_github(runtime_paths: RuntimePaths, requester_id: str = _ALICE) -> None:
+    """Let Agent Keys use the requester's GitHub account for the `github` service."""
+    allow_oauth_reuse(get_runtime_credentials_manager(runtime_paths), runtime_paths, account_store(requester_id))
+
+
 def _configure_drive_client(manager: CredentialsManager) -> None:
     manager.save_credentials(
         "google_drive_oauth_client",
@@ -175,6 +195,7 @@ def _connect_drive(
         client_id="drive-client-id",
         refresh_token="drive-refresh",  # noqa: S106 - test credential
     )
+    allow_oauth_reuse(manager, runtime_paths, target, "drive", provider=provider)
 
 
 def test_reports_configured_status_per_requester_scope(tmp_path: Path) -> None:
@@ -187,10 +208,7 @@ def test_reports_configured_status_per_requester_scope(tmp_path: Path) -> None:
     bob = _list(_tool(runtime_paths, _BOB), context)
 
     assert alice["tool"] == "egress_credentials"
-    assert alice["services"] == [
-        {"name": "github", "display_name": "GitHub", "source": "config", "configured": True, "active_source": "key"},
-        _unconfigured("openai"),
-    ]
+    assert alice["services"] == [_keyed("github", "GitHub"), _unconfigured("openai")]
     assert _statuses(bob) == {"github": False, "openai": False}
 
 
@@ -210,13 +228,7 @@ def test_lists_the_scopes_own_services_next_to_config_services(tmp_path: Path) -
     alice = _list(_tool(runtime_paths), context)
     bob = _list(_tool(runtime_paths, _BOB), context)
 
-    assert _entry(alice, "mine") == {
-        "name": "mine",
-        "display_name": "Mine",
-        "source": "user",
-        "configured": True,
-        "active_source": "key",
-    }
+    assert _entry(alice, "mine") == _keyed("mine", "Mine", source="user")
     assert _entry(alice, "github")["source"] == "config"
     assert _statuses(alice) == {"github": False, "openai": False, "mine": True}
     assert _statuses(bob) == {"github": False, "openai": False}
@@ -469,11 +481,15 @@ def test_an_agent_gets_the_tool_only_while_the_broker_is_on(tmp_path: Path, *, b
 
 
 def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) -> None:
-    """A service whose GitHub account is connected reports `oauth` and no connect hint; other requesters see none."""
+    """A service whose GitHub account is connected and allowed reports `oauth` and no connect hint.
+
+    Other requesters see none.
+    """
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
     manager = get_runtime_credentials_manager(runtime_paths)
     _configure_github_client(manager)
     _connect_github(manager)
+    _allow_github(runtime_paths)
     context = _context(runtime_paths, _PRESET_SERVICES)
 
     alice = _list(_tool(runtime_paths), context)
@@ -485,8 +501,43 @@ def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) ->
         "source": "config",
         "configured": True,
         "active_source": "oauth",
+        "oauth_reuse": True,
+        "account_connected": True,
     }
     assert _entry(bob, "github")["configured"] is False
+
+
+def test_a_connected_account_agent_keys_may_not_use_is_named_until_it_is_allowed(tmp_path: Path) -> None:
+    """A connected account serves only its tools until it is allowed, so the entry says it is connected but not usable.
+
+    The agent can then tell the user what allowing it means; nothing is offered to connect.
+    """
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _configure_github_client(manager)
+    _connect_github(manager)
+    context = _context(runtime_paths, _PRESET_SERVICES)
+
+    connected = _list(_tool(runtime_paths), context)
+    unconnected = _list(_tool(runtime_paths, _BOB), context)
+    _allow_github(runtime_paths, _BOB)
+    allowed_unconnected = _list(_tool(runtime_paths, _BOB), context)
+
+    assert _entry(connected, "github") == _unconfigured(
+        "github",
+        "GitHub",
+        oauth_reuse=False,
+        account_connected=True,
+        provider="github",
+    )
+    assert _entry(unconnected, "github") == _unconfigured("github", "GitHub", oauth_reuse=False, provider="github")
+    assert _entry(allowed_unconnected, "github") == _unconfigured(
+        "github",
+        "GitHub",
+        oauth_reuse=True,
+        can_connect_account=True,
+        provider="github",
+    )
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", None], ids=["shared", "unscoped"])
@@ -514,6 +565,8 @@ def test_github_account_is_not_offered_on_the_static_runner_without_the_opt_in(t
     _connect_github(manager)
     opted_in = {**_PRESET_SERVICES, "github": {"preset": "github", "oauth_on_shared_workers": True}}
 
+    _allow_github(runtime_paths)
+
     refused = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
     allowed = _list(_tool(runtime_paths), _context(runtime_paths, opted_in))
 
@@ -527,6 +580,8 @@ def test_github_account_is_per_requester_on_a_shared_agent_with_the_opt_in(tmp_p
     manager = get_runtime_credentials_manager(runtime_paths)
     _configure_github_client(manager)
     _connect_github(manager)
+    _allow_github(runtime_paths)
+    _allow_github(runtime_paths, _BOB)
     context = _context(
         runtime_paths,
         {**_PRESET_SERVICES, "github": {"preset": "github", "oauth_on_shared_workers": True}},
@@ -551,28 +606,37 @@ def test_explicit_key_wins_over_a_connected_account(tmp_path: Path) -> None:
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
     assert _entry(payload, "github") == {
-        "name": "github",
-        "display_name": "GitHub",
-        "source": "config",
-        "configured": True,
-        "active_source": "key",
+        **_keyed("github", "GitHub"),
+        "oauth_reuse": False,
+        "account_connected": True,
     }
 
 
 def test_unconfigured_service_says_whether_an_account_can_be_connected(tmp_path: Path) -> None:
-    """Without a key or connection, a service with a connectable provider offers to connect it; one without does not."""
+    """Without a key or connection, a service with a connectable provider it may use offers to connect it.
+
+    One without a provider does not.
+    """
     runtime_paths = _runtime_paths(tmp_path)
     _configure_github_client(get_runtime_credentials_manager(runtime_paths))
+    _allow_github(runtime_paths)
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
-    assert _entry(payload, "github") == _unconfigured("github", "GitHub", can_connect_account=True, provider="github")
+    assert _entry(payload, "github") == _unconfigured(
+        "github",
+        "GitHub",
+        oauth_reuse=True,
+        can_connect_account=True,
+        provider="github",
+    )
     assert _entry(payload, "openai") == _unconfigured("openai", "OpenAI")
 
 
 def test_provider_without_a_client_cannot_be_connected(tmp_path: Path) -> None:
     """A provider whose OAuth client is not configured offers no connection and is not named."""
     runtime_paths = _runtime_paths(tmp_path)
+    _allow_github(runtime_paths)
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
@@ -585,9 +649,17 @@ def test_shared_service_account_is_not_injected_so_it_is_not_connected(tmp_path:
     runtime_paths = _runtime_paths(tmp_path, GOOGLE_SERVICE_ACCOUNT_FILE=str(tmp_path / "service-account.json"))
     _configure_drive_client(get_runtime_credentials_manager(runtime_paths))
 
+    allow_oauth_reuse(
+        get_runtime_credentials_manager(runtime_paths),
+        runtime_paths,
+        worker_target(),
+        "drive",
+        provider=google_drive_oauth_provider(),
+    )
+
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _DRIVE_SERVICES))
 
-    assert _entry(payload, "drive") == _unconfigured("drive", "Google Drive")
+    assert _entry(payload, "drive") == _unconfigured("drive", "Google Drive", oauth_reuse=True)
 
 
 def test_google_account_follows_the_agent_scope_not_the_requester(tmp_path: Path) -> None:
@@ -605,7 +677,7 @@ def test_google_account_follows_the_agent_scope_not_the_requester(tmp_path: Path
     assert _entry(shared_alice, "drive")["active_source"] == "oauth"
     assert _entry(shared_bob, "drive")["active_source"] == "oauth"
     assert _entry(per_requester_alice, "drive")["active_source"] is None
-    assert _entry(per_requester_alice, "drive")["can_connect_account"] is True
+    assert _entry(per_requester_alice, "drive")["oauth_reuse"] is False
     assert _entry(per_requester_alice, "drive")["provider"] == "google_drive"
 
     _connect_drive(runtime_paths, manager, "user_agent")
@@ -646,6 +718,7 @@ def test_unreadable_connection_cannot_be_connected_until_reset(tmp_path: Path) -
     manager = get_runtime_credentials_manager(runtime_paths)
     _configure_github_client(manager)
     _connect_github(manager)
+    _allow_github(runtime_paths)
     provider = github_oauth_provider()
     corrupt_oauth_credential_payload(
         _oauth_credential_database_path(
@@ -698,8 +771,14 @@ def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) ->
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
     note = str(payload["note"])
-    assert "neither an API key nor a connected account" in note
+    assert "neither an API key nor a connected account Agent Keys may use" in note
     assert "an API key wins over a connected account" in note
+    assert (
+        "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service "
+        "(`account_connected` says whether one is connected): allowing it there lets this agent's shell and python "
+        "commands act as that account with its full access, without the approval prompts its tools ask for. "
+        "Only the user can allow it."
+    ) in note
     assert (
         "When `can_connect_account` is true, the user can connect their `provider` account at "
         "https://mindroom.example/connections/egress"
@@ -717,3 +796,16 @@ def test_note_without_a_public_url_sends_the_agent_to_the_operator(tmp_path: Pat
     note = str(payload["note"])
     assert "ask the operator for it" in note
     assert "http" not in note
+
+
+@pytest.mark.parametrize("worker_scope", ["shared", None])
+def test_note_on_a_shared_agent_says_who_can_allow_an_account(tmp_path: Path, worker_scope: WorkerScope | None) -> None:
+    """A shared agent's accounts are its managers' to allow, but a per-user account is each user's own."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+
+    payload = _list(_tool(runtime_paths, worker_scope=worker_scope), _context(runtime_paths, _PRESET_SERVICES))
+
+    assert (
+        "On this shared agent only its credential managers or an administrator can allow its accounts, "
+        "except a per-user account such as GitHub, which each user allows for themselves."
+    ) in str(payload["note"])
