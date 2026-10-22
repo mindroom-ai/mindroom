@@ -1479,7 +1479,7 @@ async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_fini
 
 
 class _ExternalProbeToolkit(ProbeToolkit):
-    """The probe whose ``touch`` runs outside the loop, which nothing but a delegation's driver resumes."""
+    """The members' probe with ``touch`` executed outside the loop: a run paused on that call has nothing to resume it."""
 
     def __init__(self) -> None:
         Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
