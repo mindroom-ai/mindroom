@@ -27,12 +27,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.base import Model
-from agno.models.response import ModelResponse
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 
@@ -59,8 +54,9 @@ from mindroom.credentials.manager import CredentialsManager, get_runtime_credent
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
@@ -81,7 +77,7 @@ from mindroom.tool_system.runtime_context import (
     worker_progress_pump_scope,
     worker_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -108,7 +104,7 @@ from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_agent_tool_calls import _catalog, _events
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_KUBERNETES_VALIDATION_SNAPSHOT = {
@@ -784,33 +780,6 @@ def test_worker_proxy_malformed_transport_errors_record_worker_failure(
 
     assert manager.touched == []
     assert manager.failures == [("agent:test", failure_reason)]
-
-
-class _MinimalModel(Model):
-    """Minimal model surface for exercising Agno's async tool execution path."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6492,23 +6461,14 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
     )
     # The sync function runs through its async proxy in async runs, so it can be stopped.
     assert inspect.iscoroutinefunction(tool.get_async_functions()["read_file"].entrypoint)
-    tool = prepend_tool_hook_bridge(
-        tool,
-        build_tool_hook_bridge(
-            HookRegistry.empty(),
-            agent_name="code",
-            dispatch_context=None,
-            config=Config(agents={"code": AgentConfig(display_name="Code")}, models={}),
-            runtime_paths=runtime_paths,
-        ),
+    middleware = build_tool_hook_middleware(
+        HookRegistry.empty(),
+        agent_name="code",
+        dispatch_context=None,
+        config=Config(agents={"code": AgentConfig(display_name="Code")}, models={}),
+        runtime_paths=runtime_paths,
     )
-
-    model = _MinimalModel(id="fake-model", provider="fake")
-    agent = Agent(id="code", model=model)
-    parsed_tools = parse_tools(agent, [tool], model, async_mode=True)
-    read_file = next(
-        function for function in parsed_tools if isinstance(function, Function) and function.name == "read_file"
-    )
+    read_file = next(function for function in adapt_toolkit(tool).functions if function.name == "read_file")
 
     progress_queue: asyncio.Queue[object] = asyncio.Queue()
     with (
@@ -6521,12 +6481,11 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
         worker_progress_pump_scope(asyncio.get_running_loop(), progress_queue),
     ):
         call_task = asyncio.create_task(
-            model.arun_function_call(
-                FunctionCall(
-                    function=read_file,
-                    arguments={"file_name": "demo.txt"},
-                    call_id="call-1",
-                ),
+            execute_tool_call(
+                read_file,
+                {"file_name": "demo.txt"},
+                ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+                middleware=(middleware,),
             ),
         )
 
@@ -6539,10 +6498,10 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
         finally:
             # Join the worker before restoring patches, including on assertion failure.
             release_execute.set()
-            success, _timer, _function_call, result = await call_task
+            outcome = await call_task
 
-    assert success is True
-    assert result.result == "proxied"
+    assert not outcome.is_error
+    assert outcome.content == "proxied"
 
 
 def test_worker_routed_tool_error_does_not_record_worker_failure(

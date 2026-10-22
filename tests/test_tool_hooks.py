@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -46,6 +46,7 @@ from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution_authority import authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -57,12 +58,7 @@ from mindroom.tool_system.runtime_context import (
     emit_custom_event,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_hooks import (
-    SyncToolCompletionTracker,
-    build_tool_hook_bridge,
-    prepend_tool_hook_bridge,
-    track_sync_tool_completion,
-)
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -84,12 +80,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
-
-type SyncBridgeEvent = (
-    tuple[Literal["before"], str, dict[str, str], str]
-    | tuple[Literal["tool"], str]
-    | tuple[Literal["after"], str, bool, str]
-)
+    from mindroom.tool_system.invocation import ToolOutcome
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
 
@@ -285,6 +276,21 @@ def _first_function(toolkit: Toolkit) -> Function:
     functions = [*toolkit.functions.values(), *toolkit.async_functions.values()]
     assert functions
     return functions[0]
+
+
+async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry) -> ToolOutcome:
+    """Run the toolkit's first function with ``text="hi"`` through the tool-call policy, as the loop runs a call."""
+    middleware = build_tool_hook_middleware(
+        registry,
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+    )
+    return await execute_tool_call(
+        adapt_function(_first_function(toolkit)),
+        {"text": "hi"},
+        ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1"),
+        middleware=(middleware,),
+    )
 
 
 def test_tool_events_are_registered_with_expected_timeouts() -> None:
@@ -551,150 +557,6 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
         tool_name="explode",
         correlation_id="corr-runtime",
     )
-
-
-def test_sync_function_call_execute_runs_tool_hooks(tmp_path: Path) -> None:
-    """Sync FunctionCall.execute() should still fire the bridge hooks."""
-    seen: list[SyncBridgeEvent] = []
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        seen.append(("before", ctx.tool_name, dict(ctx.arguments), ctx.thread_id))
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def after(ctx: ToolAfterCallContext) -> None:
-        seen.append(("after", ctx.result, ctx.blocked, ctx.thread_id))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            seen.append(("tool", text))
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    with (
-        patch("agno.tools.function.log_warning") as mock_log_warning,
-        tool_runtime_context(_tool_runtime_context(tmp_path)),
-        tool_execution_identity(_execution_identity()),
-    ):
-        result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-
-    assert result.status == "success"
-    assert result.result == "HI"
-    mock_log_warning.assert_not_called()
-    assert seen == [
-        ("before", "echo", {"text": "hi"}, "$resolved-thread"),
-        ("tool", "hi"),
-        ("after", "HI", False, "$resolved-thread"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_sync_function_call_execute_inside_running_loop_unwraps_tool_hook_result(tmp_path: Path) -> None:
-    """Sync FunctionCall.execute() must not leak async bridge sentinels inside a running loop."""
-    seen: list[SyncBridgeEvent] = []
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        seen.append(("before", ctx.tool_name, dict(ctx.arguments), ctx.thread_id))
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def after(ctx: ToolAfterCallContext) -> None:
-        seen.append(("after", ctx.result, ctx.blocked, ctx.thread_id))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            seen.append(("tool", text))
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    with (
-        patch("agno.tools.function.log_warning") as mock_log_warning,
-        tool_runtime_context(_tool_runtime_context(tmp_path)),
-        tool_execution_identity(_execution_identity()),
-    ):
-        result = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").execute()
-
-    assert result.status == "success"
-    assert result.result == "HI"
-    mock_log_warning.assert_not_called()
-    assert seen == [
-        ("before", "echo", {"text": "hi"}, "$resolved-thread"),
-        ("tool", "hi"),
-        ("after", "HI", False, "$resolved-thread"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_function_call_aexecute_runs_tool_hooks(tmp_path: Path) -> None:
-    """Async execution should still run the bridge for sync tool entrypoints."""
-    seen: list[SyncBridgeEvent] = []
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        seen.append(("before", ctx.tool_name, dict(ctx.arguments), ctx.thread_id))
-
-    @hook(EVENT_TOOL_AFTER_CALL)
-    async def after(ctx: ToolAfterCallContext) -> None:
-        seen.append(("after", ctx.result, ctx.blocked, ctx.thread_id))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            seen.append(("tool", text))
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
-        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
-
-    assert result.status == "success"
-    assert result.result == "HI"
-    assert seen == [
-        ("before", "echo", {"text": "hi"}, "$resolved-thread"),
-        ("tool", "hi"),
-        ("after", "HI", False, "$resolved-thread"),
-    ]
 
 
 @pytest.mark.asyncio
@@ -1413,8 +1275,8 @@ async def _tick_until_stopped(stop: asyncio.Event, ticks: list[None]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path: Path) -> None:
-    """The real async chain offloads only the synchronous leaf while loop work advances."""
+async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(tmp_path: Path) -> None:
+    """The middleware offloads only the synchronous tool body while loop work advances."""
     request_thread = threading.get_ident()
     request_loop = asyncio.get_running_loop()
     seen: list[tuple[str, int, int] | tuple[str, str]] = []
@@ -1458,12 +1320,6 @@ async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path
         assert current_loop is request_loop
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
-    assert bridge is not None
 
     class DemoToolkit(Toolkit):
         def __init__(self) -> None:
@@ -1476,24 +1332,19 @@ async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path
             time.sleep(0.05)
             return text.upper()
 
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-
     ticker_task = asyncio.create_task(_tick_until_stopped(stop_ticking, ticks))
     try:
         with (
             tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
             tool_execution_identity(_execution_identity()),
-            track_sync_tool_completion(SyncToolCompletionTracker()),
         ):
-            result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute()
+            outcome = await _run_echo_through_middleware(DemoToolkit(), registry)
     finally:
         stop_ticking.set()
         await ticker_task
 
-    assert result.status == "success"
-    assert result.result == "HI"
+    assert not outcome.is_error
+    assert outcome.content == "HI"
     assert seen == [
         ("hook", request_thread, id(request_loop)),
         ("sender", request_thread, id(request_loop)),
@@ -1503,32 +1354,6 @@ async def test_sync_tool_aexecute_keeps_hooks_on_loop_and_body_off_loop(tmp_path
     ]
     assert tool_thread_ids[0] != request_thread
     assert ticks
-
-
-@pytest.mark.asyncio
-async def test_sync_tool_aexecute_keeps_original_agno_chain_without_background_tracker(tmp_path: Path) -> None:
-    """The broker's cancellation bridge must not rewrite ordinary agent tool execution."""
-    request_thread = threading.get_ident()
-    body_threads: list[int] = []
-    bridge = build_tool_hook_bridge(HookRegistry.empty(), agent_name="code")
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            body_threads.append(threading.get_ident())
-            return text.upper()
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
-        result = await FunctionCall(function=function, arguments={"text": "hi"}, call_id="ordinary").aexecute()
-
-    assert result.status == "success"
-    assert result.result == "HI"
-    assert body_threads == [request_thread]
 
 
 @pytest.mark.asyncio
@@ -1584,8 +1409,8 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
 
 
 @pytest.mark.asyncio
-async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_body(tmp_path: Path) -> None:
-    """Cancellation before the synchronous leaf remains ordinary task cancellation."""
+async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_its_body(tmp_path: Path) -> None:
+    """Cancellation before the synchronous tool body remains ordinary task cancellation."""
     before_started = asyncio.Event()
     body_called = False
 
@@ -1595,11 +1420,6 @@ async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_b
         await asyncio.Event().wait()
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
 
     class DemoToolkit(Toolkit):
         def __init__(self) -> None:
@@ -1610,13 +1430,8 @@ async def test_sync_tool_aexecute_cancellation_during_before_hook_never_starts_b
             body_called = True
             return text.upper()
 
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    prepend_tool_hook_bridge(toolkit, bridge)
     with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
-        execution = asyncio.create_task(
-            FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1").aexecute(),
-        )
+        execution = asyncio.create_task(_run_echo_through_middleware(DemoToolkit(), registry))
         await before_started.wait()
         execution.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -2212,52 +2027,6 @@ async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> No
         ("after", True),
         ("after", False),
     ]
-
-
-@pytest.mark.asyncio
-async def test_prepend_tool_hook_bridge_preserves_existing_function_hooks() -> None:
-    """The MindRoom bridge should prepend without overwriting existing Agno tool hooks."""
-    seen: list[str] = []
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        del ctx
-        seen.append("bridge-before")
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
-    assert bridge is not None
-
-    class DemoToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="demo", tools=[self.echo])
-
-        async def echo(self, text: str) -> str:
-            seen.append("tool")
-            return text
-
-    async def existing_hook(name: str, func: object, args: dict[str, object]) -> object:
-        seen.append(f"existing-before:{name}")
-        result = await func(**args)
-        seen.append("existing-after")
-        return result
-
-    toolkit = DemoToolkit()
-    function = _first_function(toolkit)
-    function.tool_hooks = [existing_hook]
-    prepend_tool_hook_bridge(toolkit, bridge)
-
-    assert function.tool_hooks is not None
-    assert function.tool_hooks[0] is not existing_hook
-    assert callable(function.tool_hooks[0])
-    assert function.tool_hooks[1] is existing_hook
-
-    execution = FunctionCall(function=function, arguments={"text": "hi"}, call_id="call-1")
-    result = await execution.aexecute()
-
-    assert result.status == "success"
-    assert result.result == "hi"
-    assert seen == ["bridge-before", "existing-before:echo", "tool", "existing-after"]
 
 
 @pytest.mark.asyncio

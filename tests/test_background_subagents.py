@@ -12,7 +12,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools.function import FunctionCall
 from agno.tools.toolkit import Toolkit
 
 from mindroom.delegation.background import (
@@ -34,6 +33,8 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
+from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from tests.conftest import test_runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -470,8 +471,8 @@ async def test_recovery_interrupts_running_work_and_cancels_only_on_request(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_sync_agno_tool_checkpoint_respects_cancellation_across_loops(cancelled: bool) -> None:
-    """Threaded tools cross a cancellation checkpoint without waiting on an unrelated loop."""
+async def test_a_sync_tool_call_stops_at_its_cancelled_jobs_checkpoint(cancelled: bool) -> None:
+    """A synchronous tool's call passes the tool-call policy's job checkpoint, which a cancelled job stops it at."""
     control = JobControl()
     if cancelled:
         control.cancel()
@@ -481,21 +482,16 @@ async def test_sync_agno_tool_checkpoint_respects_cancellation_across_loops(canc
         results.append("executed")
         return "done"
 
-    toolkit = Toolkit(name="test", tools=[tool])
-    tool_hooks.prepend_tool_hook_bridge(
-        toolkit,
-        tool_hooks.build_tool_hook_bridge(HookRegistry.empty(), agent_name="parent"),
-    )
-    call = FunctionCall(function=toolkit.functions["tool"], arguments={}, call_id="sync-call")
+    function = adapt_function(Toolkit(name="test", tools=[tool]).functions["tool"])
+    middleware = (tool_hooks.build_tool_hook_middleware(HookRegistry.empty(), agent_name="parent"),)
+    context = ToolCallContext(run_id="run", session_id="session", call_id="sync-call")
     with job_control_context(control):
         if cancelled:
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.to_thread(call.execute)
+                await run_tool_call(function, {}, context, middleware=middleware)
             assert results == []
         else:
-            result = await asyncio.to_thread(call.execute)
-            assert result.status == "success"
-            assert result.result == "done"
+            assert await run_tool_call(function, {}, context, middleware=middleware) == "done"
             assert results == ["executed"]
 
 

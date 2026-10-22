@@ -31,6 +31,7 @@ from mindroom.hooks import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import format_tool_combined
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
@@ -42,7 +43,7 @@ from mindroom.tool_system.output_files import (
     wrap_toolkit_for_output_files,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1066,7 +1067,18 @@ def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> No
     assert not list(tmp_path.iterdir())
 
 
-def test_before_hook_sees_mindroom_output_path_and_after_hook_receives_receipt(tmp_path: Path) -> None:
+async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments: dict[str, object]) -> object:
+    """Run the toolkit's first function through the tool-call policy and return what the call returned."""
+    return await run_tool_call(
+        adapt_function(_first_function(toolkit)),
+        arguments,
+        ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1"),
+        middleware=(build_tool_hook_middleware(registry, agent_name="code"),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_before_hook_sees_mindroom_output_path_and_after_hook_receives_receipt(tmp_path: Path) -> None:
     marker = "ISSUE200_HOOK_MARKER"
     seen: list[tuple[str, object]] = []
 
@@ -1080,23 +1092,19 @@ def test_before_hook_sees_mindroom_output_path_and_after_hook_receives_receipt(t
 
     toolkit = _EchoToolkit(result=marker)
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-    bridge = build_tool_hook_bridge(HookRegistry.from_plugins([_plugin(before, after)]), agent_name="code")
-    prepend_tool_hook_bridge(toolkit, bridge)
+    registry = HookRegistry.from_plugins([_plugin(before, after)])
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "hook.txt"},
-        call_id="call-1",
-    ).execute()
+    result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "hook.txt"})
 
     assert marker in (tmp_path / "hook.txt").read_text(encoding="utf-8")
     assert seen[0] == ("before", {"text": "hi", OUTPUT_PATH_ARGUMENT: "hook.txt"})
     assert seen[1][0] == "after"
     assert marker not in str(seen[1][1])
-    assert seen[1][1] == result.result
+    assert seen[1][1] == result
 
 
-def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_path: Path) -> None:
     seen: list[object] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -1109,15 +1117,10 @@ def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_path: P
 
     toolkit = _EchoToolkit(seen, result="should not run")
     wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-    bridge = build_tool_hook_bridge(HookRegistry.from_plugins([_plugin(before, after)]), agent_name="code")
-    prepend_tool_hook_bridge(toolkit, bridge)
+    registry = HookRegistry.from_plugins([_plugin(before, after)])
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "blocked.txt"},
-        call_id="call-1",
-    ).execute()
+    result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "blocked.txt"})
 
     assert not (tmp_path / "blocked.txt").exists()
-    assert seen == [("after", True, result.result)]
-    assert "[TOOL CALL DECLINED]" in str(result.result)
+    assert seen == [("after", True, result)]
+    assert "[TOOL CALL DECLINED]" in str(result)

@@ -31,7 +31,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.hooks import HookRegistry
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import agno_execution, results
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -63,8 +62,6 @@ from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import (
-    build_tool_hook_bridge,
-    prepend_tool_hook_bridge,
     run_async_entrypoint_blocking_call,
 )
 from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
@@ -248,7 +245,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
     managed: bool,
     background_after: float | None,
 ) -> None:
-    """The registered sync hook bridge must not give its job a foreign-loop completion task."""
+    """A registered synchronous tool completes through the SDK dispatch, inline and as its job."""
     reply_returned = _hold_job_outcomes(monkeypatch) if background_after == 0 else threading.Event()
     (tmp_path / "input.txt").write_text("registered sync result\n")
     paths = _runtime_paths(tmp_path)
@@ -269,7 +266,6 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
         disable_sandbox_proxy=True,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
-    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
     bind_toolkit_authority(toolkit, authored_name="coding")
     arguments: dict[str, object] = {"path": "input.txt"}
     if managed:
@@ -333,7 +329,6 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         disable_sandbox_proxy=True,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
-    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
     bind_toolkit_authority(toolkit, authored_name="shell")
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
     if managed:
@@ -802,8 +797,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_bridge", [False, True])
-async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Path, with_bridge: bool) -> None:
+async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Path) -> None:
     """A cancel returns at once, and cannot settle or release resources before the actual sync worker exits."""
     started, release = threading.Event(), threading.Event()
     finished = threading.Event()
@@ -827,8 +821,6 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
     )
     install_tool_job_execution(model)
     toolkit = Toolkit(name="slow", tools=[slow_tool])
-    if with_bridge:
-        prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
     bind_toolkit_authority(toolkit, authored_name="slow")
     agent = Agent(id="leader", model=model, tools=[toolkit])
 

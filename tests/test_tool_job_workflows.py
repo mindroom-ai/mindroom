@@ -19,7 +19,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
-from mindroom.hooks import HookRegistry
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import (
@@ -33,7 +32,6 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.delegation_helpers import DelegationModel, _call
 from tests.test_dynamic_workflows import _make_context, _workflow_spec
 from tests.tool_job_helpers import (
@@ -46,7 +44,7 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
 
@@ -181,11 +179,9 @@ async def test_workflow_participant_tools_run_under_their_own_grants(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parallel", [False, True])
-@pytest.mark.parametrize("async_hook", [False, True])
 async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     tmp_path: Path,
     parallel: bool,
-    async_hook: bool,
 ) -> None:
     """Cancellation keeps resources until every started nested thread has exited."""
     context = _make_context(tmp_path)
@@ -208,13 +204,6 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
         return str(value)
 
     toolkit = Toolkit(name="nested", tools=[leaf])
-    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="general"))
-    if async_hook:
-
-        async def around(func: Callable[..., Awaitable[str]], args: dict[str, object]) -> str:
-            return await func(**args)
-
-        toolkit.functions["leaf"].tool_hooks.append(around)
     calls = [_call("leaf", str(value), value=value) for value in (1, 2)]
     child_model = DelegationModel(
         id="test",
