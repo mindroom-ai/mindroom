@@ -152,9 +152,9 @@ export function unsetNote(service: EgressCredentialService): string | null {
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
   const oauth = service.oauth;
-  // Where Agent Keys can use an account, the account stops refusals as well as a key does. A
-  // service account is never one, but a personal account connected before it still is.
-  if (oauth && oauth.unavailable_reason === null) {
+  // An account Agent Keys can use stops refusals as well as a key does. A service account is
+  // never one, but a personal account connected before it still is.
+  if (oauth) {
     if (oauth.connected && !oauth.reset_required)
       return "Requests are refused until a key is set or this account is used for Agent Keys.";
     // The server only says an account can be connected where this viewer may connect one.

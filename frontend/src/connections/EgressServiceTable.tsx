@@ -85,7 +85,7 @@ export function ServiceGroupHeading({ label }: { label: string }) {
 /** A host, variable, or header name, set apart as code; it wraps only when wider than its cell. */
 function Code({ children }: { children: ReactNode }) {
   return (
-    <code className="inline-block max-w-full rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground wrap-anywhere">
+    <code className="inline-block rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground wrap-anywhere">
       {children}
     </code>
   );

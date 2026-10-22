@@ -1990,7 +1990,7 @@ describe("what a row says about how the key is sent", () => {
       "Requests are refused until a key is set or this account is used for Agent Keys.",
     ],
     [
-      "a connected account the viewer cannot allow",
+      "a connected account while connecting another is unavailable",
       {
         ...toolsOnly,
         can_connect: false,
@@ -2020,6 +2020,11 @@ describe("what a row says about how the key is sent", () => {
         can_connect: false,
       },
       "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a service account beside a personal connection that needs a reset",
+      { service_account: true, can_connect: false, reset_required: true },
+      "Requests are refused until a key is set.",
     ],
     [
       "a service account with no personal account",
