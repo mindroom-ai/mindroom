@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli import minimal_mode_preflight
@@ -404,12 +403,11 @@ def test_selection_checks_effective_shell_permissions(
         identity,
         persist_runtime_state=False,
     )
-    assert isinstance(canonical.tools, list)
     shell_functions = {
-        name
-        for tool in canonical.tools
-        if isinstance(tool, Toolkit) and tool.name == "shell_tools"
-        for name in tool.get_async_functions()
+        function.name
+        for toolkit in canonical.spec.toolkits
+        if toolkit.name == "shell_tools"
+        for function in toolkit.functions
     }
     assert ("run_shell_command" in shell_functions) is permitted
     assert ("uses `minimal`" if permitted else "Allow the `run_shell_command` shell function") in result

@@ -13,8 +13,11 @@ from mindroom import agents
 from mindroom.agent_cli.bash import MinimalBashTools
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import PlannedCall
+from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.llm.runs import RunRecord, ToolExecution
@@ -139,6 +142,40 @@ async def capture_bash_batch(
         request_template=EMPTY_REQUEST,
     )
     await owner.checkpoint.capture(state, planned)
+
+
+async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
+    """Run one provider batch of Bash calls ``bash-0``, ``bash-1``, ... through the loop, as a minimal attempt does.
+
+    The batch is checkpointed before its calls run; the run answers "done" unless a call stops it.
+    """
+    catalog = owner.catalog
+    model = ScriptedModel(
+        [
+            calls(*(tool_call("bash", f"bash-{index}", command=command) for index, command in enumerate(commands))),
+            answer("done"),
+        ],
+    )
+    spec = AgentSpec(
+        id=catalog.agent_name,
+        name=catalog.agent_name,
+        model=model,
+        system_message=None,
+        toolkits=(adapt_toolkit(MinimalBashTools(execute=owner.execute_bash)),),
+    )
+    record: RunRecord | None = None
+    events = run_agent(
+        spec,
+        [Message(role="user", content="run")],
+        ctx=catalog.run,
+        hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
+    )
+    async for event in events:
+        if isinstance(event, RunFinished):
+            assert isinstance(event.record, RunRecord)
+            record = event.record
+    assert record is not None
+    return record
 
 
 type Step = str | list[tuple[str, dict[str, object]]]
