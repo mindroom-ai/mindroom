@@ -123,14 +123,6 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-def _canonical_route(provider: str) -> ClaudeRouteKind:
-    canonical = canonical_provider(provider)
-    if canonical not in PROVIDER_NAMES:
-        msg = f"Provider {provider!r} is not a Claude route; expected one of {', '.join(sorted(PROVIDER_NAMES))}"
-        raise ValueError(msg)
-    return cast("ClaudeRouteKind", canonical)
-
-
 def native_compaction_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str:
     """Return the endpoint identity that binds stored checkpoints to one route, or "" when it has none.
 
@@ -227,13 +219,10 @@ class ClaudeProvider:
             ):
                 return None
             threshold = None
-        endpoint = native_compaction_endpoint(self.route, self.settings)
-        if not endpoint:
-            return None
         route = native_compaction_route(
             provider=self.identity.provider,
             model_id=self.identity.id,
-            endpoint=endpoint,
+            endpoint=native_compaction_endpoint(self.route, self.settings),
             history_generation=history_generation,
         )
         return NativeCompactionReplay(route=route, threshold=threshold)
@@ -310,13 +299,15 @@ class ClaudeProvider:
         return message, stop_reason_of(raw_stop_reason)
 
     def _output_format(self, response_format: type[BaseModel] | Mapping[str, Any] | None) -> dict[str, Any] | None:
-        """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead."""
-        if response_format is None or self.capabilities.structured_output != "native":
+        """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
+
+        A route with native structured output always gets the schema's class; a JSON-mode route gets a mapping and
+        relies on the prompt asking for JSON.
+        """
+        native = self.capabilities.structured_output == "native"
+        if not native or not isinstance(response_format, type) or not issubclass(response_format, BaseModel):
             return None
-        if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-            return {"type": "json_schema", "schema": anthropic.transform_schema(response_format.model_json_schema())}
-        # Claude has json_schema output only; a json_object request relies on the prompt asking for JSON.
-        return None if response_format.get("type") == "json_object" else dict(response_format)
+        return {"type": "json_schema", "schema": anthropic.transform_schema(response_format.model_json_schema())}
 
     def _authored_params(self, request: ModelRequest) -> dict[str, Any]:
         """Return the model's authored request parameters with the request's overrides applied."""
@@ -343,8 +334,6 @@ class ClaudeProvider:
             params["context_management"] = compaction_context_management(replay.threshold)
         # The raw request overrides merge last, as the SDK merges a raw body.
         params.update(_raw_request_params(settings, disable_thinking=overrides.disable_thinking))
-        if overrides.timeout_seconds is not None:
-            params["timeout"] = overrides.timeout_seconds
         return params
 
     def _with_sampling_in_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -401,14 +390,10 @@ class ClaudeProvider:
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
-            enable_citations=output_format is None,
         )
         # Vertex rejects the tool-level strict field.
         strict_allowed = self.route != "vertexai_claude"
-        tools = [
-            *format_claude_tools(request.tools, strict_allowed=strict_allowed),
-            *(dict(tool) for tool in request.native_tools),
-        ]
+        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         body: dict[str, Any] = {
             "model": self.identity.id,
@@ -433,19 +418,19 @@ class ClaudeProvider:
             cache_system_prompt=cache_system_prompt,
         )
         return _PreparedRequest(
-            client=self._client(overrides.timeout_seconds, overrides.sdk_max_retries),
+            client=self._client(overrides.sdk_max_retries),
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=request_uses_native_checkpoint(projected, route),
         )
 
-    def _client(self, timeout_seconds: float | None, max_retries: int | None) -> _AsyncClaudeClient:
+    def _client(self, max_retries: int | None) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
 
         The route's own credentials and endpoint come first and ``client_params`` may override any of them;
         ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller's
-        per-request deadline and retry budget win over everything the model authored.
+        retry budget wins over everything the model authored.
         """
         settings = self.settings
         kwargs = self._route_client_kwargs()
@@ -455,8 +440,6 @@ class ClaudeProvider:
         if settings.default_headers is not None:
             kwargs["default_headers"] = dict(settings.default_headers)
         kwargs["http_client"] = self.http_client
-        if timeout_seconds is not None:
-            kwargs["timeout"] = timeout_seconds
         if max_retries is not None:
             kwargs["max_retries"] = max_retries
         if self.route == "anthropic":
@@ -699,7 +682,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     with ``auth_token``; Vertex and Bedrock resolve their project, region, and credentials from the runtime
     env. A key the dashboard saved for the model arrives as ``model_config.api_key``.
     """
-    route = _canonical_route(model_config.provider)
+    route = cast("ClaudeRouteKind", canonical_provider(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
         api_key = model_config.configured_api_key()

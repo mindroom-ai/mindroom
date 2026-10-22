@@ -1387,7 +1387,7 @@ def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
     assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
-    formatted = format_claude_messages(messages, append_trailing_user_message=False, enable_citations=True).messages
+    formatted = format_claude_messages(messages, append_trailing_user_message=False).messages
     assistant_turns = [message["content"] for message in formatted if message["role"] == "assistant"]
     assert assistant_turns == [replay_blocks, current_blocks]
     assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}

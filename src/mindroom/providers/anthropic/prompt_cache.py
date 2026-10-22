@@ -48,7 +48,6 @@ if TYPE_CHECKING:
 __all__ = ["claude_loaded_tool_names", "native_tool_search_supported", "prepare_request_body"]
 
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"anthropic", "vertexai_claude"})
-_TOOL_CHOICES = {"auto": {"type": "auto"}, "none": {"type": "none"}, "required": {"type": "any"}}
 
 
 def native_tool_search_supported(provider: str, model_id: str) -> bool:
@@ -84,10 +83,7 @@ def _count_cache_markers(body: dict[str, Any]) -> int:
     """Count the ``cache_control`` markers the body already carries."""
     count = sum(1 for block in body.get("system") or [] if has_cache_marker(block))
     count += sum(1 for tool in body.get("tools") or [] if has_cache_marker(tool))
-    for message in body.get("messages") or []:
-        content = (as_dict(message) or {}).get("content")
-        if isinstance(content, list):
-            count += sum(1 for block in content if has_cache_marker(block))
+    count += sum(1 for message in body["messages"] for block in message["content"] if has_cache_marker(block))
     return count
 
 
@@ -97,8 +93,8 @@ def _with_prompt_cache_ladder(body: dict[str, Any], cache_control: dict[str, str
     if marker_budget <= 0:
         return body
     prepared = dict(body)
-    messages = prepared.get("messages")
-    if isinstance(messages, list) and messages:
+    messages = prepared["messages"]
+    if messages:
         marked_messages, markers_added = mark_message_cache_rungs(
             messages,
             cache_control,
@@ -199,33 +195,28 @@ def _without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]
     without references stays as an empty result, like a search that matched nothing, so the signed thinking
     around it is not moved.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
+    messages = body["messages"]
     available = _request_tool_names(body)
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = as_dict(message)
-        content = message_dict.get("content") if message_dict is not None else None
-        if message_dict is None or not isinstance(content, list):
-            continue
-        prepared_content = _content_without_unavailable_references(content, available)
+        prepared_content = _content_without_unavailable_references(message["content"], available)
         if prepared_content is None:
             continue
         if prepared_messages is None:
             prepared_messages = list(messages)
-        prepared_messages[message_index] = {**message_dict, "content": prepared_content}
+        prepared_messages[message_index] = {**message, "content": prepared_content}
     return body if prepared_messages is None else {**body, "messages": prepared_messages}
 
 
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
-    """Apply the request's tool choice when the request offers tools; the API rejects a choice without them.
+    """Turn tool selection off for a ``"none"`` request that offers tools; the API rejects a choice without them.
 
-    The SDK merges ``extra_body`` over the named fields, so an authored ``extra_body.tool_choice`` is replaced too.
+    MindRoom asks for no other choice. The SDK merges ``extra_body`` over the named fields, so an authored
+    ``extra_body.tool_choice`` is replaced too.
     """
-    if tool_choice is None or not body.get("tools"):
+    if tool_choice != "none" or not body.get("tools"):
         return body
-    choice = _TOOL_CHOICES[tool_choice] if isinstance(tool_choice, str) else dict(tool_choice)
+    choice = {"type": "none"}
     prepared = {**body, "tool_choice": choice}
     extra_body = body.get("extra_body")
     if isinstance(extra_body, dict) and "tool_choice" in extra_body:
@@ -244,8 +235,9 @@ def prepare_request_body(
 ) -> dict[str, Any]:
     """Return the request body as it goes on the wire.
 
-    Repairs come first, then the deferred tool search, the tool choice, and finally the cache breakpoints when
-    the model caches its prompt. The input body is never mutated.
+    ``body`` is the request the adapter built around ``format_claude_messages``. Repairs come first, then the
+    deferred tool search, the tool choice, and finally the cache breakpoints when the model caches its prompt.
+    The input body is never mutated.
     """
     prepared = with_replay_safe_tool_search_results(body)
     prepared = _without_unavailable_tool_references(prepared)
