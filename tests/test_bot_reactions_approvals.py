@@ -11,13 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.agent import Agent as AgnoAgent
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.tools.function import Function
 
 from mindroom import interactive
-from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
@@ -30,10 +25,10 @@ from mindroom.approval.tool_approval import (
     MatrixApprovalAction,
     shutdown_approval_runtime,
 )
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
 from mindroom.coalescing.batch import PendingEvent, PreparedTurn, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -60,13 +55,11 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import paused_attempt_from_response
+from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
-from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
@@ -90,15 +83,15 @@ from tests.conftest import (
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import ReportTools, ScriptedAgents, registered_report_tool, respond
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
-
-    from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
@@ -108,6 +101,13 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
+
+
+@pytest.fixture
+def report_tool() -> Iterator[type[ReportTools]]:
+    """Register the ``report`` toolkit, whose ``write_report`` records each run, for the test."""
+    with registered_report_tool() as report:
+        yield report
 
 
 def _detached_approval_card() -> dict[str, Any]:
@@ -1408,7 +1408,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A resumed Agno run belongs to the response runtime, not the room journal lane."""
+        """A resumed run belongs to the response runtime, not the room journal lane."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         store = bot.approval_store
@@ -1480,13 +1480,17 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        report_tool: type[ReportTools],
         requires_human: bool,
     ) -> None:
         """A fresh bot must execute the persisted tool once after policy or card consent."""
         config = self._config_for_storage(tmp_path)
-        config.agents[mock_agent_user.agent_name].tools = [ToolConfigEntry(name="shell")]
+        config.agents[mock_agent_user.agent_name].tools = [ToolConfigEntry(name="report")]
+        config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
+        )
         runtime_paths = runtime_paths_for(config)
-        executed: list[list[str]] = []
         target = MessageTarget.resolve("!test:localhost", None, "$source")
         identity = ToolExecutionIdentity(
             channel="matrix",
@@ -1497,57 +1501,21 @@ class TestAgentBot(AgentBotTestBase):
             resolved_thread_id=target.resolved_thread_id,
             session_id=target.session_id,
         )
+        model = ScriptedModel([calls(tool_call("write_report", "call-report")), answer("Report done.")])
+        ScriptedAgents({mock_agent_user.agent_name: model}).install(monkeypatch)
 
-        def run_shell_command(args: list[str]) -> str:
-            executed.append(args)
-            return "ok"
-
-        def new_agent(history_storage: BaseDb | None = None) -> AgnoAgent:
-            return AgnoAgent(
-                id=mock_agent_user.agent_name,
-                model=SyntheticModel(
-                    id="synthetic",
-                    seed=1,
-                    min_response_chars=20,
-                    max_response_chars=20,
-                    chars_per_second=0,
-                    tool_call_probability=1,
-                ),
-                tools=[
-                    Function(
-                        name="run_shell_command",
-                        entrypoint=run_shell_command,
-                        requires_confirmation=True,
-                        owning_toolkit="shell",
-                    ),
-                ],
-                db=history_storage
-                if history_storage is not None
-                else create_session_storage(mock_agent_user.agent_name, config, runtime_paths, identity),
-            )
-
-        first_agent = new_agent()
-        paused_response = await first_agent.arun(
+        paused = await respond(
+            mock_agent_user.agent_name,
             "exercise the tool",
-            session_id=target.session_id,
-            user_id="@user:localhost",
-            stream=False,
+            config=config,
+            runtime_paths=runtime_paths,
+            identity=identity,
         )
-        assert isinstance(paused_response, RunOutput)
-        assert paused_response.status is RunStatus.paused
-        paused = paused_attempt_from_response(
-            paused_response,
-            fallback_session_id=target.session_id,
-            fallback_run_id=paused_response.run_id,
-            toolkit_owners=toolkit_owners_for_agents([first_agent]),
-        )
-        assert paused is not None
-        paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
-        paused = _attach_blocking_pause_presentation(
-            paused,
-            paused_response,
-            show_tool_calls=True,
-        )
+        assert isinstance(paused, PausedAttempt)
+        assert [(tool.tool_name, tool.approval_type) for tool in paused.tools] == [
+            ("write_report", POLICY_CONFIRMATION_APPROVAL_TYPE),
+        ]
+        assert report_tool.written == []
 
         first = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
@@ -1623,14 +1591,12 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert suspended.terminal_status == "suspended"
-        assert executed == []
+        assert report_tool.written == []
         persisted = await first.approval_store.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
         assert persisted.state == ("waiting" if requires_human else "ready")
-        if first_agent.db is not None:
-            first_agent.db.close()
 
         restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
@@ -1642,43 +1608,40 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._response_runner.wait_for_source_owned_inbox_responses()
             await restarted._journal_dispatcher.drain_once()
 
-        with patch(
-            "mindroom.approval.execution.create_agent",
-            side_effect=lambda *_args, **kwargs: new_agent(kwargs["history_storage"]),
-        ):
-            if requires_human:
-                manager = initialize_approval_store(
-                    runtime_paths,
-                    prepare_event=prepare_event,
-                    send_delivery=send_delivery,
-                    resolve_delivery=AsyncMock(return_value=None),
-                    cards=restarted._journal_store.principal(router_principal_id),
-                    transport_sender=lambda: "@mindroom_router:localhost",
-                    sending_device=lambda: "DEVICE",
-                    continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
-                        room_id,
-                        source_ids,
-                    ),
+        if requires_human:
+            manager = initialize_approval_store(
+                runtime_paths,
+                prepare_event=prepare_event,
+                send_delivery=send_delivery,
+                resolve_delivery=AsyncMock(return_value=None),
+                cards=restarted._journal_store.principal(router_principal_id),
+                transport_sender=lambda: "@mindroom_router:localhost",
+                sending_device=lambda: "DEVICE",
+                continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
+                    room_id,
+                    source_ids,
+                ),
+            )
+            restarted._journal_dispatcher.release_turn_replay()
+            try:
+                resolved = await manager.handle_card_response(
+                    room_id="!test:localhost",
+                    sender_id="@user:localhost",
+                    card_event_id="$approval",
+                    status="approved",
+                    reason=None,
+                    authorize_responder=lambda _entity_name: True,
                 )
-                restarted._journal_dispatcher.release_turn_replay()
-                try:
-                    resolved = await manager.handle_card_response(
-                        room_id="!test:localhost",
-                        sender_id="@user:localhost",
-                        card_event_id="$approval",
-                        status="approved",
-                        reason=None,
-                        authorize_responder=lambda _entity_name: True,
-                    )
-                    assert resolved.consumed is True
-                    await drain_restarted_runtime()
-                finally:
-                    await shutdown_approval_runtime()
-            else:
+                assert resolved.consumed is True
                 await drain_restarted_runtime()
+            finally:
+                await shutdown_approval_runtime()
+        else:
+            await drain_restarted_runtime()
 
         remaining = await restarted.approval_store.approval_continuation_for_source("$source")
-        assert len(executed) == 1, remaining
+        assert report_tool.written == ["written"], remaining
+        assert model.turns == []
         assert remaining is None
         assert not await restarted.approval_store.is_pending("$source")
 
