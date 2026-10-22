@@ -217,8 +217,9 @@ class EgressService(BaseModel):
         default=None,
         pattern=r"^[a-z0-9][a-z0-9_-]*$",
         description=(
-            "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored; "
-            "checked against the provider registry at runtime"
+            "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored, "
+            "once someone allows Agent Keys to use it for this service; checked against the provider registry at "
+            "runtime"
         ),
     )
     oauth_on_shared_workers: bool = Field(

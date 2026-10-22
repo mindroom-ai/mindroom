@@ -48,6 +48,7 @@ Each service's status loads independently, so one failing or unconnected service
 Using an agent requires a matching `access.users` grant, administrator authority, or membership in a configured grant room; `access.current_room_members` does not apply because browser requests have no current room.
 Users listed in `agents.<name>.credential_managers` see that shared agent even without use access, but credential management alone grants no tool access.
 Who may manage each connection follows [Who Can Connect An Account](oauth-framework.md#who-can-connect-an-account), and connections made here are the same ones tools use.
+An agent's shell and python commands use such a connection only after the user allows it on the Agent Keys page (see [Using a connected account](deployment/egress-broker.md#using-a-connected-account)).
 Disconnecting a shared connection affects every agent using its [credential scope](oauth-framework.md#where-connections-are-stored).
 While the [egress broker](deployment/egress-broker.md) is on, the portal and its Agent Keys page link to each other.
 The portal never shows tokens, model configuration, generic credential editing, or OAuth client settings; operators still configure OAuth clients.
