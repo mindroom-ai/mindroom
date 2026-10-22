@@ -13,7 +13,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to, new chats, and people's presence | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `ChatMessage.Send`, `Presence.Read.All`, `User.Read.All` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
-| `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
+| `microsoft_onenote` | OneNote notebooks of the requester, of their Teams teams and SharePoint sites, and of people who share notebooks with them | `microsoft_onenote` | `Notes.ReadWrite.All` |
 | `microsoft_people` | People, managers, and direct reports in the requester's organization directory | `microsoft_people` | `User.Read.All` |
 
 Every provider also requests `User.Read`, to label the connected account, and `offline_access`, to stay connected.
@@ -278,17 +278,20 @@ Two Teams administrator settings also govern transcripts: with Graph access to t
 
 | Function | Changes data | Purpose |
 | --- | --- | --- |
-| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, by name, and which one is the default. |
+| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, or those of a team, a site, or a person who shares them, by name, and which one is the default. |
 | `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
 | `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
 | `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
 | `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
 | `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
 
-Only the notebooks the requester owns are listed; notebooks other people share with the requester, and group or SharePoint site notebooks, are not.
-Sections inside section groups are not listed either.
+Without `container`, the functions reach the notebooks the requester owns.
+Every function also takes an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_list_teams` (a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_search_sites` or `microsoft_sharepoint_get_site` (`host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
+A bare id always names a team, so a person is named by sign-in email address and not by id; a container of any other form is refused before any request.
+Results repeat the `container`, and calls on the sections and pages of those notebooks pass it again; `Notes.ReadWrite.All` already covers every notebook the requester can open, so containers need no new consent.
+Sections inside section groups are not listed.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
-Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
+Listings and page text return a `next_page_token` while more follows; passing it back with the same container and the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
 Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
