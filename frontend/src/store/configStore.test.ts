@@ -603,17 +603,18 @@ describe("configStore", () => {
         agents: ["test"],
       };
 
-      async function loadAuthored(
-        agent: object = authoredAgent,
-        team: object = authoredTeam,
-      ) {
+      async function loadAuthored({
+        agent = authoredAgent as object,
+        team = authoredTeam as object,
+        defaults = { markdown: true } as object,
+      } = {}) {
         (global.fetch as any).mockResolvedValueOnce({
           ok: true,
           json: async () => ({
             agents: { test: agent },
             teams: { ops: team },
             models: { default: { provider: "ollama", id: "test-model" } },
-            defaults: { markdown: true },
+            defaults,
             router: { model: "default" },
             memory: {
               embedder: {
@@ -638,10 +639,10 @@ describe("configStore", () => {
           json: async () => ({ success: true }),
         });
         await useConfigStore.getState().saveConfig();
-        const saveCall = (global.fetch as any).mock.calls.find(
+        const saveCalls = (global.fetch as any).mock.calls.filter(
           ([url]: [string]) => url === "/api/config/save",
         );
-        return JSON.parse(saveCall[1].body);
+        return JSON.parse(saveCalls[saveCalls.length - 1][1].body);
       }
 
       it("fills them in on load", async () => {
@@ -717,7 +718,7 @@ describe("configStore", () => {
           learning_mode: "always",
         };
         const team = { ...authoredTeam, rooms: [], mode: "coordinate" };
-        await loadAuthored(agent, team);
+        await loadAuthored({ agent, team });
 
         useConfigStore.getState().updateAgent("test", { role: "Edited role" });
         useConfigStore.getState().updateTeam("ops", { role: "Edited role" });
@@ -725,6 +726,132 @@ describe("configStore", () => {
         const payload = await savedPayload();
         expect(payload.agents.test).toEqual({ ...agent, role: "Edited role" });
         expect(payload.teams.ops).toEqual({ ...team, role: "Edited role" });
+      });
+
+      it.each([
+        {
+          edits: "learning turned off and on again",
+          edit: () => {
+            useConfigStore.getState().updateAgent("test", { learning: false });
+            useConfigStore.getState().updateAgent("test", { learning: true });
+          },
+          agent: { learning: true },
+        },
+        {
+          edits: "an instruction added and removed again",
+          edit: () => {
+            useConfigStore
+              .getState()
+              .updateAgent("test", { instructions: [""] });
+            useConfigStore.getState().updateAgent("test", { instructions: [] });
+          },
+          agent: { instructions: [] },
+        },
+        {
+          edits: "the team mode switched back to coordinate",
+          edit: () => {
+            useConfigStore
+              .getState()
+              .updateTeam("ops", { mode: "collaborate" });
+            useConfigStore.getState().updateTeam("ops", { mode: "coordinate" });
+          },
+          team: { mode: "coordinate" },
+        },
+      ])("keeps a field after $edits", async ({ edit, agent, team }) => {
+        await loadAuthored();
+
+        edit();
+
+        const payload = await savedPayload();
+        expect(payload.agents.test).toEqual({ ...authoredAgent, ...agent });
+        expect(payload.teams.ops).toEqual({ ...authoredTeam, ...team });
+      });
+
+      it("keeps learning set on an agent after the global default changes", async () => {
+        await loadAuthored();
+
+        useConfigStore
+          .getState()
+          .updateConfigValue(["defaults", "learning"], false);
+        useConfigStore.getState().updateAgent("test", { learning: true });
+
+        const payload = await savedPayload();
+        expect(payload.defaults.learning).toBe(false);
+        expect(payload.agents.test).toEqual({
+          ...authoredAgent,
+          learning: true,
+        });
+      });
+
+      it("lets an edited agent keep inheriting non-default global learning", async () => {
+        await loadAuthored({
+          defaults: {
+            markdown: true,
+            learning: false,
+            learning_mode: "agentic",
+          },
+        });
+        expect(useConfigStore.getState().agents[0]).toMatchObject({
+          learning: false,
+          learning_mode: "agentic",
+        });
+
+        useConfigStore.getState().updateAgent("test", { role: "Edited role" });
+
+        expect((await savedPayload()).agents.test).toEqual({
+          ...authoredAgent,
+          role: "Edited role",
+        });
+      });
+
+      it("keeps untouched fields omitted after a reload during edits", async () => {
+        await loadAuthored();
+        useConfigStore.getState().updateAgent("test", { role: "Edited role" });
+
+        await loadAuthored({ defaults: { markdown: true, learning: false } });
+
+        expect((await savedPayload()).agents.test).toEqual({
+          ...authoredAgent,
+          role: "Edited role",
+        });
+      });
+
+      it("keeps untouched fields omitted after an edit during a save", async () => {
+        await loadAuthored();
+        useConfigStore
+          .getState()
+          .updateConfigValue(["defaults", "learning"], false);
+        useConfigStore.getState().updateAgent("test", { role: "First edit" });
+        const response = deferred<Response>();
+        vi.mocked(fetch).mockReturnValueOnce(response.promise);
+        const firstSave = useConfigStore.getState().saveConfig();
+        useConfigStore.getState().updateAgent("test", { role: "Second edit" });
+        response.resolve(
+          new Response(JSON.stringify({ success: true }), { status: 200 }),
+        );
+        expect(await firstSave).toEqual({ status: "stale" });
+
+        expect((await savedPayload()).agents.test).toEqual({
+          ...authoredAgent,
+          role: "Second edit",
+        });
+      });
+
+      it("treats an authored null like an omitted field", async () => {
+        await loadAuthored({
+          agent: { ...authoredAgent, learning: null, learning_mode: null },
+        });
+        expect(useConfigStore.getState().agents[0]).toMatchObject({
+          learning: true,
+          learning_mode: "always",
+        });
+
+        useConfigStore.getState().updateAgent("test", { role: "Edited role" });
+
+        expect((await savedPayload()).agents.test).toEqual({
+          ...authoredAgent,
+          role: "Edited role",
+        });
       });
     });
 
