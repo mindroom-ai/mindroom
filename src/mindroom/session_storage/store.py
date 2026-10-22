@@ -243,8 +243,8 @@ class ConversationStore:
     def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
         """Write ``state`` as the session's ``session_state`` and record it as ``session.stored_session_state``.
 
-        ``state`` is a copy of ``session.session_state`` its caller took and hands over: a save in the database's lane
-        takes it before the lane is awaited, because the run's tools change the session's own state in place meanwhile.
+        ``state`` is a snapshot of the run's state that the caller took before awaiting the database's lane, as the
+        run's tools change the live state in place meanwhile. The session keeps it, so the caller must not change it.
         """
         self._save_fields(session, metadata=False, state=state)
 
