@@ -198,7 +198,10 @@ def rendered(chunk: TeamStreamChunk) -> str:
 
 @dataclass
 class TeamTurn:
-    """One team's config, scripted models by model name, tool runtime, orchestrator, and turn recorder."""
+    """One team's config, scripted models by model name, tool runtime, orchestrator, and its last turn's recorder.
+
+    Each ``stream`` or ``respond`` records into a new ``recorder`` of its own message, as the runner records each turn.
+    """
 
     config: Config
     runtime_paths: RuntimePaths
@@ -210,7 +213,7 @@ class TeamTurn:
     team_name: str | None
     mode: TeamMode
     scope: HistoryScope
-    recorder: TurnRecorder = field(default_factory=lambda: TurnRecorder(user_message="Hello"))
+    recorder: TurnRecorder = field(init=False)
 
     @property
     def storage(self) -> ConversationStore:
@@ -262,6 +265,7 @@ class TeamTurn:
         kwargs.setdefault("mode", self.mode)
         kwargs.setdefault("user_id", REQUESTER_ID)
         kwargs.setdefault("agent_ids", self.member_ids())
+        self.recorder = TurnRecorder(user_message=message)
         with tool_runtime_context(self.runtime):
             return [
                 chunk
@@ -287,6 +291,7 @@ class TeamTurn:
         kwargs.setdefault("mode", self.mode)
         kwargs.setdefault("user_id", REQUESTER_ID)
         kwargs.setdefault("agent_names", list(self.member_names))
+        self.recorder = TurnRecorder(user_message=message)
         with tool_runtime_context(self.runtime):
             return await team_response(
                 message=message,
@@ -314,11 +319,15 @@ class TeamTurn:
         session_id: str = SESSION_ID,
         **kwargs: Any,  # noqa: ANN401
     ) -> CompletedApprovalRun | PausedAttempt:
-        """Resume ``paused`` with every saved approval call approved or denied, as an approval from ``session_id`` does."""
+        """Resume ``paused`` with every saved approval call approved or denied, as an approval from ``session_id`` does.
+
+        The leader and the members run on the models the pause pinned, as the runner resumes them.
+        """
         call_ids = [call.tool_call_id for call in approvals]
         kwargs.setdefault("decisions", dict.fromkeys(call_ids, approved))
         kwargs.setdefault("denial_reasons", dict.fromkeys(call_ids, "Declined by requester"))
-        kwargs.setdefault("model_name", "default")
+        kwargs.setdefault("model_name", paused.runtime_model_name or "default")
+        kwargs.setdefault("member_model_names", dict(paused.team_member_model_names) or None)
         kwargs.setdefault("show_tool_calls", False)
         kwargs.setdefault("progress", None)
         with tool_runtime_context(self.runtime):

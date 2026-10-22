@@ -468,6 +468,29 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
 
 
 @pytest.mark.asyncio
+async def test_a_resume_runs_each_member_on_the_model_its_pause_pinned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose configured model changed while the approval waited finishes on the model it paused on."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.config.agents["checker"].model = "writer-model"
+    team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert len(team.models["checker-model"].requests) == 1
+    assert team.models["writer-model"].requests == []
+
+
+@pytest.mark.asyncio
 async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader_and_stores_it_in_neither(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
