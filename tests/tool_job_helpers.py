@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -16,22 +16,28 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import create_agent
+from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import ApprovalCall, EventJournalStore, ToolJobStore, approval_arguments_digest
 from mindroom.event_journal.offloading import ThreadOffload
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.history.request_messages import build_resume_request
+from mindroom.history.types import HistoryScope
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.authorization import toolkit_authority
@@ -49,10 +55,12 @@ from mindroom.tool_system.agno_toolkits import AdaptedToolkit, Toolkit, adapt_to
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.delegation_helpers import _delegate_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel
+from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -61,16 +69,18 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.run import Persist
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.llm.provider import ModelProvider
-    from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
+    from tests.fakes.scripted_model import ScriptStep
 
 
 # One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
 JOB_TEST_TIMEOUT = 30
+_LEADER_SCOPE = HistoryScope(kind="agent", scope_id="leader")
 
 
 def _authorize_all(_job: BackgroundJob) -> bool:
@@ -678,3 +688,116 @@ async def cancel_settled(
     requested = await runtime.cancel(job_id, owner=owner, depth=depth)
     drain = runtime._entries[job_id].drain
     return requested if drain is None else await asyncio.shield(drain)
+
+
+@dataclass
+class DelegatingLeader:
+    """The leader as a reply builds it, whose turns the native driver advances with a test's child runner.
+
+    Each turn builds the leader with ``create_agent`` and runs it on the owned loop with the hooks every agent turn
+    installs; ``drive`` hands its delegations to the native driver, which continues it through the production resume.
+    """
+
+    config: Config
+    paths: RuntimePaths
+    identity: ToolExecutionIdentity
+    agents: ScriptedAgents
+    depth: int = 0
+    store: ConversationStore = field(init=False)
+    session: ConversationSession = field(init=False)
+    build: AgentBuild | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Give the agents their Matrix identities and open the leader's conversation store."""
+        entity_ids(self.config, self.paths)
+        self.store = create_session_storage("leader", self.config, self.paths, self.identity)
+        self.session = ConversationSession(session_id=self.identity.session_id or "", kind="agent", owner_id="leader")
+
+    @property
+    def model(self) -> ScriptedModel:
+        """The leader's provider for its current turn."""
+        return self.agents.models["leader"]
+
+    async def _persist(self, record: RunRecord) -> None:
+        await persist_to(self.store, self.session)(record)
+        self.session.runs = [*(run for run in self.session.runs if run.run_id != record.run_id), record]
+
+    async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
+        """Run the leader on ``turns`` until it completes or pauses on its delegations."""
+        self.agents.models["leader"] = ScriptedModel(list(turns))
+        self.build = build = create_agent(
+            "leader",
+            self.config,
+            self.paths,
+            self.identity,
+            history_storage=self.store,
+            delegation_depth=self.depth,
+            supports_native_tool_approval=True,
+            include_interactive_questions=False,
+        )
+        hooks = agent_loop_hooks(
+            build,
+            config=self.config,
+            runtime_paths=self.paths,
+            agent_name="leader",
+            model_name="default",
+            store=self.store,
+            session=self.session,
+            scope=_LEADER_SCOPE,
+            scoped=False,
+            native_compaction=None,
+            prompt_id=None,
+        )
+        events = run_agent(
+            replace(build.spec, system_message=prompt_for_turn(build)),
+            [Message(role="user", content="Delegate")],
+            ctx=RunContext(
+                run_id=run_id,
+                session_id=self.session.session_id,
+                user_id=self.identity.requester_id,
+                session_state=self.session.session_state,
+            ),
+            hooks=hooks,
+            persist=self._persist,
+            request_template=build.request_template,
+        )
+        finished = [event.record async for event in events if isinstance(event, RunFinished)]
+        record = finished[-1]
+        assert isinstance(record, RunRecord)
+        return record
+
+    async def drive(self, record: RunRecord, run_child: ChildResponseRunner) -> RunRecord:
+        """Advance ``record``'s delegations with ``run_child`` and continue the leader with their results."""
+        assert self.build is not None
+        runner = ResumeRunner(
+            build=self.build,
+            config=self.config,
+            runtime_paths=self.paths,
+            agent_name="leader",
+            model_name="default",
+            store=self.store,
+            session=self.session,
+            scope=_LEADER_SCOPE,
+            user_id=self.identity.requester_id,
+        )
+        return await drive_delegations(
+            record,
+            store=self.store,
+            session=self.session,
+            continue_parent=runner.continue_run,
+            agent_name="leader",
+            run_child=run_child,
+            config=self.config,
+            runtime_paths=self.paths,
+            execution_identity=self.identity,
+            delegation_depth=self.depth,
+        )
+
+    async def reply(
+        self,
+        *turns: Sequence[ScriptStep],
+        run_child: ChildResponseRunner,
+        run_id: str = "parent-run",
+    ) -> RunRecord:
+        """Run one leader reply whose delegations ``run_child`` runs."""
+        return await self.drive(await self.turn(*turns, run_id=run_id), run_child)
