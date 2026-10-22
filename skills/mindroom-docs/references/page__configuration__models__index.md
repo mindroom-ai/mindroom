@@ -448,13 +448,33 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 
 ## Extra Kwargs
 
-`extra_kwargs` sets additional parameters on the underlying [Agno](https://docs.agno.com/) model class.
-Common options include:
+`extra_kwargs` sets provider-specific options for the model's requests and API client.
+Each provider accepts only the keys in the table below.
+A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
 
-- `base_url` - Custom API endpoint (useful for OpenAI-compatible servers)
-- `temperature` - Sampling temperature
-- `max_tokens` - Maximum tokens in response
-- `extra_body` - Extra JSON body fields for OpenAI-compatible providers (e.g., [OpenRouter provider routing](#openrouter-provider-routing))
+- `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `api_key` is the same as the model's `api_key` field.
+- `request_params` holds request body fields that MindRoom merges over its own.
+- `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
+- `client_params` passes options to the provider's API client.
+
+| Provider | Accepted keys |
+|----------|---------------|
+| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_retries`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
+| `azure` | The Chat Completions keys, plus `api_version`, `azure_endpoint`, `azure_deployment`, and `azure_ad_token` |
+| `openrouter` | The Chat Completions keys, plus `models`, `cache_system_prompt`, and `extended_cache_time` |
+| `deepseek` | The Chat Completions keys, plus `use_thinking` |
+| `kimi` | The Chat Completions keys, plus `kimi_home` and `prompt_cache_key` |
+| `groq` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_retries`, `max_tokens`, `presence_penalty`, `request_params`, `seed`, `stop`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user` |
+| `cerebras` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `max_completion_tokens`, `max_retries`, `parallel_tool_calls`, `repetition_penalty`, `request_params`, `strict_output`, `temperature`, `timeout`, `top_k`, `top_p` |
+| `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_retries`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
+| `codex` | The Responses keys, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
+| `anthropic` | `api_key`, `auth_token`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
+| `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
+| `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `response_modalities`, `safety_settings`, `search`, `seed`, `speech_config`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
+| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
+| `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 When a Claude response reaches `max_tokens`, its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 
