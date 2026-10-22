@@ -2983,6 +2983,14 @@ def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_gil_switch_interval() -> Generator[None, None, None]:
+    """Keep a primary started by one test from shortening the GIL switch interval for later tests."""
+    interval = sys.getswitchinterval()
+    yield
+    sys.setswitchinterval(interval)
+
+
+@pytest.fixture(autouse=True)
 def _restore_gc_thresholds() -> Generator[None, None, None]:
     """Keep a runtime refreeze in one test from raising the full-collection threshold for later tests."""
     thresholds = gc.get_threshold()
