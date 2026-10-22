@@ -414,7 +414,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e3", sender="@user:localhost", body="New question"),
         ]
 
-        context_messages, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = _build_unseen_context_messages(
             "Answer the new question.",
             thread_history,
             seen_event_ids={"e1"},
@@ -423,6 +423,7 @@ class TestUnseenMessagesPartialReplies:
             response_sender_id=agent_id,
             config=config,
         )
+        context_messages = turn.in_request_order()
 
         assert unseen_event_ids == []
         assert [message.role for message in context_messages] == ["user", "user", "user"]
@@ -516,7 +517,7 @@ class TestUnseenMessagesPartialReplies:
             _make_visible_message(event_id="e2", sender="@user:localhost", body="Continue"),
         ]
 
-        context_messages, unseen_event_ids = _build_unseen_context_messages(
+        turn, unseen_event_ids = _build_unseen_context_messages(
             "Continue.",
             thread_history,
             seen_event_ids=set(),
@@ -525,6 +526,7 @@ class TestUnseenMessagesPartialReplies:
             response_sender_id=agent_id,
             config=config,
         )
+        context_messages = turn.in_request_order()
 
         assert unseen_event_ids == []
         assert [message.role for message in context_messages] == ["user"]
