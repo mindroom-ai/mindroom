@@ -263,12 +263,11 @@ async def test_unfixable_personal_room_settles_its_owners_membership_event(coord
     coordination.local.owner_membership_event.side_effect = RuntimeError("Personal-room ownership state unavailable")
     with pytest.raises(RuntimeError, match="state unavailable"):
         await lifecycle.member_event(room, profile_change)
-    # Only the roster mismatch settles; other ownership failures still hold the event.
+    # Every check no retry passes settles, not only the roster mismatch.
     coordination.local.owner_membership_event.side_effect = PersonalRoomValidationError(
         "Personal-room directory must remain private",
     )
-    with pytest.raises(PersonalRoomValidationError, match="must remain private"):
-        await lifecycle.member_event(room, profile_change)
+    await lifecycle.member_event(room, profile_change)
 
 
 @pytest.mark.asyncio
