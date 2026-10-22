@@ -99,7 +99,7 @@ export function ToolSelectionRow({
           {isChecked && showSettings && (
             <Button
               type="button"
-              variant={isActive ? "secondary" : "ghost"}
+              variant={isActive ? "outline" : "ghost"}
               size="sm"
               onClick={onToggleSettings}
               className="h-8 px-2"
