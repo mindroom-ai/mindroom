@@ -379,26 +379,6 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     return persist
 
 
-async def save_run_in_lane(
-    store: ConversationStore,
-    session: ConversationSession,
-    run: AnyRunRecord,
-    *,
-    record_usage: bool,
-) -> None:
-    """Save ``run`` as ``ConversationStore.save_run`` does, in the database's lane.
-
-    The run is serialized on the caller's task before the lane is awaited, so what lands is the run as it was handed
-    over, whatever the caller changes on it meanwhile.
-    """
-    data = run.to_dict()
-    row_type = run_type(run)
-    await run_session_storage_operation(
-        lambda: store,
-        lambda opened: opened._save_run_dict(session, data, row_type=row_type, record_usage=record_usage),
-    )
-
-
 def _tables(connection: sqlite3.Connection) -> set[str]:
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
@@ -702,5 +682,4 @@ __all__ = [
     "delete_run_subtrees_in_transaction",
     "open_conversation_store",
     "persist_to",
-    "save_run_in_lane",
 ]

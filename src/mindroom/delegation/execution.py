@@ -57,7 +57,7 @@ from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.store import save_run_in_lane
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, application_arguments, read_background_after
 from mindroom.tool_jobs.consumption import retain_parent_call_claim
 from mindroom.tool_jobs.control import job_owns_execution
@@ -209,7 +209,13 @@ async def persist_delegation_state(
     if store is None:
         msg = "Durable delegation requires persisted session storage"
         raise RuntimeError(msg)
-    await save_run_in_lane(store, session, response, record_usage=False)
+    # The copy is taken before the lane is awaited, so the row lands as it was handed over, whatever the driver
+    # changes on the record while the lane is busy.
+    handed_over = deepcopy(response)
+    await run_session_storage_operation(
+        lambda: store,
+        lambda opened: opened.save_run(session, handed_over, record_usage=False),
+    )
 
 
 async def _run_child(
