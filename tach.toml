@@ -2565,6 +2565,7 @@ path = "mindroom.history.request_messages"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_summary_system_prompt",
+    "mindroom.history.legacy_tool_results",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.llm",
@@ -9357,3 +9358,8 @@ visibility = [
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
+
+[[modules]]
+path = "mindroom.history.legacy_tool_results"
+depends_on = ["mindroom.llm"]
+visibility = ["mindroom.history.request_messages"]

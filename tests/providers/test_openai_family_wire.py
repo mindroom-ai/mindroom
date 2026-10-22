@@ -144,28 +144,6 @@ async def _adapter_turn(built: _Built, request: ModelRequest) -> Any:  # noqa: A
 
 
 @pytest.mark.asyncio
-async def test_combined_gemini_tool_results_split_into_canonical_results(tmp_path: Path) -> None:
-    calls = [_CALL, {**_CALL, "id": "call_2"}]
-    combined = Message(
-        role="tool",
-        content=["sunny", "rainy"],
-        tool_calls=[
-            {"tool_call_id": "call_1", "tool_name": "get_weather", "content": "sunny"},
-            {"tool_call_id": "call_2", "tool_name": "get_weather", "content": "rainy"},
-        ],
-    )
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
-
-    await _turn(built, ModelRequest(messages=[_user(), Message(role="assistant", tool_calls=calls), combined]))
-
-    tool_messages = [message for message in built.body()["messages"] if message["role"] == "tool"]
-    assert tool_messages == [
-        {"role": "tool", "content": "sunny", "tool_call_id": "call_1"},
-        {"role": "tool", "content": "rainy", "tool_call_id": "call_2"},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_legacy_tool_replay_supplies_missing_arguments(tmp_path: Path) -> None:
     call = {"id": "call_1", "type": "function", "function": {"name": "list_rooms"}}
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))

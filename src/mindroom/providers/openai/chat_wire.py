@@ -21,7 +21,7 @@ from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.providers.assistant_turn import split_thinking
-from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
+from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -189,14 +189,14 @@ def _cerebras_message(message: Message) -> dict[str, Any]:
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSettings) -> list[dict[str, Any]]:
     if wire.dialect == "groq":
-        return [_groq_message(message) for message in split_combined_tool_results(messages)]
+        return [_groq_message(message) for message in messages]
     if wire.dialect == "cerebras":
-        return [_cerebras_message(message) for message in split_combined_tool_results(messages)]
+        return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {
         "system": "developer" if wire.developer_system_role else "system",
         "model": "assistant",
     }
-    canonical = reformat_tool_call_ids(split_combined_tool_results(repair_legacy_tool_replay(messages)), "chat")
+    canonical = reformat_tool_call_ids(repair_legacy_tool_replay(messages), "chat")
     return [_openai_message(message, wire, role_map) for message in canonical]
 
 

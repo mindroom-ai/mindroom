@@ -426,23 +426,6 @@ async def test_native_tool_search_routes_receive_the_deferred_names() -> None:
     assert inner.requests[0] is request
 
 
-@pytest.mark.asyncio
-async def test_portable_tool_search_renames_combined_gemini_results() -> None:
-    combined = Message(
-        role="tool",
-        content=["shipped"],
-        tool_calls=[{"tool_call_id": "call_1", "tool_name": "lookup_order", "content": "shipped"}],
-    )
-    inner = _ScriptedProvider([[_turn()]])
-    request = ModelRequest(messages=[combined], deferred_tool_names=frozenset({"lookup_order"}))
-
-    await _drain(WrappedProvider(inner, portable_tool_search_stream), request)
-
-    assert inner.requests[0].messages[0].tool_calls == [
-        {"tool_call_id": "call_1", "tool_name": "call_tool", "content": "shipped"},
-    ]
-
-
 def _stored_call(call_id: str, name: str, arguments: str) -> dict[str, object]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
