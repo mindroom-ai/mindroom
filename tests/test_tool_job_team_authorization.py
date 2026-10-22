@@ -19,9 +19,7 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import leader_loop_hooks
-from mindroom.teams import envelope
-from mindroom.teams.envelope import build_team_spec
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
@@ -445,7 +443,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         transport_agent_name="pair",
     )
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
         agent_name="pair",
@@ -553,7 +551,7 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
             execution_identity=identity,
         )
         hooks = {
-            build.spec.id: envelope._team_member(
+            build.spec.id: _team_member(
                 build,
                 "",
                 config=config,

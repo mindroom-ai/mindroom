@@ -21,8 +21,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.providers.registry import build_model_provider
-from mindroom.teams.envelope import BuiltTeam, build_team_spec
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot

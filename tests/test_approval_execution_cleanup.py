@@ -17,7 +17,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.types import ConversationSession
-from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -76,10 +76,10 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         raise RuntimeError(msg)
 
     with (
-        patch("mindroom.teams.envelope.open_resolved_scope_session_context", return_value=open_scope()),
-        patch("mindroom.teams.envelope.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
-        patch("mindroom.teams.envelope.finalize_consumption", new=fail_finalization),
-        patch("mindroom.teams.envelope._register_team_notice_storage"),
+        patch("mindroom.teams.resume.open_resolved_scope_session_context", return_value=open_scope()),
+        patch("mindroom.teams.resume.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
+        patch("mindroom.teams.resume.finalize_consumption", new=fail_finalization),
+        patch("mindroom.teams.resume.register_team_notice_storage"),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await continue_paused_team_run(

@@ -38,8 +38,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
-from mindroom.teams import envelope
-from mindroom.teams.envelope import continue_paused_team_run, team_response
+from mindroom.teams.envelope import team_response
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
@@ -150,7 +150,7 @@ class ScriptedAgents:
         """Serve the scripted models from the seams ``create_agent`` and the team envelope build providers at."""
         monkeypatch.setattr(agents, "_build_agent_model_provider", self._build)
         if self.team is not None:
-            monkeypatch.setattr(envelope, "build_model_provider", self._build_team)
+            monkeypatch.setattr("mindroom.teams.members.build_model_provider", self._build_team)
 
     def _build_team(
         self,

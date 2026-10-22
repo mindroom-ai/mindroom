@@ -4,6 +4,7 @@
 ``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id Agno derived for its members, which stored snapshots and reply records carry.
+``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
     StreamingToolTracker,
+    StructuredStreamChunk,
     ToolTraceEntry,
     append_stream_text,
     complete_pending_tool_block,
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from mindroom.llm.runs import ToolExecution
+    from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
 
@@ -54,6 +57,7 @@ def url_safe_member_id(input_string: str) -> str:
 
 _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
 _TEAM_HEADER_END = "):\n\n"
+NO_TEAM_RESPONSE = "No team response generated."
 
 
 def format_team_header(agent_names: list[str]) -> str:
@@ -482,10 +486,23 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
         presentation.complete_tool("team", event.tool)
 
 
+async def publish_team_presentation(
+    progress: ProgressPublisher | None,
+    presentation: TeamStreamPresentation,
+) -> None:
+    """Show the team continuation's current document in the reply it resumes."""
+    if progress is not None:
+        await progress(
+            StructuredStreamChunk(content=presentation.render_body(), tool_trace=presentation.tool_trace),
+        )
+
+
 __all__ = [
+    "NO_TEAM_RESPONSE",
     "TeamStreamPresentation",
     "apply_team_event",
     "format_team_header",
+    "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",
     "url_safe_member_id",

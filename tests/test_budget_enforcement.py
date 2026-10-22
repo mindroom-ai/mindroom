@@ -30,8 +30,8 @@ from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
-from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
-from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection
+from mindroom.teams.envelope import PreparedTeamExecution
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, TeamTurnModelSelection
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

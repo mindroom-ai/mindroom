@@ -18,8 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
 from mindroom.system_prompt import render_date_context
-from mindroom.teams import envelope
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
@@ -153,7 +152,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     config.timezone = "UTC"
     runtime_paths = runtime_paths_for(config)
     install_agent_model(monkeypatch, ScriptedModel([]))
-    monkeypatch.setattr(envelope, "build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
         members = materialize_exact_team_members(
@@ -162,7 +161,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             runtime_paths=runtime_paths,
             execution_identity=None,
         )
-        team = envelope.build_team_spec(
+        team = build_team_spec(
             members=members,
             mode=TeamMode.COORDINATE,
             config=config,

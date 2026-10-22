@@ -15,7 +15,7 @@ from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import CompletedApprovalRun
-from mindroom.teams.envelope import continue_paused_team_run
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
@@ -222,7 +222,7 @@ async def _exercise_team_member_assembly(
     )
     monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
     if required_resolver is not None:
-        monkeypatch.setattr("mindroom.teams.envelope.required_approval_tool_names", required_resolver)
+        monkeypatch.setattr("mindroom.teams.resume.required_approval_tool_names", required_resolver)
 
     def inspect_members(*, members: ResolvedExactTeamMembers, **_kwargs: object) -> None:
         functions = {build.spec.id: set(build.tool_owners) for build in members.builds}
@@ -253,7 +253,7 @@ async def _exercise_team_member_assembly(
             ),
             record_usage=False,
         )
-    monkeypatch.setattr("mindroom.teams.envelope.build_team_spec", inspect_members)
+    monkeypatch.setattr("mindroom.teams.resume.build_team_spec", inspect_members)
     with pytest.raises(_MemberAssemblyObservedError):
         await continue_paused_team_run(
             member_names=("alpha", "beta"),

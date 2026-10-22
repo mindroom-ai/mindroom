@@ -44,6 +44,7 @@ from agno.session.summary import SessionSummary
 from agno.utils.message import copy_history_message, filter_tool_calls
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.session_storage.agno_compat_session_persistence import drain_agent_cancellation
 
 from mindroom.agents import create_agent
@@ -74,7 +75,6 @@ from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -90,8 +90,9 @@ from mindroom.session_storage.agent_storage import (
     get_team_session,
     save_compaction_usage,
 )
-from mindroom.teams.envelope import continue_paused_team_run, team_response, team_response_stream
+from mindroom.teams.envelope import team_response, team_response_stream
 from mindroom.teams.members import select_model_for_team
+from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (

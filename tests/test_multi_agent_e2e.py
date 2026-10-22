@@ -291,7 +291,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     # The members build on scripted providers that are never asked; the team's leader answers on its own.
     team_leader = ScriptedModel([answer("Team response")])
     monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    monkeypatch.setattr("mindroom.teams.envelope.build_model_provider", lambda *_args, **_kwargs: team_leader)
+    monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_args, **_kwargs: team_leader)
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.get_domain(runtime_paths_for(mock_config))

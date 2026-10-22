@@ -1,20 +1,36 @@
-"""Materializing a team's exact members as agent builds, and choosing the leader's and members' models for a turn."""
+"""Building a team: its exact members as agent builds, the leader's and members' models, and the team spec.
+
+``build_team_spec`` turns the materialized members into the team the leader loop runs: the leader's model, prompt,
+job controls, and call budget, and each member's system message, roster role, and loop hooks.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.agents import create_agent
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.prompt import model_note_for
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agents import create_agent, team_background_jobs
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.history.session_context import resolve_bound_team_scope_context
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
+from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.providers.registry import build_model_provider
+from mindroom.system_prompt import render_date_context
 from mindroom.teams.formation import (
     not_materializable_team_agents_message,
     resolve_live_shared_agent_names,
     resolve_team_materializable_agent_names,
 )
+from mindroom.teams.prompt import render_leader_system_message
+from mindroom.teams.spec import TeamMember, TeamSpec
 from mindroom.thread_models import resolve_thread_model_override
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -22,9 +38,13 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.teams.spec import TeamMode
+    from mindroom.tool_jobs.execution import JobActor
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -293,11 +313,189 @@ def resolve_team_turn_models(
     )
 
 
+def team_label(member_names: Sequence[str]) -> str:
+    """Return the stored ``team_name`` of a team of these members, as Agno's team instances were named."""
+    return f"Team-{'-'.join(member_names)}"
+
+
+def _appended_context(existing: str, block: str) -> str:
+    if not block:
+        return existing
+    stripped = existing.strip()
+    return f"{stripped}\n\n{block}" if stripped else block
+
+
+def _team_member(
+    build: AgentBuild,
+    system_enrichment: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+) -> TeamMember:
+    """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
+
+    A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
+    mid-turn compaction, and approval receipt, and its tools run under its own identity. It replays no history, so
+    its compaction stays within the run, and the leader owns the queued-message notices of the turn. ``model_name``
+    is the member's configured model for this turn, whose window its compaction sizes against. The compaction and
+    receipt hooks hold the state of the run they serve, so each run or resume builds its own.
+    """
+    as_member = replace(build, tool_middleware=(*build.tool_middleware, _as_member(build.spec.id, model_name)))
+    return TeamMember(
+        spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
+        role=build.prompt.role or "",
+        hooks=partial(
+            agent_loop_hooks,
+            as_member,
+            config=config,
+            runtime_paths=runtime_paths,
+            agent_name=build.spec.id,
+            model_name=model_name,
+            store=None,
+            session=None,
+            scope=None,
+            scoped=False,
+            native_compaction=None,
+            prompt_id=None,
+            queued_notices=False,
+        ),
+        request_template=build.request_template,
+    )
+
+
+def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
+    """Return the innermost step of a member's tool calls, which runs the tool under the member's own identity.
+
+    The turn's tool runtime context names the team. Tools that act for the running agent, such as ``todo``'s default
+    assignee and workspace templates or ``claude_agent``'s sessions and model, read it from that context, so each
+    call reaches its entrypoint with the member's name and the model it runs on. The tool-call policy around the
+    step still sees the turn's context, as it did when Agno ran the members.
+    """
+
+    async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
+        context = get_tool_runtime_context()
+        if context is None:
+            return await call_next(call.arguments)
+        with tool_runtime_context(replace(context, agent_name=member_id, active_model_name=model_name)):
+            return await call_next(call.arguments)
+
+    return run_as_member
+
+
+def _resolve_team_instance_id(
+    *,
+    member_names: Sequence[str],
+    config: Config,
+    team_display_name: str,
+    configured_team_name: str | None,
+    scope_context: ScopeSessionContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+) -> str:
+    """Return the team id for scoped and no-session team runs."""
+    if scope_context is not None:
+        return scope_context.scope.scope_id
+    bound_scope = resolve_bound_team_scope_context(
+        member_names=member_names,
+        config=config,
+        team_name=configured_team_name,
+        execution_identity=execution_identity,
+    )
+    if bound_scope is not None:
+        return bound_scope.scope.scope_id
+    return team_display_name
+
+
+@dataclass(frozen=True)
+class BuiltTeam:
+    """One team ready to run: its spec, the tool-call policy the leader's own tools run under, and the team's jobs.
+
+    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner.
+    """
+
+    spec: TeamSpec
+    leader_middleware: tuple[ToolMiddleware, ...]
+    leader_jobs: JobActor | None = None
+
+
+def build_team_spec(
+    *,
+    members: ResolvedExactTeamMembers,
+    mode: TeamMode,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    team_display_name: str,
+    scope_context: ScopeSessionContext | None,
+    execution_identity: ToolExecutionIdentity | None,
+    model_name: str,
+    configured_team_name: str | None,
+    system_enrichment: str = "",
+) -> BuiltTeam:
+    """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
+
+    The leader prompt holds each member's roster role, the leader's tool instructions in offer order, the provider
+    family's note, and the date context with ``system_enrichment`` appended; the team's own history settings and
+    call budget come from the configured team, or the defaults for an ad hoc one.
+    """
+    model = build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
+    team_view = config.resolve_entity(configured_team_name if configured_team_name in config.teams else None)
+    team_id = _resolve_team_instance_id(
+        member_names=members.requested_agent_names,
+        config=config,
+        team_display_name=team_display_name,
+        configured_team_name=configured_team_name,
+        scope_context=scope_context,
+        execution_identity=execution_identity,
+    )
+    jobs = team_background_jobs(config, runtime_paths, execution_identity)
+    leader_toolkits = () if jobs is None else (jobs.controls,)
+    team_members = tuple(
+        _team_member(
+            build,
+            system_enrichment,
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name=members.model_names[build.spec.id],
+        )
+        for build in members.builds
+    )
+    prepared = prepare_run_tools(
+        AgentSpec(id=team_id, name=team_display_name, model=model, system_message=None, toolkits=leader_toolkits),
+    )
+    additional_context = _appended_context(
+        render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
+        system_enrichment,
+    )
+    system_message = render_leader_system_message(
+        team_members,
+        mode,
+        tool_instructions=prepared.instructions,
+        # The delegation tool is always offered, so every leader request offers tools.
+        model_note=model_note_for(model.capabilities, offers_tools=True),
+        additional_context=additional_context,
+    )
+    spec = TeamSpec(
+        id=team_id,
+        name=team_display_name,
+        mode=mode,
+        model=model,
+        system_message=system_message,
+        toolkits=leader_toolkits,
+        tool_call_limit=team_view.max_tool_calls_per_turn,
+        members=team_members,
+    )
+    if jobs is None:
+        return BuiltTeam(spec=spec, leader_middleware=())
+    return BuiltTeam(spec=spec, leader_middleware=jobs.middleware, leader_jobs=jobs.actor)
+
+
 __all__ = [
     "NO_AGENTS_RESPONSE",
+    "BuiltTeam",
     "ResolvedExactTeamMembers",
     "TeamTurnModelSelection",
     "allow_direct_private_team_agents",
+    "build_team_spec",
     "materialize_exact_requested_team_members",
     "materialize_exact_team_members",
     "materialize_team_members",
@@ -305,4 +503,5 @@ __all__ = [
     "resolve_team_member_model_names",
     "resolve_team_turn_models",
     "select_model_for_team",
+    "team_label",
 ]

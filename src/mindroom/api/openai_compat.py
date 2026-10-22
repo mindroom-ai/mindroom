@@ -91,18 +91,19 @@ from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.routing import suggest_responder
-from mindroom.teams.envelope import (
+from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
+from mindroom.teams.members import (
     BuiltTeam,
-    TeamRunRecords,
+    ResolvedExactTeamMembers,
+    TeamTurnModelSelection,
     build_team_spec,
-    prepare_materialized_team_execution,
-    run_prepared_team,
+    materialize_exact_team_members,
     team_label,
 )
-from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection, materialize_exact_team_members
 from mindroom.teams.presentation import TeamStreamPresentation, apply_team_event, render_team_member_slots
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
+from mindroom.teams.storage import TeamRunRecords
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.runtime_context import DetachedRequesterContext, detached_requester_context
 from mindroom.tool_system.worker_routing import (

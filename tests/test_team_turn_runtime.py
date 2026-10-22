@@ -43,6 +43,7 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams.spec import TeamMode
+from mindroom.teams.storage import under_team_scope
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -344,7 +345,7 @@ async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
     with tool_runtime_context(replace(team.runtime, active_model_name="turn-model")):
         # As the attempt does: the team scope around the run, the attempt's model around that.
         events = ToolRuntimeModelBinding().stream_with_model(
-            envelope._under_team_scope(run_events(), TEAM_SCOPE),
+            under_team_scope(run_events(), TEAM_SCOPE),
             active_model_name="attempt-model",
         )
         consumed = [current_binding() async for _event in events]

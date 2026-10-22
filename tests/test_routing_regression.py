@@ -1795,7 +1795,7 @@ class TestRoutingRegression:
         # The members build on scripted providers that are never asked; the team's leader answers on its own.
         team_leader = ScriptedModel([answer("Team response")])
         monkeypatch.setattr("mindroom.agents._build_agent_model_provider", lambda *_a, **_k: ScriptedModel([]))
-        monkeypatch.setattr("mindroom.teams.envelope.build_model_provider", lambda *_a, **_k: team_leader)
+        monkeypatch.setattr("mindroom.teams.members.build_model_provider", lambda *_a, **_k: team_leader)
 
         test_room_id = "!research:localhost"
 
