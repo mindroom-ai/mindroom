@@ -262,6 +262,36 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
         require_ordered_pause_presentation(doubled, show_tool_calls=True)
 
 
+def test_two_members_pending_on_one_call_id_cannot_be_told_apart_and_are_refused() -> None:
+    """An approval names its call by id alone, so the pause is refused before either member's call is decided."""
+    tools = (
+        ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),
+        ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),
+    )
+    requirements = tuple(RunRequirement(tool_execution=tool) for tool in tools)
+    for requirement, member in zip(requirements, ("test_agent", "other"), strict=True):
+        requirement.member_agent_id = member
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=tools,
+        requirements=requirements,
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+        toolkit_owners={("test_agent", "dangerous"): "test_toolkit", ("other", "dangerous"): "test_toolkit"},
+    )
+
+    with pytest.raises(RuntimeError, match="exact identity"):
+        identify_approval_tools(paused, default_agent_name="test-team")
+
+
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
     """A team-level approval requirement must be anchored in the coordinator slot."""
     tool = ToolExecution(
