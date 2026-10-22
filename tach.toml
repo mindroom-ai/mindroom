@@ -7642,7 +7642,7 @@ depends_on = [
     "mindroom.redaction",
     "mindroom.delegation.storage",
     "mindroom.session_storage.agent_storage",
-    "mindroom.session_storage.lanes",
+    "mindroom.session_storage.store",
     "mindroom.agents",
     "mindroom.llm",
     "mindroom.delegation.background",
