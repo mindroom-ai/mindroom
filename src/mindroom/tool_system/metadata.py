@@ -48,6 +48,7 @@ from mindroom.tool_system.registry_state import (
     scoped_plugin_registration_store,
 )
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy, primary_owns_tool_settings
+from mindroom.tool_system.toolkit_connections import register_mcp_functions
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
@@ -724,6 +725,7 @@ def _build_tool_instance(
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int,
     worker_target: ResolvedWorkerTarget | None,
+    list_mcp_functions: bool = False,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -802,6 +804,9 @@ def _build_tool_instance(
 
     with optional_dependency_environment():
         toolkit = cast("Any", tool_class)(**init_kwargs)
+    if list_mcp_functions:
+        # The filters and wrappers below must see the functions an MCP toolkit registers once connected.
+        register_mcp_functions(toolkit)
     _apply_implicit_toolkit_filters(
         toolkit,
         include_tools=include_tools,
@@ -852,11 +857,14 @@ def get_tool_by_name(
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     worker_target: ResolvedWorkerTarget | None,
+    list_mcp_functions: bool = False,
 ) -> Toolkit:
     """Get a tool instance by its registered name.
 
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
+    ``list_mcp_functions`` registers the functions of an Agno MCP toolkit that is not connected yet, for an agent
+    whose runs connect the toolkit in this process.
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
@@ -881,6 +889,7 @@ def get_tool_by_name(
         agent_state_root=agent_state_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
+        list_mcp_functions=list_mcp_functions,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing

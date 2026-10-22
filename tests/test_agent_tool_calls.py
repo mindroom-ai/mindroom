@@ -36,7 +36,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
@@ -342,6 +342,43 @@ async def test_lazy_metadata_and_single_materialization(tmp_path: Path) -> None:
     assert first.instructions == ("Actual lazy instructions",)
     assert builds == [catalog.runtime_context]
     assert (await _events(catalog, "lazy", "action", {"value": 9}))[-1].execution.result == "9"
+
+
+@pytest.mark.asyncio
+async def test_toolkits_the_catalog_connects_stay_connected_until_it_closes(tmp_path: Path) -> None:
+    """A minimal turn's toolkits, eager and deferred, are connected through its catalog and closed with it."""
+    log: list[str] = []
+
+    def connecting(adapted: AdaptedToolkit) -> AdaptedToolkit:
+        async def close() -> None:
+            log.append(f"{adapted.name} close")
+
+        async def connect() -> Callable[[], Awaitable[None]]:
+            log.append(f"{adapted.name} connect")
+            return close
+
+        return replace(adapted, connect=connect)
+
+    def query(sql: str) -> str:
+        return sql
+
+    def lookup(term: str) -> str:
+        return term
+
+    async def materialize() -> AdaptedToolkit:
+        return connecting(_toolkit("server", lookup))
+
+    database = connecting(_toolkit("database", query))
+    catalog = await _catalog(tmp_path, [database])
+    await catalog.connect([database])
+    catalog.add_deferred(agent_tool_calls.DeferredAgentToolkit("server", "An MCP server", materialize))
+    assert (await _events(catalog, "server", "lookup", {"term": "x"}))[-1].execution.result == "x"
+    assert log == ["database connect", "server connect"]
+
+    await catalog.close()
+    await catalog.close()
+
+    assert log == ["database connect", "server connect", "server close", "database close"]
 
 
 @pytest.mark.asyncio

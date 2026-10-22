@@ -49,6 +49,7 @@ from mindroom.tool_system.tool_hooks import (
     build_tool_hook_middleware,
     track_sync_tool_completion,
 )
+from mindroom.tool_system.toolkit_connections import run_toolkit_lifecycle
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -577,7 +578,7 @@ class ScriptToolBroker:
         if not toolkit.requires_connect:
             return
         completion_task = asyncio.create_task(
-            _run_toolkit_lifecycle(toolkit.connect),
+            run_toolkit_lifecycle(toolkit.connect),
             name="script-toolkit-connect",
         )
         try:
@@ -1070,27 +1071,9 @@ def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:
     return function
 
 
-async def _maybe_await(value: object) -> object:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 async def _close_toolkit(toolkit: Toolkit) -> None:
     if toolkit.requires_connect:
-        await _run_toolkit_lifecycle(toolkit.close)
-
-
-async def _run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
-    if inspect.iscoroutinefunction(operation):
-        await operation()
-        return
-    await _run_sync_toolkit_lifecycle(operation)
-
-
-async def _run_sync_toolkit_lifecycle(operation: Callable[[], object]) -> None:
-    result = await asyncio.to_thread(operation)
-    await _maybe_await(result)
+        await run_toolkit_lifecycle(toolkit.close)
 
 
 def _strict_json_result(result: object) -> object:

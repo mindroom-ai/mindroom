@@ -11,9 +11,12 @@ from typing import TYPE_CHECKING, Any
 from mindroom.llm.provider import ToolSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Iterable, Mapping
 
     from mindroom.llm.media import Audio, File, Image, Video
+
+type ToolkitClose = Callable[[], Awaitable[None]]
+type ToolkitConnect = Callable[[], Awaitable[ToolkitClose | None]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -63,12 +66,35 @@ class AdaptedToolkit:
 
     ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
+    ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
+    run connects before the run and closes after it; it returns how to close the connection, or None when the run
+    owns none because the toolkit was connected before it or connecting failed.
     """
 
     name: str
     functions: tuple[ToolFunction, ...]
     instructions: str | None
     guidance: str | None = None
+    connect: ToolkitConnect | None = None
+
+
+async def connect_toolkits(toolkits: Iterable[AdaptedToolkit], closes: list[ToolkitClose]) -> None:
+    """Connect each of ``toolkits`` that holds a connection for one run, adding how to close it to ``closes``.
+
+    ``closes`` grows as each toolkit connects, so a caller cancelled partway still closes the ones it connected.
+    """
+    for toolkit in toolkits:
+        if toolkit.connect is None:
+            continue
+        close = await toolkit.connect()
+        if close is not None:
+            closes.append(close)
+
+
+async def close_toolkits(closes: list[ToolkitClose]) -> None:
+    """Close what ``connect_toolkits`` connected, the last one first, emptying ``closes``."""
+    while closes:
+        await closes.pop()()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

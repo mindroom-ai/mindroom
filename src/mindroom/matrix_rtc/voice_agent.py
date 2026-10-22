@@ -346,6 +346,8 @@ class VoiceAgentOptions:
     on_session_error: Callable[[str], None] | None = None
     #: Saves the speech model's cumulative token usage for the call after each update.
     record_usage: Callable[[RealtimeCallUsage], Awaitable[None]] | None = None
+    #: Closes what the call's tools connected, once the call ends.
+    close_tools: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -527,6 +529,8 @@ class RealtimeVoiceBridge:
         else:
             model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
         self._owned_speech_resource_closers += (model.aclose,)
+        if options.close_tools is not None:
+            self._owned_speech_resource_closers += (options.close_tools,)
         session = AgentSession(llm=model)
         agent = Agent(instructions=options.instructions, tools=list(options.tools))
         await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)

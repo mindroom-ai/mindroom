@@ -35,6 +35,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -44,7 +45,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRequirement, ToolExecution
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import ToolFunction, ToolkitClose
 
 logger = get_logger(__name__)
 
@@ -369,11 +370,16 @@ async def drive_run[R: AnyRunRecord](
     """Run ``entry`` and then the loop over ``messages``, ending the record exactly once however the run ends.
 
     ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills. A run
-    that ends paused without text of its own gets ``pause_content(record)`` as its content.
+    that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
+    hold a connection for one run are connected before ``entry`` and closed after the run reports its end, as Agno's
+    agent closed them after its completed event, once the consumer reads past ``RunFinished`` or closes the stream;
+    a run that fails or is cancelled closes them once its record is stored.
     """
     started = time.monotonic()
     paused = False
+    closes: list[ToolkitClose] = []
     try:
+        await connect_toolkits(spec.toolkits, closes)
         if entry is not None:
             entry_events = entry()
             async with closing_async_stream(entry_events):
@@ -408,7 +414,11 @@ async def drive_run[R: AnyRunRecord](
     except Exception as error:
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
-    yield RunFinished(record)
+    else:
+        # Reported before the toolkits close, so a slow close, such as a stdio MCP server's exit, holds no consumer up.
+        yield RunFinished(record)
+    finally:
+        await close_toolkits(closes)
 
 
 async def _store_interrupted[R: AnyRunRecord](

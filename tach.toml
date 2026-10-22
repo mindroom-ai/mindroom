@@ -937,6 +937,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.toolkit_connections",
 ]
 
 [[modules]]
@@ -4484,6 +4485,7 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.types",
@@ -5161,6 +5163,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.legacy_tool_overrides",
     "mindroom.egress_broker",
@@ -5379,6 +5382,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.tool_function"
 depends_on = ["mindroom.llm"]
+
+[[modules]]
+path = "mindroom.tool_system.toolkit_connections"
+depends_on = ["mindroom.background_tasks", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.tool_system.agno_toolkits"
@@ -5936,6 +5943,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.invocation",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]
@@ -8394,6 +8402,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.invocation",
     "mindroom.tool_jobs.approvals",
@@ -8515,6 +8524,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.llm",
     "mindroom.tool_system.invocation",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[interfaces]]
