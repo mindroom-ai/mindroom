@@ -68,9 +68,9 @@ class EgressCredentialsTools(Toolkit):
         which credential they need. Returns each configured service with whether this agent has a
         credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
         `source` says who defined the service: `config` for the administrator, `user` for the user's own.
-        `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and
-        `account_connected` whether one is connected. A service with nothing configured also says whether the
-        user can connect an account instead of adding a key (`can_connect_account`), with the account's
+        `oauth_reuse` says whether Agent Keys may use the service's account (null without one). A service with
+        nothing configured also says whether the user can connect an account instead of adding a key
+        (`can_connect_account`), with the account's
         `provider` when it can or when the account still needs allowing. The result carries the link
         where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
         into the chat; send them to the link instead.
@@ -136,7 +136,6 @@ class EgressCredentialsTools(Toolkit):
                 "configured": False,
                 "active_source": None,
                 "oauth_reuse": None,
-                "account_connected": False,
                 "can_connect_account": False,
                 "provider": None,
             }
@@ -147,7 +146,6 @@ class EgressCredentialsTools(Toolkit):
             "configured": status.configured,
             "active_source": status.active_source,
             "oauth_reuse": reuse,
-            "account_connected": oauth is not None and oauth.connected,
         }
         if not status.configured:
             # An unreadable stored connection must be reset before a new one can be stored, so it is not connectable.
@@ -180,10 +178,9 @@ class EgressCredentialsTools(Toolkit):
             fix = (
                 f"When `can_connect_account` is true, the user can connect their `provider` account {where}; "
                 "otherwise, or to use their own key instead, they can add an API key there. "
-                "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service "
-                "(`account_connected` says whether one is connected): allowing it there lets this agent's shell and "
-                "python commands act as that account with its full access, without the approval prompts its tools "
-                f"ask for. {who}"
+                "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service: allowing "
+                "it there lets this agent's shell and python commands act as that account with its full access, "
+                f"without the approval prompts its tools ask for. {who}"
             )
         else:
             fix = (

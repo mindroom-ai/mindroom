@@ -116,7 +116,6 @@ def _unconfigured(name: str, display_name: str | None = None, **changes: object)
         "configured": False,
         "active_source": None,
         "oauth_reuse": None,
-        "account_connected": False,
         "can_connect_account": False,
         "provider": None,
         **changes,
@@ -132,7 +131,6 @@ def _keyed(name: str, display_name: str | None = None, source: str = "config") -
         "configured": True,
         "active_source": "key",
         "oauth_reuse": None,
-        "account_connected": False,
     }
 
 
@@ -502,15 +500,15 @@ def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) ->
         "configured": True,
         "active_source": "oauth",
         "oauth_reuse": True,
-        "account_connected": True,
     }
     assert _entry(bob, "github")["configured"] is False
 
 
 def test_a_connected_account_agent_keys_may_not_use_is_named_until_it_is_allowed(tmp_path: Path) -> None:
-    """A connected account serves only its tools until it is allowed, so the entry says it is connected but not usable.
+    """An account serves only its tools until it is allowed, so the entry names it as not usable yet.
 
-    The agent can then tell the user what allowing it means; nothing is offered to connect.
+    The agent can then tell the user what allowing it means; nothing is offered to connect, and the connection is
+    not read to say whether there is one.
     """
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
     manager = get_runtime_credentials_manager(runtime_paths)
@@ -523,13 +521,7 @@ def test_a_connected_account_agent_keys_may_not_use_is_named_until_it_is_allowed
     _allow_github(runtime_paths, _BOB)
     allowed_unconnected = _list(_tool(runtime_paths, _BOB), context)
 
-    assert _entry(connected, "github") == _unconfigured(
-        "github",
-        "GitHub",
-        oauth_reuse=False,
-        account_connected=True,
-        provider="github",
-    )
+    assert _entry(connected, "github") == _unconfigured("github", "GitHub", oauth_reuse=False, provider="github")
     assert _entry(unconnected, "github") == _unconfigured("github", "GitHub", oauth_reuse=False, provider="github")
     assert _entry(allowed_unconnected, "github") == _unconfigured(
         "github",
@@ -605,11 +597,7 @@ def test_explicit_key_wins_over_a_connected_account(tmp_path: Path) -> None:
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _PRESET_SERVICES))
 
-    assert _entry(payload, "github") == {
-        **_keyed("github", "GitHub"),
-        "oauth_reuse": False,
-        "account_connected": True,
-    }
+    assert _entry(payload, "github") == {**_keyed("github", "GitHub"), "oauth_reuse": False}
 
 
 def test_unconfigured_service_says_whether_an_account_can_be_connected(tmp_path: Path) -> None:
@@ -774,9 +762,9 @@ def test_note_points_at_connecting_an_account_or_adding_a_key(tmp_path: Path) ->
     assert "neither an API key nor a connected account Agent Keys may use" in note
     assert "an API key wins over a connected account" in note
     assert (
-        "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service "
-        "(`account_connected` says whether one is connected): allowing it there lets this agent's shell and python "
-        "commands act as that account with its full access, without the approval prompts its tools ask for. "
+        "`oauth_reuse: false` means Agent Keys may not use the `provider` account for that service: allowing it "
+        "there lets this agent's shell and python commands act as that account with its full access, without the "
+        "approval prompts its tools ask for. "
         "Only the user can allow it."
     ) in note
     assert (

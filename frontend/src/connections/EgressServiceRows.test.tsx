@@ -928,6 +928,37 @@ describe("connected accounts", () => {
       );
     });
 
+    it("tells a manager of agents without a scope that every one of them gets the account", async () => {
+      const unscoped = withAccount(
+        {
+          provider: "google_drive",
+          display_name: "Google Drive",
+          connected: true,
+          account_label: "team@example.com",
+          reuse_enabled: false,
+        },
+        { name: "drive", display_name: "Drive", is_shared: true },
+      );
+      renderRows([unscoped], {
+        agent: {
+          displayName: "the agents without a scope",
+          shared: true,
+          scope: "unscoped",
+          services: [unscoped],
+        },
+      });
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Use my Google Drive account for Drive",
+        }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent(
+        "without the approval prompts Google Drive tools ask for. Every agent without a scope gets this.",
+      );
+      expect(dialog).not.toHaveTextContent("Everyone using");
+    });
+
     it("offers nothing to a user who may not change the account", () => {
       renderRows(
         [

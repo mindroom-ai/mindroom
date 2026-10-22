@@ -4,7 +4,8 @@ Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a t
 same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
 policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
 requester's own account is used only in a sandbox that belongs to that requester; see `shared_worker_oauth`.
-A connection is used for a service only after someone allowed it (`oauth_reuse`); until then it is never read.
+The broker neither reads nor refreshes a connection for a service until someone allowed it (`oauth_reuse`); the egress
+pages show its state through the Connections portal's own status reader.
 Logs carry the service, the provider id, and error types, never tokens or connect links.
 """
 
@@ -156,9 +157,9 @@ def oauth_status(
     """Return the scope's connection state for `provider_id` without refreshing; None for an unknown provider.
 
     A stored connection whose access token expired still counts as connected while it can be refreshed.
-    `reuse_enabled` says whether Agent Keys may use it for `service`. A None `worker_target` is the global store that
-    agents without a worker scope read. Binding the keyword arguments gives `secrets.service_status` its
-    `oauth_status` reader.
+    `reuse_enabled` says whether Agent Keys may use it for `service`; without that the connection is not read, so it
+    reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
+    Binding the keyword arguments gives `secrets.service_status` its `oauth_status` reader.
     """
     provider = _registered_provider(service, provider_id, config, runtime_paths)
     if provider is None:
@@ -172,9 +173,10 @@ def oauth_status(
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    reuse_enabled = oauth_reuse_enabled(context, service, provider.id)
     credentials = None
     reset_required = False
-    if context.worker_target is not None or not provider.requester_scoped_credentials:
+    if reuse_enabled:
         try:
             credentials = load_oauth_credentials_snapshot_sync(context).credentials
         except OAuthCredentialUnreadableError:
@@ -189,7 +191,7 @@ def oauth_status(
         reset_required=reset_required,
         service_account=oauth_provider_service_account_configured(provider, runtime_paths),
         shared_worker_opt_in=access == "allowed",
-        reuse_enabled=oauth_reuse_enabled(context, service, provider.id),
+        reuse_enabled=reuse_enabled,
     )
 
 

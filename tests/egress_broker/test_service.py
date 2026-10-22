@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, OAuthCredentialsSnapshot
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -819,17 +820,29 @@ async def test_stored_key_wins_over_oauth_and_its_removal_falls_back_without_res
 async def test_placeholder_env_when_only_oauth_is_connected(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A connected OAuth account Agent Keys may use gives the scope its placeholders; the token never enters the env.
 
-    Until the account is allowed for the service it serves only its tools, so there is no placeholder either.
+    Until the account is allowed for the service it serves only its tools: there is no placeholder, and working that
+    out never reads the connection.
     """
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
     connect_account(manager, account_store("@bob:example.org"), "bob-oauth")
+    reads: list[str | None] = []
+    real_load = oauth_source.load_oauth_credentials_snapshot_sync
+
+    def recording_load(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
+        identity = None if context.worker_target is None else context.worker_target.execution_identity
+        reads.append(None if identity is None else identity.requester_id)
+        return real_load(context)
+
+    monkeypatch.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", recording_load)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         before_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        reads_before = list(reads)
         allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
         alice_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         bob_env = execution_env_for_worker(
@@ -838,9 +851,11 @@ async def test_placeholder_env_when_only_oauth_is_connected(
             worker_target=_routable_target("@bob:example.org"),
         )
     assert "GH_TOKEN" not in before_env
+    assert reads_before == []
     assert alice_env["GH_TOKEN"] == _PLACEHOLDER
     assert "alice-oauth" not in str(alice_env)
     assert "GH_TOKEN" not in bob_env
+    assert reads == ["@alice:example.org"]
 
 
 @pytest.mark.usefixtures("github_oauth_client")

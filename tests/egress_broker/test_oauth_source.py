@@ -853,8 +853,9 @@ def test_without_an_opt_in_a_connection_is_never_read_refreshed_or_linked(
 ) -> None:
     """A connected account serves only its tools until someone allows Agent Keys to use it for the service.
 
-    The broker neither reads nor refreshes it and hands out no connect link; the result names the provider and says
-    whether the account is the requester's own, so the refusal can say who may allow it.
+    The broker neither reads nor refreshes it, not even for the status that placeholders and the agent tool read, and
+    hands out no connect link; the result names the provider and says whether the account is the requester's own, so
+    the refusal can say who may allow it.
     """
     connect_account(
         manager,
@@ -864,11 +865,15 @@ def test_without_an_opt_in_a_connection_is_never_read_refreshed_or_linked(
     )
     presented = serve_token_endpoint(monkeypatch, [])
     monkeypatch.setattr(oauth_source, "refresh_oauth_credentials_blocking", _never)
+    monkeypatch.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", _never)
 
     result = _resolve(config, runtime_paths, manager, target, provider_id=provider.id)
+    status = _status(config, runtime_paths, manager, target, provider_id=provider.id)
 
     assert result == SecretMissing(provider=provider.id, reuse_off=True, requester_owned=requester_owned)
     assert presented == []
+    assert status is not None
+    assert (status.connected, status.account_label, status.reuse_enabled) == (False, None, False)
 
 
 def test_an_opt_in_for_another_provider_counts_as_off(
@@ -886,7 +891,7 @@ def test_an_opt_in_for_another_provider_counts_as_off(
 
     assert result == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
     assert status is not None
-    assert (status.connected, status.reuse_enabled) == (True, False)
+    assert (status.connected, status.reuse_enabled) == (False, False)
 
 
 def test_one_requesters_opt_in_never_unlocks_anothers_account(
@@ -947,7 +952,7 @@ def test_status_says_whether_agent_keys_may_use_the_connection_and_revoking_stop
     revoked = _resolve(config, runtime_paths, manager, alice)
 
     assert before is not None
-    assert (before.connected, before.reuse_enabled) == (True, False)
+    assert (before.connected, before.reuse_enabled) == (False, False)
     assert allowed[0] is not None
     assert (allowed[0].connected, allowed[0].reuse_enabled) == (True, True)
     assert allowed[1] == Secret("alice-access")

@@ -5,8 +5,8 @@ agent's shell and python, which run without approval prompts, so the broker uses
 someone allowed it. The opt-in lives in the store of the connection it unlocks (`oauth_source.broker_credential_context`):
 the requester's own store for a requester-scoped provider such as GitHub, else the store of the service's keys. One
 reserved document there, `egress__oauth_reuse`, holds `{"services": {name: {"provider", "enabled_by", "enabled_at"}}}`.
-An entry naming another provider counts as off, so changing a service's `oauth_provider` turns it off. Workers never
-read it: egress documents are primary-only.
+An entry counts as off while it names a provider other than the service's `oauth_provider`. Workers never read it:
+egress documents are primary-only.
 """
 
 from __future__ import annotations

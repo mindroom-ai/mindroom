@@ -341,7 +341,7 @@ On a standalone deployment the script authenticates with `Authorization: Bearer 
 
 ### Connecting an account
 
-On the personal egress page and the dashboard panel, a service with an account provider offers **Connect <provider> for Agent Keys**, which allows Agent Keys to use the account (see [Using a connected account](#using-a-connected-account)) and opens the provider's login in a popup.
+On the personal egress page and the dashboard panel, a service with an account provider offers **Connect <provider> for Agent Keys**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
 A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
 In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
@@ -371,7 +371,8 @@ The provider's tools ask for approval before they write, but an allowed account 
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
-Disconnecting keeps the account allowed, so a newly connected account of the same provider is used at once, but if a service's `oauth_provider` changes, its account is not used until someone allows it again.
+An allowance covers that provider's account for that scope until someone stops it: disconnecting keeps it, so an account of the same provider connected later, also one connected for the tools on the Connections portal, is used at once.
+It does not apply while the service's `oauth_provider` names another provider.
 A script can allow an account with `PUT /api/connections/egress/agents/<agent>/<service>/oauth-reuse`, or `PUT /api/egress-broker/services/<name>/oauth-reuse?agent_name=<agent>` on the dashboard, and the body `{"acknowledge_approval_bypass": true}`, and stop it with `DELETE` on the same URL.
 
 ## User services
@@ -485,11 +486,11 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   "tool": "egress_credentials",
   "services": [
     {"name": "github", "display_name": "GitHub", "source": "config", "configured": true, "active_source": "oauth",
-     "oauth_reuse": true, "account_connected": true},
+     "oauth_reuse": true},
     {"name": "gmail", "display_name": "Gmail", "source": "config", "configured": false, "active_source": null,
-     "oauth_reuse": false, "account_connected": true, "can_connect_account": false, "provider": "google_gmail"},
+     "oauth_reuse": false, "can_connect_account": false, "provider": "google_gmail"},
     {"name": "openai", "display_name": "OpenAI", "source": "user", "configured": false, "active_source": null,
-     "oauth_reuse": null, "account_connected": false, "can_connect_account": false, "provider": null}
+     "oauth_reuse": null, "can_connect_account": false, "provider": null}
   ],
   "manage_url": "https://mindroom.example/connections/egress",
   "note": "..."
@@ -501,7 +502,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   A [`restrict_only` service](#limiting-in-place) is left out.
 - `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`.
   The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
-- `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)), and `account_connected` whether one is connected; `oauth_reuse` is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
+- `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
   When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.

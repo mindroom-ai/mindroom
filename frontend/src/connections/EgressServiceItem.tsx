@@ -603,6 +603,7 @@ export function EgressServiceItem({
                 : `the ${oauth.display_name} account you connect`,
               service: name,
               sharedAgent: asksAboutSharedAccount ? agent.displayName : null,
+              unscoped: agent.scope === "unscoped",
             })}
             confirmLabel={oauth.connected ? "Use account" : "Continue"}
             onCancel={() => setConfirm(null)}

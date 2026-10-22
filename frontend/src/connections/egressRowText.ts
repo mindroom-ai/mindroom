@@ -5,6 +5,7 @@ import type {
   EgressCredentialService,
   EgressOAuthStatus,
   EgressRuleSummary,
+  EgressScope,
   EgressServiceSource,
 } from "./types";
 
@@ -15,6 +16,8 @@ export interface RowAgent {
   displayName: string;
   /** A shared or unscoped agent: everyone using it shares its keys and accounts. */
   shared: boolean;
+  /** Whose store its keys and accounts live in; every `unscoped` agent shares the global one. */
+  scope?: EgressScope;
   /** The credential managers' Matrix IDs; the dashboard, whose operator manages every service, leaves them out. */
   managers?: string[];
   /** Every service of the agent: disconnecting a provider names the ones that use it. */
