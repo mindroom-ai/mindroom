@@ -15,13 +15,11 @@ from mindroom.session_storage.store import ConversationStore, open_conversation_
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelIdentity
-    from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -97,29 +95,8 @@ def save_compaction_usage(
     )
 
 
-def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[AnyRunRecord]:
-    """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
-    run_list = list(runs)
-    removed = {run_id for run_id in run_ids if run_id}
-    if not removed:
-        return run_list
-    children_by_parent: dict[str, list[str]] = {}
-    for run in run_list:
-        if run.parent_run_id:
-            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
-    frontier = list(removed)
-    while frontier:
-        parent = frontier.pop()
-        for child in children_by_parent.get(parent, []):
-            if child not in removed:
-                removed.add(child)
-                frontier.append(child)
-    return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
-
-
 __all__ = [
     "create_session_storage",
     "create_state_storage",
-    "runs_without",
     "save_compaction_usage",
 ]

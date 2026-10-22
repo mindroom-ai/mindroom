@@ -12,7 +12,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import agent_storage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage, runs_without
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
@@ -137,18 +137,6 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
     assert reopened is not None
     assert [run.run_id for run in reopened.runs] == ["run-1", "run-3", "run-4"]
     assert stored_run_ids(_open(tmp_path), "session-1") == ["run-1", "run-3", "run-4"]
-
-
-def test_runs_without_removes_every_descendant() -> None:
-    """Grandchildren leave with their root even when stored before it."""
-    runs = [
-        RunRecord(run_id="unrelated"),
-        RunRecord(run_id="child", parent_run_id="root"),
-        RunRecord(run_id="grandchild", parent_run_id="child"),
-        RunRecord(run_id="root"),
-    ]
-
-    assert [run.run_id for run in runs_without(runs, ["root"])] == ["unrelated"]
 
 
 def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:

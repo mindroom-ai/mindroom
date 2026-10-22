@@ -31,8 +31,9 @@ class ConversationSession:
 
     ``owner_id`` is the agent or team the session belongs to (the row's ``agent_id`` or ``team_id``).
     ``runs`` holds the runs after the owner scope's latest summary row, every paused, cancelled, or errored
-    run, and their member runs, in log order. ``summary`` is the owner scope's latest summary row, derived on
-    load and never written back. ``session_state`` is the dict the run's tools share and change in place.
+    run, and their member runs, in log order; the store's saves leave each run they save here as the store holds
+    it. ``summary`` is the owner scope's latest summary row, derived on load and never written back.
+    ``session_state`` is the dict the run's tools share and change in place.
     """
 
     session_id: str

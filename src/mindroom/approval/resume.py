@@ -21,7 +21,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.response_turn import DENIED_WITHOUT_REASON
-from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -160,12 +159,6 @@ class ResumeRunner:
         plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         native_compaction = native.native_compaction if native is not None else None
-        store_record = persist_to(self.store, self.session)
-
-        async def persist(record: RunRecord) -> None:
-            await store_record(record)
-            self.session.runs = [*runs_without(self.session.runs, [record.run_id]), record]
-
         return resume_from_session(
             build.spec,
             paused,
@@ -188,7 +181,7 @@ class ResumeRunner:
                 native_compaction=native_compaction,
                 prompt_id=None,
             ),
-            persist=persist,
+            persist=persist_to(self.store, self.session),
             request_template=replace(
                 build.request_template,
                 native_compaction=native_compaction,

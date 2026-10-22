@@ -758,7 +758,6 @@ depends_on = [
     "mindroom.pre_model_preparation",
     "mindroom.providers.pipeline",
     "mindroom.response_turn",
-    "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
@@ -946,21 +945,17 @@ depends_on = [
     "mindroom.session_storage.store",
 ]
 visibility = [
-    "mindroom.ai",
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
     "mindroom.helper_usage",
     "mindroom.agents",
-    "mindroom.ai_runtime",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",
-    "mindroom.history.compaction",
     "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.response_lifecycle",
-    "mindroom.teams",
     "mindroom.turn_store",
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
@@ -973,7 +968,6 @@ visibility = [
     "mindroom.automations.exploration",
     "mindroom.memory._mem0_backend",
     "mindroom.history.mid_turn_compaction",
-    "mindroom.approval.resume",
 ]
 
 [[modules]]
@@ -1110,7 +1104,7 @@ path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.llm",
-    "mindroom.session_storage.agent_storage",
+    "mindroom.session_storage.store",
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
@@ -1278,7 +1272,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.loop_hooks",
     "mindroom.response_turn",
-    "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
 ]
@@ -2593,7 +2586,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.compaction"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
+    "mindroom.session_storage.store",
     "mindroom.background_tasks",
     "mindroom.error_handling",
     "mindroom.history.claude_replay_compat",
@@ -3315,7 +3308,6 @@ depends_on = [
     "mindroom.providers.pipeline",
     "mindroom.providers.registry",
     "mindroom.response_turn",
-    "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
     "mindroom.system_prompt",
     "mindroom.thread_models",
@@ -6260,16 +6252,7 @@ from = ["mindroom.agents"]
 expose = [
     "create_session_storage",
     "create_state_storage",
-    "get_agent_runtime_state_db",
-    "get_agent_session",
-    "get_team_session",
-    "load_agent_session",
-    "run_session_storage_operation",
-    "runs_without",
     "save_compaction_usage",
-    "save_independent_usage",
-    "save_runs",
-    "ensure_session_row",
 ]
 from = ["mindroom.session_storage.agent_storage"]
 

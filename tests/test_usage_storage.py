@@ -24,19 +24,22 @@ from tests.history_helpers import compact_runs
 if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
-_SESSION = ConversationSession(kind="agent", session_id="session", owner_id="code", user_id="@alice:example.test")
+
+def _session() -> ConversationSession:
+    """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
+    return ConversationSession(kind="agent", session_id="session", owner_id="code", user_id="@alice:example.test")
 
 
 @pytest.fixture
 def usage_db(tmp_path: Path) -> ConversationStore:
     """Use the production storage owner with a real session row."""
     storage = create_state_storage("code", tmp_path, session_table="code_sessions")
-    storage.ensure_session_row(_SESSION)
+    storage.ensure_session_row(_session())
     return storage
 
 
 def _save(storage: ConversationStore, run: RunRecord) -> None:
-    storage.save_run(_SESSION, run, record_usage=True)
+    storage.save_run(_session(), run, record_usage=True)
 
 
 def _run(tokens: int = 10, *, run_id: str = "run-1", parent_run_id: str | None = None) -> RunRecord:

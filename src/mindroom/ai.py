@@ -84,7 +84,6 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.notices import append_turn_start_job_note
@@ -731,16 +730,13 @@ def _attempt_storage(run: TurnRunState, build: AgentBuild, *, session_id: str, a
 
 
 def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persist[RunRecord]:
-    """Return the persist callback of one run: keep its terminal record, store it, and show it to the loaded session."""
+    """Return the persist callback of one run: keep its terminal record and store it, which updates the loaded session."""
     store_persist = persist_to(storage.store, storage.session) if storage.store is not None else None
 
     async def persist(record: RunRecord) -> None:
         terminal.record = record
-        if store_persist is None:
-            return
-        await store_persist(record)
-        session = storage.session
-        session.runs = [*runs_without(session.runs, [record.run_id]), record]
+        if store_persist is not None:
+            await store_persist(record)
 
     return persist
 
