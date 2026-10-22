@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_loop.tools import dispatch_tool_calls, media_follow_up, plan_tool_batch
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
@@ -381,7 +381,7 @@ def _stamp_model(message: Message, identity: ModelIdentity) -> None:
     """Record which model answered on the message, the key usage attribution reads (``usage/storage.py``)."""
     message.provider_data = {
         **(message.provider_data or {}),
-        "mindroom_model": {"id": identity.id, "provider": identity.provider_name},
+        MODEL_PROVENANCE_KEY: {"id": identity.id, "provider": identity.provider_name},
     }
 
 

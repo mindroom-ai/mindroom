@@ -232,6 +232,27 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Conver
     assert list(iter_usage_storage_rows(source)) == before
 
 
+def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_is_no_request() -> None:
+    """A request's stored model comes from its message; a message summing retried attempts describes no one request."""
+    answered = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
+    single = Message(
+        role="assistant",
+        metrics=MessageMetrics(input_tokens=100, output_tokens=1),
+        provider_data=answered,
+    )
+    retried = Message(
+        role="assistant",
+        metrics=MessageMetrics(input_tokens=300, output_tokens=3),
+        provider_data={**answered, "mindroom_aggregate_usage": True},
+    )
+
+    requests = project_requests([single.to_dict(), retried.to_dict()]) or []
+
+    assert [(request["model"], request["model_provider"], request["metrics"]) for request in requests] == [
+        ("reply-model", "test-provider", {"input_tokens": 100, "output_tokens": 1}),
+    ]
+
+
 def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved() -> None:
     """A failed reply can keep the messages a compaction folded; their carried usage must not count twice."""
     folded = Message(role="assistant", content="step", metrics=MessageMetrics(input_tokens=100, output_tokens=1))

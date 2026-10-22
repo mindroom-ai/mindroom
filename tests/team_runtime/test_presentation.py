@@ -66,6 +66,11 @@ def test_an_event_for_an_unknown_member_is_refused() -> None:
         apply_team_event(_presentation(), MemberEvent("stranger", "Stranger", "run-9", ContentDelta("hi")))
 
 
+def test_a_member_run_that_names_no_member_has_no_slot() -> None:
+    with pytest.raises(RuntimeError, match="no frozen member slot for 'Scout'"):
+        _presentation().resolve_member_id(None, "Scout")
+
+
 @pytest.mark.parametrize(
     "content",
     [

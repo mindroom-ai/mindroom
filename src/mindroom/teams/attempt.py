@@ -1,9 +1,9 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
 ``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
-also when it is interrupted, and which tells a resume the slots its runs streamed text into; the attempt also collects
-the records the run hands over, which a blocking reply and an interrupted blocking turn render from, and renders the
-run's metadata from them.
+also when it is interrupted, and which tells a resume the slots its runs streamed text into. The attempt also collects
+the records the run hands over, which a blocking turn renders its reply from and records however it ends, and renders
+the run's metadata from them.
 """
 
 from __future__ import annotations
@@ -95,6 +95,8 @@ class TeamAttempt:
     members: ResolvedExactTeamMembers
     presentation: TeamStreamPresentation
     show_tool_calls: bool
+    # Whether the document streams as it grows; a blocking turn renders its reply from the run's records instead.
+    stream: bool
     team_name: str
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
@@ -115,18 +117,21 @@ class TeamAttempt:
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return the live partial-output view of this attempt, for a turn cancelled from outside."""
         return TurnPartialSnapshot(
-            assistant_text=self.reply.canonical_text(),
+            assistant_text=self.interrupted_text(),
             completed_tools=tuple(self.tool_tracker.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in self.tool_tracker.pending_tools),
             attempt_run_id=self.run_id,
         )
 
     def interrupted_text(self) -> str:
-        """Return the text a blocking turn records when this attempt stopped or failed, as Agno's blocking turn did.
+        """Return the text the turn records when this attempt is stopped or fails.
 
-        That is the stored runs' document, stripped, or nothing when the run stored no record. A leader that wrote
-        nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped.
+        A streamed attempt records the text its events built. A blocking attempt records its stored runs' document,
+        stripped, as Agno's blocking turn did, or nothing before the run stored a record. A leader that wrote nothing
+        contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped.
         """
+        if self.stream:
+            return self.reply.canonical_text()
         record = self.records.record
         return format_team_response(record, self.records.members).strip() if record is not None else ""
 

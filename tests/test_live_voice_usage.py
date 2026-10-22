@@ -68,7 +68,10 @@ async def test_voice_usage_keeps_caller_ownership(tmp_path: Path, private: bool)
 
 @pytest.mark.asyncio
 async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) -> None:
-    """Realtime speech models bill tokens per response; each save replaces the call's responses so far."""
+    """Realtime speech models bill tokens per response; each save replaces the call's responses so far.
+
+    Each stored response names the model that answered it.
+    """
     paths = test_runtime_paths(tmp_path)
     config = Config(agents={"helper": AgentConfig(display_name="Helper")})
     identity = ToolExecutionIdentity(
@@ -117,6 +120,16 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0
+    storage = create_session_storage("helper", config, paths, identity)
+    with storage.transaction(write=False) as connection:
+        [(raw,)] = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            ("realtime_voice:call-1",),
+        ).fetchall()
+    assert [(request["model"], request["model_provider"]) for request in json.loads(raw)["requests"]] == [
+        ("gpt-realtime-2.1", "OpenAI"),
+        ("gpt-realtime-2.1", "OpenAI"),
+    ]
 
 
 @pytest.mark.asyncio

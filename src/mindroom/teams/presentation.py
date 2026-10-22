@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
-from mindroom.providers.assistant_turn import MODEL_PROVENANCE_KEY
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -144,6 +144,11 @@ def format_team_response(record: TeamRunRecord, members: Sequence[RunRecord]) ->
         if (text := finished_run_text(member)).strip()
     ]
     return "\n\n".join(_with_consensus(contributions, str(record.content or "")))
+
+
+def team_response_text(record: TeamRunRecord, members: Sequence[RunRecord]) -> str:
+    """Return a finished team run's reply without the header: its runs' text, else the leader's, else the no-reply note."""
+    return format_team_response(record, members) or finished_run_text(record) or NO_TEAM_RESPONSE
 
 
 def _restore_hidden_team_separators(
@@ -329,8 +334,11 @@ class TeamStreamPresentation:
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
         return state
 
-    def resolve_member_id(self, agent_id: str, reported_name: str | None) -> str:
-        """Resolve an event only through its stable member identity: a member id or a member's config name."""
+    def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
+        """Resolve an event or a member run only through its stable member identity: a member id or a config name.
+
+        A run record's member identity is optional, and a run that names no member has no slot.
+        """
         if agent_id in self.per_member:
             return agent_id
         for member_id, config_name in self.config_names_by_id.items():
@@ -489,5 +497,6 @@ __all__ = [
     "publish_team_presentation",
     "render_team_member_slots",
     "strip_team_display",
+    "team_response_text",
     "url_safe_member_id",
 ]

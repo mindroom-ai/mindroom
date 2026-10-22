@@ -18,8 +18,9 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from agno.tools import Toolkit
 
-from mindroom import ai_runtime, loop_hooks, response_runner
+from mindroom import ai_runtime, loop_hooks, response_runner, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
@@ -64,6 +65,7 @@ from tests.conftest import (
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -1436,6 +1438,82 @@ async def test_a_stopped_blocking_team_turn_whose_leader_has_no_content_records_
     assert (record.status, record.content) == (RunStatus.cancelled, None)
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_turn_stopped_after_its_run_ended_records_the_finished_runs_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that lands after the run ended, before the turn settles, records the finished runs' records.
+
+    The checker failed before any text and shows its error, as the reply would have shown it; the text the run's
+    events built held no checker text.
+    """
+    finishing = asyncio.Event()
+    finalize_consumption = response_turn.finalize_consumption
+
+    async def stop_once_the_run_ended() -> None:
+        if not finishing.is_set():
+            finishing.set()
+            await asyncio.Event().wait()
+        await finalize_consumption()
+
+    monkeypatch.setattr(response_turn, "finalize_consumption", stop_once_the_run_ended)
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), answer("Done.")],
+        checker=[[Await(_checker_overloaded)]],
+    )
+    task = asyncio.create_task(team.respond(show_tool_calls=False))
+    await asyncio.wait_for(finishing.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record, [member] = team.stored_runs()
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.error)
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nDone."
+
+
+class _ExternalProbeToolkit(ProbeToolkit):
+    """The members' probe with ``touch`` executed outside the loop: a run paused on that call has nothing to resume it."""
+
+    def __init__(self) -> None:
+        Toolkit.__init__(self, name="probe", tools=[self.touch], external_execution_required_tools=["touch"])
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_run_s_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking turn whose run paused on a call nothing can resume fails, and records the paused run's records.
+
+    The members are listed as their runs ended: the checker failed before any text and shows its error, then the
+    writer paused on its call with the text it wrote before it; the text the run's events built held no checker text.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Write")],
+        checker=[[Await(_checker_overloaded)]],
+        writer=[calls(tool_call("touch", "call-touch", label="outside"), content="Let me touch it.")],
+    )
+
+    with registered_toolkit(PROBE_TOOL, _ExternalProbeToolkit):
+        reply = await team.respond(show_tool_calls=False)
+
+    assert "without an approval to ask for" in reply
+    record, members = team.stored_runs()
+    assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
+    assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
+    assert team.recorder.assistant_text == (
+        "**Checker**: Checker overloaded\n\n**Writer**: Let me touch it.\n\n\n"
+        "*No team consensus - showing individual responses only*"
+    )
 
 
 def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:

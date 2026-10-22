@@ -3283,7 +3283,6 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
-    "mindroom.providers.assistant_turn",
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.session_storage.store",
@@ -8825,7 +8824,7 @@ expose = ["clear_stale_singleton_locks"]
 
 [[modules]]
 path = "mindroom.usage.storage"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_call", "mindroom.history.summary_input", "mindroom.providers.pipeline"]
 
 [[modules]]
