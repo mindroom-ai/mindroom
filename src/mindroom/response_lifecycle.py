@@ -175,11 +175,17 @@ class _QueuedMessageState:
         if self._active_response_turns == 0:
             self._idle_event.set()
 
-    def add_waiting_human_message(self, source_event_id: str, *, text: str | None = None) -> bool:
+    def add_waiting_human_message(
+        self,
+        source_event_id: str,
+        *,
+        text: str | None = None,
+        requester_id: str | None = None,
+    ) -> bool:
         if source_event_id in self._pending_messages:
             return False
         progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
+        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress, requester_id)
         self._notify_changed()
         return True
 
@@ -298,10 +304,12 @@ class ResponseLifecycleCoordinator:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(target.lifecycle_key)
 
-    def has_waiting_human_messages(self, target: MessageTarget) -> bool:
-        """Return whether human messages wait for one canonical conversation's next turn."""
+    def has_waiting_messages_from(self, target: MessageTarget, requester_id: str) -> bool:
+        """Return whether one requester's messages wait for one canonical conversation's next turn."""
         queued_signal = self._thread_queued_signals.get(target.lifecycle_key)
-        return queued_signal is not None and queued_signal.has_pending_human_messages()
+        return queued_signal is not None and any(
+            message.requester_id == requester_id for message in queued_signal.pending_message_snapshot()
+        )
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
@@ -431,6 +439,7 @@ class ResponseLifecycleCoordinator:
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
+            requester_id=response_envelope.requester_id,
         ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
@@ -453,6 +462,7 @@ class ResponseLifecycleCoordinator:
         if not queued_signal.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
+            requester_id=response_envelope.requester_id,
         ):
             return None
         return response_envelope.source_event_id
