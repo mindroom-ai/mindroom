@@ -12,6 +12,8 @@ import httpx
 import nio
 import pytest
 from agno.media import Audio
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
@@ -768,9 +770,6 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_a_failed_normalizer_run_keeps_the_transcription(self) -> None:
         """Agno returns a provider failure as the run's content, which must never replace what the user said."""
-        from agno.run.agent import RunOutput  # noqa: PLC0415
-        from agno.run.base import RunStatus  # noqa: PLC0415
-
         config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
         failed = RunOutput(
             content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
