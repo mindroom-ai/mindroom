@@ -663,20 +663,28 @@ async def test_team_member_loop_compacts_run_locally(
     assert member.status is RunStatus.completed
 
 
+@dataclass(frozen=True)
+class _Hold:
+    """Hold ``task``'s run before it answers its ``request``-th request, until ``release`` is set."""
+
+    task: str
+    request: int
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 @dataclass
 class _PerTaskLoop(ScriptedModel):
     """Script each delegated task's run on its own: ``dig`` for ``tool_rounds`` requests, then the task's answer.
 
     Concurrent runs of one member share this model and interleave their requests, so each request is answered from
-    the script of the task it carries; ``tasks`` names that task for each of ``requests``. When ``task_b_waits_for``
-    is given, Task B's run waits for it before answering its third request, so Task A's run outgrows its window
-    first.
+    the script of the task it carries; ``tasks`` names that task for each of ``requests``. A ``hold`` keeps one
+    task's run waiting, at most five seconds, before one of its requests is answered.
     """
 
     turns: list[Sequence[ScriptStep]] = field(default_factory=list)
     tool_rounds: int = 6
     tasks: list[str] = field(default_factory=list)
-    task_b_waits_for: asyncio.Event | None = None
+    hold: _Hold | None = None
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the next turn of the task ``request`` carries."""
@@ -688,17 +696,17 @@ class _PerTaskLoop(ScriptedModel):
             if number <= self.tool_rounds
             else answer(f"{task} done")
         )
-        event = self.task_b_waits_for
-        if event is not None and (task, number) == ("Task B", 3):
+        hold = self.hold
+        if hold is not None and (task, number) == (hold.task, hold.request):
 
             async def wait() -> None:
-                await asyncio.wait_for(event.wait(), timeout=5)
+                await asyncio.wait_for(hold.release.wait(), timeout=5)
 
             turn = [Await(wait), *turn]
         # The base model takes the queued turn at once, before another run's request can queue its own.
         self.turns.append(turn)
-        async for event in super().stream(request):
-            yield event
+        async for stream_event in super().stream(request):
+            yield stream_event
 
     def compacted_tasks(self) -> list[str]:
         """Return the tasks whose runs sent a request that carries a compaction summary."""
@@ -755,12 +763,14 @@ async def test_a_member_run_whose_compaction_failed_leaves_its_sibling_run_compa
     """Each member run keeps its own compaction state: the run whose summary failed stops, its sibling still compacts."""
     team, writer = _two_writer_runs(tmp_path, monkeypatch)
     failed: list[str] = []
-    writer.task_b_waits_for = asyncio.Event()
+    # Task B's run waits before its third request is answered, so Task A's run outgrows its window first.
+    hold = _Hold("Task B", request=3)
+    writer.hold = hold
 
     async def fail_task_a(*, summary_input: str, **kwargs: Any) -> str:  # noqa: ANN401
         if "Task A" in summary_input:
             failed.append(summary_input)
-            writer.task_b_waits_for.set()
+            hold.release.set()
             msg = "summary model unavailable"
             raise RuntimeError(msg)
         return await summary_calls(summary_input=summary_input, **kwargs)
