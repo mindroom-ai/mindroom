@@ -764,14 +764,12 @@ def _agent_loop_hooks(
     run_context: _AgentRunContext,
     attempt: _AgentAttempt,
     storage: _AttemptStorage,
-    *,
-    approval_receipt: bool = False,
 ) -> LoopHooks:
     """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
 
     A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
     that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
-    ``approval_receipt`` sends the bound approval receipt with the run's first request.
+    ``attempt.approval_receipt`` sends the bound approval receipt with the run's first request.
     """
     ctx = run_context.turn
     prepared = run_context.prepared_run
@@ -796,7 +794,7 @@ def _agent_loop_hooks(
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
         run_id=attempt.run_id,
-        approval_receipt=approval_receipt,
+        approval_receipt=attempt.approval_receipt,
     )
 
 
@@ -825,7 +823,7 @@ async def _start_agent_run(
         session_state=storage.session.session_state,
     )
     spec = prepared.spec
-    hooks = _agent_loop_hooks(run_context, attempt, storage, approval_receipt=attempt.approval_receipt)
+    hooks = _agent_loop_hooks(run_context, attempt, storage)
     if build.surface.mode == "minimal":
         spec, hooks = await minimal_attempt(
             build,
@@ -903,7 +901,7 @@ async def _continue_turn_run(
         settings=prepared.build.history_settings,
         plan=prepared.prepared_history.replay_plan,
         user_id=run_context.turn.requester_id,
-        hooks=_agent_loop_hooks(run_context, attempt, storage),
+        hooks=_agent_loop_hooks(run_context, replace(attempt, approval_receipt=False), storage),
         persist=_persist_into(terminal, storage),
         request_template=replace(run_context.request_template, stream=True),
     )

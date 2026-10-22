@@ -28,6 +28,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, context, spec
+from tests.approval_continuation_helpers import carries_approval_receipt
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import (
     ScriptedAgents,
@@ -276,10 +277,7 @@ def _leader_delegating_to_code(tmp_path: Path) -> tuple[Config, RuntimePaths, To
 
 def _receipt_flags(model: ScriptedModel) -> list[bool]:
     """Return, per request the model received, whether it carried the approval receipt."""
-    return [
-        any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
-        for request in model.requests
-    ]
+    return [carries_approval_receipt(request) for request in model.requests]
 
 
 @pytest.mark.asyncio

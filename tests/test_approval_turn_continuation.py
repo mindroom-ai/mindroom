@@ -41,7 +41,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import approval_continuation, carries_approval_receipt
 from tests.conftest import bind_runtime_paths, make_turn_context, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot
@@ -424,11 +424,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     assert any(message.role == "tool" and message.tool_call_id == "continue" for message in last)
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
-    receipt_requests = [
-        index
-        for index, request in enumerate(model.requests)
-        if any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
-    ]
+    receipt_requests = [index for index, request in enumerate(model.requests) if carries_approval_receipt(request)]
     assert receipt_requests == resume_starts
 
 

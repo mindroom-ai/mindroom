@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
     from mindroom.event_journal.approval_continuations import ApprovalCall
+    from mindroom.llm.provider import ModelRequest
+
+
+def carries_approval_receipt(request: ModelRequest) -> bool:
+    """Return whether ``request`` carries a projected approval receipt, by the marker its projection sets."""
+    return any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
 
 
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401

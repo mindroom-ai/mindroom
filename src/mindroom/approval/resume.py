@@ -165,7 +165,14 @@ async def forward_resume[R: AnyRunRecord](
     return record
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclass(slots=True)
+class _RunHooks:
+    """The hooks of the run a ``ResumeRunner`` resumes: built on its first resume, kept for the continuations."""
+
+    hooks: LoopHooks | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ResumeRunner:
     """Resumes one paused run of a rebuilt agent against its store, with the hooks an agent turn installs.
 
@@ -185,7 +192,7 @@ class ResumeRunner:
     session: ConversationSession
     scope: HistoryScope
     user_id: str | None
-    _hooks: LoopHooks | None = field(default=None, init=False, repr=False, compare=False)
+    _run_hooks: _RunHooks = field(default_factory=_RunHooks, init=False, repr=False, compare=False)
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
@@ -193,8 +200,9 @@ class ResumeRunner:
         plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         native_compaction = native.native_compaction if native is not None else None
-        if self._hooks is None:
-            self._hooks = agent_loop_hooks(
+        hooks = self._run_hooks.hooks
+        if hooks is None:
+            hooks = agent_loop_hooks(
                 build,
                 HookTurn(
                     config=self.config,
@@ -210,6 +218,7 @@ class ResumeRunner:
                 agent_name=self.agent_name,
                 approval_receipt=True,
             )
+            self._run_hooks.hooks = hooks
         events = resume_from_session(
             build.spec,
             paused,
@@ -219,7 +228,7 @@ class ResumeRunner:
             settings=build.history_settings,
             plan=plan,
             user_id=self.user_id,
-            hooks=self._hooks,
+            hooks=hooks,
             persist=persist_to(self.store, self.session),
             request_template=replace(
                 build.request_template,
