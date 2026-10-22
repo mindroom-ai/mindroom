@@ -10,6 +10,7 @@ from itertools import takewhile
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
@@ -41,6 +42,8 @@ _PDF = b"%PDF-1.4\n%fake report\n"
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
 )
+_JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+_WEBP = b"RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00/\x00\x00\x00\x10\x07\x10\x11\x11\x88\x88\xfe\x07\x00"
 _UNSUPPORTED_FILES = {
     "deck.pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "sheet.xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -110,6 +113,50 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
     for note, mime_type in zip(notes, _UNSUPPORTED_FILES.values(), strict=True):
         assert mime_type in note
         assert "get_attachment without view" in note
+
+
+@pytest.mark.asyncio
+async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_type(tmp_path: Path) -> None:
+    """The bytes decide an image's type, even against its file name; an image gone or of another type is logged."""
+    # An upload announced as image/jpg is retained without a usable suffix; a tool saved a PNG under a .jpg name.
+    upload = tmp_path / "sha256_upload.bin"
+    upload.write_bytes(_JPEG)
+    chart = tmp_path / "chart.jpg"
+    chart.write_bytes(_PNG)
+    heic = tmp_path / "sha256_photo.heic"
+    heic.write_bytes(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00")
+    turn = Message(
+        role="user",
+        content="What is in these?",
+        images=[
+            Image(id="att_upload", filepath=str(upload), mime_type="image/jpg"),
+            Image(id="tool_chart", filepath=str(chart)),
+            Image(id="tool_webp", content=_WEBP),
+            Image(id="att_gone", filepath=str(tmp_path / "sha256_gone.png"), mime_type="image/png"),
+            Image(id="att_heic", filepath=str(heic), mime_type="image/heic"),
+        ],
+        files=[File(id="att_report", filepath=str(tmp_path / "sha256_gone.pdf"), mime_type="application/pdf")],
+    )
+    wire = Wire(json_reply([{"type": "text", "text": "Three images."}]))
+
+    with capture_logs() as logs:
+        blocks = _user_blocks(await _sent(route_provider("anthropic", tmp_path, wire), wire, [turn]))
+
+    assert blocks == [
+        {"type": "text", "text": "What is in these?"},
+        *(
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode()},
+            }
+            for media_type, data in (("image/jpeg", _JPEG), ("image/png", _PNG), ("image/webp", _WEBP))
+        ),
+    ]
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
+        "claude_image_file_missing",
+        "claude_image_type_unknown",
+        "claude_document_file_missing",
+    ]
 
 
 @pytest.mark.asyncio

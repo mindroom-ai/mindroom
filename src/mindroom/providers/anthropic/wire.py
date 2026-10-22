@@ -233,11 +233,13 @@ def _user_blocks(message: Message) -> list[Any]:
 
 
 def _image_media_type(image: Image, data: bytes | None) -> str | None:
+    """Return the declared media type when Claude names it, else the one the bytes show.
+
+    A file name is not consulted: every image type Claude reads has a signature, and a name can disagree with it.
+    """
     if image.mime_type in _IMAGE_MEDIA_TYPES.values():
         return image.mime_type
     if image.format and (media_type := _IMAGE_MEDIA_TYPES.get(image.format.lower())) is not None:
-        return media_type
-    if image.filepath and (media_type := _IMAGE_MEDIA_TYPES.get(Path(image.filepath).suffix[1:].lower())):
         return media_type
     if data is not None:
         for signature, media_type in _IMAGE_SIGNATURES:
