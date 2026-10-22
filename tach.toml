@@ -1753,7 +1753,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.openai_compat"
 depends_on = [
-    "mindroom.agent_loop",
     "mindroom.agent_run_context",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",
@@ -1762,10 +1761,8 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.api.response_activity",
     "mindroom.constants",
-    "mindroom.execution_preparation",
     "mindroom.helper_usage",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.knowledge.utils",
     "mindroom.llm",
     "mindroom.logging_config",
@@ -1773,7 +1770,6 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.response_activity",
     "mindroom.routing",
-    "mindroom.session_storage.store",
     "mindroom.teams",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -1782,7 +1778,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.openai_streaming_protocol"
-depends_on = ["mindroom.tool_system.events"]
+depends_on = ["mindroom.llm", "mindroom.tool_system.events"]
 
 [[modules]]
 path = "mindroom.api.openai_request_parsing"
@@ -6276,9 +6272,11 @@ from = ["mindroom.routing"]
 [[interfaces]]
 expose = [
     "envelope.BuiltTeam",
+    "envelope.TeamRunRecords",
     "envelope.build_team_spec",
     "envelope.continue_paused_team_run",
     "envelope.prepare_materialized_team_execution",
+    "envelope.run_prepared_team",
     "envelope.team_label",
     "envelope.team_response",
     "envelope.team_response_stream",
@@ -6300,8 +6298,7 @@ expose = [
     "presentation.apply_team_event",
     "presentation.render_team_member_slots",
     "presentation.strip_team_display",
-    "runtime.MemberRunEnded",
-    "runtime.run_team",
+    "runtime.MemberEvent",
     "spec.TeamMode",
 ]
 from = ["mindroom.teams"]

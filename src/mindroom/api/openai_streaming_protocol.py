@@ -16,24 +16,20 @@ from html import escape
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
     from starlette.background import BackgroundTask
     from starlette.types import Receive, Scope, Send
 
     from mindroom.ai import AIStreamChunk
+    from mindroom.llm.runs import ToolExecution
 
 SSE_DONE = "data: [DONE]\n\n"
 
@@ -188,7 +184,7 @@ def is_error_response(text: str) -> bool:
     if any(stripped.startswith(p) for p in error_prefixes):
         return True
 
-    # Raw provider errors (agno may surface these as response content)
+    # Raw provider errors that reached the reply as text
     return _looks_like_raw_provider_error(stripped)
 
 
@@ -351,18 +347,10 @@ def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -
     return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
 
 
-def _format_openai_stream_tool_message(
-    tool: ToolExecution,
-    *,
-    completed: bool,
-) -> str:
-    if completed:
-        _, trace = format_tool_completed_event(tool)
-    else:
-        _, trace = format_tool_started_event(tool)
-    if trace is None:
-        return ""
-
+def _format_openai_stream_tool_message(tool: ToolExecution, *, completed: bool) -> str:
+    _, trace = format_tool_completed_event(tool) if completed else format_tool_started_event(tool)
+    # A present tool always formats to a trace.
+    assert trace is not None
     call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
     if not completed:
         return call_display
@@ -372,31 +360,12 @@ def _format_openai_stream_tool_message(
     return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
 
 
-def format_stream_tool_event(
-    event: RunOutputEvent | TeamRunOutputEvent,
-    tool_state: ToolStreamState,
-) -> str | None:
-    """Format tool events as inline text for the SSE stream with stable IDs."""
-    if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
-        tool_id = _resolve_started_tool_id(tool, tool_state)
-        state: Literal["start", "done"] = "start"
-    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
-        tool_id = _resolve_completed_tool_id(tool, tool_state)
-        state = "done"
-    else:
-        return None
-
-    if not tool_msg:
-        return None
-    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
+def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
+    """Format one tool event as an inline tool block whose id the call's start and completion share."""
+    started = isinstance(event, ToolStarted)
+    tool_id = (_resolve_started_tool_id if started else _resolve_completed_tool_id)(event.tool, tool_state)
+    message = _format_openai_stream_tool_message(event.tool, completed=not started)
+    return _inject_tool_metadata(message, tool_id=tool_id, state="start" if started else "done")
 
 
 def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
@@ -416,18 +385,19 @@ def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
 
 
 def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> str | None:
-    """Extract text content from a stream event."""
-    if isinstance(event, RunContentEvent) and event.content:
-        return str(event.content)
+    """Return the wire text of one agent stream chunk: reply text, a plain string, or a tool block."""
+    if isinstance(event, ContentDelta):
+        return event.text
     if isinstance(event, str):
         return event
-    return format_stream_tool_event(event, tool_state)
+    if isinstance(event, ToolStarted | ToolCompleted):
+        return format_stream_tool_event(event, tool_state)
+    # ``RunFinished``: its text already streamed as deltas, or the caller sends it as the completed body.
+    return None
 
 
 def extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
-    """Return terminal agent-stream failure text when the chunk represents one."""
-    if isinstance(event, RunErrorEvent):
-        return str(event.content or "Agent execution failed.")
+    """Return the failure text when the chunk is the error message a failed agent run streams."""
     if isinstance(event, str) and is_error_response(event):
         return event
     return None
