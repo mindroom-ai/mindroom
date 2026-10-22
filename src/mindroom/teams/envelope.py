@@ -518,34 +518,59 @@ class _TeamStorage:
 
 
 @dataclass
-class _TerminalTeamRecord:
-    """The terminal team record a run handed to its persist callback, however the run ended."""
+class TeamRunRecords:
+    """The records one team run handed over: its terminal team record and each member run's latest record.
+
+    ``record`` comes from the run's persist callback however the run ended, and from its ``RunFinished``.
+    """
 
     record: TeamRunRecord | None = None
+    members: list[RunRecord] = field(default_factory=list)
+
+    def collect(self, event: TeamRunEvent) -> bool:
+        """Keep the record ``event`` carries; return whether it carried one."""
+        if isinstance(event, RunFinished):
+            assert isinstance(event.record, TeamRunRecord)
+            self.record = event.record
+            return True
+        if isinstance(event, MemberRunEnded):
+            # A member resumed within this run ends twice; its later record replaces the paused one.
+            self.members = [*(record for record in self.members if record.run_id != event.record.run_id), event.record]
+            return True
+        return False
+
+
+def _scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> _TeamStorage:
+    """Return where a team run in ``scope_context`` is stored, giving a scope without a stored session its first one."""
+    session = scope_context.session or new_scope_session(
+        session_id=session_id,
+        scope_id=scope_context.scope.scope_id,
+        is_team=True,
+    )
+    return _TeamStorage(scope_context.storage, session, scope_context.scope, scope_context.storage_factory)
 
 
 def _team_storage(run: TurnRunState, *, session_id: str) -> _TeamStorage | None:
-    """Return where one attempt's team run is stored, giving a scope without a stored session its first session.
+    """Return where one attempt's team run is stored; the turn's scope context keeps the session a run first gave it.
 
     A team without a bound scope stores nothing, as Agno's team ran without a database then.
     """
     scope_context = run.scope_context
     if scope_context is None:
         return None
-    session = scope_context.session
-    if session is None:
-        session = new_scope_session(session_id=session_id, scope_id=scope_context.scope.scope_id, is_team=True)
-        run.scope_context = replace(scope_context, session=session)
-    return _TeamStorage(scope_context.storage, session, scope_context.scope, scope_context.storage_factory)
+    storage = _scope_storage(scope_context, session_id=session_id)
+    if scope_context.session is None:
+        run.scope_context = replace(scope_context, session=storage.session)
+    return storage
 
 
-def _persist_into(terminal: _TerminalTeamRecord, storage: _TeamStorage | None) -> Persist[AnyRunRecord]:
+def _persist_into(records: TeamRunRecords | None, storage: _TeamStorage | None) -> Persist[AnyRunRecord]:
     """Return the persist callback of one team run: keep the team's terminal record, store every record, show it to the session."""
     store_persist = persist_to(storage.store, storage.session) if storage is not None else None
 
     async def persist(record: AnyRunRecord) -> None:
-        if isinstance(record, TeamRunRecord):
-            terminal.record = record
+        if records is not None and isinstance(record, TeamRunRecord):
+            records.record = record
         if store_persist is None or storage is None:
             return
         await store_persist(record)
@@ -608,6 +633,123 @@ def _leader_hooks(
         tool_middleware=leader_middleware,
         after_tool_batch=(ai_runtime.queued_notice_after_tool_batch(notice_text),),
         on_resume_entry=(ai_runtime.queued_notice_on_resume_entry(notice_text),),
+    )
+
+
+@dataclass(frozen=True)
+class _LeaderRun:
+    """How the leader of one prepared team turn runs: where it stores, the hooks around its loop, its request settings."""
+
+    spec: TeamSpec
+    storage: _TeamStorage | None
+    hooks: LoopHooks
+    request_template: ModelRequest
+
+    def start(
+        self,
+        run_input: Sequence[Message],
+        *,
+        run_id: str,
+        session_id: str,
+        user_id: str | None,
+        metadata: dict[str, Any] | None,
+        records: TeamRunRecords | None,
+    ) -> AsyncIterator[TeamRunEvent]:
+        """Start the run; its tools share the stored session's ``session_state``, which the store writes back."""
+        return run_team(
+            self.spec,
+            run_input,
+            ctx=RunContext(
+                run_id=run_id,
+                session_id=session_id,
+                user_id=user_id,
+                metadata=metadata,
+                session_state=self.storage.session.session_state if self.storage is not None else {},
+            ),
+            hooks=self.hooks,
+            persist=_persist_into(records, self.storage),
+            request_template=self.request_template,
+        )
+
+
+def _leader_run(
+    built: BuiltTeam,
+    prepared: PreparedTeamExecution,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    storage: _TeamStorage | None,
+    configured_team_name: str | None,
+    stream: bool,
+    compaction_lifecycle: CompactionLifecycle | None,
+    turn_recorder: TurnRecorder | None,
+) -> _LeaderRun:
+    """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
+    history = prepared.prepared_history
+    plan = history.replay_plan
+    native = history.native_history
+    return _LeaderRun(
+        spec=built.spec,
+        storage=storage,
+        hooks=_leader_hooks(
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name=configured_team_name,
+            scope_id=built.spec.id,
+            spec=built.spec,
+            runtime_model_name=prepared.runtime_model_name,
+            storage=storage,
+            scoped=storage is not None and plan is not None and plan.add_history_to_context,
+            prepared_history=history,
+            prompt_id=prepared.turn.prompt.id,
+            compaction_lifecycle=compaction_lifecycle,
+            turn_recorder=turn_recorder,
+            leader_middleware=built.leader_middleware,
+        ),
+        request_template=ModelRequest(
+            messages=(),
+            stream=stream,
+            native_compaction=native.native_compaction if native is not None else None,
+            portable_replay=native.portable_replay if native is not None else False,
+        ),
+    )
+
+
+def run_prepared_team(
+    built: BuiltTeam,
+    prepared: PreparedTeamExecution,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    scope_context: ScopeSessionContext | None,
+    team_name: str,
+    session_id: str,
+    user_id: str | None,
+    stream: bool,
+) -> AsyncIterator[TeamRunEvent]:
+    """Run one prepared turn of a configured team outside Matrix, with the leader hooks and storage a Matrix turn has.
+
+    The run and its usage are stored in the team scope, a scope without a stored session getting its first one.
+    """
+    storage = _scope_storage(scope_context, session_id=session_id) if scope_context is not None else None
+    leader = _leader_run(
+        built,
+        prepared,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage=storage,
+        configured_team_name=team_name,
+        stream=stream,
+        compaction_lifecycle=None,
+        turn_recorder=None,
+    )
+    return leader.start(
+        prepared.run_input(MediaInputs()),
+        run_id=str(uuid4()),
+        session_id=session_id,
+        user_id=user_id,
+        metadata=prepared.run_metadata,
+        records=None,
     )
 
 
@@ -695,8 +837,7 @@ class _TeamAttempt:
     # The text each slot received, without tool markers: what the interrupted-turn record keeps.
     canonical_per_member: dict[str, str]
     canonical_consensus: str = ""
-    member_records: list[RunRecord] = field(default_factory=list)
-    terminal: _TerminalTeamRecord = field(default_factory=_TerminalTeamRecord)
+    records: TeamRunRecords = field(default_factory=TeamRunRecords)
 
     @property
     def tool_tracker(self) -> StreamingToolTracker:
@@ -724,16 +865,7 @@ class _TeamAttempt:
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""
-        if isinstance(event, RunFinished):
-            assert isinstance(event.record, TeamRunRecord)
-            self.terminal.record = event.record
-            return False
-        if isinstance(event, MemberRunEnded):
-            # A member resumed within this attempt ends twice; its later record replaces the paused one.
-            self.member_records = [
-                *(record for record in self.member_records if record.run_id != event.record.run_id),
-                event.record,
-            ]
+        if self.records.collect(event):
             return False
         if isinstance(event, MemberEvent):
             inner = event.event
@@ -784,7 +916,7 @@ class _TeamAttempt:
 
     def metadata_content(self, config: Config, *, session_id: str | None, status: RunStatus) -> dict[str, Any]:
         """Return the run metadata payload: the leader's identity, the team's usage, and the prepared history."""
-        record = self.terminal.record
+        record = self.records.record
         prepared_history = self.prepared_history
         return build_ai_run_metadata_content(
             config=config,
@@ -794,10 +926,10 @@ class _TeamAttempt:
             status=status,
             model=record.model if record is not None else None,
             model_provider=record.model_provider if record is not None else None,
-            metrics=team_usage(record, self.member_records) if record is not None else None,
+            metrics=team_usage(record, self.records.members) if record is not None else None,
             context_metrics=record.metrics if record is not None else None,
             context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-            tool_count=len(_team_tool_executions(record, self.member_records)) if record is not None else 0,
+            tool_count=len(_team_tool_executions(record, self.records.members)) if record is not None else 0,
             prepared_history=prepared_history,
         )
 
@@ -960,27 +1092,17 @@ class _TeamTurn:
         run_input = prepared.run_input(self.media)
         logger.info("team_prompt_preview", agents=members.display_names, prompt_preview=prepared.prompt_text[:500])
         storage = _team_storage(run, session_id=self.session_id)
-        scoped = (
-            storage is not None
-            and prepared.prepared_history.replay_plan is not None
-            and prepared.prepared_history.replay_plan.add_history_to_context
-        )
-        hooks = _leader_hooks(
+        leader = _leader_run(
+            built,
+            prepared,
             config=config,
             runtime_paths=self.runtime_paths,
-            entity_name=self.configured_team_name,
-            scope_id=built.spec.id,
-            spec=built.spec,
-            runtime_model_name=prepared.runtime_model_name,
             storage=storage,
-            scoped=scoped,
-            prepared_history=prepared.prepared_history,
-            prompt_id=prepared.turn.prompt.id,
+            configured_team_name=self.configured_team_name,
+            stream=stream,
             compaction_lifecycle=self.compaction_lifecycle,
             turn_recorder=self.turn_recorder,
-            leader_middleware=built.leader_middleware,
         )
-        native = prepared.prepared_history.native_history
         ai_runtime.note_attempt_run_id(self.run_id_callback, attempt.run_id)
         request_context = _team_request_log_context(
             self.ctx,
@@ -989,28 +1111,16 @@ class _TeamTurn:
             run_input=run_input,
             metadata=prepared.run_metadata,
         )
-        request_template = ModelRequest(
-            messages=(),
-            stream=stream,
-            native_compaction=native.native_compaction if native is not None else None,
-            portable_replay=native.portable_replay if native is not None else False,
-        )
         with bind_llm_request_log_context(**request_context):
             if self.pipeline_timing is not None:
                 self.pipeline_timing.mark_model_request()
-            events = run_team(
-                built.spec,
+            events = leader.start(
                 run_input,
-                ctx=RunContext(
-                    run_id=attempt.run_id,
-                    session_id=self.session_id,
-                    user_id=self.user_id,
-                    metadata=prepared.run_metadata,
-                    session_state=storage.session.session_state if storage is not None else {},
-                ),
-                hooks=hooks,
-                persist=_persist_into(attempt.terminal, storage),
-                request_template=request_template,
+                run_id=attempt.run_id,
+                session_id=self.session_id,
+                user_id=self.user_id,
+                metadata=prepared.run_metadata,
+                records=attempt.records,
             )
         events = _under_team_scope(events, storage.scope if storage is not None else None)
         if storage is not None:
@@ -1019,9 +1129,9 @@ class _TeamTurn:
                 _TeamResume(
                     spec=built.spec,
                     storage=storage,
-                    terminal=attempt.terminal,
-                    hooks=hooks,
-                    request_template=request_template,
+                    records=attempt.records,
+                    hooks=leader.hooks,
+                    request_template=leader.request_template,
                     settings=_team_history_settings(config, self.configured_team_name),
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,
@@ -1107,7 +1217,7 @@ class _TeamTurn:
 
     def terminal_record(self, attempt: _TeamAttempt) -> TeamRunRecord:
         """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
-        record = attempt.terminal.record
+        record = attempt.records.record
         if record is None:
             msg = f"team run {attempt.run_id!r} ended without its terminal record"
             raise RuntimeError(msg)
@@ -1115,7 +1225,7 @@ class _TeamTurn:
 
     def failure_metadata(self, attempt: _TeamAttempt) -> dict[str, Any] | None:
         """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
-        if self.run_metadata_collector is None or attempt.terminal.record is None:
+        if self.run_metadata_collector is None or attempt.records.record is None:
             return None
         return attempt.metadata_content(self.config, session_id=self.session_id, status=RunStatus.error)
 
@@ -1167,7 +1277,7 @@ class _TeamTurn:
                 session_id=self.ctx.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        tool_executions = _team_tool_executions(record, attempt.member_records)
+        tool_executions = _team_tool_executions(record, attempt.records.members)
         canonical_text = attempt.canonical_text()
         has_visible_output = bool(canonical_text)
         header = format_team_header(attempt.members.display_names)
@@ -1706,7 +1816,7 @@ class _TeamResume:
 
     spec: TeamSpec
     storage: _TeamStorage
-    terminal: _TerminalTeamRecord
+    records: TeamRunRecords
     hooks: LoopHooks
     request_template: ModelRequest
     settings: ResolvedHistorySettings
@@ -1737,7 +1847,7 @@ class _TeamResume:
                 session_state=session.session_state,
             ),
             hooks=self.hooks,
-            persist=_persist_into(self.terminal, self.storage),
+            persist=_persist_into(self.records, self.storage),
             request_template=self.request_template,
         )
         return _under_team_scope(events, self.storage.scope)
@@ -1951,12 +2061,7 @@ async def continue_paused_team_run(
                 state=prior_presentation_state,
                 tool_trace=prior_tool_trace,
             )
-            session = scope.session or new_scope_session(
-                session_id=session_id,
-                scope_id=scope.scope.scope_id,
-                is_team=True,
-            )
-            storage = _TeamStorage(scope.storage, session, scope.scope, scope.storage_factory)
+            storage = _scope_storage(scope, session_id=session_id)
             attempt = _TeamAttempt(
                 run_id=run_id,
                 members=members,
@@ -1971,7 +2076,7 @@ async def continue_paused_team_run(
             resume = _TeamResume(
                 spec=built.spec,
                 storage=storage,
-                terminal=attempt.terminal,
+                records=attempt.records,
                 hooks=_leader_hooks(
                     config=config,
                     runtime_paths=runtime_paths,
@@ -2021,7 +2126,7 @@ async def continue_paused_team_run(
                     async for event in events:
                         if attempt.apply(event):
                             await _publish_team_presentation(progress, presentation)
-            continued = attempt.terminal.record
+            continued = attempt.records.record
             if continued is None:
                 msg = f"team run {run_id!r} ended without its terminal record"
                 raise RuntimeError(msg)
@@ -2067,10 +2172,12 @@ async def _publish_team_presentation(
 __all__ = [
     "BuiltTeam",
     "PreparedTeamExecution",
+    "TeamRunRecords",
     "TeamStreamChunk",
     "build_team_spec",
     "continue_paused_team_run",
     "prepare_materialized_team_execution",
+    "run_prepared_team",
     "team_label",
     "team_response",
     "team_response_stream",

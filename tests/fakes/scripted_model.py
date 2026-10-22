@@ -43,6 +43,8 @@ class ScriptedModel:
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
     requests: list[ModelRequest] = field(default_factory=list)
+    # A route adapter's settings, which the registry's request log records; a scripted route has none.
+    settings: object = None
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the next scripted turn's events."""

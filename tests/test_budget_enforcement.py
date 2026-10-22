@@ -27,8 +27,10 @@ from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
+from mindroom.history.request_messages import TurnMessages
+from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
-from mindroom.teams.envelope import BuiltTeam
+from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
 from mindroom.teams.members import ResolvedExactTeamMembers, TeamTurnModelSelection
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -375,20 +377,27 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
     return members, BuiltTeam(spec=spec, leader_middleware=()), TeamMode.COORDINATE
 
 
+def _prepared_team_turn() -> PreparedTeamExecution:
+    """Return a prepared team turn of one prompt, with no history to replay."""
+    return PreparedTeamExecution(
+        turn=TurnMessages(prompt=Message(role="user", content="Build it"), context=()),
+        history=(),
+        summary=None,
+        run_metadata=None,
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+        runtime_model_name="luna",
+    )
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_openai_compat_team_completion_budgets_priced_models(tmp_path: Path, stream: bool) -> None:
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
         patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()) as build,
         patch(
-            "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(
-                return_value=openai_compat._PreparedOpenAITeamPrompt(
-                    run_input=[Message(role="user", content="Build it")],
-                    prompt="Build it",
-                    run_metadata=None,
-                ),
-            ),
+            "mindroom.api.openai_compat._prepare_openai_team_execution",
+            new=AsyncMock(return_value=_prepared_team_turn()),
         ) as prepare,
     ):
         reply = client.post(
@@ -457,14 +466,8 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
         patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
         patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()),
         patch(
-            "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(
-                return_value=openai_compat._PreparedOpenAITeamPrompt(
-                    run_input=[Message(role="user", content="Build it")],
-                    prompt="Build it",
-                    run_metadata=None,
-                ),
-            ),
+            "mindroom.api.openai_compat._prepare_openai_team_execution",
+            new=AsyncMock(return_value=_prepared_team_turn()),
         ),
     ):
         config_lifecycle.app_state(client.app).budget_monitor = monitor

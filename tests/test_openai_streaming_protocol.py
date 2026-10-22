@@ -9,15 +9,6 @@ from __future__ import annotations
 import json
 import time
 
-from agno.models.response import ToolExecution
-from agno.run.agent import (
-    RunCompletedEvent,
-    RunContentEvent,
-    RunErrorEvent,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
-)
-
 from mindroom.api.openai_streaming_protocol import (
     SSE_DONE,
     CompletionStreamState,
@@ -29,6 +20,8 @@ from mindroom.api.openai_streaming_protocol import (
     new_completion_id,
     sse_chunk,
 )
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, ToolExecution
 
 
 def _parse_sse_line(line: str) -> dict:
@@ -100,8 +93,8 @@ class TestToolCallDeltas:
         started = ToolExecution(tool_name="search", tool_args={"query": "X"}, tool_call_id="tc-1")
         completed = ToolExecution(tool_name="search", tool_args={"query": "X"}, tool_call_id="tc-1", result="3 results")
 
-        start_text = format_stream_tool_event(ToolCallStartedEvent(tool=started), tool_state)
-        done_text = format_stream_tool_event(ToolCallCompletedEvent(tool=completed), tool_state)
+        start_text = format_stream_tool_event(ToolStarted(started), tool_state)
+        done_text = format_stream_tool_event(ToolCompleted(completed), tool_state)
 
         assert start_text == '<tool id="1" state="start">search(query=X)</tool>'
         assert done_text == '<tool id="1" state="done">search(query=X)\n3 results</tool>'
@@ -113,8 +106,8 @@ class TestToolCallDeltas:
         first = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
         second = ToolExecution(tool_name="fetch", tool_args={}, tool_call_id="tc-2")
 
-        first_text = format_stream_tool_event(ToolCallStartedEvent(tool=first), tool_state)
-        second_text = format_stream_tool_event(ToolCallStartedEvent(tool=second), tool_state)
+        first_text = format_stream_tool_event(ToolStarted(first), tool_state)
+        second_text = format_stream_tool_event(ToolStarted(second), tool_state)
 
         assert first_text is not None
         assert second_text is not None
@@ -125,7 +118,7 @@ class TestToolCallDeltas:
         """A completion that was never announced still gets a usable tool ID."""
         tool_state = ToolStreamState()
         completed = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-9", result="ok")
-        text = format_stream_tool_event(ToolCallCompletedEvent(tool=completed), tool_state)
+        text = format_stream_tool_event(ToolCompleted(completed), tool_state)
         assert text is not None
         assert '<tool id="1" state="done">' in text
 
@@ -138,21 +131,17 @@ class TestToolCallDeltas:
             tool_call_id="tc-1",
             result="</tool><i>boom</i>",
         )
-        text = format_stream_tool_event(ToolCallCompletedEvent(tool=completed), tool_state)
+        text = format_stream_tool_event(ToolCompleted(completed), tool_state)
         assert text is not None
         assert "</tool><b>pwn</b>" not in text
         assert "&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in text
         assert "&lt;/tool&gt;&lt;i&gt;boom&lt;/i&gt;" in text
 
-    def test_non_tool_event_is_skipped(self) -> None:
-        """Events that are not tool calls produce no tool trace."""
-        assert format_stream_tool_event(RunCompletedEvent(content="done"), ToolStreamState()) is None
-
     def test_finalize_pending_tools_closes_interrupted_calls(self) -> None:
         """Started-but-never-completed calls are closed with an interrupted done tag."""
         tool_state = ToolStreamState()
         started = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
-        format_stream_tool_event(ToolCallStartedEvent(tool=started), tool_state)
+        format_stream_tool_event(ToolStarted(started), tool_state)
 
         pending = finalize_pending_tools(tool_state)
         assert pending == '<tool id="1" state="done">(interrupted)</tool>'
@@ -164,8 +153,8 @@ class TestStreamTextExtraction:
     """Tests for extracting wire text from core stream chunk events."""
 
     def test_content_event_text(self) -> None:
-        """RunContentEvent content streams through as text."""
-        assert extract_stream_text(RunContentEvent(content="Hello"), ToolStreamState()) == "Hello"
+        """A reply text delta streams through as text."""
+        assert extract_stream_text(ContentDelta("Hello"), ToolStreamState()) == "Hello"
 
     def test_plain_string_passthrough(self) -> None:
         """Cached full responses (plain strings) pass through unchanged."""
@@ -174,24 +163,16 @@ class TestStreamTextExtraction:
     def test_tool_event_becomes_tool_trace(self) -> None:
         """Tool events are encoded as inline tool traces."""
         started = ToolExecution(tool_name="search", tool_args={}, tool_call_id="tc-1")
-        text = extract_stream_text(ToolCallStartedEvent(tool=started), ToolStreamState())
+        text = extract_stream_text(ToolStarted(started), ToolStreamState())
         assert text == '<tool id="1" state="start">search()</tool>'
 
-    def test_completed_event_yields_nothing(self) -> None:
-        """RunCompletedEvent is not a text delta."""
-        assert extract_stream_text(RunCompletedEvent(content="final"), ToolStreamState()) is None
+    def test_finished_run_yields_nothing(self) -> None:
+        """The finished run is not a text delta."""
+        assert extract_stream_text(RunFinished(RunRecord(run_id="run", content="final")), ToolStreamState()) is None
 
 
 class TestAgentStreamFailure:
     """Tests for terminal failure detection on agent stream chunks."""
-
-    def test_run_error_event(self) -> None:
-        """RunErrorEvent surfaces its content as the failure text."""
-        assert extract_agent_stream_failure(RunErrorEvent(content="boom")) == "boom"
-
-    def test_run_error_event_without_content(self) -> None:
-        """RunErrorEvent without content falls back to a generic message."""
-        assert extract_agent_stream_failure(RunErrorEvent(content=None)) == "Agent execution failed."
 
     def test_error_string_chunk(self) -> None:
         """Error-formatted string chunks are treated as terminal failures."""
@@ -200,4 +181,4 @@ class TestAgentStreamFailure:
     def test_normal_chunks_are_not_failures(self) -> None:
         """Ordinary content never reads as a failure."""
         assert extract_agent_stream_failure("All good") is None
-        assert extract_agent_stream_failure(RunContentEvent(content="hi")) is None
+        assert extract_agent_stream_failure(ContentDelta("hi")) is None

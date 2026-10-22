@@ -11,7 +11,7 @@ import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager
 from contextvars import Context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -22,13 +22,12 @@ from tests.conftest import seed_session
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
+    from agno.run import RunContext as AgnoRunContext
+
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.ai import ResponseTurnContext
-    from mindroom.llm.provider import StreamEvent
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.models.ollama import Ollama
-from agno.run.agent import RunContentEvent, RunOutput
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
@@ -36,6 +35,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 
 from mindroom import constants
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
@@ -69,18 +69,18 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.llm.events import ContentDelta, RunFinished
-from mindroom.llm.messages import Message as OwnedMessage
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, TextDelta
-from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.llm.runs import RunStatus as OwnedRunStatus
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import RunMetrics
 from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.routing import ResponderSelection
+from mindroom.teams import envelope
 from mindroom.teams.envelope import BuiltTeam, PreparedTeamExecution
 from mindroom.teams.members import ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
@@ -91,6 +91,8 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     get_tool_execution_identity,
 )
+from mindroom.usage.stats import collect_admin_usage
+from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 
@@ -183,12 +185,12 @@ def _prepared_team_execution_context(
     run_metadata: dict[str, object] | None = None,
     replay_plan: ResolvedReplayPlan | None = None,
     replays_persisted_history: bool = False,
-    messages: list[OwnedMessage] | None = None,
-    history: Sequence[OwnedMessage] = (),
+    messages: list[Message] | None = None,
+    history: Sequence[Message] = (),
     prepared_context_tokens: int | None = None,
 ) -> PreparedTeamExecution:
     """Return a prepared team turn as ``prepare_materialized_team_execution`` builds one: its turn, replayed history, and run metadata."""
-    turn_messages = list(messages or [OwnedMessage(role="user", content=final_prompt)])
+    turn_messages = list(messages or [Message(role="user", content=final_prompt)])
     turn = TurnMessages(prompt=turn_messages[-1], context=tuple(turn_messages[:-1]))
     prepared_history = PreparedHistoryState(
         replay_plan=replay_plan,
@@ -425,6 +427,11 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     assert captured_runtime_paths == [runtime_a]
 
 
+def _offered_function_names(build: AgentBuild) -> set[str]:
+    """Return the names of every function the built agent offers its model."""
+    return {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
+
+
 def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config, tmp_path: Path) -> None:
     """OpenAI-compatible agent construction should hide tools that require approval."""
     runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
@@ -449,8 +456,8 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
         session_id="openai-session",
     )
 
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
-        agent = create_agent(
+    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
+        build = create_agent(
             "code",
             config=config,
             runtime_paths=runtime_paths,
@@ -458,10 +465,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(test_config: Config,
             include_openai_compat_guidance=True,
         )
 
-    exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
-        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
-    }
+    exposed_tool_names = _offered_function_names(build)
     assert "run_shell_command" not in exposed_tool_names
     assert "read_file" in exposed_tool_names
 
@@ -493,8 +497,8 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
         session_id="openai-session",
     )
 
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
-        agent = create_agent(
+    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
+        build = create_agent(
             "code",
             config=config,
             runtime_paths=runtime_paths,
@@ -502,11 +506,8 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path) -
             include_openai_compat_guidance=True,
         )
 
-    exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
-        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
-    }
-    assert "todo" not in {toolkit.name for toolkit in agent.tools}
+    exposed_tool_names = _offered_function_names(build)
+    assert "todo" not in {toolkit.name for toolkit in build.spec.toolkits}
     assert (
         not {
             "add_todo",
@@ -550,8 +551,8 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
         session_id="openai-session",
     )
 
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
-        agent = create_agent(
+    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
+        build = create_agent(
             "code",
             config=config,
             runtime_paths=runtime_paths,
@@ -559,12 +560,13 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(tmp_pa
             include_openai_compat_guidance=True,
         )
 
-    toolkits = {toolkit.name: toolkit for toolkit in agent.tools}
+    toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
     assert "todo" not in toolkits
-    search_result = json.loads(toolkits["dynamic_tools"].tool_search("todo"))
+    [tool_search] = [function for function in toolkits["dynamic_tools"].functions if function.name == "tool_search"]
+    search_result = json.loads(tool_search.entrypoint("todo"))
 
     assert search_result["matches"] == []
-    assert agent.request_template.deferred_tool_names == frozenset({"sleep"})
+    assert build.request_template.deferred_tool_names == frozenset({"sleep"})
 
 
 def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, tmp_path: Path) -> None:
@@ -597,8 +599,8 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
         session_id="openai-session",
     )
 
-    with patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")):
-        agent = create_agent(
+    with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
+        build = create_agent(
             "code",
             config=config,
             runtime_paths=runtime_paths,
@@ -606,10 +608,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(test_config: Config, t
             include_openai_compat_guidance=True,
         )
 
-    exposed_tool_names = {
-        *(function_name for toolkit in agent.tools for function_name in toolkit.functions),
-        *(function_name for toolkit in agent.tools for function_name in toolkit.async_functions),
-    }
+    exposed_tool_names = _offered_function_names(build)
     assert "run_shell_command" not in exposed_tool_names
 
 
@@ -1257,11 +1256,8 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([answer("Agent reply")])),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-            patch(
-                "mindroom.ai._run_cached_agent_attempt",
-                new=AsyncMock(return_value=RunOutput(content="Agent reply")),
-            ),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
@@ -1626,15 +1622,30 @@ class TestChatCompletions:
         assert response.status_code == 500
 
 
+@dataclass
+class _ClosingModel(ScriptedModel):
+    """A scripted route adapter that records when its stream closes."""
+
+    closed: bool = False
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the scripted turn, noting the stream's close."""
+        try:
+            async for event in super().stream(request):
+                yield event
+        finally:
+            self.closed = True
+
+
 class TestStreamingCompletion:
     """Tests for POST /v1/chat/completions with stream=true."""
 
     def test_streaming_sse_format(self, app_client: TestClient) -> None:
         """Streaming returns valid SSE format."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
-            yield RunContentEvent(content="Hello ")
-            yield RunContentEvent(content="world!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta("Hello ")
+            yield ContentDelta("world!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1676,8 +1687,8 @@ class TestStreamingCompletion:
     def test_streaming_passes_include_interactive_questions_false(self, app_client: TestClient) -> None:
         """Streaming disables interactive question prompting for OpenAI compatibility."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
-            yield RunContentEvent(content="ok")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta("ok")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn:
             response = app_client.post(
@@ -1697,8 +1708,8 @@ class TestStreamingCompletion:
     def test_streaming_consistent_id(self, app_client: TestClient) -> None:
         """All streaming chunks have the same completion ID."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
-            yield RunContentEvent(content="test")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta("test")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1726,14 +1737,14 @@ class TestStreamingCompletion:
         """Worker-routing identity must stay active after the first streamed event."""
         observed_session_ids: list[str | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield RunContentEvent(content="Hello ")
+            yield ContentDelta("Hello ")
 
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
-            yield RunContentEvent(content="world!")
+            yield ContentDelta("world!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1756,41 +1767,21 @@ class TestStreamingCompletion:
         test_config: Config,
         spec_version: str,
     ) -> None:
-        """The real API prefetch and ASGI response may advance a model in different tasks."""
-        closed = False
-
-        class _TwoChunkProvider:
-            identity = ModelIdentity(id="synthetic-model", provider="Ollama", provider_name="Ollama")
-            capabilities = Capabilities()
-
-            async def stream(self, _request: ModelRequest) -> AsyncIterator[StreamEvent]:
-                nonlocal closed
-                try:
-                    yield TextDelta("Hello")
-                    yield TextDelta(" world")
-                finally:
-                    closed = True
-
-            def format_tool_results(
-                self,
-                _messages: Sequence[OwnedMessage],
-                results: Sequence[OwnedMessage],
-            ) -> list[OwnedMessage]:
-                return list(results)
-
-        model = wrap_provider(
-            _TwoChunkProvider(),
-            idle_timeout_seconds=None,
-            media_fallback_prompt="Continue without inline media.",
-            request_log=None,
+        """The API's prefetch and the ASGI response may advance the agent's provider stream in different tasks."""
+        model = _ClosingModel(
+            [
+                [
+                    TextDelta("Hello"),
+                    TextDelta(" world"),
+                    TurnCompleted(message=Message(role="assistant", content="Hello world"), stop_reason="end"),
+                ],
+            ],
         )
 
-        async def agent_stream(_ctx: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
-            async for event in model.stream(ModelRequest(messages=[OwnedMessage(role="user", content="Hello")])):
-                if isinstance(event, TextDelta):
-                    yield RunContentEvent(content=event.text)
-
-        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=agent_stream):
+        with (
+            patch("mindroom.providers.registry._build_adapter", return_value=model),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        ):
             response = await openai_compat._stream_completion(
                 "general",
                 "Hello",
@@ -1814,7 +1805,7 @@ class TestStreamingCompletion:
 
         await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
 
-        assert closed
+        assert model.closed
         assert response.completion_predicate is not None
         assert response.completion_predicate()
         body = b"".join(sent).decode()
@@ -1838,10 +1829,10 @@ class TestStreamingCompletion:
         )
         observed_final_identities: list[ToolExecutionIdentity | None] = []
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
             try:
                 assert get_tool_execution_identity() == execution_identity
-                yield RunContentEvent(content="Hello")
+                yield ContentDelta("Hello")
                 await asyncio.Future()
             finally:
                 observed_final_identities.append(get_tool_execution_identity())
@@ -1909,9 +1900,6 @@ class TestStreamingCompletion:
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
         """Streaming emits start/done tool blocks with a stable per-stream tool id."""
-        from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-
         tool_started = ToolExecution(
             tool_name="search",
             tool_args={"query": "X"},
@@ -1925,10 +1913,10 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="Let me search. ")
-            yield ToolCallStartedEvent(tool=tool_started)
-            yield ToolCallCompletedEvent(tool=tool_completed)
-            yield RunContentEvent(content="Found it!")
+            yield ContentDelta("Let me search. ")
+            yield ToolStarted(tool_started)
+            yield ToolCompleted(tool_completed)
+            yield ContentDelta("Found it!")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -1961,9 +1949,6 @@ class TestStreamingCompletion:
 
     def test_streaming_tool_events_escape_payload_and_truncate_result(self, app_client: TestClient) -> None:
         """Tool SSE payloads escape XML and keep large results bounded."""
-        from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-
         tool_started = ToolExecution(
             tool_name="search",
             tool_args={"query": "</tool><b>pwn</b>"},
@@ -1977,8 +1962,8 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield ToolCallStartedEvent(tool=tool_started)
-            yield ToolCallCompletedEvent(tool=tool_completed)
+            yield ToolStarted(tool_started)
+            yield ToolCompleted(tool_completed)
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2014,9 +1999,6 @@ class TestStreamingCompletion:
 
     def test_streaming_tool_ids_increment_for_multiple_calls(self, app_client: TestClient) -> None:
         """Tool ids start at 1 and increment for each new started tool call in a stream."""
-        from agno.models.response import ToolExecution  # noqa: PLC0415
-        from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent  # noqa: PLC0415
-
         first_started = ToolExecution(
             tool_name="search",
             tool_args={"query": "one"},
@@ -2041,12 +2023,12 @@ class TestStreamingCompletion:
         )
 
         async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="Start ")
-            yield ToolCallStartedEvent(tool=first_started)
-            yield ToolCallCompletedEvent(tool=first_completed)
-            yield ToolCallStartedEvent(tool=second_started)
-            yield ToolCallCompletedEvent(tool=second_completed)
-            yield RunContentEvent(content="End")
+            yield ContentDelta("Start ")
+            yield ToolStarted(first_started)
+            yield ToolCompleted(first_completed)
+            yield ToolStarted(second_started)
+            yield ToolCompleted(second_completed)
+            yield ContentDelta("End")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2991,8 +2973,8 @@ class TestAutoRouting:
     def test_auto_streaming(self, app_client: TestClient) -> None:
         """Auto model works with streaming, chunks carry resolved agent name."""
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
-            yield RunContentEvent(content="Streamed!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta("Streamed!")
 
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
@@ -3149,11 +3131,7 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
         yield client
 
 
-_TEAM_SESSION_PROMPT = openai_compat._PreparedOpenAITeamPrompt(
-    run_input=[OwnedMessage(role="user", content="Build it")],
-    prompt="Build it",
-    run_metadata=None,
-)
+_PREPARED_TEAM_TURN = _prepared_team_execution_context(final_prompt="Build it")
 
 
 @dataclass(frozen=True)
@@ -3161,7 +3139,7 @@ class _TeamRunCall:
     """One ``run_team`` call the bridge made: the team, its request, and the run's context."""
 
     spec: TeamSpec
-    messages: list[OwnedMessage]
+    messages: list[Message]
     ctx: RunContext
     request_template: ModelRequest
 
@@ -3170,11 +3148,11 @@ class _TeamRunCall:
 def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
     """Run the real team loop while recording what the bridge hands it."""
     recorded: list[_TeamRunCall] = []
-    real_run_team = openai_compat.run_team
+    real_run_team = envelope.run_team
 
     def recording_run_team(
         spec: TeamSpec,
-        messages: Sequence[OwnedMessage],
+        messages: Sequence[Message],
         *,
         ctx: RunContext,
         request_template: ModelRequest,
@@ -3183,7 +3161,7 @@ def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
         recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template))
         return real_run_team(spec, messages, ctx=ctx, request_template=request_template, **kwargs)  # type: ignore[arg-type]
 
-    with patch("mindroom.api.openai_compat.run_team", new=recording_run_team):
+    with patch("mindroom.teams.envelope.run_team", new=recording_run_team):
         yield recorded
 
 
@@ -3204,14 +3182,14 @@ def _scripted_team(
         name="Test Team",
         mode=mode,
         model=leader,
-        system_message=OwnedMessage(role="system", content="You lead the team."),
+        system_message=Message(role="system", content="You lead the team."),
         members=tuple(
             TeamMember(
                 spec=AgentSpec(
                     id=member_id,
                     name=name,
                     model=model,
-                    system_message=OwnedMessage(role="system", content=f"You are {name}."),
+                    system_message=Message(role="system", content=f"You are {name}."),
                     toolkits=(),
                 ),
                 role=f"{name} role.",
@@ -3229,9 +3207,11 @@ def _scripted_team(
     return resolved, BuiltTeam(spec=spec, leader_middleware=()), mode
 
 
-def _finished(status: OwnedRunStatus = OwnedRunStatus.completed, content: str | None = None) -> RunFinished:
-    """Return the terminal event of a team run that ended with ``status``."""
-    return RunFinished(TeamRunRecord(run_id="team-run", team_id="test-team", status=status, content=content))
+def _finished(content: str) -> RunFinished:
+    """Return the terminal event of a team run that completed with ``content``."""
+    return RunFinished(
+        TeamRunRecord(run_id="team-run", team_id="test-team", status=RunStatus.completed, content=content),
+    )
 
 
 def _team_events(*events: object) -> Callable[..., AsyncIterator[object]]:
@@ -3242,6 +3222,18 @@ def _team_events(*events: object) -> Callable[..., AsyncIterator[object]]:
             yield event
 
     return run
+
+
+def remember(label: str, run_context: AgnoRunContext) -> str:
+    """Keep a label in the conversation's shared session state.
+
+    Args:
+        label: What to keep.
+        run_context: The run, supplied by the loop.
+
+    """
+    run_context.session_state["remembered"] = label
+    return "remembered"
 
 
 def _sse_contents(response_text: str) -> list[str]:
@@ -3266,8 +3258,8 @@ def _post_team_completion_capturing_run_user(
     with (
         patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer("Team answer", chunk=99))),
         patch(
-            "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
+            "mindroom.api.openai_compat._prepare_openai_team_execution",
+            new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
         ),
         _recorded_team_runs() as runs,
     ):
@@ -3332,15 +3324,15 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
         owners.append(get_helper_usage_owner())
         session_ids.append(ctx.session_id)
         yield ContentDelta("Team answer")
-        yield _finished(content="Team answer")
+        yield _finished("Team answer")
 
     with (
         patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
         patch(
-            "mindroom.api.openai_compat._prepare_openai_team_prompt",
-            new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
+            "mindroom.api.openai_compat._prepare_openai_team_execution",
+            new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
         ),
-        patch("mindroom.api.openai_compat.run_team", new=run),
+        patch("mindroom.teams.envelope.run_team", new=run),
     ):
         response = team_app_client.post(
             "/v1/chat/completions",
@@ -3358,12 +3350,12 @@ class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_prompt_uses_non_matrix_team_preparation_defaults(
+    async def test_prepare_openai_team_execution_uses_non_matrix_team_preparation_defaults(
         self,
         team_config: Config,
         tmp_path: Path,
     ) -> None:
-        """OpenAI team prompt preparation should preserve non-Matrix request defaults."""
+        """OpenAI team turn preparation should preserve non-Matrix request defaults."""
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml")
         execution_identity = build_tool_execution_identity(
             channel="openai_compat",
@@ -3376,22 +3368,14 @@ class TestTeamCompletion:
             resolved_thread_id=None,
         )
         _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
-        run_metadata = {"correlation_id": "metadata-correlation"}
 
         with patch(
             "mindroom.api.openai_compat.prepare_materialized_team_execution",
             new_callable=AsyncMock,
         ) as mock_prepare:
-            mock_prepare.return_value = _prepared_team_execution_context(
-                final_prompt="Build it",
-                run_metadata=run_metadata,
-                messages=[
-                    OwnedMessage(role="assistant", content="Previous team reply"),
-                    OwnedMessage(role="user", content="Build it"),
-                ],
-            )
+            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
 
-            prepared = await openai_compat._prepare_openai_team_prompt(
+            prepared = await openai_compat._prepare_openai_team_execution(
                 scope_context=None,
                 team_name="super_team",
                 built=built,
@@ -3403,8 +3387,7 @@ class TestTeamCompletion:
                 execution_identity=execution_identity,
             )
 
-        assert prepared.prompt == "assistant: Previous team reply\n\nBuild it"
-        assert prepared.run_metadata is run_metadata
+        assert prepared is mock_prepare.return_value
         assert mock_prepare.await_count == 1
         preparation_kwargs = mock_prepare.await_args.kwargs
         preparation_ctx = mock_prepare.await_args.args[0]
@@ -3654,7 +3637,7 @@ class TestTeamCompletion:
             )
             yield ContentDelta("Hello ")
             yield ContentDelta("world!")
-            yield _finished(content="Hello world!")
+            yield _finished("Hello world!")
 
         completion = openai_compat._stream_team_completion if stream else openai_compat._non_stream_team_completion
         with (
@@ -3663,7 +3646,7 @@ class TestTeamCompletion:
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
                 new=AsyncMock(side_effect=mock_prepare_team_execution),
             ),
-            patch("mindroom.api.openai_compat.run_team", new=run),
+            patch("mindroom.teams.envelope.run_team", new=run),
         ):
             response = await completion(
                 "super_team",
@@ -3701,34 +3684,6 @@ class TestTeamCompletion:
         records = _read_jsonl(_tool_calls_path(runtime_paths))
         assert records[0]["correlation_id"] == correlation_id
         assert records[0]["reply_to_event_id"] is None
-
-    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
-    def test_team_non_streaming_failed_record_returns_500(
-        self,
-        team_app_client: TestClient,
-        status: OwnedRunStatus,
-    ) -> None:
-        """A team run that ends in a failed record surfaces as an API failure, not as content."""
-        with (
-            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch(
-                "mindroom.api.openai_compat.prepare_materialized_team_execution",
-                new_callable=AsyncMock,
-            ) as mock_prepare,
-            patch("mindroom.api.openai_compat.run_team", new=_team_events(_finished(status, "it went wrong"))),
-        ):
-            mock_prepare.return_value = _prepared_team_execution_context(final_prompt="Build it")
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
 
     def test_team_streaming(self, team_app_client: TestClient) -> None:
         """Streaming team completion streams the leader's text directly."""
@@ -3790,11 +3745,11 @@ class TestTeamCompletion:
             identity = get_tool_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield ContentDelta("world!")
-            yield _finished(content="Hello world!")
+            yield _finished("Hello world!")
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch("mindroom.api.openai_compat.run_team", new=run),
+            patch("mindroom.teams.envelope.run_team", new=run),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -3839,10 +3794,10 @@ class TestTeamCompletion:
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
             patch(
-                "mindroom.api.openai_compat._prepare_openai_team_prompt",
-                new=AsyncMock(return_value=_TEAM_SESSION_PROMPT),
+                "mindroom.api.openai_compat._prepare_openai_team_execution",
+                new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
             ),
-            patch("mindroom.api.openai_compat.run_team", new=run),
+            patch("mindroom.teams.envelope.run_team", new=run),
         ):
             response = await openai_compat._stream_team_completion(
                 "super_team",
@@ -3888,43 +3843,21 @@ class TestTeamCompletion:
         assert len(observed_session_ids) == 1
         assert observed_session_ids[0] is not None
 
-    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
-    def test_team_streaming_first_failed_record_returns_500(
+    def test_team_streaming_failure_after_content_closes_started_tools_and_emits_a_failure_chunk(
         self,
         team_app_client: TestClient,
-        status: OwnedRunStatus,
     ) -> None:
-        """Team stream returns HTTP 500 when the run ends in a failed record before any content."""
+        """A run that fails after streaming started keeps its text, closes its started call, and ends with a failure."""
+
+        async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield ContentDelta("Team started. ")
+            yield ToolStarted(ToolExecution(tool_name="run_shell", tool_args={"cmd": "ls"}, tool_call_id="tc-pending"))
+            msg = "Internal Server Error"
+            raise RuntimeError(msg)
+
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch("mindroom.api.openai_compat.run_team", new=_team_events(_finished(status, "model not found"))),
-        ):
-            response = team_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/super_team",
-                    "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
-                },
-            )
-
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
-
-    @pytest.mark.parametrize("status", [OwnedRunStatus.error, OwnedRunStatus.cancelled])
-    def test_team_streaming_midstream_failed_record_emits_failure_chunk(
-        self,
-        team_app_client: TestClient,
-        status: OwnedRunStatus,
-    ) -> None:
-        """When the run fails after streaming started, the streamed content and a failure chunk are emitted."""
-        with (
-            patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
-            patch(
-                "mindroom.api.openai_compat.run_team",
-                new=_team_events(ContentDelta("Team started. "), _finished(status, "Internal Server Error")),
-            ),
+            patch("mindroom.teams.envelope.run_team", new=run),
         ):
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -3936,12 +3869,13 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        full = "".join(_sse_contents(response.text))
-        assert "Team started. " in full
-        assert "Team execution failed." in full
-        assert full.index("Team started. ") < full.index("Team execution failed.")
-        assert lines[-1] == "data: [DONE]"
+        assert _sse_contents(response.text) == [
+            "Team started. ",
+            '<tool id="1" state="start">run_shell(cmd=ls)</tool>',
+            '<tool id="1" state="done">(interrupted)</tool>',
+            "Team execution failed.",
+        ]
+        assert response.text.strip().split("\n\n")[-1] == "data: [DONE]"
 
     @pytest.mark.parametrize(
         "build_error",
@@ -4032,13 +3966,13 @@ class TestTeamCompletion:
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
-                "mindroom.api.openai_compat.run_team",
+                "mindroom.teams.envelope.run_team",
                 new=_team_events(
                     member("member noise "),
                     ContentDelta("leader "),
                     member("more noise "),
                     ContentDelta("answer"),
-                    _finished(content="leader answer"),
+                    _finished("leader answer"),
                 ),
             ),
         ):
@@ -4074,7 +4008,7 @@ class TestTeamCompletion:
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
-                "mindroom.api.openai_compat.run_team",
+                "mindroom.teams.envelope.run_team",
                 new=_team_events(
                     # Interleaved chunks from two parallel members, then the leader's synthesis.
                     member("a", "From A chunk1 "),
@@ -4082,7 +4016,7 @@ class TestTeamCompletion:
                     member("a", "From A chunk2 "),
                     member("b", "From B chunk2 "),
                     ContentDelta("Combined answer from leader"),
-                    _finished(content="Combined answer from leader"),
+                    _finished("Combined answer from leader"),
                 ),
             ),
         ):
@@ -4192,7 +4126,7 @@ class TestTeamCompletion:
                     num_history_messages=None,
                 ),
                 replays_persisted_history=True,
-                history=[OwnedMessage(role="user", content="Start"), OwnedMessage(role="assistant", content="Ack")],
+                history=[Message(role="user", content="Start"), Message(role="assistant", content="Ack")],
             )
             response = team_app_client.post(
                 "/v1/chat/completions",
@@ -4257,13 +4191,155 @@ class TestTeamCompletion:
         session = storage.load_session(first.ctx.session_id, "team")
         assert session is not None
         assert [(run.run_id, run.status, run.content) for run in session.runs] == [
-            (first.ctx.run_id, OwnedRunStatus.completed, "First answer"),
-            (second.ctx.run_id, OwnedRunStatus.completed, "Second answer"),
+            (first.ctx.run_id, RunStatus.completed, "First answer"),
+            (second.ctx.run_id, RunStatus.completed, "Second answer"),
         ]
         assert [message.content for message in second.messages] == ["Start", "First answer", "Follow-up"]
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_team_completion_records_every_run_s_usage_and_the_session_state_its_tools_wrote(
+        self,
+        team_config: Config,
+        stream: bool,
+    ) -> None:
+        """An API team run stores the leader's and the member's usage in the team scope and the state a tool changed."""
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        persist_entity_accounts(team_config, runtime_paths)
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+        member = ScriptedModel(
+            [answer("Done", usage(40, 4))],
+            identity=ModelIdentity(id="member-model", provider="Synthetic", provider_name="Synthetic"),
+        )
+        members, built, mode = _scripted_team(
+            calls(
+                tool_call("remember", "call-remember", label="blue"),
+                tool_call("delegate_task_to_member", "call-delegate", member_id="general", task="Go"),
+                metrics=usage(100, 10),
+            ),
+            answer("All done", usage(150, 5)),
+            members=[("general", "GeneralAgent", member)],
+            team_id="super_team",
+        )
+        spec = replace(built.spec, toolkits=(toolkit(remember, name="memory_probe"),))
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
+            patch("mindroom.api.openai_compat._build_team", return_value=(members, replace(built, spec=spec), mode)),
+            _recorded_team_runs() as runs,
+            TestClient(app, base_url="http://localhost") as client,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                headers={"X-Session-Id": "team-session"},
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Go"}], "stream": stream},
+            )
+
+        assert response.status_code == 200
+        [run] = runs
+        storage = create_scope_session_storage(
+            agent_name="super_team",
+            scope=HistoryScope(kind="team", scope_id="super_team"),
+            config=team_config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+        )
+        session = storage.load_session(run.ctx.session_id, "team")
+        assert session is not None
+        assert session.session_state == {"remembered": "blue"}
+        report = collect_admin_usage(config=team_config, runtime_paths=runtime_paths)
+        assert {row.model: row.totals.total_tokens for row in report.model_breakdown} == {
+            SYNTHETIC.id: 265,
+            "member-model": 44,
+        }
+
+    def test_a_claude_leader_answers_a_call_the_output_limit_cut_off_instead_of_running_it(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """An API team leader runs under a Matrix leader's hooks, so a cut-off delegation is answered and never runs."""
+        cut_off = calls(tool_call("delegate_task_to_member", "call-cut", member_id="general", task="Write it all"))
+        cut_off[-1] = replace(cut_off[-1], stop_reason="output_limit")
+        member = ScriptedModel([])
+        members, built, mode = _scripted_team(
+            cut_off,
+            answer("I will split the work."),
+            members=[("general", "GeneralAgent", member)],
+        )
+        leader = replace(built.spec.model, capabilities=Capabilities(claude_family=True))
+        team = (members, replace(built, spec=replace(built.spec, model=leader)), mode)
+
+        with patch("mindroom.api.openai_compat._build_team", return_value=team):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Write it all"}]},
+            )
+
+        assert response.status_code == 200
+        assert "I will split the work." in response.json()["choices"][0]["message"]["content"]
+        assert member.requests == []
+        assert leader.requests[1].messages[-1].content == CUT_OFF_TOOL_CALL_RESULT
+
+    def test_team_streaming_shows_the_tool_calls_of_the_leader_and_its_members_but_only_the_leader_s_text(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """Every tool call streams as a block with an id its start and completion share; member text stays out."""
+
+        def delegation(result: str | None = None) -> ToolExecution:
+            return ToolExecution(
+                tool_name="delegate_task_to_member",
+                tool_args={"member_id": "general"},
+                tool_call_id="call-team",
+                result=result,
+            )
+
+        def search(result: str | None = None) -> ToolExecution:
+            return ToolExecution(
+                tool_name="search",
+                tool_args={"query": "X"},
+                tool_call_id="call-member",
+                result=result,
+            )
+
+        def member(event: ContentDelta | ToolStarted | ToolCompleted) -> MemberEvent:
+            return MemberEvent("general", "GeneralAgent", "member-run", event)
+
+        with (
+            patch(
+                "mindroom.api.openai_compat._build_team",
+                return_value=_scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))]),
+            ),
+            patch(
+                "mindroom.teams.envelope.run_team",
+                new=_team_events(
+                    ToolStarted(delegation()),
+                    member(ContentDelta("member noise")),
+                    member(ToolStarted(search())),
+                    member(ToolCompleted(search("3 results"))),
+                    ToolCompleted(delegation("Found 3")),
+                    ContentDelta("Final answer"),
+                    _finished("Final answer"),
+                ),
+            ),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Search"}], "stream": True},
+            )
+
+        assert response.status_code == 200
+        assert _sse_contents(response.text) == [
+            '<tool id="1" state="start">delegate_task_to_member(member_id=general)</tool>',
+            '<tool id="2" state="start">search(query=X)</tool>',
+            '<tool id="2" state="done">search(query=X)\n3 results</tool>',
+            '<tool id="1" state="done">delegate_task_to_member(member_id=general)\nFound 3</tool>',
+            "Final answer",
+        ]
+
     @pytest.mark.asyncio
-    async def test_prepare_openai_team_prompt_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
+    async def test_prepare_openai_team_execution_scrubs_queued_notices_and_uses_team_renderer(self) -> None:
         """OpenAI team prep should recover notice facts and preserve assistant-role rendering."""
         config = Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", role="General", rooms=[])},
@@ -4274,8 +4350,8 @@ class TestTeamCompletion:
         _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
         prior_response_id = "prior-openai-team-response"
 
-        def notice(marker: object) -> OwnedMessage:
-            return OwnedMessage(
+        def notice(marker: object) -> Message:
+            return Message(
                 role="user",
                 content=QUEUED_MESSAGE_NOTICE_TEXT,
                 provider_data={
@@ -4313,7 +4389,7 @@ class TestTeamCompletion:
             ]
             seed_session(scope_context.storage, scope_context.session)
 
-        def collect_messages(run: RunRecord | TeamRunRecord) -> list[OwnedMessage]:
+        def collect_messages(run: RunRecord | TeamRunRecord) -> list[Message]:
             messages = list(run.messages)
             if isinstance(run, TeamRunRecord):
                 for member_response in run.member_responses:
@@ -4357,8 +4433,8 @@ class TestTeamCompletion:
                 return _prepared_team_execution_context(
                     final_prompt="Previous team reply\n\nAnalyze this.",
                     messages=[
-                        OwnedMessage(role="assistant", content="Previous team reply"),
-                        OwnedMessage(role="user", content="Analyze this."),
+                        Message(role="assistant", content="Previous team reply"),
+                        Message(role="user", content="Analyze this."),
                     ],
                 )
 
@@ -4369,7 +4445,7 @@ class TestTeamCompletion:
                 ),
                 patch("mindroom.teams.envelope.provider_model_params", return_value={"temperature": 0.7}),
             ):
-                prepared_prompt = await openai_compat._prepare_openai_team_prompt(
+                prepared = await openai_compat._prepare_openai_team_execution(
                     scope_context=scope_context,
                     team_name="general",
                     built=built,
@@ -4380,11 +4456,11 @@ class TestTeamCompletion:
                     team_model_name="default",
                 )
 
-        assert prepared_prompt.prompt == "assistant: Previous team reply\n\nAnalyze this."
-        assert prepared_prompt.run_metadata is not None
-        assert "tools_schema" not in prepared_prompt.run_metadata
-        assert prepared_prompt.run_metadata["model_params"] == {"temperature": 0.7}
-        assert prepared_prompt.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
+        assert prepared.prompt_text == "assistant: Previous team reply\n\nAnalyze this."
+        assert prepared.run_metadata is not None
+        assert "tools_schema" not in prepared.run_metadata
+        assert prepared.run_metadata["model_params"] == {"temperature": 0.7}
+        assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         with open_bound_scope_session_context(
             member_names=["general"],
             session_id="session-openai-team-prep",
@@ -4802,8 +4878,8 @@ class TestKnowledgeIntegration:
         """Knowledge is passed through in streaming mode too."""
         mock_reader = MagicMock()
 
-        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[RunContentEvent]:
-            yield RunContentEvent(content="Streamed!")
+        async def mock_stream(_ctx: object, **_kw: object) -> AsyncIterator[ContentDelta]:
+            yield ContentDelta("Streamed!")
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
@@ -4872,7 +4948,7 @@ class TestKnowledgeIntegration:
         assert response.status_code == 200
         knowledge_arg = mock_ai.call_args.kwargs["knowledge"]
         assert _knowledge_indexes(knowledge_arg) == [mock_reader_docs, mock_reader_wiki]
-        assert [source.description.base_id for source in knowledge_arg.agent_knowledge.sources] == ["docs", "wiki"]
+        assert [source.description.base_id for source in knowledge_arg.sources] == ["docs", "wiki"]
         assert knowledge_arg.max_results == 10
 
     def test_knowledge_resolution_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:

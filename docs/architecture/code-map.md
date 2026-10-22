@@ -168,7 +168,7 @@ Matrix sync callback
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
 | `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, and the durable `team_stream` snapshot an approval resume restores |
-| `teams/envelope.py` | `team_response`, `team_response_stream`, and `continue_paused_team_run`: build the leader and members, run the team through the turn drivers, drive a member's delegations and resume the run with their results, render the reply |
+| `teams/envelope.py` | `team_response`, `team_response_stream`, and `continue_paused_team_run`: build the leader and members, run the team through the turn drivers, drive a member's delegations and resume the run with their results, render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `agent_cli/minimal_agent.py` | Same live Agent with one provider-facing Bash tool and hidden canonical tool preparation |
 | `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent` |
