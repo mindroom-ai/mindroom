@@ -44,7 +44,7 @@ from mindroom.tool_approval_grants import (
 from mindroom.tool_system.tool_calls import sanitize_failure_text, sanitize_failure_value
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from mindroom.approval.recovery import ApprovalRecovery
@@ -1006,26 +1006,58 @@ class ApprovalManager:
             return False
         complete = True
         for room_id in await self.cards.pending_approval_room_ids():
-            cursor: tuple[int, str] | None = None
-            while True:
-                page = await self.cards.pending_approval_cards(
-                    room_id=room_id,
-                    limit=_STARTUP_RECOVERY_SCAN_PAGE,
-                    after=cursor,
-                )
-                if not page:
-                    break
-                cursor = (page[-1].created_at_ns, page[-1].delivery_id)
-                for stored in page:
-                    if isinstance(stored, UnreadableApprovalCard):
-                        if stored.continuation_id == continuation_id:
-                            complete = False
-                        continue
-                    if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
-                        complete = await self._expire_stored(room_id, stored) and complete
-                if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
-                    break
+            async for stored in self._pending_cards(self.cards, room_id):
+                if isinstance(stored, UnreadableApprovalCard):
+                    if stored.continuation_id == continuation_id:
+                        complete = False
+                    continue
+                if stored.target_kind == "continuation" and stored.continuation_id == continuation_id:
+                    complete = await self._expire_stored(room_id, stored) and complete
         return complete
+
+    @staticmethod
+    async def _pending_cards(
+        cards: ApprovalDeliveryView,
+        room_id: str,
+    ) -> AsyncIterator[StoredApprovalCard | UnreadableApprovalCard]:
+        """Yield one room's recorded cards oldest first, one page at a time."""
+        cursor: tuple[int, str] | None = None
+        while True:
+            page = await cards.pending_approval_cards(room_id=room_id, limit=_STARTUP_RECOVERY_SCAN_PAGE, after=cursor)
+            if not page:
+                return
+            cursor = (page[-1].created_at_ns, page[-1].delivery_id)
+            for stored in page:
+                yield stored
+            if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
+                return
+
+    async def pending_card_event_ids(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        approver_user_id: str,
+    ) -> tuple[str, ...]:
+        """Return the unanswered, approvable cards one approver has in one conversation, scheduled calls aside."""
+        if self.cards is None:
+            return ()
+        event_ids = []
+        async for stored in self._pending_cards(self.cards, room_id):
+            if (
+                isinstance(stored, StoredApprovalCard)
+                and stored.resolution is None
+                and stored.card_event_id is not None
+                and stored.target_kind != "scheduled_call"
+            ):
+                content = stored.card["content"]
+                if (
+                    content.get("thread_id") == thread_id
+                    and content.get("approver_user_id") == approver_user_id
+                    and content.get("approvable", True) is True
+                ):
+                    event_ids.append(stored.card_event_id)
+        return tuple(event_ids)
 
     async def _expire_stored(self, room_id: str, stored: StoredApprovalCard) -> bool:
         if self.cards is None or (stored.card_event_id is None and stored.resolution is not None):
@@ -1122,31 +1154,19 @@ class ApprovalManager:
         scanned = 0
         retired = 0
         for room_id in await self.cards.pending_approval_room_ids():
-            cursor: tuple[int, str] | None = None
-            while True:
-                page = await self.cards.pending_approval_cards(
-                    room_id=room_id,
-                    limit=_STARTUP_RECOVERY_SCAN_PAGE,
-                    after=cursor,
+            async for stored in self._pending_cards(self.cards, room_id):
+                scanned += 1
+                settled = await self._settle_startup_card(room_id, stored)
+                had_transport_failure = any(
+                    delivery_id == stored.delivery_id for delivery_id, _stage in transport_failures
                 )
-                if not page:
-                    break
-                cursor = (page[-1].created_at_ns, page[-1].delivery_id)
-                for stored in page:
-                    scanned += 1
-                    settled = await self._settle_startup_card(room_id, stored)
-                    had_transport_failure = any(
-                        delivery_id == stored.delivery_id for delivery_id, _stage in transport_failures
-                    )
-                    if settled is True:
-                        transport_failures = {
-                            delivery for delivery in transport_failures if delivery[0] != stored.delivery_id
-                        }
-                        retired += 1
-                    elif settled is False and not had_transport_failure:
-                        failed += 1
-                if len(page) < _STARTUP_RECOVERY_SCAN_PAGE:
-                    break
+                if settled is True:
+                    transport_failures = {
+                        delivery for delivery in transport_failures if delivery[0] != stored.delivery_id
+                    }
+                    retired += 1
+                elif settled is False and not had_transport_failure:
+                    failed += 1
         self._ensure_deadline_sweep()
         return _ApprovalStartupSweep(
             discarded=retired,

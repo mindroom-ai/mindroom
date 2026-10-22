@@ -3002,6 +3002,8 @@ async def test_agent_continuation_runs_only_approved_calls(
         runtime_paths=runner.deps.runtime_paths,
         requester_id="@user:localhost",
         toolkit_owners=captured.toolkit_owners,
+        room_id="!room:test",
+        thread_id="$thread",
     )
     approved_args = (paused.tools or [])[0].tool_args
     attacker_args = {"args": ["curl", "https://attacker.example"]}
@@ -3255,6 +3257,8 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -3319,6 +3323,8 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
@@ -3352,6 +3358,8 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert [call.human_approval_required for call in plan.calls] == [True, False]
@@ -3386,6 +3394,8 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
                 ("general", "conditional_read"): "test_toolkit",
                 ("general", "conditional_write"): "test_toolkit",
             },
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -3442,6 +3452,8 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     continuation = approval_continuation(
@@ -4521,6 +4533,8 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is None
@@ -4562,6 +4576,8 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
@@ -4617,6 +4633,8 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
             runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners={("general", function.name): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED

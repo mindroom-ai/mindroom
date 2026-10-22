@@ -16,6 +16,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
 )
+from mindroom.approval.yolo import yolo_expires_at
 from mindroom.cancellation import cancel_source_from_failure_reason
 from mindroom.constants import (
     STREAM_STATUS_APPROVAL_PENDING,
@@ -202,9 +203,15 @@ async def plan_approval_calls(
     runtime_paths: RuntimePaths,
     requester_id: str,
     toolkit_owners: Mapping[tuple[str, str], str | None],
+    room_id: str | None,
+    thread_id: str | None,
 ) -> _ApprovalPausePlan:
-    """Evaluate policy once and normalize exact calls with integer deadlines."""
+    """Evaluate policy once and normalize exact calls with integer deadlines.
+
+    The approver's YOLO window in the conversation approves every call that would ask them.
+    """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
+    yolo = yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id) is not None
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
     for tool, tool_call_id, tool_name, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
@@ -219,11 +226,11 @@ async def plan_approval_calls(
         )
         requires_approval = requires_approval or tool_authored_confirmation
         decisions[tool_call_id] = (
-            None
-            if requires_approval and approver_id is not None
-            else ContinuationDecision.DENIED
-            if requires_approval
-            else ContinuationDecision.APPROVED,
+            ContinuationDecision.APPROVED
+            if not requires_approval or yolo
+            else None
+            if approver_id is not None
+            else ContinuationDecision.DENIED,
             timeout_seconds,
             requires_approval,
         )
@@ -381,6 +388,8 @@ class ApprovalResponseCoordinator:
             runtime_paths=self.runtime_paths,
             requester_id=current.requester_id,
             toolkit_owners=paused.toolkit_owners,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
         )
         approval_pending = plan.waiting_text is not None
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()

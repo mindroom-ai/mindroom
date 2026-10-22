@@ -61,6 +61,13 @@ It covers the original call, matching pending calls, and later calls for the sam
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
+### YOLO Mode
+
+Send `!yolo 30` (minutes) or `!yolo 2h` in a thread to run every tool call you request there without approval cards, for 1 minute up to 24 hours.
+It covers every agent and team in that thread, script rules, tools that ask for their own confirmation, background jobs, and background scripts, and turning it on approves the cards already waiting for you there.
+Other people in the thread still approve their own calls, an agent cannot turn it on for you, and scheduled calls still ask when they are scheduled.
+`!yolo` shows when the window ends and `!yolo off` ends it early; restarts and config reloads keep it.
+
 ## Approval Card Contents
 
 Cards show a redacted preview of the tool arguments, and clients can expand the complete redacted arguments when the preview is truncated.

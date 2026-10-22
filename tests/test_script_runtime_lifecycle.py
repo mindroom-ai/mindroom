@@ -22,7 +22,8 @@ from httpx import ASGITransport, AsyncClient
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
-from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
+from mindroom.approval.yolo import start_yolo
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workers.backend import WorkerBackend
 
 
@@ -4791,6 +4793,61 @@ async def test_live_resolver_rebuilds_exact_context_and_worker_authority(
     assert built_target.resolved_thread_id == run.thread_root_event_id
     approvals.request_background_approval.assert_awaited_once()
     await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_live_resolver_approves_without_a_card_inside_the_requesters_yolo_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A background script call of the requester's YOLO thread runs without publishing an approval card."""
+    runtime_paths = _runtime_paths(tmp_path)
+    run = _run(runtime_paths)
+    context = SimpleNamespace(
+        requester_id=run.owner_user_id,
+        room_id=run.room_id,
+        resolved_thread_id=run.thread_root_event_id,
+        current_config=_config(),
+        runtime_paths=runtime_paths,
+    )
+    approvals = SimpleNamespace(request_background_approval=AsyncMock())
+    runtime = build_script_runtime(
+        runtime_paths,
+        config_provider=_config,
+        bot_provider=lambda _name: None,
+        worker_lease_provider=lambda _locator: None,
+        api_enabled=True,
+    )
+    resolver = runtime.resolver
+    resolver.approval_provider = lambda: approvals
+    monkeypatch.setattr(
+        "mindroom.orchestration.script_runtime.resolve_tool_approval_approver",
+        lambda *_args: run.owner_user_id,
+    )
+    start_yolo(
+        runtime_paths,
+        room_id=run.room_id,
+        thread_id=run.thread_root_event_id,
+        requester_id=run.owner_user_id,
+        duration=timedelta(minutes=5),
+    )
+
+    decision = await resolver.request_approval(
+        origin=BackgroundScriptToolOrigin(
+            run_id="run-1",
+            call_id="call-1",
+            requester_id=run.owner_user_id,
+            toolkit_name="calculator",
+            function_name="add",
+        ),
+        context=cast("ToolRuntimeContext", context),
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+        timeout_seconds=30.0,
+    )
+
+    assert decision == ToolApprovalDecision(approved=True)
+    approvals.request_background_approval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
