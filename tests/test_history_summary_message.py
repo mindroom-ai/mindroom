@@ -44,14 +44,13 @@ from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session, seed_summary
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     EVENT_ID,
     SESSION_ID,
     TEAM_SCOPE,
     TeamTurn,
     delegate,
     member_approval,
-    squad_probe,
     squad_turn,
 )
 

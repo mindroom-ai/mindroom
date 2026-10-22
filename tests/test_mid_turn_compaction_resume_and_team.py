@@ -53,13 +53,12 @@ from tests.history_helpers import (
     segments_of,
     summary_rows_of,
 )
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     SESSION_ID,
     TEAM_SCOPE,
     ProbeToolkit,
     TeamTurn,
     member_approval,
-    squad_probe,
     squad_turn,
 )
 from tests.test_mid_turn_compaction import _SCOPE, _TOOL_RESULT, _seeded_storage, _SummaryCalls, _ToolLoopModel

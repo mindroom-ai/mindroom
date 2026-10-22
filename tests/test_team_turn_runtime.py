@@ -63,7 +63,7 @@ from tests.conftest import (
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
     REQUESTER_ID,
@@ -75,7 +75,6 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
     TeamTurn,
     delegate,
     member_approval,
-    squad_probe,
     squad_turn,
 )
 

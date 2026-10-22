@@ -16,7 +16,6 @@ from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import pytest
 from agno.tools import Toolkit
 
 from mindroom import agents
@@ -60,6 +59,8 @@ from tests.identity_helpers import entity_ids
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
+
+    import pytest
 
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -149,13 +150,6 @@ def registered_probe() -> Iterator[type[ProbeToolkit]]:
         TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-
-
-@pytest.fixture
-def squad_probe() -> Iterator[type[ProbeToolkit]]:
-    """Register the members' probe toolkit for the test."""
-    with registered_probe() as toolkit:
-        yield toolkit
 
 
 def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ScriptedModel]) -> None:
@@ -496,6 +490,5 @@ __all__ = [
     "member_approval",
     "registered_probe",
     "rendered",
-    "squad_probe",
     "squad_turn",
 ]

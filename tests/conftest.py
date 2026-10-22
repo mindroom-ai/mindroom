@@ -178,6 +178,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from tests.team_turn_helpers import ProbeToolkit
 
 
 _STRUCTLOG_CONFIGURE = structlog.configure
@@ -3434,6 +3435,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
 @pytest.fixture
 def enforce_turn_authorization() -> None:
     """Keep final TurnPolicy authorization active for tests that exercise it."""
+
+
+@pytest.fixture
+def squad_probe() -> Iterator[type["ProbeToolkit"]]:
+    """Register the probe toolkit the team suites' ``squad`` members offer, with cleared records, for the test."""
+    from tests.team_turn_helpers import registered_probe  # noqa: PLC0415 - team_turn_helpers imports this module
+
+    with registered_probe() as toolkit:
+        yield toolkit
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

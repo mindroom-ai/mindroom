@@ -34,10 +34,9 @@ from tests.conftest import seed_session
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, pause_parent, respond
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     SESSION_ID,
     delegate,
-    squad_probe,
     squad_turn,
 )
 
