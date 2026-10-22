@@ -409,7 +409,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow sending channel messages, channel replies, and chat messages.",
+          "description": "Allow sending channel messages, channel replies, and chat messages, and starting chats.",
           "label": "Allow Write Operations",
           "name": "write",
           "options": null,
@@ -422,7 +422,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Read and send Teams channel and chat messages as the connected user",
+      "description": "Read and send Teams channel and chat messages, start chats, and read presence as the connected user",
       "display_name": "Microsoft Teams",
       "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
       "executes_code": false,
@@ -434,9 +434,11 @@
         "microsoft_teams_list_channel_message_replies",
         "microsoft_teams_list_chats",
         "microsoft_teams_list_chat_messages",
+        "microsoft_teams_get_presence",
         "microsoft_teams_send_channel_message",
         "microsoft_teams_reply_to_channel_message",
-        "microsoft_teams_send_chat_message"
+        "microsoft_teams_send_chat_message",
+        "microsoft_teams_start_chat"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "TbBrandTeams",
@@ -7181,7 +7183,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow creating drafts, sending and replying, marking read, and moving messages.",
+          "description": "Allow creating drafts, sending and replying, marking read, moving messages, and changing automatic replies.",
           "label": "Allow Write Operations",
           "name": "write",
           "options": null,
@@ -7203,11 +7205,13 @@
         "outlook_mail_search",
         "outlook_mail_get_message",
         "outlook_mail_download_attachment",
+        "outlook_mail_get_automatic_replies",
         "outlook_mail_create_draft",
         "outlook_mail_send",
         "outlook_mail_reply",
         "outlook_mail_mark_read",
-        "outlook_mail_move"
+        "outlook_mail_move",
+        "outlook_mail_set_automatic_replies"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "Mail",

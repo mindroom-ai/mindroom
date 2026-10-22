@@ -104,7 +104,7 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
         "nested": {
             "api_key": "***redacted***",
             "items": [
-                {"url": "https://alice:***@example.com/private"},
+                {"url": "https://***@example.com/private"},
                 {"authorization": "***redacted***"},
             ],
         },
@@ -117,7 +117,7 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
 def test_sanitize_failure_text_redacts_url_credentials() -> None:
     """Credential-bearing HTTP(S) URLs should be masked in free-form error text."""
     sanitized = tool_calls.sanitize_failure_text("clone failed for https://alice:secret@example.com/private.git")
-    assert sanitized == "clone failed for https://alice:***@example.com/private.git"
+    assert sanitized == "clone failed for https://***@example.com/private.git"
 
 
 def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
@@ -131,7 +131,7 @@ def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
 
     assert sanitized == (
         "fetch failed for "
-        "https://alice:***@example.com/private?"
+        "https://***@example.com/private?"
         "sig=***redacted***&X-Amz-Signature=***redacted***&X-Amz-Credential=***redacted***"
         "&X-Amz-Security-Token=***redacted***&api_key=***redacted***&keep=1"
     )

@@ -510,7 +510,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],
-        "url": "https://alice:***@example.com/private",
+        "url": "https://***@example.com/private",
     }
     assert "secret" not in records[0]["error_message"]
     assert "secret" not in records[0]["traceback"]
