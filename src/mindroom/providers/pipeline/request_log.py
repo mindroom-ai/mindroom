@@ -92,6 +92,34 @@ def _request_record(
     }
 
 
+def _write_request_record(
+    path: Path,
+    request: ModelRequest,
+    log: RequestLog,
+    *,
+    model_id: str,
+    model_params: dict[str, Any],
+    request_log_id: str,
+    context: Mapping[str, Any],
+) -> None:
+    """Build and append the request record, in the thread that writes it.
+
+    Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
+    built in the writer thread; the request waits for the write, so nothing edits its messages meanwhile.
+    """
+    _write_line(
+        path,
+        _request_record(
+            request,
+            log,
+            model_id=model_id,
+            model_params=model_params,
+            request_log_id=request_log_id,
+            context=context,
+        ),
+    )
+
+
 def _daily_log_path(log_dir: str | None, default_log_dir: Path, now: datetime) -> Path:
     """Return the day's request-log file under the configured directory, else under ``default_log_dir``."""
     base_dir = Path(log_dir) if log_dir else default_log_dir
@@ -159,7 +187,9 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     if log.debug.log_llm_requests:
         log_path = _daily_log_path(log.debug.llm_request_log_dir, log.default_log_dir, datetime.now().astimezone())
         try:
-            record = _request_record(
+            await asyncio.to_thread(
+                _write_request_record,
+                log_path,
                 request,
                 log,
                 model_id=inner.identity.id,
@@ -167,7 +197,6 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 request_log_id=request_log_id,
                 context=context,
             )
-            await asyncio.to_thread(_write_line, log_path, record)
         except Exception:
             logger.exception("Failed to persist LLM request log", agent_name=log.model_name, model_id=inner.identity.id)
             log_path = None

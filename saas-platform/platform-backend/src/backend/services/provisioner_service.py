@@ -35,8 +35,6 @@ from backend.config import (
     INSTANCE_MATRIX_OIDC_ISSUER,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
-    INSTANCE_SYNAPSE_IMAGE,
-    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
     INSTANCE_STORAGE_CLASS_NAME,
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
@@ -48,6 +46,8 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
     INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
+    INSTANCE_TUWUNEL_IMAGE,
+    INSTANCE_TUWUNEL_IMAGE_PULL_POLICY,
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
@@ -101,12 +101,12 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
         "mindroomResources.limits.ephemeral-storage": "32Gi",
-        "synapseResources.requests.memory": "384Mi",
-        "synapseResources.requests.cpu": "100m",
-        "synapseResources.requests.ephemeral-storage": "64Mi",
-        "synapseResources.limits.memory": "4Gi",
-        "synapseResources.limits.cpu": "2000m",
-        "synapseResources.limits.ephemeral-storage": "4Gi",
+        "tuwunelResources.requests.memory": "384Mi",
+        "tuwunelResources.requests.cpu": "100m",
+        "tuwunelResources.requests.ephemeral-storage": "64Mi",
+        "tuwunelResources.limits.memory": "4Gi",
+        "tuwunelResources.limits.cpu": "2000m",
+        "tuwunelResources.limits.ephemeral-storage": "4Gi",
         "sandboxRunnerResources.requests.memory": "256Mi",
         "sandboxRunnerResources.requests.cpu": "50m",
         "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
@@ -179,7 +179,7 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
 
 
 def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
-    """Derive a stable per-instance Synapse registration shared secret."""
+    """Derive a stable per-instance Matrix registration shared secret."""
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
@@ -206,8 +206,8 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _matrix_localpart_from_email(email: str) -> str:
-    """Return the Matrix localpart Synapse derives from our OIDC email template."""
+def matrix_localpart_from_email(email: str) -> str:
+    """Return the Matrix localpart the platform's OIDC issuer asks tenant homeservers to give an account email."""
     email_localpart = email.strip().lower().rsplit("@", maxsplit=1)[0]
     if not email_localpart:
         msg = "Account email is required to configure Matrix owner access"
@@ -222,7 +222,7 @@ def _matrix_localpart_from_email(email: str) -> str:
 
 def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domain: str) -> str:
     """Build the hosted tenant owner MXID from a platform account email."""
-    return f"@{_matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
+    return f"@{matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
 
 
 def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
@@ -288,7 +288,7 @@ def _instance_secret_name(instance_id: str) -> str:
 
 def _instance_pvc_names(instance_id: str | int) -> list[str]:
     """Return the chart-managed PVC names that hold one instance's data."""
-    return [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
+    return [f"mindroom-storage-{instance_id}", f"tuwunel-storage-{instance_id}"]
 
 
 def _instance_secret_names(instance_id: str | int) -> list[str]:
@@ -731,6 +731,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
     unless the lifecycle itself is resuming it (`resume_lifecycle_hold`) and its account is not pending deletion.
+    With `keep_stopped` in `data`, as the release script sends for an instance a customer or admin stopped, the
+    instance is redeployed onto the current chart and scaled back to zero.
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
@@ -744,6 +746,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
     existing_instance_id = data.get("instance_id")  # For re-provisioning
+    keep_stopped = data.get("keep_stopped") is True
 
     # If re-provisioning, update existing instance; otherwise insert new
     if existing_instance_id:
@@ -861,7 +864,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
         # Tenant workloads are untrusted, so every value here must be scoped to this instance,
-        # except the platform-wide OIDC client secret, which the instance chart mounts only into Synapse.
+        # except the platform-wide OIDC client secret, which the instance chart mounts only into Tuwunel.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",
@@ -932,10 +935,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "--set",
                 (f"matrixHomeserverStartupTimeoutSeconds={INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS}"),
             ]
-        if INSTANCE_SYNAPSE_IMAGE:
-            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
-        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
-            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+        if INSTANCE_TUWUNEL_IMAGE:
+            helm_args += ["--set", f"tuwunel_image={INSTANCE_TUWUNEL_IMAGE}"]
+        if INSTANCE_TUWUNEL_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"tuwunel_image_pull_policy={INSTANCE_TUWUNEL_IMAGE_PULL_POLICY}"]
         if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
             helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN:
@@ -970,8 +973,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Record a created key before publishing it, so a run that loses the record never publishes its key.
         if created_openrouter_key is not None:
             await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
-        # Apply before Helm so pods restarted by the new secret hash read the new values;
-        # Synapse reads its OIDC client secret only at startup.
+        # Apply before Helm so pods restarted by the new secret hash read the new values.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
@@ -1010,6 +1012,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
+    if keep_stopped:
+        await _scale_tenant_deployments(
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+        )
+        update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
+        return {**held_response, "message": "Instance redeployed and kept stopped"}
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)

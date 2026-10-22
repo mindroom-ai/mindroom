@@ -1,0 +1,69 @@
+{{- $serverName := printf "%s.%s" (toString .Values.customer) (toString .Values.baseDomain) -}}
+{{- $clientUrl := printf "https://%s.matrix.%s" (toString .Values.customer) (toString .Values.baseDomain) -}}
+{{- $matrixOidc := .Values.matrixOidc | default (dict) -}}
+{{- $oidcEnabled := eq (toString $matrixOidc.enabled) "true" -}}
+{{- $autoJoinRoomKeys := .Values.matrixAutoJoinRoomKeys | default (list) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tuwunel-config-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: tuwunel
+    customer: {{ .Values.customer | quote }}
+data:
+  tuwunel.toml: |
+    [global]
+    server_name = {{ $serverName | quote }}
+    address = ["0.0.0.0"]
+    port = 8008
+    database_path = "/data"
+    # The homeserver is public, so anonymous self-registration stays closed.
+    # Managed accounts are created through the shared-secret admin API; owners sign up through platform OIDC.
+    allow_registration = false
+    registration_shared_secret_file = "/etc/mindroom-secrets/matrix_registration_shared_secret"
+    allow_federation = false
+    # Without this, the first owner to sign in would become the server admin.
+    grant_admin_to_first_user = false
+    # Owners keep the display name the platform sends; Tuwunel would otherwise append "💕".
+    new_user_displayname_suffix = ""
+    # Synapse's upload limit, which tenants relied on; Tuwunel's default is 24 MiB.
+    max_request_size = "50 MiB"
+    # MindRoom fork features: collapse superseded streaming edits in /sync, and bind OpenID tokens to the
+    # MindRoom server that asked, so MindRoom Chat can sign in to the server the agents publish.
+    mindroom_compact_edits_enabled = true
+    mindroom_openid_audience = true
+    # Tuwunel sizes its database thread pool and cache to the node's cores; on a shared node that made one idle
+    # tenant use about 310 MiB instead of about 115 MiB, and would let the cache outgrow the pod's memory limit.
+    db_pool_max_workers = 16
+    db_cache_capacity_mb = 256
+{{- if and $oidcEnabled $autoJoinRoomKeys }}
+    auto_join_rooms = [
+{{- range $index, $roomKey := $autoJoinRoomKeys }}{{ if $index }}, {{ end }}{{ printf "#%s:%s" (toString $roomKey) $serverName | quote }}{{ end -}}
+    ]
+{{- end }}
+
+    [global.well_known]
+    client = {{ $clientUrl | quote }}
+
+    # The runtime signs in every managed account when it starts, so successful sign-ins to one account get a
+    # larger burst than Tuwunel's default; wrong passwords keep the default brute-force limit.
+    [global.rate_limiting.login.account]
+    per_second = 0.05
+    burst_count = 10
+{{- if $oidcEnabled }}
+{{- $clientId := required "matrixOidc.clientId is required when matrixOidc.enabled=true" $matrixOidc.clientId | toString }}
+
+    [[global.identity_provider]]
+    brand = "mindroom"
+    name = "MindRoom"
+    client_id = {{ $clientId | quote }}
+    client_secret_file = "/etc/mindroom-secrets/matrix_oidc_client_secret"
+    issuer_url = {{ required "matrixOidc.issuer is required when matrixOidc.enabled=true" $matrixOidc.issuer | toString | quote }}
+    callback_url = {{ printf "%s/_matrix/client/unstable/login/sso/callback/%s" $clientUrl $clientId | quote }}
+    scope = ["openid", "profile", "email"]
+    # The platform names the localpart, so the owner it authorizes in MindRoom is the account this server creates;
+    # when that name is taken, sign-in fails instead of creating an account MindRoom does not know.
+    userid_claims = ["preferred_username"]
+    unique_id_fallbacks = false
+{{- end }}

@@ -12,7 +12,7 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 - Core dev against local Matrix + DB
   - Commands: `just local-matrix-up`, `just local-matrix-down`, or `just local-matrix-logs`, then `mindroom run`
   - Destructive reset: stop the backend, run `just local-matrix-reset`, then `just local-matrix-up` and `mindroom run`.
-    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's `matrix_state.yaml`, and repository `tmp/`.
+    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's state bound to that homeserver (`matrix_state.yaml`, `encryption_keys/`, `sync_continuity/`, the event journal in `tracking/`, and the agents' personal-room and invited-room records), and repository `tmp/`.
     It resolves storage like `mindroom run`: `MINDROOM_STORAGE_PATH` in the environment takes precedence over the selected config's `.env`, then storage defaults to `mindroom_data/` beside that config.
     If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` environment value when resetting.
     Relative environment paths are resolved from the repository root; relative storage paths in `.env` are resolved from the selected config directory.

@@ -1937,7 +1937,7 @@
   "paths": {
     "/.well-known/openid-configuration/matrix-oidc": {
       "get": {
-        "description": "Return OIDC discovery metadata for Synapse.",
+        "description": "Return OIDC discovery metadata for tenant homeservers.",
         "operationId": "openid_configuration__well_known_openid_configuration_matrix_oidc_get",
         "responses": {
           "200": {
@@ -2935,7 +2935,7 @@
     },
     "/matrix-oidc/.well-known/openid-configuration": {
       "get": {
-        "description": "Return OIDC discovery metadata for Synapse.",
+        "description": "Return OIDC discovery metadata for tenant homeservers.",
         "operationId": "openid_configuration_matrix_oidc__well_known_openid_configuration_get",
         "responses": {
           "200": {
@@ -2956,7 +2956,7 @@
     },
     "/matrix-oidc/authorize": {
       "get": {
-        "description": "Issue an authorization code to Synapse after platform-cookie authentication.",
+        "description": "Issue an authorization code to a tenant homeserver after platform-cookie authentication.",
         "operationId": "authorize_matrix_oidc_authorize_get",
         "parameters": [
           {
@@ -3067,7 +3067,7 @@
     },
     "/matrix-oidc/token": {
       "post": {
-        "description": "Exchange a Synapse authorization code for OIDC tokens.",
+        "description": "Exchange a tenant homeserver authorization code for OIDC tokens.",
         "operationId": "token_matrix_oidc_token_post",
         "parameters": [
           {
@@ -3116,7 +3116,7 @@
     },
     "/matrix-oidc/userinfo": {
       "get": {
-        "description": "Return user claims for Synapse's OIDC userinfo fetch.",
+        "description": "Return user claims for a tenant homeserver's OIDC userinfo fetch.",
         "operationId": "userinfo_matrix_oidc_userinfo_get",
         "parameters": [
           {

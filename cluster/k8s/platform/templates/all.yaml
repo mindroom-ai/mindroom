@@ -66,8 +66,8 @@ data:
   INSTANCE_MINDROOM_IMAGE: {{ .Values.provisioner.instanceMindroomImage | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_IMAGE_PULL_SECRET_NAMES: {{ (.Values.provisioner.instanceImagePullSecretNames | default (list) | join ",") | quote }}
-  INSTANCE_SYNAPSE_IMAGE: {{ .Values.provisioner.instanceSynapseImage | default "" | quote }}
-  INSTANCE_SYNAPSE_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceSynapseImagePullPolicy | default "" | quote }}
+  INSTANCE_TUWUNEL_IMAGE: {{ .Values.provisioner.instanceTuwunelImage | default "" | quote }}
+  INSTANCE_TUWUNEL_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceTuwunelImagePullPolicy | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED: {{ $trustedUpstreamAuth.enabled | default "false" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN: {{ $trustedUpstreamAuth.emailDomain | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
@@ -80,11 +80,11 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | quote }}
   MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
   MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
-  MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
+  MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-matrix" | quote }}
   MATRIX_OIDC_KEY_ID: {{ $matrixOidc.keyId | default "mindroom-platform" | quote }}
   INSTANCE_MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
   INSTANCE_MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
-  INSTANCE_MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
+  INSTANCE_MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-matrix" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

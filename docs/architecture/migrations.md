@@ -9,7 +9,7 @@ It covers the current source and does not promise upgrades from every earlier re
 Each `# LEGACY_COMPAT:` source comment owns its rule's legacy format, release cutoff, handling, and coverage; list every rule, including the SaaS backend and scripts, from the repository root:
 
 ```bash
-rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
+rg -n -F 'LEGACY_COMPAT:' --glob '*.{py,yaml}'
 ```
 
 Paths below are relative to `src/mindroom/` unless they start with `scripts/` or `saas-platform/`.

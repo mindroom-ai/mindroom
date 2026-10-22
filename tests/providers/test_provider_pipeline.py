@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
@@ -640,6 +641,32 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
         "cache_read_tokens": 30,
         "cache_write_tokens": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_request_log_builds_the_record_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serializing a long conversation must not stall the loop, so the record is built in the thread that writes it."""
+    inner = _ScriptedProvider([[_turn()]])
+    build_threads: list[int] = []
+    build_record = request_log_stage._request_record
+
+    def record_build_thread(*args: object, **kwargs: object) -> dict[str, object]:
+        build_threads.append(threading.get_ident())
+        return build_record(*args, **kwargs)
+
+    monkeypatch.setattr(request_log_stage, "_request_record", record_build_thread)
+    request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert [(message["role"], message["content"]) for message in record["messages"]] == [("user", "hi")]
+    assert [tool["name"] for tool in record["tools"]] == ["search"]
+    assert len(build_threads) == 1
+    assert build_threads[0] != threading.get_ident()
 
 
 def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "openai") -> RequestLog:

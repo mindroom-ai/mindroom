@@ -15,15 +15,15 @@ case $COMPONENT in
   mindroom)
     kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/mindroom-$CUSTOMER_ID -f
     ;;
-  matrix|synapse)
-    kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/synapse-$CUSTOMER_ID -f
+  matrix|tuwunel)
+    kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/tuwunel-$CUSTOMER_ID -f
     ;;
   all)
     echo "=== MINDROOM LOGS ==="
     kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/mindroom-$CUSTOMER_ID --tail=50
     echo ""
-    echo "=== MATRIX/SYNAPSE LOGS ==="
-    kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/synapse-$CUSTOMER_ID --tail=50
+    echo "=== MATRIX/TUWUNEL LOGS ==="
+    kubectl --kubeconfig=$KUBECONFIG logs -n mindroom-instances deployment/tuwunel-$CUSTOMER_ID --tail=50
     ;;
   *)
     echo "Usage: $0 [customer_id] [mindroom|matrix|all]"

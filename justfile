@@ -27,10 +27,40 @@ local-matrix-logs:
 
 # Reset local Matrix volumes, selected runtime Matrix state, and repository tmp/
 local-matrix-reset:
-    cd local/matrix && docker compose down -v
-    uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd local/matrix && docker compose down -v)
+    uv run python - <<'PY'
+    import shutil
+    from mindroom.constants import encryption_keys_dir, matrix_state_file, resolve_runtime_paths, tracking_dir
+    paths = resolve_runtime_paths()
+    # The new homeserver knows none of the accounts, devices, and events this state is bound to.
+    matrix_state_file(paths).unlink(missing_ok=True)
+    for directory in (encryption_keys_dir(paths), paths.storage_root / "sync_continuity"):
+        if directory.exists():
+            shutil.rmtree(directory)
+    tracking = tracking_dir(paths)
+    for journal in tracking.glob("event_journal*"):
+        journal.unlink()
+    for record in [*tracking.rglob("invited_rooms.json"), *tracking.rglob("pending_room_invites.json")]:
+        record.unlink()
+    for personal_rooms in list(tracking.rglob("personal_rooms")):
+        shutil.rmtree(personal_rooms)
+    # Releases up to v2026.10.37 kept these records in agents/<agent>/, and startup would move them below tracking/.
+    # Tool code can write agents/, so only agents/<agent>/<record> is removed and no link is followed.
+    agents = paths.storage_root / "agents"
+    for agent in sorted(agents.iterdir()) if agents.is_dir() and not agents.is_symlink() else []:
+        if agent.is_symlink() or not agent.is_dir():
+            continue
+        for name in ("invited_rooms.json", "pending_room_invites.json", "personal_rooms"):
+            record = agent / name
+            if record.is_dir() and not record.is_symlink():
+                shutil.rmtree(record)
+            elif record.is_symlink() or record.exists():
+                record.unlink()
+    PY
     rm -rf tmp/
-    @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
+    echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)

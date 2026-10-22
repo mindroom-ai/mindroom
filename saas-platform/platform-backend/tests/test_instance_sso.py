@@ -209,7 +209,7 @@ def test_instance_sso_ticket_is_not_a_platform_credential(monkeypatch: pytest.Mo
     monkeypatch.setattr(deps, "auth_client", Mock(auth=_SupabaseAuth()))
     monkeypatch.setattr(sso, "verify_user", deps.verify_user)
     monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_ENABLED", True)
-    monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_CLIENT_ID", "mindroom-synapse")
+    monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_CLIENT_ID", "mindroom-matrix")
     monkeypatch.setattr(matrix_oidc, "PLATFORM_DOMAIN", "mindroom.chat")
     monkeypatch.setattr(sso, "INSTANCE_BASE_DOMAIN", "mindroom.chat")
     client = TestClient(app)
@@ -221,8 +221,8 @@ def test_instance_sso_ticket_is_not_a_platform_credential(monkeypatch: pytest.Mo
         "/matrix-oidc/authorize",
         params={
             "response_type": "code",
-            "client_id": "mindroom-synapse",
-            "redirect_uri": "https://1.matrix.mindroom.chat/_synapse/client/oidc/callback",
+            "client_id": "mindroom-matrix",
+            "redirect_uri": "https://1.matrix.mindroom.chat/_matrix/client/unstable/login/sso/callback/mindroom-matrix",
             "scope": "openid",
             "state": "state-123",
         },

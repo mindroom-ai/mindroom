@@ -18139,7 +18139,7 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Tuwunel | `cluster/k8s/tuwunel/` | Standalone Tuwunel homeserver (MindRoom fork) to pair with the runtime chart |
 | Client | `cluster/k8s/client/` | Standalone MindRoom web client behind unprivileged nginx, for clusters that already provide a homeserver, ingress, and TLS |
 | MatrixRTC | `cluster/k8s/matrixrtc/` | Optional LiveKit SFU and MatrixRTC authorization service for [voice calls](https://docs.mindroom.chat/voice-calls/), proxied by the client chart |
-| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and Matrix/Synapse, deployed by the SaaS platform |
+| Instance | `cluster/k8s/instance/` | One hosted MindRoom runtime with bundled dashboard/API and a Tuwunel Matrix homeserver, deployed by the SaaS platform |
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
@@ -20461,6 +20461,7 @@ Setting `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` to `0` or a negative value
 
 Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` (default `3600`, `0` disables, any other value below `60` fails startup), MindRoom collects garbage once and excludes the surviving objects from later collections, logging `runtime_heap_refrozen`.
 This keeps routine collections short on large processes at the cost of one full collection per interval.
+After the first refreeze, MindRoom also raises CPython's full-collection threshold and logs `gc_full_collection_threshold_raised`, so routine full collections run less often, by an amount that depends on the workload; unreachable reference cycles then wait longer to be freed.
 Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.
 
 ### `matrix_sync_stall_diagnostics`
