@@ -471,7 +471,9 @@ acl egress_has_token req_header Proxy-Authorization .
 acl egress_bypass_parent dstdomain -n {{ join " " . }}
 {{- end }}
 dns_defnames on
-cache_peer {{ $parentHost }} parent {{ $parentPort }} 0 no-query no-digest login=PASSTHRU
+{{- /* The parent is Squid's only route for credentialed requests (never_direct), so a parent marked dead only refuses
+them: after the egress broker restarts with the primary, the first requests would fail until Squid re-probed it. */}}
+cache_peer {{ $parentHost }} parent {{ $parentPort }} 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000
 {{- if .Values.approvedEgress.parentProxy.bypassDomains }}
 cache_peer_access {{ $parentHost }} deny egress_bypass_parent
 {{- end }}
