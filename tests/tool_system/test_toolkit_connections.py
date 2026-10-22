@@ -7,13 +7,16 @@ An Agno ``MCPTools`` wrapper registers its functions only once its session is co
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 from agno.tools import Toolkit
 from agno.tools.mcp import MCPTools
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
+from structlog.testing import capture_logs
 
 from mindroom.agent_cli.minimal_agent import prepare_minimal_catalog
 from mindroom.agent_loop.spec import RunContext
@@ -21,21 +24,32 @@ from mindroom.agents import create_agent
 from mindroom.ai import stream_agent_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
+from mindroom.tool_system.toolkit_connections import register_mcp_functions, run_connection
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    make_turn_context,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit, streamed_text
-from tests.test_agent_cli_authority import _runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 # What the toolkits and the model saw, in order: each connect and close, and each model request.
 EVENTS: list[str] = []
@@ -112,6 +126,21 @@ class _DatabaseTools(Toolkit):
         return f"1 row for {sql}"
 
 
+class _BlockingDatabaseTools(_DatabaseTools):
+    """A database toolkit whose blocking connect waits until the test lets it finish."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connecting = threading.Event()
+        self.release = threading.Event()
+
+    def connect(self) -> None:
+        """Start connecting, then finish once released."""
+        self.connecting.set()
+        self.release.wait()
+        super().connect()
+
+
 @pytest.fixture(autouse=True)
 def _events() -> Iterator[None]:
     EVENTS.clear()
@@ -166,6 +195,28 @@ async def _reply(config: Config) -> list[str]:
         )
     ]
     return streamed_text(chunks)
+
+
+def _helper_runtime(tmp_path: Path, agent: AgentConfig) -> ToolRuntimeContext:
+    """Return the tool runtime of a turn of ``agent``, configured as ``helper`` on a test model."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": agent},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    return make_test_tool_runtime_context(
+        agent_name="helper",
+        target=MessageTarget("!room:test", "$thread", "$thread", "$event", "session"),
+        requester_id="@alice:test",
+        client=MagicMock(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
 
 
 @pytest.mark.asyncio
@@ -229,12 +280,11 @@ async def test_a_session_connected_before_the_run_is_left_to_its_owner(
 @pytest.mark.asyncio
 async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tmp_path: Path) -> None:
     """A minimal turn offers only Bash, so its catalog connects the eager toolkits and each deferred one it builds."""
-    runtime = _runtime_context(tmp_path)
-    runtime.config.agents["helper"] = AgentConfig(
-        display_name="Helper",
-        tools=["shell", "database", {"mcp_server": {"defer": True}}],
-    )
     with _registered(_ServerTools):
+        runtime = _helper_runtime(
+            tmp_path,
+            AgentConfig(display_name="Helper", tools=["shell", "database", {"mcp_server": {"defer": True}}]),
+        )
         build = create_agent(
             "helper",
             runtime.config,
@@ -292,9 +342,47 @@ def test_the_primary_neither_lists_nor_connects_a_toolkit_a_worker_runs(tmp_path
             runtime_paths,
         )
         persist_entity_accounts(config, runtime_paths, usernames={"router": "router", "worker": "worker"})
-        build = create_agent("worker", config, runtime_paths, execution_identity=None, persist_runtime_state=False)
+        with capture_logs() as logs:
+            build = create_agent("worker", config, runtime_paths, execution_identity=None, persist_runtime_state=False)
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
     assert "server" not in toolkits
     assert toolkits["database"].connect is None
     assert EVENTS == []
+    # The operator learns why the MCP toolkit offers nothing.
+    skipped = [log for log in logs if log["event"].startswith("Skipping MCP toolkit routed through a worker")]
+    assert [(log["log_level"], log["tool"]) for log in skipped] == [("warning", "mcp_server")]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_blocking_connect_closes_the_connection_once_it_is_made() -> None:
+    """The connect's thread goes on after its run stops waiting for it, and what it connects is closed."""
+    toolkit = _BlockingDatabaseTools()
+    connect = run_connection(toolkit)
+    assert connect is not None
+    connecting = asyncio.create_task(connect())
+    try:
+        assert await asyncio.to_thread(toolkit.connecting.wait, 5)
+        connecting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await connecting
+        cleanup = [task for task in asyncio.all_tasks() if task.get_name() == "toolkit-connect-cleanup"]
+        assert len(cleanup) == 1
+        assert EVENTS == []
+    finally:
+        toolkit.release.set()
+    await asyncio.wait_for(cleanup[0], timeout=5)
+
+    assert EVENTS == ["database connect", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_toolkit_built_on_the_event_loop_fails_before_it_connects() -> None:
+    """Listing needs a loop of its own, so a build on the event loop's thread is refused before anything connects."""
+    toolkit = _ServerTools()
+
+    with pytest.raises(RuntimeError, match="must be built off the event loop"):
+        register_mcp_functions(toolkit)
+
+    assert EVENTS == []
+    assert toolkit.functions == {}

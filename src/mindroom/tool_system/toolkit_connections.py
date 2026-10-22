@@ -14,6 +14,7 @@ import inspect
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
+from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -40,16 +41,26 @@ def connects_per_run(toolkit: Toolkit) -> bool:
     return toolkit.requires_connect or _mcp_toolkit(toolkit) is not None
 
 
+def lists_functions_once_connected(toolkit: Toolkit) -> bool:
+    """Whether ``toolkit`` is an Agno MCP toolkit that is not connected yet, so it offers no functions until it is."""
+    mcp = _mcp_toolkit(toolkit)
+    return mcp is not None and not mcp.initialized
+
+
 def register_mcp_functions(toolkit: Toolkit) -> None:
     """Register the functions of an Agno MCP toolkit that is not connected yet, which it lists only once connected.
 
     An agent is built off the event loop its runs use and before any of them, and its approval rules, tool owners,
     and prompt are derived from the functions it offers, so the build connects the toolkit through a session and a
     loop of its own and closes that session once the functions are registered. Each run connects it again.
+    Building such a toolkit on an event loop's thread raises ``RuntimeError``, since it cannot list there.
     """
-    mcp = _mcp_toolkit(toolkit)
-    if mcp is None or mcp.initialized:
+    if not lists_functions_once_connected(toolkit):
         return
+    if _on_event_loop():
+        msg = f"MCP toolkit {toolkit.name!r} must be built off the event loop, since it lists on a loop of its own"
+        raise RuntimeError(msg)
+    mcp = cast("MCPTools", toolkit)
 
     async def list_functions() -> None:
         await mcp.connect()
@@ -59,6 +70,14 @@ def register_mcp_functions(toolkit: Toolkit) -> None:
         asyncio.run(list_functions())
     except Exception as exc:
         logger.warning("mcp_toolkit_listing_failed", toolkit=toolkit.name, error=str(exc))
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
@@ -80,11 +99,38 @@ async def _connect_mcp(toolkit: MCPTools) -> ToolkitClose | None:
 
 async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
     try:
-        await run_toolkit_lifecycle(toolkit.connect)
+        if inspect.iscoroutinefunction(toolkit.connect):
+            # An async session may have to close in the task that opened it, so it connects in the run's own task.
+            await toolkit.connect()
+        else:
+            await _connect_on_thread(toolkit)
     except Exception as exc:
         logger.warning("toolkit_connect_failed", toolkit=toolkit.name, error=str(exc))
         return None
     return partial(_close, toolkit)
+
+
+async def _connect_on_thread(toolkit: Toolkit) -> None:
+    """Connect ``toolkit`` on a thread; a caller cancelled meanwhile stops waiting, and the connection closes once made.
+
+    A thread cannot be stopped, so, as the script broker and the MCP gateway do, the connect goes on after the
+    cancellation and a retained task closes what it opened.
+    """
+    connecting = asyncio.create_task(run_toolkit_lifecycle(toolkit.connect))
+    try:
+        await asyncio.shield(connecting)
+    except asyncio.CancelledError:
+        create_background_task(_close_once_connected(toolkit, connecting), name="toolkit-connect-cleanup")
+        raise
+
+
+async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]) -> None:
+    try:
+        await connecting
+    except Exception as exc:
+        logger.warning("toolkit_connect_failed", toolkit=toolkit.name, error=str(exc))
+        return
+    await _close(toolkit)
 
 
 async def _close(toolkit: Toolkit) -> None:

@@ -5384,7 +5384,7 @@ depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.tool_system.toolkit_connections"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.background_tasks", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.tool_system.agno_toolkits"

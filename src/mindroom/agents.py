@@ -80,7 +80,7 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from mindroom.tool_system.toolkit_connections import run_connection
+from mindroom.tool_system.toolkit_connections import lists_functions_once_connected, run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -1432,6 +1432,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
         tool_name = tool_entry.name
         runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
+        # A worker builds and connects its own copy of a toolkit routed through it.
+        routed = routes_through_worker(tool_name)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -1447,8 +1449,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
                 deferred_toolkits=tuple(deferred_toolkits),
-                # A worker builds and connects its own copy of a toolkit routed through it.
-                list_mcp_functions=not routes_through_worker(tool_name),
+                list_mcp_functions=not routed,
+            )
+        if routed and toolkit is not None and lists_functions_once_connected(toolkit):
+            logger.warning(
+                "Skipping MCP toolkit routed through a worker because the primary lists only the MCP toolkits it runs",
+                agent=agent_name,
+                tool=tool_name,
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
