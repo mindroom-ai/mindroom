@@ -11,7 +11,6 @@ from uuid import UUID
 
 import nio
 import pytest
-from agno.models.ollama import Ollama
 from nio.durable import DurableSyncConfig
 
 from mindroom.bot import AgentBot
@@ -1555,7 +1554,6 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
-    @patch("mindroom.providers.model_loading.get_model_instance")
     @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
@@ -1564,7 +1562,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_should_use_streaming: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
-        mock_get_model_instance: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
@@ -1577,9 +1574,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         mock_load_config.return_value = config
 
-        # Mock get_model_instance to return a mock model
-        mock_model = Ollama(id="test-model")
-        mock_get_model_instance.return_value = mock_model
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         # The members build on scripted providers that are never asked; the team's leader answers on its own.
         team_leader = ScriptedModel([answer("Team response")])

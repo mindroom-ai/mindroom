@@ -19,7 +19,17 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
-from mindroom.oauth.microsoft import microsoft_files_oauth_provider, outlook_mail_oauth_provider
+from mindroom.oauth.microsoft import (
+    microsoft_files_oauth_provider,
+    microsoft_meetings_oauth_provider,
+    microsoft_onenote_oauth_provider,
+    microsoft_people_oauth_provider,
+    microsoft_sharepoint_oauth_provider,
+    microsoft_teams_oauth_provider,
+    microsoft_todo_oauth_provider,
+    outlook_calendar_oauth_provider,
+    outlook_mail_oauth_provider,
+)
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -61,7 +71,14 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         google_sheets_oauth_provider(),
         google_tasks_oauth_provider(),
         microsoft_files_oauth_provider(),
+        microsoft_sharepoint_oauth_provider(),
         outlook_mail_oauth_provider(),
+        outlook_calendar_oauth_provider(),
+        microsoft_todo_oauth_provider(),
+        microsoft_teams_oauth_provider(),
+        microsoft_meetings_oauth_provider(),
+        microsoft_onenote_oauth_provider(),
+        microsoft_people_oauth_provider(),
     )
 
 

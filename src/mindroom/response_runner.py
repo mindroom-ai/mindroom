@@ -3517,10 +3517,19 @@ class ResponseRunner:
         await self.deps.approval_store.settle(event.event_id)
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
-        """Decide under the conversation lock whether a follow-up still has jobs to report, which a reply may have collected."""
-        assert request.follow_up_key is not None
+        """Decide under the conversation lock whether a follow-up still has jobs to report.
+
+        A reply may have collected them, and the reply to a message of their requester that already waits here reports
+        them in its start note, so the follow-up gives way to that message.
+        """
+        key = request.follow_up_key
+        assert key is not None
+        waiting = self._lifecycle_coordinator.has_waiting_messages_from(
+            request.response_envelope.target,
+            key.requester_id,
+        )
         runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is not None and follow_up_jobs(await runtime.ended_jobs(request.follow_up_key)):
+        if not waiting and runtime is not None and follow_up_jobs(await runtime.ended_jobs(key)):
             return True
         # A follow-up whose own reply a restart cut short answers again, though that reply collected the jobs.
         reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))

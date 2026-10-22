@@ -14,6 +14,7 @@ import {
 } from "@/connections/EgressServiceEditor";
 import type { ServiceEditing } from "@/connections/egressRowText";
 import { EgressServiceRows } from "@/connections/EgressServiceRows";
+import { EgressServiceTable } from "@/connections/EgressServiceTable";
 import { errorText, type RequestErrorMessages } from "@/connections/request";
 import type {
   AuthoredEgressService,
@@ -367,8 +368,9 @@ function ServiceSection({
           </>
         ) : (
           <>
-            Agent Keys page, which needs trusted upstream auth and is not served
-            here. Give such agents a shared worker scope to set their keys here.
+            Agent Keys page, which nobody can sign in to while sign-in from
+            MindRoom Chat is off and trusted upstream JWT auth is not set. Give
+            such agents a shared worker scope to set their keys here.
           </>
         )}
       </p>
@@ -434,31 +436,33 @@ function ServiceSection({
       )}
       {services && services.length > 0 && (
         <div className="overflow-hidden rounded-md border border-border/60">
-          <EgressServiceRows
-            secretPath={(serviceName) =>
-              withAgentName(
-                API_ENDPOINTS.egressBroker.secret(serviceName),
+          <EgressServiceTable label={`Services for ${agentLabel}`}>
+            <EgressServiceRows
+              secretPath={(serviceName) =>
+                withAgentName(
+                  API_ENDPOINTS.egressBroker.secret(serviceName),
+                  agentName,
+                )
+              }
+              accountPath={(serviceName, action) =>
+                withAgentName(
+                  API_ENDPOINTS.egressBroker.account(serviceName, action),
+                  agentName,
+                )
+              }
+              servicesPath={withAgentName(
+                API_ENDPOINTS.egressBroker.services,
                 agentName,
-              )
-            }
-            accountPath={(serviceName, action) =>
-              withAgentName(
-                API_ENDPOINTS.egressBroker.account(serviceName, action),
-                agentName,
-              )
-            }
-            servicesPath={withAgentName(
-              API_ENDPOINTS.egressBroker.services,
-              agentName,
-            )}
-            services={services}
-            onChanged={() => void load()}
-            errorMessages={SECRET_ERROR_MESSAGES}
-            serviceEditing={serviceEditing}
-            hideKeyActions={keysUnused}
-            // Only shared agents and the global store are offered here, so every key is shared.
-            agent={{ displayName: agentLabel, shared: true, services }}
-          />
+              )}
+              services={services}
+              onChanged={() => void load()}
+              errorMessages={SECRET_ERROR_MESSAGES}
+              serviceEditing={serviceEditing}
+              hideKeyActions={keysUnused}
+              // Only shared agents and the global store are offered here, so every key is shared.
+              agent={{ displayName: agentLabel, shared: true, services }}
+            />
+          </EgressServiceTable>
         </div>
       )}
     </section>

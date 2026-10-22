@@ -20,7 +20,7 @@ from structlog.testing import capture_logs
 
 from mindroom.api import auth, connections_session, frontend, main
 from mindroom.api.connections_session_cookie import (
-    CONNECTIONS_SESSION_COOKIE,
+    connections_session_cookie,
     issue_connections_session,
     read_connections_session,
 )
@@ -50,13 +50,14 @@ if TYPE_CHECKING:
 
 PORTAL_ORIGIN = "https://portal.example.org"
 CHAT_ORIGIN = "https://chat.example.org"
+CONNECTIONS_SESSION_COOKIE = connections_session_cookie(PORTAL_ORIGIN)
 
 
 @pytest.fixture
 def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API in API-key mode with a fake Matrix OpenID verifier for users alice and bob."""
 
-    async def verify(token: Any, _paths: Any) -> str:  # noqa: ANN401
+    async def verify(token: Any, _paths: Any, *, request_origin: str | None = None) -> str:  # noqa: ANN401, ARG001
         if token.access_token in {"alice", "bob", "mallory"}:
             return f"@{token.access_token}:example.org"
         raise MatrixOpenIDError(401, "Matrix OpenID verification failed.")
@@ -196,14 +197,6 @@ def test_dashboard_bit_needs_admin_and_binding(signin: dict[str, Any], admin: st
     assert _session_of(signin["client"]) == ("@alice:example.org", False)
 
 
-def test_dashboard_bit_needs_public_url(signin: dict[str, Any]) -> None:
-    """Without MINDROOM_PUBLIC_URL no audience was sent, so the token was never bound to this deployment."""
-    _with_admin(signin, MINDROOM_PUBLIC_URL="")
-    signin["binds"].return_value = True
-    assert sign_in(signin["client"], "alice").status_code == 200
-    assert _session_of(signin["client"]) == ("@alice:example.org", False)
-
-
 def test_failed_check_after_binding_probe_logs_why_dashboard_was_refused(signin: dict[str, Any]) -> None:
     """A token check that fails after the binding probe leaves a warning for the administrator to find."""
     _with_admin(signin)
@@ -264,22 +257,103 @@ def test_sign_in_rejects_cross_origin_request(signin: dict[str, Any]) -> None:
     signin["verifier"].assert_not_awaited()
 
 
-def test_sign_in_requires_https_public_origin(signin: dict[str, Any]) -> None:
-    """A cleartext public origin never receives a Secure session cookie."""
-    _serve(signin, MINDROOM_PUBLIC_URL="http://portal.example.org")
-    response = sign_in(TestClient(main.app, base_url="http://portal.example.org"), "alice")
+@pytest.mark.parametrize("public_url", ["http://portal.example.org", "http://100.64.0.1:8765"])
+def test_sign_in_refuses_plain_http_outside_local_addresses(signin: dict[str, Any], public_url: str) -> None:
+    """A cleartext public origin gets no session at all."""
+    _serve(signin, MINDROOM_PUBLIC_URL=public_url)
+    response = sign_in(TestClient(main.app, base_url=public_url), "alice", headers={"Origin": public_url})
     assert response.status_code == 403
-    assert response.json() == {"detail": "Connections require an HTTPS public origin"}
+    assert response.json() == {"detail": "Connections require an HTTPS public origin, or HTTP on a local address"}
     assert "set-cookie" not in response.headers
+    signin["verifier"].assert_not_awaited()
 
 
-def test_sign_in_404_when_portal_disabled(signin: dict[str, Any]) -> None:
-    """The portal is opt-in, so a blank agent hides the endpoint."""
-    _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
-    response = sign_in(signin["client"], "alice")
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Connections are not enabled"}
-    assert "set-cookie" not in response.headers
+LAN_PORTAL = "http://192.168.1.10:8765"
+LAN_CHAT = "http://192.168.1.10:8080"
+
+
+def test_portal_on_a_lan_address_signs_in_over_http(signin: dict[str, Any]) -> None:
+    """A Docker stack on a home network, with `MINDROOM_PUBLIC_URL` naming its LAN address, signs Chat users in over HTTP.
+
+    The browser keeps the plain session cookie there, and the default list accepts the LAN Chat without an entry.
+    """
+    _serve(
+        signin,
+        MINDROOM_PUBLIC_URL=LAN_PORTAL,
+        MINDROOM_CONNECTIONS_AGENT="",
+        MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="",
+    )
+    signin["binds"].return_value = True
+    client = TestClient(main.app, base_url=LAN_PORTAL)
+    response = sign_in(client, "alice", origin=LAN_CHAT, headers={"Origin": LAN_PORTAL})
+    assert response.status_code == 200, response.text
+    cookie = response.headers["set-cookie"]
+    assert cookie.startswith("mindroom_connections_session=")
+    assert "Secure" not in cookie
+    for attribute in ("HttpOnly", "SameSite=lax", "Path=/", "Max-Age=3600"):
+        assert attribute in cookie
+    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert client.get("/api/connections").json()["agents"][0]["agent_name"] == "personal"
+    connect = client.post(
+        "/api/connections/agents/personal/google_drive/connect",
+        headers={"Origin": LAN_PORTAL},
+        json={},
+    )
+    assert connect.status_code == 200, connect.text
+    # The same session cookie under its HTTPS name means nothing on plain HTTP.
+    secure_named = TestClient(main.app, base_url=LAN_PORTAL)
+    secure_named.cookies.set(CONNECTIONS_SESSION_COOKIE, client.cookies["mindroom_connections_session"])
+    assert secure_named.get("/api/connections").status_code == 401
+
+
+def test_https_portal_ignores_a_plain_http_session_cookie(signin: dict[str, Any]) -> None:
+    """On HTTPS only the `__Host-` cookie counts, so a sibling host cannot plant a session cookie for this one."""
+    client = signin["client"]
+    client.cookies.set(
+        "mindroom_connections_session",
+        issue_connections_session("@alice:example.org", now=time.time(), dashboard=False),
+    )
+    assert client.get("/api/connections").status_code == 401
+
+
+def test_local_chat_cannot_sign_in_to_a_public_portal_by_default(signin: dict[str, Any]) -> None:
+    """Without a list, only MindRoom's hosted Chat signs users in to a portal that is not on a local address."""
+    _serve(signin, MINDROOM_CONNECTIONS_AGENT="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    signin["binds"].return_value = True
+    refused = sign_in(signin["client"], "alice", origin=LAN_CHAT)
+    assert refused.status_code == 403
+    assert refused.json() == {"detail": "Connections sign-in is not allowed from this client"}
+    assert sign_in(signin["client"], "alice", origin="https://chat.mindroom.chat").status_code == 200
+
+
+@pytest.mark.parametrize("portal", [PORTAL_ORIGIN, LAN_PORTAL, "http://localhost:8765"])
+def test_default_chat_origins_wait_for_a_binding_homeserver(signin: dict[str, Any], portal: str) -> None:
+    """Unbound tokens could be replayed by any backend the user opened, and a forged `Host` can claim any address.
+
+    So under the default list every portal, local-looking or not, needs binding; an explicit list accepts the risk.
+    """
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="")
+    client = TestClient(main.app, base_url=portal)
+    refused = sign_in(client, "alice", origin="https://chat.mindroom.chat", headers={"Origin": portal})
+    assert refused.status_code == 403
+    assert refused.json() == {
+        "detail": "Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, "
+        "or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS",
+    }
+    assert "set-cookie" not in refused.headers
+    signin["verifier"].assert_not_awaited()
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='["https://chat.mindroom.chat"]')
+    assert sign_in(client, "alice", origin="https://chat.mindroom.chat", headers={"Origin": portal}).status_code == 200
+
+
+def test_empty_chat_allowlist_turns_matrix_sign_in_off(signin: dict[str, Any]) -> None:
+    """`[]` refuses every Chat, including the defaults for MindRoom's hosted Chat and local addresses."""
+    _serve(signin, MINDROOM_PUBLIC_URL="", MINDROOM_CONNECTIONS_ALLOWED_ORIGINS="[]")
+    client = TestClient(main.app, base_url=LAN_PORTAL)
+    for origin in (LAN_CHAT, "https://chat.mindroom.chat"):
+        response = sign_in(client, "alice", origin=origin, headers={"Origin": LAN_PORTAL})
+        assert response.status_code == 403
+        assert "set-cookie" not in response.headers
 
 
 def test_sign_in_rejects_bad_token_without_echo(signin: dict[str, Any]) -> None:
@@ -342,13 +416,15 @@ def test_session_reads_catalog_as_matrix_user(signin: dict[str, Any]) -> None:
     assert session.headers["referrer-policy"] == "no-referrer"
 
 
-def test_session_endpoint_404_when_portal_disabled(signin: dict[str, Any]) -> None:
-    """A disabled portal hides the session probe even from a signed-in browser."""
-    assert sign_in(signin["client"], "alice").status_code == 200
+def test_portal_needs_no_connections_agent(signin: dict[str, Any]) -> None:
+    """Without `MINDROOM_CONNECTIONS_AGENT` the portal still signs users in and lists the private agents they use."""
     _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
-    response = signin["client"].get("/api/connections/session")
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Connections are not enabled"}
+    client = signin["client"]
+    assert sign_in(client, "alice").status_code == 200
+    assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
+    assert [agent["agent_name"] for agent in client.get("/api/connections").json()["agents"]] == ["personal"]
+    assert client.get("/api/oauth/google_drive/success").status_code == 200
+    _connect_state(client)
 
 
 def test_two_session_users_connect_under_their_own_ids_not_owner(signin: dict[str, Any]) -> None:
@@ -576,15 +652,6 @@ def test_session_ignored_on_non_portal_oauth_and_credential_routes(
     assert response.status_code == 401
 
 
-def test_live_session_ignored_once_portal_is_disabled(signin: dict[str, Any]) -> None:
-    """Disabling the portal stops honoring live sessions, even on the OAuth completion routes."""
-    client = signin["client"]
-    assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/oauth/google_drive/success").status_code == 200
-    _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
-    assert client.get("/api/oauth/google_drive/success").status_code == 401
-
-
 def _serve_with_strict_upstream(
     signin: dict[str, Any],
     tmp_path: Path,
@@ -678,9 +745,6 @@ def test_connections_shell_served_without_auth(
     assert response.headers["content-type"].startswith("text/html")
     assert response.text == "<!doctype html><title>Connections</title>"
     assert client.get("/", follow_redirects=False).headers["location"].startswith("/login")
-
-    _serve(signin, MINDROOM_CONNECTIONS_AGENT="")
-    assert client.get("/connections/", follow_redirects=False).status_code == 404
 
 
 @pytest.mark.asyncio
@@ -860,13 +924,17 @@ def test_sign_in_never_takes_the_audience_from_the_request(
     signin: dict[str, Any],
     binding_homeserver: ComputerPeer,
 ) -> None:
-    """Without MINDROOM_PUBLIC_URL no audience is sent, so a token bound to the portal's origin is refused."""
+    """Without MINDROOM_PUBLIC_URL the audience is the local default, so a token bound to the request's origin is refused."""
     binding_homeserver.expected_audience = PORTAL_ORIGIN
     _serve(signin, MINDROOM_PUBLIC_URL="")
     response = sign_in(signin["client"], "openid-secret")
     assert response.status_code == 401
+    assert response.json()["detail"] == (
+        "Matrix OpenID verification failed. MindRoom checked the token for http://localhost:8765; "
+        f"if MindRoom is opened at {PORTAL_ORIGIN}, set MINDROOM_PUBLIC_URL to it."
+    )
     assert "set-cookie" not in response.headers
-    assert binding_homeserver.userinfo_audiences == [None]
+    assert binding_homeserver.userinfo_audiences == ["http://localhost:8765"]
 
 
 def test_binding_switched_on_during_sign_in_grants_no_dashboard(

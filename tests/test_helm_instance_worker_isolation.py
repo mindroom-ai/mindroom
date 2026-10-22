@@ -597,6 +597,12 @@ def test_runtime_chart_native_bootstrap_runs_in_main_container() -> None:
     )
 
 
+def test_runtime_chart_primary_pod_gets_no_service_link_environment() -> None:
+    """A Service named `mindroom` would otherwise inject `MINDROOM_PORT=tcp://<ip>:<port>`, which MindRoom reads as its port."""
+    docs = _render_chart(Path("cluster/k8s/runtime"), "fullnameOverride=mindroom", release_name="mindroom-runtime")
+    assert _resource(docs, "Deployment", "mindroom")["spec"]["template"]["spec"]["enableServiceLinks"] is False
+
+
 def test_runtime_chart_passes_bootstrap_revision_to_main_container() -> None:
     """The runtime command receives the declared chart revision."""
     docs = _render_chart(
@@ -2231,7 +2237,7 @@ def test_runtime_chart_approved_egress_can_chain_agent_vault_parent(
     assert "include /etc/squid/squid.conf" in conf
     assert "acl egress_has_token req_header Proxy-Authorization ." in conf
     assert "dns_defnames on" in conf
-    assert "cache_peer agent-vault parent 14322 0 no-query no-digest login=PASSTHRU" in conf
+    assert "cache_peer agent-vault parent 14322 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000" in conf
     assert "cache_peer_access agent-vault allow egress_has_token" in conf
     assert "cache_peer_access agent-vault deny all" in conf
     assert "nonhierarchical_direct off" in conf
@@ -4702,7 +4708,10 @@ def test_runtime_chart_chain_renders_broker_cache_peer() -> None:
     proxy = _resource(docs, "Deployment", _EGRESS_PROXY_NAME)
     proxy_container = _container(proxy, "approved-egress-proxy")
 
-    assert f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU" in conf
+    assert (
+        f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000"
+        in conf
+    )
     assert f"cache_peer_access {_EGRESS_BROKER_HOST} allow egress_has_token" in conf
     assert f"cache_peer_access {_EGRESS_BROKER_HOST} deny all" in conf
     assert "acl egress_has_token req_header Proxy-Authorization ." in conf

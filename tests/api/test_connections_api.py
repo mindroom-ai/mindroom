@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ import jwt
 import nio
 import pytest
 import yaml
+from aiohttp import ClientConnectionError
 from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -297,7 +299,7 @@ def test_avatar_maps_matrix_response_errors_to_upstream_failure(portal: dict[str
 
 @pytest.mark.parametrize(
     ("user", "agent_name", "expected"),
-    [("alice", "support", 404), ("admin", "other_private", 404), (None, "personal", 401)],
+    [("alice", "support", 404), ("bob", "other_private", 404), (None, "personal", 401)],
 )
 def test_avatar_requires_visible_agent(
     shared_portal: dict[str, Any],
@@ -305,7 +307,7 @@ def test_avatar_requires_visible_agent(
     agent_name: str,
     expected: int,
 ) -> None:
-    """Signed-in access alone cannot reveal hidden agents, including to administrators."""
+    """Signed-in access alone cannot reveal agents the user may not use, including private ones."""
     with aioresponses() as matrix:
         response = shared_portal["client"].get(
             f"/api/connections/agents/{agent_name}/avatar",
@@ -325,12 +327,62 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
     assert response.status_code == 200, response.text
     assert response.json() == {
         "matrix_user_id": f"@{user}:example.org",
+        "display_name": user,
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
-        "portal_enabled": True,
     }
     assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "expected"),
+    [(200, {"displayname": "Bob Builder"}, "Bob Builder"), (200, {}, "bob"), (404, {"errcode": "M_NOT_FOUND"}, "bob")],
+)
+def test_me_names_the_user_by_matrix_display_name(
+    portal: dict[str, Any],
+    status: int,
+    payload: dict[str, str],
+    expected: str,
+) -> None:
+    """The header greets the user by their Matrix display name, and by their localpart when the profile has none."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
+            status=status,
+            payload=payload,
+        )
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        assert len(matrix.requests) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"exception": ClientConnectionError("refused")},
+        {"status": 429, "payload": {"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 5000}},
+    ],
+    ids=["unreachable", "rate-limited"],
+)
+def test_me_falls_back_at_once_when_the_homeserver_fails(portal: dict[str, Any], failure: dict[str, Any]) -> None:
+    """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
+    state = MatrixState()
+    state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
+    state.save(runtime_paths=portal["paths"])
+    with aioresponses() as matrix:
+        matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
+        started = time.monotonic()
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        elapsed = time.monotonic() - started
+        assert sum(len(calls) for calls in matrix.requests.values()) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "bob"
+    assert elapsed < 1.5
 
 
 @pytest.mark.parametrize("broker_on", [False, True])
@@ -342,22 +394,6 @@ def test_me_says_whether_agent_keys_are_enabled(portal: dict[str, Any], *, broke
         response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
         assert response.status_code == 200, response.text
         assert response.json()["egress_enabled"] is broker_on
-
-
-def test_me_says_when_only_the_agent_keys_page_is_served(portal: dict[str, Any]) -> None:
-    """Without the portal agent setting the Agent Keys page is still served, so its header must not link the portal."""
-    env = {**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
-    del env["MINDROOM_CONNECTIONS_AGENT"]
-    paths = replace(portal["paths"], process_env=env)
-    main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, portal["payload"])
-    _use_runtime_auth_settings(main.app)
-
-    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
-
-    assert response.status_code == 200, response.text
-    assert response.json()["egress_enabled"] is True
-    assert response.json()["portal_enabled"] is False
 
 
 def test_me_needs_a_signed_identity_and_takes_no_target(portal: dict[str, Any]) -> None:
@@ -576,6 +612,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         "can_connect": False,
         "reset_required": False,
         "account_label": None,
+        "service_account": True,
     }
     assert (
         portal["client"]
@@ -583,13 +620,6 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         .status_code
         == 409
     )
-
-
-def test_unconfigured_portal_is_unavailable(portal: dict[str, Any]) -> None:
-    """An explicit operator opt-in is required."""
-    paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_CONNECTIONS_AGENT": ""})
-    main.initialize_api_app(main.app, paths)
-    assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 404
 
 
 def test_canonical_alias_uses_the_same_private_scope(portal: dict[str, Any]) -> None:
@@ -661,7 +691,8 @@ def shared_portal(portal: dict[str, Any]) -> dict[str, Any]:
         ("alice", ["personal", "research"]),
         ("bob", ["personal", "support"]),
         ("mallory", ["research"]),
-        ("admin", ["personal", "research", "support"]),
+        # An administrator may use every agent, so every private agent is theirs to connect too.
+        ("admin", ["personal", "research", "support", "other_private"]),
     ],
 )
 def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], user: str, expected: list[str]) -> None:
@@ -670,9 +701,10 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     assert response.status_code == 200, response.text
     agents = response.json()["agents"]
     assert [agent["agent_name"] for agent in agents] == expected
-    assert all(agent["is_shared"] == (agent["agent_name"] != "personal") for agent in agents)
-    # These shared agents have no per-user scope or MCP opt-in, so only the personal agent reaches the gateway.
-    assert all(agent["mcp_available"] == (agent["agent_name"] == "personal") for agent in agents)
+    private = {"personal", "other_private"}
+    assert all(agent["is_shared"] == (agent["agent_name"] not in private) for agent in agents)
+    # These shared agents have no per-user scope or MCP opt-in, so only the private agents reach the gateway.
+    assert all(agent["mcp_available"] == (agent["agent_name"] in private) for agent in agents)
 
 
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
@@ -703,6 +735,7 @@ def test_agent_user_sees_shared_connection_without_management(shared_portal: dic
     assert status.json()["connected"] is True
     assert status.json()["account_label"] == "alice@example.com"
     assert status.json()["can_connect"] is False
+    assert status.json()["service_account"] is False
     for action in ("connect", "disconnect"):
         assert client.post(f"{base}/{action}", headers=headers["bob"], json={}).status_code == 403
         assert (
@@ -778,7 +811,6 @@ def test_agent_user_can_manage_only_their_personal_connection(
         ("bob", "other_private"),
         ("bob", "missing"),
         ("alice", "other_private"),
-        ("admin", "other_private"),
     ],
 )
 @pytest.mark.parametrize("action", ["status", "connect", "disconnect"])
@@ -788,7 +820,7 @@ def test_unlisted_agent_actions_are_denied(
     agent: str,
     action: str,
 ) -> None:
-    """Direct URLs cannot bypass catalog authorization or choose another private agent."""
+    """Direct URLs cannot bypass catalog authorization or reach a private agent the user may not use."""
     response = shared_portal["client"].request(
         "GET" if action == "status" else "POST",
         f"/api/connections/agents/{agent}/google_drive/{action}",
@@ -1095,6 +1127,7 @@ def test_catalog_names_the_credential_managers_of_shared_agents(shared_portal: d
         "research": ["@alice:example.org", "@mallory:example.org"],
         # A shared agent that runs per user keeps its keys per requester, so nobody manages them together.
         "support": [],
+        "other_private": [],
     }
 
 

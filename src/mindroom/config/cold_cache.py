@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.config.judgment import JudgmentConfig, LLMJudgmentConfig
+from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
 
 
 class ColdCacheConfig(BaseModel):
@@ -11,7 +12,7 @@ class ColdCacheConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     idle_seconds: int = Field(
-        default=3600,
+        default=PROMPT_CACHE_IDLE_SECONDS,
         ge=1,
         description="Seconds since the agent's last reply in a thread after which its prompt cache counts as cold",
     )

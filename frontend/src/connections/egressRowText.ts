@@ -1,5 +1,4 @@
-import { formatList, sharedAccountStatus } from "./accountCopy";
-import { BROKERED_PLACEHOLDER } from "./egressServiceForm";
+import { formatList } from "./accountCopy";
 import { GRAPHQL_CAVEAT, limitedTo, parseGithubLimit } from "./githubLimits";
 import { githubLimitLabels } from "./githubRepositoryRules";
 import type {
@@ -50,13 +49,11 @@ export interface ServiceEditing {
 
 /** Whether a service or limit gets its edit actions: it has the `editableSource` and the viewer manages it. */
 export function canEdit(
-  editing: ServiceEditing | undefined,
+  editing: ServiceEditing,
   service: EgressCredentialService | null,
-): editing is ServiceEditing {
+): boolean {
   return (
-    editing !== undefined &&
-    service?.can_manage === true &&
-    service.source === editing.editableSource
+    service?.can_manage === true && service.source === editing.editableSource
   );
 }
 
@@ -87,10 +84,7 @@ function keySavedLabel(saved: string | null): string {
 }
 
 /** What the row's badge says about where the service's credential comes from. */
-export function statusLabel(
-  service: EgressCredentialService,
-  agent: RowAgent,
-): string {
+export function statusLabel(service: EgressCredentialService): string {
   const oauth = service.oauth;
   if (oauth) {
     // An account that cannot be used here leaves the key as all there is to say.
@@ -98,12 +92,8 @@ export function statusLabel(
       return oauth.unavailable_reason === null
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
-    if (service.active_source === "oauth")
-      return sharesAccount(agent, oauth)
-        ? sharedAccountStatus(oauth.account_label, agent.displayName)
-        : oauth.account_label
-          ? `Connected as ${oauth.account_label}`
-          : "Connected";
+    // The row names the account below the badge.
+    if (service.active_source === "oauth") return "Connected";
     return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";
@@ -147,68 +137,18 @@ export function limitedNote(service: EgressCredentialService): string | null {
 export const hostPort = (rule: EgressRuleSummary) =>
   `${rule.host}${rule.port === null ? "" : `:${rule.port}`}`;
 
-/** The hosts a service's rules cover, each once, with the port when a rule names one. */
-function ruleHosts(rules: readonly EgressRuleSummary[]): string[] {
-  return [...new Set(rules.map(hostPort))];
+/** The hosts a service's rules cover, each once, in rule order, with the port when a rule names one. */
+export function serviceHosts(service: EgressCredentialService): string[] {
+  return [...new Set(service.rules.map(hostPort))];
 }
 
-/** "Sends to a.com, b.com:8443", or another `lead`, for the hosts a service's rules cover, each once; null without rules. */
-export function hostsNote(
-  service: EgressCredentialService,
-  lead = "Sends to",
-): string | null {
-  const hosts = ruleHosts(service.rules);
-  return hosts.length > 0 ? `${lead} ${hosts.join(", ")}` : null;
-}
-
-const SENT_AS: Record<string, (name: string | null | undefined) => string> = {
-  bearer: () => "as a bearer token",
-  header: (name) => (name ? `as header ${name}` : "as a header"),
-  query: (name) =>
-    name ? `as query parameter ${name}` : "as a query parameter",
-  basic: () => "with basic auth",
-  template: () => "with a custom header template",
-};
-
-/**
- * How the service's rules send the key: "Sent as a bearer token", "Sent as
- * header X-Api-Key", and so on, once for each way its rules differ. Null for
- * a service that sends no key.
- */
-export function sentAsNote(service: EgressCredentialService): string | null {
-  const ways = [
-    ...new Set(
-      service.rules.flatMap((rule) =>
-        rule.auth_type ? [SENT_AS[rule.auth_type]?.(rule.auth_name)] : [],
-      ),
-    ),
-  ].filter((way) => way !== undefined);
-  return ways.length > 0 ? `Sent ${formatList(ways)}` : null;
-}
-
-/**
- * What the sandbox is told about the service: the variables it sets, or for a
- * service with a key and nothing to set, that the agent must be told which
- * website to use. Null where the listing does not name the variables, and for
- * an account service, which the agent finds through the API it calls.
- */
-export function agentSeesNote(service: EgressCredentialService): string | null {
-  const names = service.placeholder_names;
-  if (names === undefined || service.restrict_only) return null;
-  if (names.length > 0)
-    return `Your agent sees ${names.map((name) => `${name}=${BROKERED_PLACEHOLDER}`).join(", ")}`;
-  const hosts = ruleHosts(service.rules);
-  return service.oauth === null && hosts.length > 0
-    ? `Your agent is not told this key exists; mention ${formatList(hosts)} in your request.`
-    : null;
-}
-
-/** What happens to requests while the service has no key or account; null once it has, and for a limit. */
+/** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
-  const hosts = ruleHosts(service.rules);
-  return service.configured || service.restrict_only || hosts.length === 0
+  return service.configured ||
+    service.restrict_only ||
+    service.rules.length === 0
     ? null
-    : `While no key is set, requests to ${formatList(hosts)} are refused.`;
+    : "Requests are refused until a key is set.";
 }
 
 /**
@@ -270,4 +210,19 @@ export function limitOf(
         other.rules.some((rule) => hosts.has(rule.host.toLowerCase())),
     ) ?? null
   );
+}
+
+/** How many of these services' keys and accounts are set, out of all of them; a limit has neither. */
+export function keyCounts(services: readonly EgressCredentialService[]) {
+  const keyed = services.filter((service) => !service.restrict_only);
+  return {
+    set: keyed.filter((service) => service.configured).length,
+    total: keyed.length,
+  };
+}
+
+/** "2 of 6 set", or "None" when there is no key or account to set. */
+export function keysSetText(services: readonly EgressCredentialService[]) {
+  const { set, total } = keyCounts(services);
+  return total === 0 ? "None" : `${set} of ${total} set`;
 }

@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import ipaddress
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import warnings
@@ -30,10 +32,12 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 from urllib.parse import unquote, urlsplit
 
+import httpcore
+import httpcore2
 import httpx
 import nio
 import pytest
@@ -42,6 +46,7 @@ import structlog
 import yaml
 from agno.utils import log as agno_log
 from aioresponses import aioresponses
+from openai import AsyncOpenAI, OpenAI
 from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
@@ -54,6 +59,7 @@ import mindroom.knowledge.read_process as knowledge_read_process_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
+import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
 import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -75,6 +81,7 @@ from mindroom.dispatch_handoff import (
 )
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
@@ -134,6 +141,7 @@ from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers.media_fallback import reset_model_media_capability_cache
 from mindroom.reaction_dispatch import ReactionDispatcher
@@ -2962,6 +2970,12 @@ def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
+    monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
+
+
+@pytest.fixture(autouse=True)
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
@@ -2994,6 +3008,11 @@ def _never_build_the_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
 
 
+def _refuse_connection(request: httpx.Request) -> NoReturn:
+    message = "network disabled in tests"
+    raise httpx.ConnectError(message, request=request)
+
+
 @pytest.fixture(autouse=True)
 def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep bot startup and room creation from fetching stock avatars over the network.
@@ -3003,10 +3022,199 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     async def offline(url: str) -> bytes:
-        message = "network disabled in tests"
-        raise httpx.ConnectError(message, request=httpx.Request("GET", url))
+        _refuse_connection(httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+# Captured before any test patches them, so the offline clients below still start from the production ones.
+_PRODUCTION_EMBEDDER_CLIENT = OpenAIEmbedder._sdk_client
+_PRODUCTION_EMBEDDER_ACLIENT = OpenAIEmbedder._async_sdk_client
+
+
+def _offline_sync_client(embedder: OpenAIEmbedder) -> OpenAI:
+    if embedder.client is None:
+        # Without retries, because the SDK would back off for seconds before reporting the refusal.
+        embedder.client = _PRODUCTION_EMBEDDER_CLIENT(embedder).with_options(
+            http_client=httpx.Client(transport=httpx.MockTransport(_refuse_connection)),
+            max_retries=0,
+        )
+    return embedder.client
+
+
+def _offline_async_client(embedder: OpenAIEmbedder) -> AsyncOpenAI:
+    if embedder.async_client is None:
+        embedder.async_client = _PRODUCTION_EMBEDDER_ACLIENT(embedder).with_options(
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(_refuse_connection)),
+            max_retries=0,
+        )
+    return embedder.async_client
+
+
+@pytest.fixture
+def real_embedder_clients() -> None:
+    """Keep the OpenAI embedder SDK clients on their real transport, for tests that serve embeddings locally."""
+
+
+@pytest.fixture(autouse=True)
+def _offline_openai_embedders(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep OpenAI-compatible embedders from sending real embedding requests.
+
+    The default config pairs mem0 memory with the OpenAI embedder, so any test that searches memory
+    or probes embedder health builds one. Its requests would go to `OPENAI_BASE_URL` or
+    api.openai.com with the keyless placeholder key. Here an embedder without an injected SDK client
+    builds its clients the production way, then moves them onto a transport that fails every request
+    the way an unreachable endpoint does. Those failures never reach httpcore, so the network guard
+    does not report them: a test that uses such an embedder sees a down endpoint, as it would in
+    production. Tests that need vectors inject a client or their own embedder.
+    """
+    if "real_embedder_clients" in request.fixturenames:
+        return
+    monkeypatch.setattr(OpenAIEmbedder, "_sdk_client", _offline_sync_client)
+    monkeypatch.setattr(OpenAIEmbedder, "_async_sdk_client", _offline_async_client)
+
+
+_OLLAMA_DEFAULT_PORT = urlsplit(OLLAMA_HOST_DEFAULT).port
+
+
+def _dial_leaves_the_test(host: str, port: int) -> bool:
+    """Return whether to refuse dialing ``host:port``.
+
+    Refused: any host except localhost, ``*.localhost``, or a loopback or unspecified IP literal, plus port 11434,
+    where a locally running Ollama listens, on every host. Hostnames are never resolved, so every other name is
+    refused, and so are this machine's non-loopback addresses.
+    """
+    if host == "localhost" or host.endswith(".localhost"):
+        local = True
+    else:
+        try:
+            address = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            local = False
+        else:
+            local = address.is_loopback or address.is_unspecified
+    # Test servers on other local ports stay reachable.
+    return not local or port == _OLLAMA_DEFAULT_PORT
+
+
+@dataclass
+class _RefusedDial:
+    """One refused dial, the thread that made it, and whether a test failure has named it."""
+
+    address: str
+    thread: str
+    reported: bool = False
+
+
+def _refuse_dial_off_the_test(
+    host: str,
+    port: int,
+    connect_error: type[Exception],
+    dials: list[_RefusedDial],
+) -> None:
+    if _dial_leaves_the_test(host, port):
+        # httpcore passes IPv6 hosts unbracketed.
+        address = f"[{host.strip('[]')}]:{port}" if ":" in host else f"{host}:{port}"
+        dials.append(_RefusedDial(address, threading.current_thread().name))
+        message = f"network disabled in tests: {address}"
+        raise connect_error(message)
+
+
+def _describe_dials(dials: Iterable[_RefusedDial]) -> str:
+    return ", ".join(sorted({f"{dial.address} (thread {dial.thread})" for dial in dials}))
+
+
+def _report_test_dials(dials: list[_RefusedDial], start: int, test_thread: str) -> str | None:
+    """Mark the dials recorded from index ``start`` on as reported, and return the failure for their test."""
+    made_during_test = dials[start:]
+    if not made_during_test:
+        return None
+    for dial in made_during_test:
+        dial.reported = True
+    message = f"test tried to reach the network: {_describe_dials(made_during_test)}"
+    if any(dial.thread != test_thread for dial in made_during_test):
+        message += (
+            f"; a dial from a thread other than the test's own ({test_thread})"
+            " may come from an earlier test's background work"
+        )
+    return message
+
+
+def _unreported_dials_failure(dials: list[_RefusedDial]) -> str | None:
+    """Return the failure for dials no test reported, which were made between tests or after the last one."""
+    unreported = [dial for dial in dials if not dial.reported]
+    if not unreported:
+        return None
+    return (
+        "background work tried to reach the network between tests or after the last test: "
+        f"{_describe_dials(unreported)}"
+    )
+
+
+def _refusing_sync_connect[R](
+    connect_tcp: Callable[..., R],
+    connect_error: type[Exception],
+    dials: list[_RefusedDial],
+) -> Callable[..., R]:
+    def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
+        _refuse_dial_off_the_test(host, port, connect_error, dials)
+        return connect_tcp(backend, host, port, *args, **kwargs)
+
+    return refusing_connect_tcp
+
+
+def _refusing_async_connect[R](
+    connect_tcp: Callable[..., Awaitable[R]],
+    connect_error: type[Exception],
+    dials: list[_RefusedDial],
+) -> Callable[..., Awaitable[R]]:
+    async def refusing_connect_tcp(backend: object, host: str, port: int, *args: object, **kwargs: object) -> R:
+        _refuse_dial_off_the_test(host, port, connect_error, dials)
+        return await connect_tcp(backend, host, port, *args, **kwargs)
+
+    return refusing_connect_tcp
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
+    """Refuse every HTTP client dial that ``_dial_leaves_the_test`` rejects, for the whole session.
+
+    The patch outlives each test so that a background thread or task finishing after its test is still refused.
+    A dial no test reported, made between tests or after the last one, fails the session at teardown.
+    """
+    dials: list[_RefusedDial] = []
+    with pytest.MonkeyPatch.context() as patcher:
+        for core in (httpcore, httpcore2):
+            patcher.setattr(
+                core.SyncBackend,
+                "connect_tcp",
+                _refusing_sync_connect(core.SyncBackend.connect_tcp, core.ConnectError, dials),
+            )
+            patcher.setattr(
+                core.AnyIOBackend,
+                "connect_tcp",
+                _refusing_async_connect(core.AnyIOBackend.connect_tcp, core.ConnectError, dials),
+            )
+        yield dials
+    failure = _unreported_dials_failure(dials)
+    if failure is not None:
+        pytest.fail(failure, pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None, None, None]:
+    """Fail a test whose HTTP client made a dial that ``_dial_leaves_the_test`` rejects.
+
+    The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
+    is recorded and checked here. This covers clients built on httpx and httpx2, which include the
+    OpenAI, Anthropic, and Ollama SDKs. Raw sockets, aiohttp, and requests are not covered: google-genai's
+    async path uses aiohttp, and tiktoken downloads its encodings through requests when its cache is cold.
+    """
+    start = len(_refused_dials)
+    yield
+    failure = _report_test_dials(_refused_dials, start, threading.current_thread().name)
+    if failure is not None:
+        pytest.fail(failure, pytrace=False)
 
 
 @pytest.fixture(autouse=True)

@@ -17,10 +17,14 @@ from mindroom.custom_tools.microsoft_graph import (
     checked_upload_source,
     graph_session,
     graph_tool_result,
+    html_to_text,
     next_page_token,
+    page_path,
     path_segment,
     read_upload_source,
     share_id,
+    text_to_html,
+    time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.redaction import redact_sensitive_text
@@ -388,6 +392,29 @@ def test_path_segments_refuse_anything_that_changes_the_path(value: object) -> N
     assert excinfo.value.code == "invalid_argument"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "W. Europe Standard Time",
+        "Central Standard Time (Mexico)",
+        "Pacific Standard Time (Mexico)",
+        "UTC-11",
+        "America/New_York",
+        "Etc/GMT+5",
+    ],
+)
+def test_time_zone_names_accept_windows_and_iana_names(value: str) -> None:
+    assert time_zone_name(value) == value
+
+
+@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n", 7, None])
+def test_time_zone_names_refuse_anything_else(value: object) -> None:
+    with pytest.raises(MicrosoftGraphError) as excinfo:
+        time_zone_name(value)
+
+    assert excinfo.value.code == "invalid_argument"
+
+
 def test_share_ids_encode_the_whole_link() -> None:
     encoded = share_id(SHARE_LINK)
 
@@ -579,3 +606,95 @@ def test_a_download_into_an_inaccessible_directory_is_reported(
 )
 def test_next_page_tokens_only_continue_graph_v1_collections(link: str | None, token: str | None) -> None:
     assert next_page_token({"@odata.nextLink": link} if link else {}) == token
+
+
+@pytest.mark.parametrize(
+    ("page_token", "collection"),
+    [
+        ("/me/drive/root/children?$skiptoken=a", "/me/drive/root/children"),
+        ("/me/todo/lists/AAMk-1=/tasks?$skip=50&$filter=a%2Eb", r"/me/todo/lists/[^/]+/tasks"),
+    ],
+)
+def test_page_paths_continue_their_own_collection(page_token: str, collection: str) -> None:
+    assert page_path(page_token, collection) == page_token
+
+
+@pytest.mark.parametrize(
+    "page_token",
+    [
+        "/me/todo/lists/../../planner/tasks?x=1",
+        "/me/todo/lists/%2e%2e/%2e%2e/planner/tasks?x=1",
+        "/me/todo/lists/%2E%2e/%2e%2E/planner/tasks?x=1",
+        "/me/todo/lists/.%2E/x/tasks?x=1",
+        "/me/todo/lists/AAMk-1=/tasks",
+        "//evil.example.com/tasks?x=1",
+        "https://graph.microsoft.com/v1.0/me/todo/lists/AAMk-1=/tasks?x=1",
+        "",
+    ],
+)
+def test_page_paths_refuse_tokens_that_can_leave_the_collection(page_token: str) -> None:
+    with pytest.raises(MicrosoftGraphError) as excinfo:
+        page_path(page_token, r"/me/todo/lists/.+/tasks")
+
+    assert excinfo.value.code == "invalid_page_token"
+
+
+@pytest.mark.parametrize(
+    ("html", "text"),
+    [
+        ("Plain notes", "Plain notes"),
+        ("First line<br>Second line", "First line\nSecond line"),
+        ("Paragraph<br><br>after a blank line", "Paragraph\n\nafter a blank line"),
+        ("<p>First</p><p>Second &amp; third</p>", "First\nSecond & third"),
+        ("<ul><li>one</li><li>two</li></ul>", "one\ntwo"),
+        ("<p>a   b</p>\n\n\n<p></p><p>c</p>", "a b\nc"),
+        ('<attachment id="ee8d"></attachment>', ""),
+        ("Tom &lt;tom@contoso.com&gt;&nbsp;wrote", "Tom <tom@contoso.com> wrote"),
+        (
+            "<html><head><title>Note</title><style>p { color: red; }</style></head>"
+            "<body><div>Line  one\n  continues <b>bold</b></div></body></html>",
+            "Line one continues bold",
+        ),
+        ("<html><head><title>Note</title><body><p>Kept</p></body></html>", "Kept"),
+        (
+            "<table><tr><th>Name</th><th>Value</th></tr>\n<tr><td> Alpha </td> <td>1</td><td></td><td>x</td></tr></table>",
+            "Name | Value\nAlpha | 1 | | x",
+        ),
+        ('<p>see</p><img src="https://graph.microsoft.com/x" alt="chart">', "see\n[image]"),
+        ('<p>Ship it <emoji id="1f44d_thumbsup" alt="\U0001f44d" title="Thumbs up"></emoji></p>', "Ship it \U0001f44d"),
+        (
+            '<blockquote itemscope="" itemtype="http://schema.skype.com/Reply" itemid="1616965872000">'
+            '<strong itemprop="mri">Sam Example</strong><p itemprop="preview">Can we ship today?</p></blockquote>'
+            "<p>Yes, after the review.</p>",
+            "> Sam Example\n> Can we ship today?\nYes, after the review.",
+        ),
+        (
+            "<blockquote>outer<blockquote>inner</blockquote>after</blockquote>reply",
+            "> outer\n> > inner\n> after\nreply",
+        ),
+    ],
+)
+def test_html_to_text_keeps_readable_text_and_line_breaks(html: str, text: str) -> None:
+    assert html_to_text(html) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "html"),
+    [
+        ("Plain notes", "Plain notes"),
+        (
+            'Ship <b>today</b> & tell "everyone" it\'s done',
+            "Ship &lt;b&gt;today&lt;/b&gt; &amp; tell &quot;everyone&quot; it&#x27;s done",
+        ),
+        ("one\ntwo\r\nthree\rfour", "one<br>two<br>three<br>four"),
+        ("blank\n\nline\n", "blank<br><br>line"),
+    ],
+)
+def test_text_to_html_escapes_markup_and_keeps_line_breaks(text: str, html: str) -> None:
+    assert text_to_html(text) == html
+
+
+def test_text_to_html_reads_back_as_the_same_text() -> None:
+    text = "Tom <tom@contoso.com> wrote:\n1 < 2 & 3 > 2\n\nThanks"
+
+    assert html_to_text(text_to_html(text)) == text

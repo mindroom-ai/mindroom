@@ -32,11 +32,12 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import open_resolved_scope_session_context
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
+    set_force_compaction_state,
     update_scope_seen_event_ids,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -45,8 +46,10 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
     _completed_run,
@@ -787,6 +790,52 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
         render_msg_tag(sender="alice", body="Fresh follow-up", event_id="event-2"),
     )
     assert (seen[-1].role, seen[-1].content) == ("user", "Current prompt")
+
+
+@pytest.mark.asyncio
+async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Added memory waits for a request whose history changes anyway, so the cached system prompt survives."""
+    config, runtime_paths = _make_config(tmp_path)
+    config.memory.backend = "file"
+    memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
+
+    async def system_prompt_of_turn(prompt: str) -> str:
+        await ai_response(
+            make_turn_context("test_agent", session_id="session-1"),
+            prompt=prompt,
+            runtime_paths=runtime_paths,
+            config=config,
+        )
+        system_message = provider.model.requests[-1].messages[0]
+        assert system_message.role == "system"
+        return str(system_message.content)
+
+    assert "Fact one." in await system_prompt_of_turn("First prompt")
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact two.\n")
+    assert "Fact two." not in await system_prompt_of_turn("Second prompt")
+
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = storage.load_session("session-1", "agent")
+    assert session is not None
+    set_force_compaction_state(session, _SCOPE, HistoryScopeState(), force=True)
+    storage.save_session_fields(session, "metadata")
+    with (
+        patch("mindroom.history.compaction.build_model_provider", return_value=summary_model()),
+        patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")),
+    ):
+        compacted_turn = await system_prompt_of_turn("Third prompt")
+    assert "Fact two." in compacted_turn
+    assert any("merged summary" in str(message.content) for message in provider.model.requests[-1].messages)
+
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact three.\n")
+    assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
 
 
 _SESSION_PREAMBLE = "[File memory entrypoint (agent)]\nStable MEMORY.md"

@@ -54,8 +54,7 @@ def configure_native_history(
         allowed
         and plan.authored_compaction_enabled
         and not plan.explicit_compaction_model
-        and history_settings.policy.mode == "all"
-        and history_settings.max_tool_calls_from_history is None
+        and history_settings.replays_whole_history
         and threshold is not None
         and static_tokens is not None
         and hard_budget is not None

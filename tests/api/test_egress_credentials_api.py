@@ -641,7 +641,8 @@ def test_agents_keep_config_order(egress_portal: dict[str, Any]) -> None:
     listed = _agent_rows(_listing(portal, "alice"))
     catalog = _agent_rows(client.get("/api/connections", headers=alice))
     assert listed == ["shared_dev", "personal"]
-    assert catalog == ["shared_dev", "personal"]
+    # The catalog also lists Alice's private calculator agent, which has no keys to set.
+    assert catalog == ["shared_dev", "personal", "no_shell"]
 
     # Setting a key on the agent declared second, then on the first, never reorders either page. Alice sets her own
     # personal key, so the key lands in the scope the pages read; Bob manages the shared agent.
@@ -681,7 +682,7 @@ def test_dashboard_config_save_sorts_services_and_agents_and_ties_follow_service
     assert config_lifecycle.load_config_into_app(paths, main.app)
 
     assert _agent_rows(_listing(portal, "alice")) == ["personal", "shared_dev"]
-    assert _agent_rows(client.get("/api/connections", headers=alice)) == ["personal", "shared_dev"]
+    assert _agent_rows(client.get("/api/connections", headers=alice)) == ["no_shell", "personal", "shared_dev"]
     on_disk = yaml.safe_load(paths.config_path.read_text(encoding="utf-8"))
     assert list(on_disk["agents"]) == sorted(payload["agents"])
     assert list(on_disk["egress_broker"]["services"]) == sorted(payload["egress_broker"]["services"])

@@ -18,8 +18,15 @@ __all__ = [
     "ACCOUNT_LOOKUP_TIMEOUT_SECONDS",
     "GRAPH_ME_URL",
     "microsoft_files_oauth_provider",
+    "microsoft_meetings_oauth_provider",
     "microsoft_oauth_provider",
+    "microsoft_onenote_oauth_provider",
+    "microsoft_people_oauth_provider",
+    "microsoft_sharepoint_oauth_provider",
+    "microsoft_teams_oauth_provider",
+    "microsoft_todo_oauth_provider",
     "microsoft_token_url",
+    "outlook_calendar_oauth_provider",
     "outlook_mail_oauth_provider",
 ]
 
@@ -132,6 +139,16 @@ def microsoft_files_oauth_provider() -> OAuthProvider:
     )
 
 
+def microsoft_sharepoint_oauth_provider() -> OAuthProvider:
+    """Return the SharePoint sites, lists, and pages provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_sharepoint",
+        display_name="Microsoft SharePoint",
+        scopes=("Sites.ReadWrite.All",),
+        status_capabilities=("read SharePoint sites, lists, and pages, and add and change list items",),
+    )
+
+
 def outlook_mail_oauth_provider() -> OAuthProvider:
     """Return the Outlook mail provider."""
     return microsoft_oauth_provider(
@@ -139,4 +156,71 @@ def outlook_mail_oauth_provider() -> OAuthProvider:
         display_name="Outlook Mail",
         scopes=("Mail.ReadWrite", "Mail.Send"),
         status_capabilities=("search, read, draft, send, and organize Outlook mail",),
+    )
+
+
+def outlook_calendar_oauth_provider() -> OAuthProvider:
+    """Return the Outlook calendar provider."""
+    return microsoft_oauth_provider(
+        provider_id="outlook_calendar",
+        display_name="Outlook Calendar",
+        scopes=("Calendars.ReadWrite",),
+        status_capabilities=("read and change Outlook calendar events",),
+    )
+
+
+def microsoft_todo_oauth_provider() -> OAuthProvider:
+    """Return the Microsoft To Do provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_todo",
+        display_name="Microsoft To Do",
+        scopes=("Tasks.ReadWrite",),
+        status_capabilities=("list, create, update, and delete Microsoft To Do tasks",),
+    )
+
+
+def microsoft_teams_oauth_provider() -> OAuthProvider:
+    """Return the Teams channels and chats provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_teams",
+        display_name="Microsoft Teams",
+        scopes=(
+            "Team.ReadBasic.All",
+            "Channel.ReadBasic.All",
+            "ChannelMessage.Read.All",
+            "ChannelMessage.Send",
+            "Chat.Read",
+            "ChatMessage.Send",
+        ),
+        status_capabilities=("read and send Teams channel and chat messages",),
+    )
+
+
+def microsoft_meetings_oauth_provider() -> OAuthProvider:
+    """Return the Teams meeting transcripts provider; `OnlineMeetingTranscript.Read.All` needs admin consent."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_meetings",
+        display_name="Microsoft Teams Meetings",
+        scopes=("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"),
+        status_capabilities=("find Teams meetings and read their transcripts",),
+    )
+
+
+def microsoft_onenote_oauth_provider() -> OAuthProvider:
+    """Return the OneNote notebooks provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_onenote",
+        display_name="Microsoft OneNote",
+        scopes=("Notes.ReadWrite.All",),
+        status_capabilities=("read, create, and append to OneNote pages",),
+    )
+
+
+def microsoft_people_oauth_provider() -> OAuthProvider:
+    """Return the organization directory provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_people",
+        display_name="Microsoft 365 People",
+        scopes=("User.Read.All",),
+        status_capabilities=("look up people, their managers, and their direct reports in the directory",),
     )

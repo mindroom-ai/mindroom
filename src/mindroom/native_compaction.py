@@ -189,6 +189,14 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     return items if _is_checkpoint(items[0]) else []
 
 
+def native_checkpoint_id(message: Message) -> str | None:
+    """Return the message's id when the provider compacted on it, whatever its route, else None."""
+    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
+        return None
+    return message.id
+
+
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:
     """Project the latest checkpoint plus tail, retaining current system messages."""
     last = next(

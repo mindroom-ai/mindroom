@@ -157,8 +157,11 @@ export function ConnectionServiceRows({
     <>
       {tools.map((tool, index) => (
         <Fragment key={tool.name}>
+          {/* The Connection and Actions cells span the service's tools, so a line
+              between those tools would stop at them; only phones, where each
+              row is a card, separate them. */}
           <tr
-            className={`border-t border-border/60 ${STACKED.row} max-sm:py-2`}
+            className={`${index === 0 ? "border-t" : "max-sm:border-t"} border-border/60 ${STACKED.row} max-sm:py-2`}
           >
             <th
               scope="row"
@@ -298,7 +301,9 @@ export function ConnectionServiceRows({
                       !status.can_connect &&
                       !status.reset_required && (
                         <p className="w-full text-sm text-muted-foreground">
-                          This service is not ready to connect yet.
+                          {status.service_account
+                            ? "This service uses a shared service account, so there is no account to connect here."
+                            : "This service needs its OAuth client saved in the MindRoom dashboard before it can connect."}
                         </p>
                       )}
                   </div>

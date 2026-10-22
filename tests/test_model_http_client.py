@@ -198,6 +198,7 @@ async def test_pooled_connections_honor_proxy_environment(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("real_embedder_clients")
 async def test_openai_embedder_reuses_the_model_connection(tmp_path: Path, server: _ModelsServer) -> None:
     """Async embedding requests go through the same pooled connection as the models."""
     config, runtime_paths = _model_config(tmp_path, "openai", server.url)

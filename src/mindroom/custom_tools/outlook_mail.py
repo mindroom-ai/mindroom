@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import html
 import json
 import mimetypes
 import re
@@ -26,6 +25,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_path,
     path_segment,
     read_upload_source,
+    text_to_html,
 )
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
 _WRITE_FUNCTIONS = frozenset(
     {
         "outlook_mail_create_draft",
-        "outlook_mail_send_draft",
         "outlook_mail_send",
         "outlook_mail_reply",
         "outlook_mail_mark_read",
@@ -68,6 +67,7 @@ _SUMMARY_FIELDS = (
 _LIST_SELECT = f"{_SUMMARY_FIELDS},bodyPreview"
 _MESSAGE_SELECT = f"{_SUMMARY_FIELDS},ccRecipients,bccRecipients,replyTo,body"
 _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
+_MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _TEXT_BODY = {"Prefer": 'outlook.body-content-type="text"'}
 _ATTACHMENT_TYPES = {
     "microsoft.graph.fileAttachment": "file",
@@ -75,6 +75,8 @@ _ATTACHMENT_TYPES = {
     "microsoft.graph.referenceAttachment": "reference",
 }
 _EMAIL = re.compile(r"[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+")
+# The `Name <address>` form read results show for a named address.
+_NAMED_EMAIL = re.compile(r"(?P<name>[^<>\x00-\x1f\x7f]*)<(?P<address>[^<>]*)>")
 _MAX_EMAIL_CHARS = 254
 # Most filesystems cap one name at 255 bytes.
 _MAX_FILENAME_BYTES = 200
@@ -98,6 +100,16 @@ def _addresses(recipients: list[Any] | None) -> list[str]:
     if not isinstance(recipients, list):
         return []
     return [address for recipient in recipients if (address := _address(recipient))]
+
+
+def _address_set(recipients: list[Any]) -> set[str | None]:
+    """Return the email addresses of Graph recipients, compared without case, with None for one without an address."""
+    addresses: set[str | None] = set()
+    for recipient in recipients:
+        email = recipient.get("emailAddress") if isinstance(recipient, dict) else None
+        address = email.get("address") if isinstance(email, dict) else None
+        addresses.add(address.casefold() if isinstance(address, str) else None)
+    return addresses
 
 
 def _summary(message: Mapping[str, Any]) -> dict[str, Any]:
@@ -159,17 +171,18 @@ def _recipients(value: object, field_name: str) -> list[dict[str, dict[str, str]
         if not isinstance(raw, str):
             msg = f"{field_name} must be a list of email addresses."
             raise _invalid(msg)
-        address = raw.strip()
+        text = raw.strip()
+        named = _NAMED_EMAIL.fullmatch(text)
+        name, address = (named["name"].strip(), named["address"].strip()) if named else ("", text)
+        if len(name) >= 2 and name[0] == name[-1] == '"':
+            # An RFC 5322 quoted display name, such as "Smith, Sam", keeps its text without the quotes.
+            name = name[1:-1].strip()
         if len(address) > _MAX_EMAIL_CHARS or not _EMAIL.fullmatch(address):
             msg = f"{field_name} has an invalid email address: {raw[:100]!r}."
             raise _invalid(msg)
-        recipients.append({"emailAddress": {"address": address}})
+        email = {"name": name, "address": address} if name else {"address": address}
+        recipients.append({"emailAddress": email})
     return recipients
-
-
-def _comment(body: str) -> str:
-    """Return plain text as the HTML Graph inserts above the quoted message, keeping its characters and line breaks."""
-    return html.escape("\n".join(body.splitlines())).replace("\n", "<br>")
 
 
 def _check_request_size(size: int) -> None:
@@ -183,7 +196,8 @@ def _check_request_size(size: int) -> None:
 
 
 def _check_payload_size(payload: Mapping[str, object]) -> None:
-    _check_request_size(len(json.dumps(payload).encode()))
+    # Measure the body as httpx encodes it: UTF-8 text without escapes or spaces.
+    _check_request_size(len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()))
 
 
 def _filename(name: object) -> str:
@@ -230,7 +244,6 @@ class OutlookMailTools(Toolkit):
             "outlook_mail_get_message": self.outlook_mail_get_message,
             "outlook_mail_download_attachment": self.outlook_mail_download_attachment,
             "outlook_mail_create_draft": self.outlook_mail_create_draft,
-            "outlook_mail_send_draft": self.outlook_mail_send_draft,
             "outlook_mail_send": self.outlook_mail_send,
             "outlook_mail_reply": self.outlook_mail_reply,
             "outlook_mail_mark_read": self.outlook_mail_mark_read,
@@ -357,7 +370,7 @@ class OutlookMailTools(Toolkit):
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             if page_token is not None:
-                payload = session.json("GET", page_path(page_token, "/messages"))
+                payload = session.json("GET", page_path(page_token, _MESSAGE_PAGES))
             else:
                 path = (
                     "/me/messages" if folder is None else f"/me/mailFolders/{path_segment(folder, 'folder')}/messages"
@@ -378,7 +391,7 @@ class OutlookMailTools(Toolkit):
 
         def validate() -> None:
             if page_token is not None:
-                page_path(page_token, "/messages")
+                page_path(page_token, _MESSAGE_PAGES)
                 return
             _limit(limit)
             if folder is not None:
@@ -397,7 +410,7 @@ class OutlookMailTools(Toolkit):
             token = next_page_token(payload)
             if token is None or len(attachments) >= _MAX_ATTACHMENTS:
                 return attachments[:_MAX_ATTACHMENTS], len(attachments) > _MAX_ATTACHMENTS or token is not None
-            payload = session.json("GET", page_path(token, "/attachments"))
+            payload = session.json("GET", page_path(token, r"/me/messages/[^/]+/attachments"))
 
     def outlook_mail_get_message(self, message_id: str) -> str:
         """Read one Outlook message as plain text, up to 20,000 characters, with its recipients and attachment list.
@@ -488,11 +501,11 @@ class OutlookMailTools(Toolkit):
 
         Before calling, tell the requester the recipients, subject, and attachments, because an approval prompt
         may show only part of them. Each attached file may be at most 3 MB, and all attached files together about
-        3 MB; save larger files to OneDrive and put a link in the body. Send the draft with
-        outlook_mail_send_draft, or the requester can open its web_link to edit it first.
+        3 MB; save larger files to OneDrive and put a link in the body. The requester opens its web_link to review,
+        edit, and send it in Outlook.
 
         Args:
-            to: Recipient email addresses, such as sam@contoso.com.
+            to: Recipient email addresses, such as sam@contoso.com or Sam Example <sam@contoso.com>.
             subject: The subject line.
             body: The message text, sent as plain text.
             cc: Email addresses to copy.
@@ -505,24 +518,6 @@ class OutlookMailTools(Toolkit):
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
         return self._run(lambda session: {"message": _summary(session.json("POST", "/me/messages", json=message))})
-
-    def outlook_mail_send_draft(self, message_id: str) -> str:
-        """Send one existing Outlook draft as the requester.
-
-        Before calling, tell the requester every recipient (to, cc, and bcc) and the subject, because an approval
-        prompt may show only the message id; read the draft with outlook_mail_get_message first, because the
-        requester may have changed it in Outlook. The sent message is saved in Sent Items.
-
-        Args:
-            message_id: The draft's id from outlook_mail_create_draft or outlook_mail_search.
-
-        """
-
-        def operation(session: GraphSession) -> Mapping[str, object]:
-            session.request("POST", f"/me/messages/{path_segment(message_id, 'message_id')}/send")
-            return {"message_id": message_id, "sent": True}
-
-        return self._call(operation, validate=lambda: path_segment(message_id, "message_id"))
 
     def outlook_mail_send(
         self,
@@ -540,7 +535,7 @@ class OutlookMailTools(Toolkit):
         OneDrive and put a link in the body. The sent message is saved in Sent Items.
 
         Args:
-            to: Recipient email addresses, such as sam@contoso.com.
+            to: Recipient email addresses, such as sam@contoso.com or Sam Example <sam@contoso.com>.
             subject: The subject line.
             body: The message text, sent as plain text.
             cc: Email addresses to copy.
@@ -559,16 +554,18 @@ class OutlookMailTools(Toolkit):
 
         return self._run(operation)
 
-    def outlook_mail_reply(self, message_id: str, body: str, reply_all: bool = False) -> str:
+    def outlook_mail_reply(self, message_id: str, recipients: list[str], body: str, reply_all: bool = False) -> str:
         """Reply to one Outlook message as the requester at once, above the quoted original.
 
-        Before calling, tell the requester who will receive the reply and what it says, because an approval prompt
-        may show only the message id. The reply goes to the original's reply_to addresses when it has them, and
-        otherwise to its sender; with reply_all, its to and cc recipients also receive it. Read the message with
-        outlook_mail_get_message first to name those recipients. The reply is saved in Sent Items.
+        Before calling, tell the requester who will receive the reply and what it says. The reply goes to the
+        original's reply_to addresses when it has them, and otherwise to its sender; with reply_all, its to and cc
+        recipients also receive it. Read the message with outlook_mail_get_message first to name those recipients.
+        When the reply would reach anyone recipients does not list, nothing is sent and it fails with
+        recipients_mismatch, which lists every address it would go to. The reply is saved in Sent Items.
 
         Args:
             message_id: The id of the message to answer, from outlook_mail_search.
+            recipients: Every email address the reply may go to, such as sam@contoso.com.
             body: The reply text, as plain text.
             reply_all: Also reply to every other recipient of the original message.
 
@@ -576,6 +573,7 @@ class OutlookMailTools(Toolkit):
 
         def validate() -> None:
             path_segment(message_id, "message_id")
+            _recipients(recipients, "recipients")
             if not isinstance(body, str) or not body.strip():
                 msg = "body must not be empty."
                 raise _invalid(msg)
@@ -584,10 +582,21 @@ class OutlookMailTools(Toolkit):
                 raise _invalid(msg)
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            action = "replyAll" if reply_all else "reply"
+            action = "createReplyAll" if reply_all else "createReply"
             path = f"/me/messages/{path_segment(message_id, 'message_id')}/{action}"
-            session.request("POST", path, json={"comment": _comment(body)})
-            return {"message_id": message_id, "reply_all": reply_all, "sent": True}
+            draft = session.json("POST", path, json={"comment": text_to_html(body)})
+            draft_path = f"/me/messages/{path_segment(draft.get('id'), 'draft id')}"
+            fields = ("toRecipients", "ccRecipients", "bccRecipients")
+            actual = [recipient for field in fields for recipient in draft.get(field) or []]
+            if not _address_set(actual) <= _address_set(_recipients(recipients, "recipients")):
+                session.request("DELETE", draft_path)
+                raise MicrosoftGraphError(
+                    code="recipients_mismatch",
+                    message="The reply would reach recipients the call did not name, all listed here; nothing was sent.",
+                    recipients=_addresses(actual),
+                )
+            session.request("POST", f"{draft_path}/send")
+            return {"message_id": message_id, "reply_all": reply_all, "recipients": _addresses(actual), "sent": True}
 
         return self._call(operation, validate=validate)
 

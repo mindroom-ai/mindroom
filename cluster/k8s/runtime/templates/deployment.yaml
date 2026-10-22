@@ -48,6 +48,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "mindroom-runtime.serviceAccountName" . }}
+      enableServiceLinks: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

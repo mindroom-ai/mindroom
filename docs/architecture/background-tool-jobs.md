@@ -12,6 +12,7 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
 - Stop, an edit, or deleting a message stops only the reply, because each job stays visible and cancellable on its own; a job ends only through its own cancel, revoked access, or the bot leaving the room.
 - An ended job reaches the agent as a notice it acknowledges with `collect`, and gets a follow-up only when no reply collected it, so results arrive without a message per job.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
+  A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
   A cancellation needs no acknowledgement and gets no follow-up, since the person who cancelled already knows, and a silent schedule's jobs get none, so the schedule stays silent.
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.
@@ -61,6 +62,9 @@ Subagent follow-ups use reusable sessions after the previous child turn finishes
 A notice reaches only a model step after a tool batch; a reply that ends without another tool call leaves the job to its follow-up.
 A follow-up in a session switched to minimal mode runs and reports results it cannot acknowledge, so a later standard reply may report them again.
 A follow-up whose turn ends without collecting its jobs is not admitted again in the same process; they wait for the next reply's note.
+A follow-up also gives way to a waiting message the agent then leaves unanswered, such as one addressed to another agent, and its jobs wait for the next reply's note.
+Another person's waiting message does not hold a follow-up back, because that person's reply lists only their own jobs, so the message still waits for the follow-up and stops it as a newer message would.
+A message is waiting only from its arrival during a busy turn until its own turn's dispatch starts, so a follow-up that takes an idle conversation while a message is still being prepared stops for it as for a newer message.
 A bot that left a room cannot clear its jobs state there, so clients ignore jobs state from users who are not joined.
 When denying an ended job's approval cards fails and the process then stops before a retry succeeds, those cards stay answerable until their own deadline; answering one runs nothing, though a timed approval chosen on it still covers later calls.
 A restart interrupts a job that waits for its own call's approval, so that call never runs, and the model is told it did not run.

@@ -83,7 +83,7 @@ router = APIRouter(
 def _egress_user_accepting(*query_names: str) -> Callable[[Request, Response], Awaitable[str]]:
     """Build the dependency that authenticates the requester and rejects every query parameter but `query_names`.
 
-    It needs no MINDROOM_CONNECTIONS_AGENT and returns the requester ID.
+    It returns the requester ID.
     """
 
     async def dependency(request: Request, response: Response) -> str:

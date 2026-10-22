@@ -18,7 +18,12 @@ from mindroom.history.summary_message import compaction_summary_fields
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
-from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
+from mindroom.native_compaction import (
+    checkpoint_estimated_tokens,
+    checkpoint_items,
+    native_checkpoint_id,
+    native_replay_messages,
+)
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -214,6 +219,23 @@ def current_summary_text(session: ConversationSession) -> str | None:
     if session.summary is None:
         return None
     return session.summary.text.strip() or None
+
+
+def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tuple[str | None, str | None]:
+    """Identify what the scope's replayed history was last compacted into: its summary and newest native checkpoint.
+
+    A changed marker means a compaction rewrote the history that requests replay.
+    """
+    checkpoint = next(
+        (
+            checkpoint_id
+            for run in reversed(scope_visible_runs(session, scope))
+            for message in reversed(run.messages)
+            if (checkpoint_id := native_checkpoint_id(message)) is not None
+        ),
+        None,
+    )
+    return current_summary_text(session), checkpoint
 
 
 def _estimated_message_chars(message: Message) -> int:

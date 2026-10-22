@@ -3,6 +3,7 @@ import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
   type RowAgent,
   type ServiceEditing,
+  sharesAccount,
   statusLabel,
 } from "./egressRowText";
 import type { EgressCredentialService } from "./types";
@@ -15,10 +16,10 @@ export function ServiceStatus({
 }: {
   service: EgressCredentialService;
   agent: RowAgent;
-  serviceEditing?: ServiceEditing;
+  serviceEditing: ServiceEditing;
 }) {
   const oauth = service.oauth;
-  const sourceLabel = serviceEditing?.labels?.[service.source];
+  const sourceLabel = serviceEditing.labels?.[service.source];
   // Once a key is saved there is nothing left to ask for, so the hint goes.
   const refusalShown =
     oauth?.unavailable_reason === "shared_sandbox" && !service.key_configured;
@@ -28,8 +29,16 @@ export function ServiceStatus({
         variant={service.configured ? "secondary" : "outline"}
         className="max-w-full font-normal"
       >
-        {statusLabel(service, agent)}
+        {statusLabel(service)}
       </Badge>
+      {service.active_source === "oauth" && oauth?.account_label && (
+        <span className="break-all text-xs">{oauth.account_label}</span>
+      )}
+      {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
+        <span className="text-xs text-muted-foreground">
+          Shared with everyone using {agent.displayName}
+        </span>
+      )}
       {service.active_source === "key" && oauth?.connected && (
         <span className="text-xs text-muted-foreground">
           Your connected {oauth.display_name} account is kept for other

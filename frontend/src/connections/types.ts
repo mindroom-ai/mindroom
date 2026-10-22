@@ -46,13 +46,13 @@ export interface ConnectionList {
 /** Who the Connections pages are open for, from `GET /api/connections/me`. */
 export interface ConnectionsIdentity {
   matrix_user_id: string;
+  /** The Matrix display name, or the localpart when the profile has none. */
+  display_name: string;
   email: string | null;
   /** The administrator dashboard is open to this user too. */
   is_administrator: boolean;
   /** The egress broker is on, so the Agent Keys page exists. */
   egress_enabled: boolean;
-  /** The Agents page is served; the Agent Keys page can be served without it. */
-  portal_enabled: boolean;
 }
 
 export interface ConnectionStatus {
@@ -61,6 +61,8 @@ export interface ConnectionStatus {
   can_connect: boolean;
   reset_required: boolean;
   account_label: string | null;
+  /** A shared service account serves this provider, so no personal account can be connected. */
+  service_account: boolean;
 }
 
 /** The account a service can use instead of an API key. */

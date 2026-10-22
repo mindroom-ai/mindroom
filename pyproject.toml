@@ -311,6 +311,12 @@ mem0 = [
 ]
 memory = []
 microsoft_files = []
+microsoft_meetings = []
+microsoft_onenote = []
+microsoft_people = []
+microsoft_sharepoint = []
+microsoft_teams = []
+microsoft_todo = []
 modelslabs = [
   "requests",
 ]
@@ -338,6 +344,7 @@ openclaw_compat = []
 openweather = [
   "requests",
 ]
+outlook_calendar = []
 outlook_mail = []
 oxylabs = [
   "oxylabs",

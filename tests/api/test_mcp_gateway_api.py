@@ -24,7 +24,7 @@ from structlog.testing import capture_logs
 
 from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
-from mindroom.api.mcp_gateway import GatewayRuntime, gateway_lifespan, install_gateway_routes
+from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
@@ -233,6 +233,17 @@ def _list(client: TestClient, token: str | None = None, **headers: str) -> httpx
             **({"Authorization": f"Bearer {token}"} if token else {}),
             **headers,
         },
+    )
+
+
+def test_gateway_runs_without_a_connections_agent(gateway_app: FastAPI) -> None:
+    """`MINDROOM_CONNECTIONS_AGENT` only preselects an agent, so the gateway is on without it."""
+    paths = config_lifecycle.require_api_state(gateway_app).snapshot.runtime_paths
+    env = {name: value for name, value in paths.process_env.items() if name != "MINDROOM_CONNECTIONS_AGENT"}
+    assert gateway_cors_origins(replace(paths, process_env=env), "/mcp/oauth/token") == ("*",)
+    assert (
+        gateway_cors_origins(replace(paths, process_env={**env, "MINDROOM_MCP_GATEWAY_ENABLED": "false"}), "/mcp")
+        is None
     )
 
 

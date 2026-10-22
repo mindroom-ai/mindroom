@@ -2,7 +2,11 @@ import { Users, UserRound } from "lucide-react";
 import { AvatarImage } from "@/components/shared/AvatarImage";
 import type { AgentConnections } from "./types";
 
-export function AgentAvatar({ agent }: { agent: AgentConnections }) {
+export function AgentAvatar({
+  agent,
+}: {
+  agent: Pick<AgentConnections, "agent_name" | "is_shared">;
+}) {
   const Icon = agent.is_shared ? Users : UserRound;
   return (
     <AvatarImage

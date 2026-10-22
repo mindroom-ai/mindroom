@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,13 +11,19 @@ import {
   removeLimitWarning,
   sharedAgentNote,
 } from "./accountCopy";
+import { AgentAvatar } from "./AgentAvatar";
 import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
 import { configPlaceholderOwners } from "./egressServiceNotes";
-import type { RowAgent, ServiceEditing } from "./egressRowText";
+import {
+  keysSetText,
+  type RowAgent,
+  type ServiceEditing,
+} from "./egressRowText";
 import { EgressServiceRows, keyPath, servicePath } from "./EgressServiceRows";
+import { EgressServiceTable } from "./EgressServiceTable";
 import {
   errorText,
   type RequestErrorMessages,
@@ -427,38 +433,31 @@ function AgentSection({
 
   return (
     <section
+      id={`egress-agent-panel-${agent.agent_name}`}
       aria-labelledby={`egress-agent-${agent.agent_name}`}
-      className="overflow-hidden rounded-2xl border bg-card shadow-sm"
+      className="border-l-2 border-primary/30 bg-background"
     >
-      <div className="flex flex-wrap items-center gap-2 border-b px-5 py-4">
-        <h2 id={`egress-agent-${agent.agent_name}`} className="font-semibold">
-          {agent.agent_display_name}
-        </h2>
-        {agent.shared && (
-          <Badge variant="secondary" className="font-normal">
-            Shared
-          </Badge>
-        )}
-        {agent.can_manage && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="ml-auto"
-            disabled={editor !== null}
-            aria-label={`Add service for ${agent.agent_display_name}`}
-            onClick={() => {
-              setError(null);
-              setEditor({ kind: "add" });
-            }}
-          >
-            Add service
-          </Button>
-        )}
-      </div>
-      {scopeLine && (
-        <p className="border-b border-border/60 px-5 py-3 text-sm text-muted-foreground">
-          {scopeLine}
-        </p>
+      {(scopeLine || agent.can_manage) && (
+        <div className="flex flex-wrap items-center gap-3 px-5 py-3">
+          {scopeLine && (
+            <p className="text-sm text-muted-foreground">{scopeLine}</p>
+          )}
+          {agent.can_manage && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto"
+              disabled={editor !== null}
+              aria-label={`Add service for ${agent.agent_display_name}`}
+              onClick={() => {
+                setError(null);
+                setEditor({ kind: "add" });
+              }}
+            >
+              Add service
+            </Button>
+          )}
+        </div>
       )}
       {error && (
         <Alert variant="destructive" className="m-4 w-auto p-2">
@@ -472,7 +471,7 @@ function AgentSection({
         />
       )}
       {editor && (
-        <div className="border-b border-border/60">
+        <div className="border-y border-border/60">
           <EgressServiceEditor
             key={editor.kind === "add" ? "add" : `edit:${editor.name}`}
             context="personal"
@@ -499,36 +498,30 @@ function AgentSection({
           />
         </div>
       )}
-      {agent.services.length ? (
-        groups.map((group) => (
-          <div
-            key={group.label}
-            role="group"
-            aria-label={group.label}
-            className="border-t border-border/60 first:border-t-0"
-          >
-            <h3 className="px-5 pt-3 text-xs font-medium text-muted-foreground">
-              {group.label}
-            </h3>
+      {agent.services.length || agent.inactive_services.length ? (
+        <EgressServiceTable label={`Services for ${agent.agent_display_name}`}>
+          {groups.map((group) => (
             <EgressServiceRows
+              key={group.label}
+              label={group.label}
               agentName={agent.agent_name}
               services={group.services}
               onChanged={onChanged}
               serviceEditing={serviceEditing}
               agent={rowAgent}
             />
-          </div>
-        ))
+          ))}
+          <InactiveServices
+            services={agent.inactive_services}
+            disabled={saving}
+            onDelete={agent.can_manage ? remove : undefined}
+          />
+        </EgressServiceTable>
       ) : (
-        <p className="px-5 py-4 text-sm text-muted-foreground">
+        <p className="border-t border-border/60 px-5 py-4 text-sm text-muted-foreground">
           No services are configured yet.
         </p>
       )}
-      <InactiveServices
-        services={agent.inactive_services}
-        disabled={saving}
-        onDelete={agent.can_manage ? remove : undefined}
-      />
       <RecentRequests
         agentName={agent.agent_name}
         shared={agent.shared}
@@ -538,11 +531,101 @@ function AgentSection({
   );
 }
 
+/** The agent the page was opened for, from a `#egress-agent-<name>` link such as Manage services on the Agents tab. */
+function linkedAgent(): string | null {
+  const prefix = "#egress-agent-";
+  const { hash } = window.location;
+  // Agent names are letters, digits, and underscores, so nothing in them is escaped.
+  return hash.startsWith(prefix) ? hash.slice(prefix.length) : null;
+}
+
+/** One agent's row, with its services below it while it is open. */
+function AgentRow({
+  agent,
+  open,
+  onToggle,
+  onChanged,
+}: {
+  agent: EgressCredentialAgent;
+  open: boolean;
+  onToggle: () => void;
+  onChanged: () => void;
+}) {
+  return (
+    <>
+      <tr
+        className={`border-t transition-colors hover:bg-muted/30 ${STACKED.row} max-sm:px-0 max-sm:py-2 ${open ? "bg-muted/30" : ""}`}
+      >
+        <td className={`px-5 py-4 ${STACKED_CELL} max-sm:px-4 max-sm:py-1.5`}>
+          <button
+            type="button"
+            className="flex w-full items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label={`${open ? "Collapse" : "Expand"} ${agent.agent_display_name}`}
+            aria-expanded={open}
+            aria-controls={`egress-agent-panel-${agent.agent_name}`}
+            onClick={onToggle}
+          >
+            {open ? (
+              <ChevronDown
+                className="h-4 w-4 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+            ) : (
+              <ChevronRight
+                className="h-4 w-4 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+            )}
+            <AgentAvatar
+              agent={{ agent_name: agent.agent_name, is_shared: agent.shared }}
+            />
+            <span
+              id={`egress-agent-${agent.agent_name}`}
+              className="font-medium"
+            >
+              {agent.agent_display_name}
+            </span>
+          </button>
+        </td>
+        <td
+          data-label="Type"
+          className={`px-5 py-4 ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
+        >
+          <Badge variant="secondary" className="font-normal">
+            {agent.shared ? "Shared" : "Personal"}
+          </Badge>
+        </td>
+        <td
+          data-label="Keys and accounts"
+          className={`px-5 py-4 text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
+        >
+          {keysSetText(agent.services)}
+        </td>
+      </tr>
+      {/* Hidden rather than removed, so closing the row keeps an open editor
+          and lets a write under way finish. */}
+      <tr className={STACKED.row} hidden={!open}>
+        <td
+          colSpan={3}
+          className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
+        >
+          <AgentSection agent={agent} onChanged={onChanged} />
+        </td>
+      </tr>
+    </>
+  );
+}
+
 /** Personal page to connect accounts or set the API keys the egress broker injects for each agent. */
 export function EgressCredentials() {
   const [agents, setAgents] = useState<EgressCredentialAgent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => {
+    const linked = linkedAgent();
+    return new Set(linked ? [linked] : []);
+  });
   const request = useRef<AbortController | null>(null);
+  const loaded = agents !== null;
 
   const load = useCallback(async () => {
     request.current?.abort();
@@ -572,9 +655,23 @@ export function EgressCredentials() {
     return () => request.current?.abort();
   }, [load]);
 
+  // The linked agent's row exists only once the listing is in, after the browser looked for it.
+  useEffect(() => {
+    const linked = linkedAgent();
+    if (loaded && linked)
+      document.getElementById(`egress-agent-${linked}`)?.scrollIntoView();
+  }, [loaded]);
+
+  const toggle = (agentName: string) =>
+    setOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(agentName)) next.add(agentName);
+      return next;
+    });
+
   return (
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
-      <div className="mx-auto max-w-4xl space-y-6">
+      <div className="mx-auto max-w-6xl space-y-6">
         <ConnectionsHeader
           current="keys"
           title="Agent Keys"
@@ -594,13 +691,52 @@ export function EgressCredentials() {
             No agents with shell or python access are available to you.
           </p>
         )}
-        {agents?.map((agent) => (
-          <AgentSection
-            key={agent.agent_name}
-            agent={agent}
-            onChanged={() => void load()}
-          />
-        ))}
+        {agents && agents.length > 0 && (
+          <div className="overflow-hidden rounded-2xl border bg-card shadow-sm">
+            <div className="flex items-center gap-2 border-b px-5 py-4">
+              <h2 className="font-semibold">Agents</h2>
+              <span className="rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                {agents.length}
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table
+                aria-label="Agents"
+                className={`w-full text-sm sm:min-w-[680px] ${STACKED.table}`}
+              >
+                <thead
+                  className={`bg-muted/30 text-left text-xs text-muted-foreground ${STACKED.head}`}
+                >
+                  <tr>
+                    {["Agent", "Type", "Keys and accounts"].map((column) => (
+                      <th
+                        key={column}
+                        scope="col"
+                        className="px-5 py-3 font-medium"
+                      >
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className={STACKED.body}>
+                  {agents.map((agent) => (
+                    <AgentRow
+                      key={agent.agent_name}
+                      agent={agent}
+                      open={open.has(agent.agent_name)}
+                      onToggle={() => toggle(agent.agent_name)}
+                      onChanged={() => void load()}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="border-t px-5 py-3 text-xs text-muted-foreground">
+              Expand an agent to manage its keys and accounts.
+            </p>
+          </div>
+        )}
       </div>
     </main>
   );
