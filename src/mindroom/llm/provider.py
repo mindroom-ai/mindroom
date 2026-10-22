@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
-type ToolChoice = Literal["auto", "none", "required"] | Mapping[str, Any]
+type ToolChoice = Literal["none"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,7 +78,6 @@ class RequestOverrides:
 
     temperature: float | None = None
     max_output_tokens: int | None = None
-    timeout_seconds: float | None = None
     sdk_max_retries: int | None = None
     prompt_cache: bool | None = None
     disable_thinking: bool = False
@@ -99,7 +98,7 @@ class NativeCompactionReplay:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
-    """One provider request; ``native_tools`` are hosted tools passed through as the provider's own dicts.
+    """One provider request.
 
     ``stream=False`` asks for one non-streaming provider call where the route offers one; the events still
     arrive through ``stream()``, after the response completes.
@@ -113,7 +112,6 @@ class ModelRequest:
     tools: Sequence[ToolSpec] = ()
     tool_choice: ToolChoice | None = None
     response_format: type[BaseModel] | Mapping[str, Any] | None = None
-    native_tools: Sequence[Mapping[str, Any]] = ()
     overrides: RequestOverrides = RequestOverrides()
     stream: bool = True
     deferred_tool_names: frozenset[str] = frozenset()

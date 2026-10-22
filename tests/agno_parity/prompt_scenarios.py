@@ -102,6 +102,7 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
+        ToolChoice,
     )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -165,7 +166,7 @@ class ModelCall:
     stream: bool
     messages: list[OwnedMessage]
     tools: list[dict[str, Any]] | None
-    tool_choice: str | dict[str, Any] | None
+    tool_choice: ToolChoice | None
     response_format: dict[str, Any] | type[BaseModel] | None
     # Routes with native tool search send these tools with defer_loading below the recorder, so the record names them.
     deferred_tool_names: list[str]
@@ -203,7 +204,7 @@ class Recorder:
             messages=deepcopy(list(request.messages)),
             # The goldens hold Agno's formatted tools; the owned definition formats the same way, None omitted.
             tools=[{"type": "function", "function": function_definition(tool)} for tool in request.tools],
-            tool_choice=deepcopy(request.tool_choice),
+            tool_choice=request.tool_choice,
             response_format=request.response_format,
             deferred_tool_names=sorted(request.deferred_tool_names),
         )

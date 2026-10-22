@@ -73,8 +73,6 @@ _HANDLED_INPUT_KEYS = frozenset(
         "tools",
     },
 )
-# Agno's Gemini adapter forwarded a forced choice as its own ``"any"`` mode; the owned protocol says ``required``.
-_TOOL_CHOICE_ALIASES = {"any": "required"}
 
 
 class PacedBytes(httpx.AsyncByteStream):
@@ -348,11 +346,10 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         )
         assert native_compaction is not None, "the golden's route supports native compaction"
     deferred = case_input["deferred_tool_search"]
-    tool_choice = case_input["tool_choice"]
     return ModelRequest(
         messages=[Message.from_dict(deepcopy(message)) for message in case_input["messages"]],
         tools=tools,
-        tool_choice=_TOOL_CHOICE_ALIASES.get(tool_choice, tool_choice) if isinstance(tool_choice, str) else tool_choice,
+        tool_choice=case_input["tool_choice"],
         response_format=response_format_from_golden(case_input["response_format"]),
         stream=case_input["stream"],
         deferred_tool_names=frozenset(deferred["tool_names"]) if deferred is not None else frozenset(),
