@@ -2007,23 +2007,32 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
         restore_tool_registry_snapshot(snapshot)
 
 
-@pytest.mark.parametrize("offers_scheduler", [True, False])
+@pytest.mark.parametrize(
+    "offered",
+    ["schedule_tool_call", "run_scheduled_call", None],
+    ids=["scheduling-only", "running-only", "no-scheduler"],
+)
 def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     monkeypatch: pytest.MonkeyPatch,
-    offers_scheduler: bool,
+    offered: str | None,
 ) -> None:
-    """Only the scheduler reads the run's live functions, so a build without it calls its tools without that step."""
+    """Each scheduler function reading the run's live functions binds them; a build offering neither has no such step.
+
+    The build offers the scheduler with only the named function, so each name is checked against the scheduler's own.
+    """
     config = _code_config()
-    if not offers_scheduler:
-        config.defaults.tools = []
+    config.defaults.tools = []
+    if offered is not None:
+        config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
 
     build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
 
-    assert ("run_scheduled_call" in prepare_run_tools(build.spec).functions) is offers_scheduler
+    functions = prepare_run_tools(build.spec).functions
+    assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
     names = [middleware.__name__ for middleware in build.tool_middleware]
-    assert names.count("bind_live_functions") == int(offers_scheduler)
-    assert (names[0] == "bind_live_functions") is offers_scheduler
+    assert names.count("bind_live_functions") == int(offered is not None)
+    assert (names[0] == "bind_live_functions") is (offered is not None)
 
 
 @pytest.mark.asyncio
