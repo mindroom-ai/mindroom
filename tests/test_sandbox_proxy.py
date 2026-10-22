@@ -71,6 +71,7 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
     WorkerRuntimeContext,
     tool_runtime_context,
@@ -913,6 +914,8 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         def large(self) -> dict[str, str]:
             return {"marker": marker * 20}
 
+    snapshot = capture_tool_registry_snapshot()
+
     @register_tool_with_metadata(
         name=tool_name,
         file_access=ToolFileAccess.NONE,
@@ -944,8 +947,7 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         assert marker not in str(proxy_result)
         assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+        restore_tool_registry_snapshot(snapshot)
 
 
 @pytest.mark.asyncio
@@ -1135,6 +1137,8 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         def large(self) -> str:
             return marker * 20
 
+    snapshot = capture_tool_registry_snapshot()
+
     @register_tool_with_metadata(
         name=tool_name,
         file_access=ToolFileAccess.NONE,
@@ -1171,8 +1175,7 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         assert marker not in str(response.result)
         assert response.result["mindroom_tool_output"]["status"] == "saved_to_file"
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+        restore_tool_registry_snapshot(snapshot)
 
 
 @pytest.mark.asyncio
@@ -1187,6 +1190,8 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
 
         def large(self) -> dict[str, str]:
             return {"marker": marker}
+
+    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1258,8 +1263,7 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
         assert not (worker_paths.workspace / "tool-results/worker.json").exists()
         assert response.result["mindroom_tool_output"]["path"] == "tool-results/worker.json"
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+        restore_tool_registry_snapshot(snapshot)
 
 
 def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1274,6 +1278,8 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
 
         def ping(self) -> str:
             return self.label or "local"
+
+    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1314,8 +1320,7 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
         assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
         assert "tool_init_overrides" not in captured["json"]
     finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+        restore_tool_registry_snapshot(snapshot)
 
 
 def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
