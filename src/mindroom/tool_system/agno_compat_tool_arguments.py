@@ -12,13 +12,18 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.utils import tools as agno_tool_utils
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function, FunctionCall
 
 _PATCH_LOCK = Lock()
 _PATCHED = False
-_MAX_SCHEMA_DEPTH = 32
+# Parameter schemas are a few nodes; a schema past these limits keeps Agno's conversion.
+_MAX_SCHEMA_NODES = 256
+_MAX_ALTERNATIVES = 64
+
+# One way a schema admits a value: its allowed JSON types and its choices, each None when unrestricted.
+type _Alternative = tuple[frozenset[str] | None, tuple[object, ...] | None]
 
 # AGNO_COMPAT: Tool-call argument parsing turns the strings none, null, true, and false into None and booleans.
 # Reason: Agno 3.0.9 get_function_call replaces every top-level string argument whose stripped, lower-cased value is
@@ -55,20 +60,8 @@ class _StringParameter:
         return self.free_text and (converted is not None or not self.nullable)
 
 
-def _schemas(schema: Mapping[str, Any] | None, root: Mapping[str, Any], depth: int = 0) -> Iterator[Mapping[str, Any]]:
-    """Yield a JSON Schema and the schemas its anyOf, oneOf, allOf, and references within the parameters name."""
-    if not isinstance(schema, dict) or depth > _MAX_SCHEMA_DEPTH:
-        return
-    yield schema
-    reference = schema.get("$ref")
-    if isinstance(reference, str) and reference.startswith("#/"):
-        target: Any = root
-        for part in reference[2:].split("/"):
-            target = target.get(part) if isinstance(target, dict) else None
-        yield from _schemas(target, root, depth + 1)
-    for key in ("anyOf", "oneOf", "allOf"):
-        for option in _items(schema.get(key)):
-            yield from _schemas(option, root, depth + 1)
+class _SchemaTooLargeError(Exception):
+    pass
 
 
 def _items(value: object) -> list[Any]:
@@ -76,20 +69,71 @@ def _items(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _both(first: _Alternative, second: _Alternative) -> _Alternative:
+    """Return what two schemas that both apply admit together."""
+    (first_types, first_choices), (second_types, second_choices) = first, second
+    types = first_types if second_types is None else second_types if first_types is None else first_types & second_types
+    if first_choices is None or second_choices is None:
+        return types, first_choices if second_choices is None else second_choices
+    return types, tuple(choice for choice in first_choices if choice in second_choices)
+
+
+def _referenced(reference: str, root: Mapping[str, Any]) -> Any:  # noqa: ANN401 - a JSON Schema node of any shape.
+    """Return the schema a local JSON Pointer reference names, or None."""
+    target: Any = root
+    for part in reference[2:].split("/"):
+        target = target.get(part.replace("~1", "/").replace("~0", "~")) if isinstance(target, dict) else None
+    return target
+
+
+def _alternatives(schema: Mapping[str, Any] | None, root: Mapping[str, Any], budget: list[int]) -> list[_Alternative]:
+    """Return the alternatives a JSON Schema admits, reading allOf and local references as further restrictions.
+
+    ``budget`` holds the nodes the whole walk may still read, so self-references end.
+    """
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise _SchemaTooLargeError
+    if not isinstance(schema, dict):
+        return [(None, None)]
+    declared = schema.get("type")
+    types = None if declared is None else frozenset(k for k in (_items(declared) or [declared]) if isinstance(k, str))
+    choices = tuple(_items(schema.get("enum"))) if "enum" in schema else None
+    if "const" in schema:
+        choices = _both((None, choices), (None, (schema["const"],)))[1]
+    restrictions = [_alternatives(member, root, budget) for member in _items(schema.get("allOf"))]
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/"):
+        restrictions.append(_alternatives(_referenced(reference, root), root, budget))
+    for key in ("anyOf", "oneOf"):
+        if members := _items(schema.get(key)):
+            options: list[_Alternative] = []
+            for member in members:
+                options.extend(_alternatives(member, root, budget))
+            restrictions.append(options)
+    alternatives: list[_Alternative] = [(types, choices)]
+    for restriction in restrictions:
+        alternatives = [_both(first, second) for first in alternatives for second in restriction]
+        if len(alternatives) > _MAX_ALTERNATIVES:
+            raise _SchemaTooLargeError
+    return alternatives
+
+
 def _string_parameter(schema: Mapping[str, Any] | None, root: Mapping[str, Any]) -> _StringParameter | None:
     """Describe a parameter whose schema admits a string, or return None when it admits none."""
-    free_text = nullable = False
-    choices: list[object] = []
-    for option in _schemas(schema, root):
-        declared = option.get("type")
-        types = {kind for kind in (_items(declared) or [declared]) if isinstance(kind, str)}
-        values = [*_items(option.get("enum")), *((option["const"],) if "const" in option else ())]
-        free_text = free_text or ("string" in types and not values)
-        nullable = nullable or "null" in types or None in values
-        choices.extend(values)
+    try:
+        alternatives = _alternatives(schema, root, [_MAX_SCHEMA_NODES])
+    except _SchemaTooLargeError:
+        return None
+    free_text = any(types is not None and "string" in types and choices is None for types, choices in alternatives)
+    nullable = any(
+        None in choices if choices is not None else types is not None and "null" in types
+        for types, choices in alternatives
+    )
+    choices = tuple(choice for _types, options in alternatives for choice in options or ())
     if not free_text and not any(isinstance(choice, str) for choice in choices):
         return None
-    return _StringParameter(free_text=free_text, nullable=nullable, choices=tuple(choices))
+    return _StringParameter(free_text=free_text, nullable=nullable, choices=choices)
 
 
 def _decoded_object(arguments: str) -> Mapping[str, object]:

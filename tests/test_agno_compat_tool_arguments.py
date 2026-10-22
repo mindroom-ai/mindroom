@@ -185,3 +185,48 @@ def test_a_resumed_call_keeps_string_arguments() -> None:
     call = _model().get_function_call_to_run_from_tool_execution(paused, {"note": function})
 
     assert call.arguments == {"text": "None", "scope": "none", "title": None, "pinned": True}
+
+
+def test_choices_combined_with_a_string_type_stay_choices() -> None:
+    """A string type narrowed to choices by allOf or a reference keeps Agno's None for words that are not choices."""
+    function = Function(
+        name="pick",
+        parameters={
+            "type": "object",
+            "properties": {
+                "narrowed": {"type": "string", "allOf": [{"enum": ["none", "all"]}]},
+                "referenced": {"type": "string", "$ref": "#/$defs/a~1b"},
+                "either": {"anyOf": [{"$ref": "#/$defs/a~1b"}, {"type": "null"}]},
+            },
+            "$defs": {"a/b": {"enum": ["none", "all"]}},
+        },
+        entrypoint=lambda **kwargs: kwargs,
+        skip_entrypoint_processing=True,
+    )
+
+    assert _parsed(function, json.dumps({"narrowed": "none", "referenced": "none", "either": "none"})) == {
+        "narrowed": "none",
+        "referenced": "none",
+        "either": "none",
+    }
+    assert _parsed(function, json.dumps({"narrowed": "null", "referenced": "True", "either": "null"})) == {
+        "narrowed": None,
+        "referenced": True,
+        "either": None,
+    }
+
+
+def test_self_referencing_schemas_fall_back_to_agnos_conversion() -> None:
+    """A schema too large to read, such as a reference that branches into itself, keeps Agno's conversion."""
+    function = Function(
+        name="tree",
+        parameters={
+            "type": "object",
+            "properties": {"node": {"$ref": "#/$defs/Node"}},
+            "$defs": {"Node": {"type": "string", "anyOf": [{"$ref": "#/$defs/Node"}, {"$ref": "#/$defs/Node"}]}},
+        },
+        entrypoint=lambda **kwargs: kwargs,
+        skip_entrypoint_processing=True,
+    )
+
+    assert _parsed(function, json.dumps({"node": "true"})) == {"node": True}
