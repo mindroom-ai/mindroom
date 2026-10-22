@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
+import google.auth.exceptions
 import httpx
 import pytest
 from pydantic import BaseModel
@@ -489,8 +490,16 @@ async def test_gemini_normalized_failures_do_not_cause_themselves(failure: str, 
         aiohttp.ClientPayloadError("cut"),
         TimeoutError(),
         ConnectionResetError(104, "Connection reset by peer"),
+        google.auth.exceptions.TransportError("token endpoint unreachable"),
     ],
-    ids=["httpx-connect", "aiohttp-disconnected", "aiohttp-payload", "aiohttp-total-timeout", "connection-reset"],
+    ids=[
+        "httpx-connect",
+        "aiohttp-disconnected",
+        "aiohttp-payload",
+        "aiohttp-total-timeout",
+        "connection-reset",
+        "vertex-token-refresh",
+    ],
 )
 async def test_gemini_transport_failure_is_retryable(failure: Exception, tmp_path: Path) -> None:
     """A connection failure before any reply is retryable, on the httpx transport and on aiohttp.

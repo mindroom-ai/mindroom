@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import anthropic
 import boto3.session
 import google.auth
+import google.auth.exceptions
 import httpx
 import pytest
 from google.oauth2.credentials import Credentials
@@ -17,6 +18,7 @@ from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
@@ -975,6 +977,56 @@ async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
     assert discoveries == 1
     assert [request.headers["authorization"] for request in wire.requests] == ["Bearer ambient-token"] * 2
     assert all(request.url.path.startswith("/v1/projects/adc-project/locations/us-east5/") for request in wire.requests)
+
+
+class _RefreshFailingCredentials(Credentials):
+    """Credentials whose token refresh fails the way google-auth reports it."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(token=None)
+        self.error = error
+
+    def refresh(self, request: object) -> None:  # noqa: ARG002 - google-auth passes its transport
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected", "status_code"),
+    [
+        (google.auth.exceptions.TransportError("token endpoint unreachable"), ProviderUnavailable, None),
+        (google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True), ProviderUnavailable, None),
+        (google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."), ProviderError, 401),
+    ],
+    ids=["transport", "retryable-refresh", "rejected-credentials"],
+)
+async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected: type[ProviderError],
+    status_code: int | None,
+) -> None:
+    """A network failure while minting the Vertex token is retryable; rejected credentials report as such."""
+    monkeypatch.setattr(google.auth, "default", lambda scopes: (_RefreshFailingCredentials(failure), "adc-project"))  # noqa: ARG005
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    with isolated_provider_environment():
+        built = build_provider(
+            ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs={"region": "us-east5"}),
+            runtime_paths,
+        )
+    provider = replace(built, http_client=wire.client)
+    with pytest.raises(expected) as raised:
+        await claude_turn(provider, ModelRequest(messages=_user()))
+    assert type(raised.value) is expected
+    assert raised.value.status_code == status_code
+    assert raised.value.__cause__ is failure
+    assert wire.requests == []
+    if status_code == 401:
+        assert "Authentication failed" in get_user_friendly_error_message(raised.value)
 
 
 @pytest.mark.asyncio

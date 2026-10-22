@@ -83,7 +83,7 @@ from mindroom.providers.anthropic.wire import (
     tool_call_from_block,
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn, whole_turn_deltas
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.errors import classify_provider_error, google_auth_error, transport_error
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -274,7 +274,7 @@ class ClaudeProvider:
                         # show the provider is still working; the SDK's own convenience events repeat them.
                         server_tool_started = server_tool_started or _starts_server_tool(event)
                         yield StreamProgress()
-        except (anthropic.APIError, httpx.TransportError) as error:
+        except Exception as error:
             self._raise_provider_error(error, server_tool_started=server_tool_started)
 
     def _finish(
@@ -485,7 +485,7 @@ class ClaudeProvider:
         return client
 
     def _raise_provider_error(self, error: Exception, *, server_tool_started: bool) -> NoReturn:
-        """Translate an SDK or transport failure into the shared provider errors.
+        """Translate an SDK, transport, or Google token failure into the shared provider errors; others propagate.
 
         Once a server tool (web search, code execution, tool search) started, a retry would run it again, so the
         failure is final and carries the code that keeps the media fallback from resending the request.
@@ -495,8 +495,13 @@ class ClaudeProvider:
             mapped: ProviderError = transport_error(error, provider=provider)
         elif isinstance(error, anthropic.APIStatusError):
             mapped = classify_provider_error(error.message, provider=provider, status_code=error.status_code)
-        else:
+        elif isinstance(error, anthropic.APIError):
             mapped = ProviderError(str(error), provider=provider)
+        elif (google_auth := google_auth_error(error, provider=provider)) is not None:
+            # The Vertex client mints its Google access token inside the request.
+            mapped = google_auth
+        else:
+            raise error
         if server_tool_started and mapped.retryable:
             msg = f"Claude stream failed after a server tool started: {mapped}"
             raise ProviderError(

@@ -24,7 +24,7 @@ from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message
-from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.errors import classify_provider_error, google_auth_error, transport_error
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
@@ -182,6 +182,9 @@ class GeminiProvider:
         elif isinstance(error, ValidationError):
             # The SDK rejected an authored generation setting; the same request cannot succeed.
             mapped = InvalidRequest(str(error), provider=provider)
+        elif (google_auth := google_auth_error(error, provider=provider)) is not None:
+            # Vertex AI mints its Google access token inside the request.
+            mapped = google_auth
         else:
             raise error
         if hosted_tool_ran and mapped.retryable:

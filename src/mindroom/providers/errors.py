@@ -25,6 +25,7 @@ __all__ = [
     "RATE_LIMIT_STATUSES",
     "TRANSIENT_STATUSES",
     "classify_provider_error",
+    "google_auth_error",
     "is_context_window_error",
     "transport_error",
 ]
@@ -103,3 +104,20 @@ def transport_error(error: Exception, *, provider: str) -> ProviderUnavailable:
     timed_out = isinstance(error, _TRANSPORT_TIMEOUTS) or isinstance(error.__cause__, _TRANSPORT_TIMEOUTS)
     code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
     return ProviderUnavailable(str(error) or type(error).__name__, provider=provider, code=code)
+
+
+def google_auth_error(error: Exception, *, provider: str) -> ProviderError | None:
+    """Return the normalized error for a failure to mint a Google access token, or None for any other error.
+
+    Vertex clients refresh their token inside the request: a network failure or a retryable token-endpoint
+    response can succeed later, while rejected credentials, such as a deleted service-account key, are final
+    and report as an authentication failure. Credentials that cannot be found or loaded stay a configuration
+    error.
+    """
+    from google.auth import exceptions  # noqa: PLC0415 - google-auth loads with the first Vertex client
+
+    if isinstance(error, exceptions.TransportError) or (isinstance(error, exceptions.RefreshError) and error.retryable):
+        return transport_error(error, provider=provider)
+    if isinstance(error, exceptions.RefreshError):
+        return ProviderError(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
+    return None
