@@ -43,8 +43,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
-from tests.history_helpers import _completed_team_run, seed_summary
-from tests.history_helpers import _team_session as _team_history_session
+from tests.history_helpers import _completed_team_run, _team_session, seed_summary
 from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
     EVENT_ID,
     SESSION_ID,
@@ -200,7 +199,7 @@ def _seeded_squad(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **scripts: An
     team = squad_turn(tmp_path, monkeypatch, **scripts)
     session = seed_session(
         team.storage,
-        _team_history_session(
+        _team_session(
             SESSION_ID,
             team_id="squad",
             runs=[_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")],
@@ -281,7 +280,7 @@ async def test_a_team_summary_only_plan_replays_the_summary_without_runs(
         team_id="squad",
         messages=[Message(role="user", content="long " * 20_000), Message(role="assistant", content="ok")],
     )
-    session = seed_session(team.storage, _team_history_session(SESSION_ID, team_id="squad", runs=[long_run]))
+    session = seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=[long_run]))
     seed_summary(team.storage, session, TEAM_SCOPE, _SUMMARY)
     team.config.models["default"].context_window = 8_000
 

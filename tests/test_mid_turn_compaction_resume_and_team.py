@@ -2,7 +2,8 @@
 
 The approval cases run one agent turn through ``run_agent`` under the hooks a reply installs, pause it on a gated
 call, and resume it through ``ResumeRunner`` as a saved approval does. The team cases drive the ``squad`` team of
-``test_team_turn_runtime`` through the team envelope, where the leader's hooks compact its loop.
+``tests/team_turn_helpers.py`` through the team envelope, where the leader's and each member run's hooks compact
+their own loops.
 """
 # ruff: noqa: D103
 
