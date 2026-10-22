@@ -252,10 +252,23 @@ class ConversationStore:
                 (*values, session.session_id),
             )
 
-    def delete_run_subtrees(self, run_ids: Collection[str], *, session_id: str | None = None) -> set[str]:
-        """Delete ``run_ids`` with every member run below them, within one session when given; return the deleted ids."""
+    def delete_run_subtrees(
+        self,
+        run_ids: Collection[str],
+        *,
+        session_id: str | None = None,
+        session: ConversationSession | None = None,
+    ) -> set[str]:
+        """Delete ``run_ids`` with every member run below them, within session ``session_id`` when given.
+
+        Returns the deleted ids. Once the delete commits, ``session``, a loaded copy of that session, holds none of
+        them, nor any run below them.
+        """
         with self.transaction(write=True) as connection:
-            return delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session_id)
+            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session_id)
+        if session is not None:
+            session.runs = runs_without(session.runs, deleted)
+        return deleted
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, as stored."""

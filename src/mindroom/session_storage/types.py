@@ -34,7 +34,7 @@ class ConversationSession:
     ``runs`` holds, as loaded, the runs after the owner scope's latest summary row, every paused, cancelled, or
     errored run, and their member runs, in log order. The store's saves leave each run they write here as the store
     holds it and take a removed run out; a frozen save leaves the session's copy, or its absence, as it was, so the
-    session can keep a run a fresh load no longer returns.
+    session can keep a run a fresh load no longer returns. A delete handed the session takes the deleted runs out.
     ``summary`` is the owner scope's latest summary row, derived on load and never written back.
     ``session_state`` is the dict the run's tools share and change in place.
     """

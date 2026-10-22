@@ -20,7 +20,6 @@ from mindroom.history.run_visibility import (
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.store import runs_without
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
@@ -730,9 +729,7 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id)
-        if scope_context.session is not None:
-            scope_context.session.runs = runs_without(scope_context.session.runs, [run_id])
+        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id, session=scope_context.session)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",
