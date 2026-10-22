@@ -167,7 +167,7 @@ def _responses_file_mime_type(file: File, filename: str) -> str:
 
 
 def responses_file_part(file: File) -> dict[str, Any] | None:
-    """Return a Responses ``input_file`` part, a URL reference or inline data, or None for a file without either."""
+    """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available."""
     filename = file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or "document"
     if file.url:
         return {"type": "input_file", "file_url": file.url}
