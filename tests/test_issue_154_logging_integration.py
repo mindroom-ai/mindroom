@@ -305,7 +305,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
     assert metadata["correlation_id"] == "$event:localhost"
 
     assert llm_entry["agent_id"] == "general"
-    assert llm_entry["model_id"] == model.identity.id
+    assert llm_entry["model_id"] == "scripted-model"
     assert llm_entry["requester_id"] == "@user:localhost"
     assert llm_entry["thread_id"] == "$thread-root:localhost"
     assert llm_entry["full_prompt"] == model.requests[0].messages[-1].content

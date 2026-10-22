@@ -2167,7 +2167,7 @@ class TestUserIdPassthrough:
         assert payload["usage"]["total_tokens"] == 15
         assert payload["usage"]["time_to_first_token"] == format(0.12, ".12g")
         assert payload["model"]["id"] == "test-model"
-        assert payload["model"]["provider"] == model.identity.provider
+        assert payload["model"]["provider"] == "OpenAI"
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
@@ -2274,13 +2274,17 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 1000
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("provider", ["anthropic", "vertexai_claude"])
+    @pytest.mark.parametrize(
+        ("provider", "stored_provider"),
+        [("anthropic", "Anthropic"), ("vertexai_claude", "VertexAI")],
+    )
     @pytest.mark.usefixtures("probe")
     async def test_stream_agent_response_context_counts_latest_claude_cache_tokens(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         provider: str,
+        stored_provider: str,
     ) -> None:
         """Streaming context includes the cache tokens of the latest Claude request on every Claude route."""
         extra_kwargs = (
@@ -2323,7 +2327,7 @@ class TestUserIdPassthrough:
             pass
 
         payload = run_metadata[AI_RUN_METADATA_KEY]
-        assert payload["model"]["provider"] == model.identity.provider
+        assert payload["model"]["provider"] == stored_provider
         assert payload["usage"]["input_tokens"] == 3120
         assert payload["usage"]["cache_read_tokens"] == 29_000
         assert payload["usage"]["cache_write_tokens"] == 510
