@@ -12554,7 +12554,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | --- | --- | --- | --- |
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
 | `microsoft_sharepoint` | SharePoint sites, list items, and site pages the requester can open | `microsoft_sharepoint` | `Sites.ReadWrite.All` |
-| `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
+| `outlook_mail` | The requester's Outlook mailbox and automatic replies, and shared mailboxes the requester can open | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send`, `Mail.ReadWrite.Shared`, `Mail.Send.Shared`, `MailboxSettings.ReadWrite` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
 | `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
@@ -12629,7 +12629,7 @@ agents:
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
 | `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values; with `false`, those functions are not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
@@ -12713,14 +12713,26 @@ Site, list, item, and page listings, and long pages, return a `next_page_token` 
 | `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
 | `outlook_mail_mark_read` | yes | Mark a message read or unread. |
 | `outlook_mail_move` | yes | Move a message to a folder. |
+| `outlook_mail_get_automatic_replies` | no | Read whether the requester's automatic replies (out of office) are off, on, or scheduled, with their period and messages. |
+| `outlook_mail_set_automatic_replies` | yes | Turn the requester's automatic replies off, on, or on for a period, and set the messages for people inside and outside the organization. |
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
 Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
 A search with `query` stops after its first 1,000 matches, so a narrower query finds the rest.
 Folders are named by a well-known name, `inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`, or `junkemail`, or by a folder ID, such as a message's `parent_folder_id`.
-Messages and replies are plain text, and sent mail is saved in the requester's Sent Items.
+Messages and replies are plain text, and sent mail is saved in the sending mailbox's Sent Items.
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook, where the requester sends it.
+
+Every function except the automatic replies ones takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
+Exchange permissions on that mailbox decide what works: reading and changing its messages needs access to them, such as Full Access, and sending from it, as a new message or a reply, needs Full Access plus Send As or Send on Behalf.
+With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
+A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
+Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again, and results name the `mailbox` whenever a call named one.
+
+Automatic replies are always the requester's own.
+Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
+Outlook Mail connections made before shared mailboxes and automatic replies were added lack their permissions, so each requester connects Outlook Mail again once.
 
 Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
 Each attached file may be at most 3 MB, and all attachments of one message together about 3 MB; share larger files through OneDrive and send a link instead.
@@ -12869,6 +12881,8 @@ tool_approval:
       action: require_approval
     - match: outlook_mail_reply
       action: require_approval
+    - match: outlook_mail_set_automatic_replies
+      action: require_approval
     - match: outlook_calendar_create_event
       action: require_approval
     - match: outlook_calendar_update_event
@@ -12897,7 +12911,9 @@ tool_approval:
 
 Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
 The approval cards of both mail functions list every recipient, and a reply is sent only to the recipients its card lists.
-`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the requester's own mailbox, where they can be undone.
+A card without `mailbox` sends as the requester; with it, the card names the shared mailbox the mail goes out from.
+`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
+Automatic replies answer every sender while they are on, outside the organization too when `external_audience` allows it.
 Every calendar write can email invitations, updates, cancellations, or responses to other people.
 
 To give an agent read access only, set `write: false` on the tool.
@@ -12910,7 +12926,7 @@ To give an agent read access only, set `write: false` on the tool.
 | `AADSTS65001` or a consent prompt the requester cannot approve | The tenant requires administrator consent, which Teams, Teams meeting transcripts, and the people directory always do; an administrator grants it on the app's **API permissions** page. |
 | `AADSTS50194` | The app is registered for one organization; set `MICROSOFT_TENANT_ID`. |
 | `invalid_tenant` | `MICROSOFT_TENANT_ID` is not a tenant ID, a verified domain, `organizations`, `common`, or `consumers`. |
-| `forbidden` | The connected account lacks access to that item, which reconnecting does not fix. |
+| `forbidden` | The connected account lacks access to that item, such as a shared mailbox without the Exchange permission, which reconnecting does not fix. |
 | `not_found` | The item does not exist or the connected account cannot see it, or the Teams meeting expired. |
 | `invalid_file` | The value is neither a Graph item path nor a OneDrive or SharePoint link. |
 | `invalid_argument` | An argument is malformed or exceeds a limit above, such as an ID, folder, email address, time, or time zone, or an end that is not after its start; the message names the field. |

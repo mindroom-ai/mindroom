@@ -154,8 +154,16 @@ def outlook_mail_oauth_provider() -> OAuthProvider:
     return microsoft_oauth_provider(
         provider_id="outlook_mail",
         display_name="Outlook Mail",
-        scopes=("Mail.ReadWrite", "Mail.Send"),
-        status_capabilities=("search, read, draft, send, and organize Outlook mail",),
+        scopes=(
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Mail.ReadWrite.Shared",
+            "Mail.Send.Shared",
+            "MailboxSettings.ReadWrite",
+        ),
+        status_capabilities=(
+            "search, read, draft, send, and organize Outlook mail, including shared mailboxes, and set automatic replies",
+        ),
     )
 
 
