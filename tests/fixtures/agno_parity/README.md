@@ -242,6 +242,7 @@ Every run with a provider request also has its usage row in `<table>_usage`.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
 - `events/ai_run.json`: the `run_metadata_collector` content, the `io.mindroom.ai_run` Matrix metadata, of every run that produced one; a turn stopped by cancelling its task and a turn paused for approval produce none, and a resumed run's entry is the metadata its resume produced.
 - `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
+  `tests/test_openai_compat_goldens.py` sends the same requests through the owned API path and compares the bodies, completion ids and timestamps aside.
 - `events/ai_run_cancelled.json`: the same content for a streamed and a blocking turn of `code` that Agno's run cancellation (`acancel_run`, which Stop also requests) ended after a completed tool call, in the sessions `$agno-cancelled` and `$agno-cancelled-blocking`.
   These turns run after the stores are dumped, so no store golden holds their rows.
   No golden holds a paused payload: MindRoom publishes one only for a pause it cannot turn into an approval, and every pause a MindRoom tool causes becomes an approval.
