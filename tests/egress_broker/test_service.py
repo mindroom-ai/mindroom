@@ -326,7 +326,6 @@ async def test_missing_secret_reports_manage_url(
         **_broker_env(free_port()),
         MINDROOM_PUBLIC_URL="https://chat.example.org/",
         MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
-        MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT="true",
     )
     config = _config(github=_GITHUB)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
@@ -723,7 +722,7 @@ async def test_bind_error_propagates(
                 **_broker_env(8768),
                 "MINDROOM_PUBLIC_URL": "https://chat.example.org/",
                 "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
+                "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
             },
             "https://chat.example.org/connections/egress",
         ),
@@ -735,7 +734,6 @@ async def test_bind_error_propagates(
             {
                 **_broker_env(8768),
                 "MINDROOM_PUBLIC_URL": "https://chat.example.org/",
-                "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
                 "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
             },
             "https://chat.example.org/",
@@ -787,7 +785,6 @@ def _oauth_runtime(tmp_runtime_paths: Callable[..., RuntimePaths], backend: str 
         **_broker_env(free_port()),
         MINDROOM_PUBLIC_URL=_PUBLIC_URL,
         MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
-        MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT="true",
         MINDROOM_WORKER_BACKEND=backend,
     )
 
@@ -972,10 +969,7 @@ _NO_PERSONAL_PAGE_KEY = (
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _NO_CHAT_SIGN_IN = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}
-_SIGNED_UPSTREAM = {
-    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-    "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
-}
+_SIGNED_UPSTREAM = {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}
 
 
 @pytest.mark.parametrize(
@@ -984,8 +978,6 @@ _SIGNED_UPSTREAM = {
         ("user_agent", _SIGNED_UPSTREAM, f"{_PUBLIC_URL}/connections/egress", _NO_GITHUB_KEY),
         ("user", {}, f"{_PUBLIC_URL}/connections/egress", _NO_GITHUB_KEY),
         ("user", _NO_CHAT_SIGN_IN, None, _NO_PERSONAL_PAGE_KEY),
-        # The personal API answers 403 without signed requests, so the page cannot set the key either.
-        ("user", {**_NO_CHAT_SIGN_IN, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}, None, _NO_PERSONAL_PAGE_KEY),
         ("shared", {}, f"{_PUBLIC_URL}/", _NO_SHARED_GITHUB_KEY),
         (None, {}, f"{_PUBLIC_URL}/", _NO_SHARED_GITHUB_KEY),
     ],
@@ -993,7 +985,6 @@ _SIGNED_UPSTREAM = {
         "personal-page",
         "personal-page-from-chat",
         "personal-without-page",
-        "personal-trusted-without-jwt",
         "shared-dashboard",
         "unscoped-dashboard",
     ],

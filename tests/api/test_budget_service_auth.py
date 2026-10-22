@@ -24,15 +24,13 @@ _BUDGET_CLIENT_ID = "budget-service-client.example.org"
 
 @pytest.fixture
 def budget_service_auth(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str], rsa.RSAPrivateKey]:
-    """Return strict trusted-upstream settings with both the usage and the budget service configured."""
+    """Return trusted-upstream settings with both the usage and the budget service configured."""
     private_key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
     return (
         {
             "MINDROOM_API_KEY": "test-budget-key",
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "Cf-Access-Authenticated-User-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": _ASSERTION_HEADER,
             "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example/jwks",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",

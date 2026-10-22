@@ -93,7 +93,7 @@ The request-by-request exchange is described in [Connections portal sign-in](arc
 
 ## Trusted Upstream Sign-In
 
-Behind an identity gateway, users can also reach the portal through [strict JWT mode](deployment/trusted-upstream-auth.md#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+Behind an identity gateway, users can also reach the portal through [trusted upstream auth](deployment/trusted-upstream-auth.md) with a [Matrix identity](deployment/trusted-upstream-auth.md#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.
@@ -103,8 +103,8 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 
 | Status and message | Fix |
 | --- | --- |
-| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable strict JWT mode |
-| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable trusted upstream auth |
+| `403 Connections require a verified Matrix identity` | Configure a trusted upstream Matrix claim or email-to-Matrix template |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | Turn on token binding on the homeserver (`mindroom_openid_audience` on MindRoom's Tuwunel fork), and set `MINDROOM_PUBLIC_URL` to the origin Chat opens unless that is `http://localhost:<MINDROOM_PORT>`, or list the Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` to accept the replay risk described under [Token Binding](#token-binding) |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list |

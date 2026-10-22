@@ -27,8 +27,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
+    _trusted_upstream_jwt_env,
     _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
 )
 from tests.api.test_egress_credentials_api import (
     _finish_oauth,
@@ -347,24 +347,10 @@ def test_services_listing_says_whether_the_personal_page_is_served(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The page where each user sets per-user keys is served while users can sign in from Chat or a signed upstream.
-
-    With sign-in from Chat off, trusted upstream auth without JWT does not serve it: the personal API answers 403
-    without a verified identity.
-    """
-    from tests.api.conftest import trusted_upstream_headers  # noqa: PLC0415
-
-    trusted_env = {
-        "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-        "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
-    }
+    """The page where each user sets per-user keys is served while users can sign in from Chat or a signed upstream."""
     private_key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
     signed_headers = {
-        "X-Trusted-User": "owner",
-        "X-Trusted-Email": "owner@example.com",
         "X-Trusted-Jwt": _trusted_upstream_jwt(
             private_key,
             email="owner@example.com",
@@ -376,21 +362,16 @@ def test_services_listing_says_whether_the_personal_page_is_served(
     no_chat = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}
     standalone = _admin_client(egress_config_file).get("/api/egress-broker/services")
     no_sign_in = _admin_client(egress_config_file, **no_chat).get("/api/egress-broker/services")
-    unsigned = _admin_client(egress_config_file, **trusted_env, **no_chat).get(
-        "/api/egress-broker/services",
-        headers=trusted_upstream_headers(matrix_user_id="@owner:example.org"),
-    )
     signed = _admin_client(
         egress_config_file,
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         **no_chat,
     ).get("/api/egress-broker/services", headers=signed_headers)
 
-    for response in (standalone, no_sign_in, unsigned, signed):
+    for response in (standalone, no_sign_in, signed):
         assert response.status_code == 200, response.text
     assert standalone.json()["personal_page_served"] is True
     assert no_sign_in.json()["personal_page_served"] is False
-    assert unsigned.json()["personal_page_served"] is False
     assert signed.json()["personal_page_served"] is True
 
 

@@ -14,7 +14,7 @@ from mindroom.api import config_lifecycle, main
 from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
-from tests.api.conftest import trusted_upstream_headers
+from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -178,14 +178,7 @@ def _configure_details_runtime(
     if api_key is not None:
         process_env["MINDROOM_API_KEY"] = api_key
     if trusted_upstream:
-        process_env.update(
-            {
-                "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-                "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-                "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
-            },
-        )
+        process_env.update(trusted_upstream_env())
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env=process_env)
     main.initialize_api_app(test_client.app, runtime_paths)
 

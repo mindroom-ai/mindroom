@@ -67,7 +67,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     resolve_worker_target,
 )
-from tests.api.conftest import trusted_upstream_headers
+from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 
@@ -5048,16 +5048,13 @@ def _trusted_upstream_oauth_env() -> dict[str, str]:
     return {
         "TEST_OAUTH_CLIENT_ID": "client-id",
         "TEST_OAUTH_CLIENT_SECRET": "client-secret",
-        "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-        "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
+        **trusted_upstream_env(),
     }
 
 
 def _trusted_upstream_oauth_email_template_env() -> dict[str, str]:
     env = _trusted_upstream_oauth_env()
-    env.pop("MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER")
+    env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM")
     env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE"] = "@{localpart}:example.org"
     env["MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"] = "example.com"
     return env
@@ -5364,10 +5361,8 @@ def test_agent_connect_token_accepts_trusted_upstream_derived_matrix_requester(t
     connect_token = oauth_service._issue_oauth_connect_token(provider, runtime_paths, worker_target)
     assert connect_token is not None
 
-    headers = {
-        "X-Trusted-User": "alice",
-        "X-Trusted-Email": "alice@example.com",
-    }
+    # Without a Matrix claim, the email names the requester.
+    headers = trusted_upstream_headers(matrix_user_id="@ignored:example.org")
     with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
         with TestClient(api_app) as client:
             authorize_response = client.get(
@@ -5526,10 +5521,10 @@ def test_agent_connect_token_missing_trusted_identity_cannot_fall_back_to_standa
 def test_agent_connect_token_requires_browser_matrix_mapping(
     tmp_path: Path,
 ) -> None:
-    runtime_paths = _runtime_paths(
-        tmp_path,
-        _trusted_upstream_oauth_env() | {"MINDROOM_OWNER_USER_ID": "@alice:example.org"},
-    )
+    env = _trusted_upstream_oauth_env() | {"MINDROOM_OWNER_USER_ID": "@alice:example.org"}
+    # Without a Matrix claim or email template, the browser user has no Matrix identity.
+    env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM")
+    runtime_paths = _runtime_paths(tmp_path, env)
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
     _use_runtime_auth_settings(api_app)
     provider = _fake_provider()
@@ -5551,7 +5546,7 @@ def test_agent_connect_token_requires_browser_matrix_mapping(
             authorize_response = client.get(
                 f"/api/oauth/{provider.id}/authorize?agent_name=general&execution_scope=user_agent"
                 f"&connect_token={connect_token}",
-                headers=trusted_upstream_headers(matrix_user_id=""),
+                headers=trusted_upstream_headers(),
                 follow_redirects=False,
             )
 

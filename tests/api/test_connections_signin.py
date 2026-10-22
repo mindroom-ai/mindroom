@@ -29,8 +29,8 @@ from mindroom.oauth import registry as oauth_registry
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
+    _trusted_upstream_jwt_env,
     _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
 )
 from tests.api.test_oauth_api import (
     _expect_styled_oauth_page,
@@ -660,11 +660,11 @@ def _serve_with_strict_upstream(
     monkeypatch: pytest.MonkeyPatch,
     payload: dict[str, Any],
 ) -> tuple[TestClient, Callable[[str], dict[str, str]]]:
-    """Serve the portal with strict trusted-upstream JWT next to sessions; return a client and upstream headers per user."""
+    """Serve the portal with trusted-upstream auth next to sessions; return a client and upstream headers per user."""
     key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
     env = {name: value for name, value in signin["paths"].process_env.items() if name != "MINDROOM_API_KEY"}
-    env.update(_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
+    env.update(_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"))
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
     _publish_config(main.app, paths, payload)
@@ -672,7 +672,6 @@ def _serve_with_strict_upstream(
 
     def upstream(name: str) -> dict[str, str]:
         return {
-            "X-Trusted-User": name,
             "X-Trusted-Jwt": _trusted_upstream_jwt(
                 key,
                 user_id=name,

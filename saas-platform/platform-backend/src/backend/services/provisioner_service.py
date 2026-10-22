@@ -41,7 +41,6 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN,
-    INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_JWKS_URL,
     INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE,
     INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM,
@@ -49,9 +48,6 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
     INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
-    INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
-    INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
-    INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
@@ -942,17 +938,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
         if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
             helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
-        if INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.userIdHeader={INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER}"]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN:
             helm_args += ["--set", f"trustedUpstreamAuth.emailDomain={INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN}"]
-        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.emailHeader={INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER:
-            helm_args += [
-                "--set",
-                f"trustedUpstreamAuth.matrixUserIdHeader={INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER}",
-            ]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE:
             helm_args += [
                 "--set",
@@ -961,8 +948,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                     f"{INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE}"
                 ),
             ]
-        if INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT:
-            helm_args += ["--set", f"trustedUpstreamAuth.requireJwt={INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT}"]
         if INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER:
             helm_args += ["--set", f"trustedUpstreamAuth.jwtHeader={INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER}"]
         if INSTANCE_TRUSTED_UPSTREAM_JWKS_URL:

@@ -234,7 +234,6 @@ def test_egress_broker_enabled_follows_the_port_setting(
     assert egress_broker_enabled(runtime_paths) is enabled
 
 
-_UPSTREAM_JWT = {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true", "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true"}
 _CHAT_ORIGINS = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
 _NO_CHAT = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}
 
@@ -245,8 +244,7 @@ _NO_CHAT = {"MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"}
         pytest.param({}, True, id="default-chat-origins"),
         pytest.param(_CHAT_ORIGINS, True, id="configured-chat-origins"),
         pytest.param(_NO_CHAT, False, id="no-sign-in"),
-        pytest.param({**_NO_CHAT, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}, False, id="upstream-without-jwt"),
-        pytest.param({**_NO_CHAT, **_UPSTREAM_JWT}, True, id="upstream-jwt"),
+        pytest.param({**_NO_CHAT, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}, True, id="trusted-upstream"),
     ],
 )
 def test_personal_page_served_needs_a_sign_in(

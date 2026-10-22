@@ -66,15 +66,13 @@ def _service_assertion(
 def usage_service_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], rsa.RSAPrivateKey]:
-    """Return strict service-auth settings backed by a locally served RSA JWKS."""
+    """Return service-auth settings backed by a locally served RSA JWKS."""
     private_key = _trusted_upstream_jwt_key()
     monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
     return (
         {
             "MINDROOM_API_KEY": "test-usage-key",
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "Cf-Access-Authenticated-User-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": _ASSERTION_HEADER,
             "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example/jwks",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -312,12 +310,12 @@ def test_usage_export_prepares_and_returns_real_daily_report(
     assert str(storage_root) not in ready.text
 
 
-def test_usage_export_fails_closed_when_strict_jwt_configuration_is_partial(
+def test_usage_export_fails_closed_when_trusted_upstream_configuration_is_partial(
     temp_config_file: Path,
     tmp_path: Path,
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
 ) -> None:
-    """The export route must stay disabled until the shared strict JWT settings are complete."""
+    """The export route must stay disabled until the shared trusted-upstream settings are complete."""
     env, private_key = usage_service_auth
     env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE")
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
@@ -373,8 +371,6 @@ def test_usage_export_sanitizes_failed_committed_configuration(
     "missing_setting",
     [
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER",
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER",
@@ -388,7 +384,7 @@ def test_usage_export_fails_closed_when_auth_setting_is_missing(
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
     missing_setting: str,
 ) -> None:
-    """Every shared strict-JWT and service-specific setting must be present."""
+    """Every shared trusted-upstream and service-specific setting must be present."""
     env, private_key = usage_service_auth
     env.pop(missing_setting)
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)

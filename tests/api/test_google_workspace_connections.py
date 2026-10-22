@@ -22,8 +22,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
+    _trusted_upstream_jwt_env,
     _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
 )
 from tests.api.test_oauth_api import (
     _publish_config,
@@ -87,7 +87,7 @@ def workspace_portal(
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://chat.example",
     }
@@ -136,7 +136,6 @@ def workspace_portal(
     providers = load_oauth_providers(config, paths, skip_broken_plugins=False)
     headers = {
         name: {
-            "X-Trusted-User": name,
             "X-Trusted-Jwt": _trusted_upstream_jwt(
                 key,
                 user_id=name,

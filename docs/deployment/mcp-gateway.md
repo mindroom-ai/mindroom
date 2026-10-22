@@ -31,10 +31,9 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 
 ## Enable the gateway
 
-First configure strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`), so the [Connections portal](../connections-portal.md#trusted-upstream-sign-in) accepts your gateway's users.
-The gateway stays disabled without it, even though users can open the portal from MindRoom Chat.
-When more than one user signs in through the upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](trusted-upstream-auth.md#security-boundary)); it names the private agent each user's selection starts with.
-Then enable the gateway:
+Users approve MCP clients and choose their tools on the [Connections portal](../connections-portal.md), which they open from MindRoom Chat or reach through [trusted upstream auth](../connections-portal.md#trusted-upstream-sign-in).
+When more than one user signs in through a trusted upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](trusted-upstream-auth.md#security-boundary)); it names the private agent each user's selection starts with.
+Enable the gateway:
 
 ```bash
 MINDROOM_CONNECTIONS_AGENT=personal
@@ -42,7 +41,7 @@ MINDROOM_PUBLIC_URL=https://assistant.example.org
 MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
-The gateway is disabled by default and stays disabled unless the strict signed upstream settings, `MINDROOM_PUBLIC_URL`, and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
+The gateway is disabled by default and stays disabled unless `MINDROOM_PUBLIC_URL` and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
 Internationalized hostnames must be written in their ASCII `xn--` form.
 Restart the API after changing any gateway environment variable.
@@ -100,7 +99,6 @@ Forward these paths to the MindRoom API:
 
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
-Strip client-supplied trusted identity headers at the proxy, including on machine paths.
 Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
 

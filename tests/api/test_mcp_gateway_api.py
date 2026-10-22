@@ -64,8 +64,6 @@ def signed_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str,
 
     def headers(user: str = "alice") -> dict[str, str]:
         return {
-            "X-Trusted-User": user,
-            "X-Trusted-Email": f"{user}@example.org",
             "X-Trusted-Jwt": _trusted_upstream_jwt(
                 key,
                 user_id=user,
@@ -88,9 +86,6 @@ def gateway_app(tmp_path: Path, enforce_turn_authorization: None) -> FastAPI:  #
         "MATRIX_HOMESERVER": "https://example.org",
         "MINDROOM_API_KEY": "owner-key",
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example.org/jwks",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -870,7 +865,6 @@ def test_token_storage_capacity_preserves_authorization_code(
     ("setting", "value"),
     [
         ("MINDROOM_MCP_GATEWAY_ENABLED", "false"),
-        ("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", "false"),
         ("MINDROOM_PUBLIC_URL", "https://example.org/unexpected-path"),
         ("MINDROOM_MCP_GATEWAY_ALLOWED_ORIGINS", "*"),
         ("MINDROOM_MCP_GATEWAY_ONBOARDING_RATE_LIMIT", "0"),
@@ -904,6 +898,17 @@ def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, settin
     with TestClient(gateway_app, base_url=ORIGIN) as client:
         assert _list(client).status_code == 404
         assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 404
+
+
+def test_gateway_starts_without_trusted_upstream_auth(gateway_app: FastAPI) -> None:
+    """Matrix sign-in can approve MCP clients, so the gateway does not need trusted upstream auth."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "false"},
+    )
+    with TestClient(gateway_app, base_url=ORIGIN) as client:
+        assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 200
 
 
 @pytest.mark.parametrize("body", [b'{"client_name":', b'{"client_name":"\xff"}', b"[" * 1100])

@@ -53,8 +53,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.api.test_api import (
     _trusted_upstream_jwks,
     _trusted_upstream_jwt,
+    _trusted_upstream_jwt_env,
     _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
 )
 from tests.api.test_oauth_api import (
     _fake_provider,
@@ -90,7 +90,6 @@ def _trust_signed_users(monkeypatch: pytest.MonkeyPatch) -> Any:  # noqa: ANN401
 def _signed_headers(key: Any, name: str) -> dict[str, str]:  # noqa: ANN401
     """Return the same-origin headers of the signed user `name`."""
     return {
-        "X-Trusted-User": name,
         "X-Trusted-Jwt": _trusted_upstream_jwt(
             key,
             user_id=name,
@@ -106,7 +105,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
     """Serve the real API with signed users and agents that use Agent Keys (shell or python and `egress_credentials`)."""
     key = _trust_signed_users(monkeypatch)
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **_trusted_upstream_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
         # A dedicated backend, where a personal agent's worker belongs to one requester.

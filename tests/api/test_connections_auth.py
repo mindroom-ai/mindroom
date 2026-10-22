@@ -24,8 +24,6 @@ def signed_connections_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str
     def headers(user: str = "alice") -> dict[str, str]:
         email = f"{user}@example.org"
         return {
-            "X-Trusted-User": user,
-            "X-Trusted-Email": email,
             "X-Trusted-Jwt": _trusted_upstream_jwt(
                 private_key,
                 user_id=user,
@@ -49,9 +47,6 @@ def connections_auth_client(
         env = {
             "MINDROOM_CONNECTIONS_AGENT": "test_agent",
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
             "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example.org/jwks",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -140,11 +135,7 @@ def test_oversized_trusted_upstream_jwt_is_rejected_before_key_lookup(
     monkeypatch.setattr(jwt.PyJWKClient, "get_signing_key_from_jwt", record_key_lookup)
     response = connections_auth_client().get(
         "/api/connections/identity",
-        headers={
-            "X-Trusted-User": "alice",
-            "X-Trusted-Email": "alice@example.org",
-            "X-Trusted-Jwt": "x" * (16 * 1024 + 1),
-        },
+        headers={"X-Trusted-Jwt": "x" * (16 * 1024 + 1)},
     )
 
     assert response.status_code == 401
@@ -179,7 +170,6 @@ def test_personal_identity_accepts_signed_matrix_user(
     [
         # Without signed upstream auth, only a Connections session authenticates, so the page must sign in.
         ({"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "false", "MINDROOM_API_KEY": "owner-key"}, 401),
-        ({"MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "false"}, 401),
         ({"MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": None}, 403),
     ],
 )
@@ -189,7 +179,7 @@ def test_personal_identity_rejects_unverified_identity_modes(
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """API keys, unsigned headers and JWTs without a bound Matrix identity cannot own personal credentials."""
+    """API keys and JWTs without a bound Matrix identity cannot own personal credentials."""
     headers = {**signed_connections_headers("alice"), "Authorization": "Bearer owner-key"}
     response = connections_auth_client(**overrides).get("/api/connections/identity", headers=headers)
     assert response.status_code == expected_status
