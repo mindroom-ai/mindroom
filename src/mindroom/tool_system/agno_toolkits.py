@@ -90,7 +90,6 @@ def adapt_function(function: Function) -> ToolFunction:
         external_execution=prepared.external_execution,
         external_execution_silent=prepared.external_execution_silent,
         stop_after_tool_call=prepared.stop_after_tool_call,
-        show_result=prepared.show_result,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
