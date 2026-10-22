@@ -194,7 +194,6 @@ class PreparedAgentToolCatalog:
     ) -> None:
         """Bind ``functions`` of ``toolkit``, under their owner from ``owners``, or under the toolkit without one."""
         bindings: dict[ToolKey, PreparedAgentToolBinding] = {}
-        instructions = (toolkit.guidance,) if toolkit.guidance else ()
         for function in functions:
             authored = owners is None or function.name in owners
             namespace = ((owners or {}).get(function.name) or toolkit.name) if authored else "agent"
@@ -206,8 +205,9 @@ class PreparedAgentToolCatalog:
                 msg = f"Duplicate qualified tool: {namespace}.{function.name}"
                 raise ValueError(msg)
             bindings[key] = PreparedAgentToolBinding(key, function, self)
-            self._instructions[key] = instructions
+        # Nothing is recorded until every function is bound, so a refused toolkit leaves the catalog unchanged.
         self._bindings.update(bindings)
+        self._instructions.update(dict.fromkeys(bindings, (toolkit.guidance,) if toolkit.guidance else ()))
 
     def bindings(self) -> tuple[PreparedAgentToolBinding, ...]:
         """Return the bindings prepared so far, for a check over the whole prepared surface."""
