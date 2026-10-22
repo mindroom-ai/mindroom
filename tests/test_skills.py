@@ -24,7 +24,7 @@ from mindroom.skill_learning import library
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext
-from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit, build_skills_toolkit
+from mindroom.tool_system.skills import RefusedWorkspaceSkill, Skill, SkillsToolkit, build_skills_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -102,6 +102,10 @@ def _skill_names(skills: SkillsToolkit | None) -> list[str]:
     return [skill.name for skill in skills.skills] if skills is not None else []
 
 
+def _skill(skills: SkillsToolkit, name: str) -> Skill:
+    return {skill.name: skill for skill in skills.skills}[name]
+
+
 def _call(skills: SkillsToolkit, function_name: str, *arguments: str) -> dict[str, object]:
     entrypoint = skills.functions[function_name].entrypoint
     assert entrypoint is not None
@@ -168,8 +172,7 @@ def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     )
 
     assert skills is not None
-    skill = skills.get_skill("alpha")
-    assert skill is not None
+    skill = _skill(skills, "alpha")
     assert skill.metadata["openclaw"]["always"] is True
 
 
@@ -365,7 +368,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert skills is not None
-    assert skills.get_skill("alpha").description == "Alpha v1"
+    assert _skill(skills, "alpha").description == "Alpha v1"
 
     old_mtime = skill_path.stat().st_mtime_ns
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
@@ -380,7 +383,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
         credential_keys=set(),
     )
     assert refreshed is not None
-    assert refreshed.get_skill("alpha").description == "Alpha v2"
+    assert _skill(refreshed, "alpha").description == "Alpha v2"
 
 
 def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> None:
@@ -511,7 +514,7 @@ def test_workspace_skills_override_default_roots(tmp_path: Path, monkeypatch: py
     )
     assert skills is not None
     assert _skill_names(skills) == ["alpha"]
-    assert skills.get_skill("alpha").description == "Workspace alpha"
+    assert _skill(skills, "alpha").description == "Workspace alpha"
 
 
 def test_malformed_workspace_skill_is_skipped(tmp_path: Path) -> None:
@@ -676,7 +679,7 @@ def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp
         credential_keys=set(),
     )
     assert _skill_names(skills) == ["mindroom-dev"]
-    skill = skills.get_skill("mindroom-dev")
+    skill = _skill(skills, "mindroom-dev")
     assert skill.description == "mindroom-dev"
 
     listing = skills_module.resolve_skill_listing("mindroom-dev", [tmp_path])

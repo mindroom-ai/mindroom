@@ -245,10 +245,6 @@ class SkillsToolkit(Toolkit):
         """The loaded skills, in the order the prompt lists them."""
         return tuple(self._skills.values())
 
-    def get_skill(self, name: str) -> Skill | None:
-        """Return the loaded skill named ``name``."""
-        return self._skills.get(name)
-
     def prompt_block(self) -> str:
         """Return the skills section of the system prompt, or ``""`` when no skill loaded."""
         if not self._skills:
