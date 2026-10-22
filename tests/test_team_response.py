@@ -1208,6 +1208,36 @@ async def test_a_resume_shows_the_saved_document_first_then_each_change_and_coll
 
 
 @pytest.mark.asyncio
+async def test_a_denied_resume_shows_the_saved_document_before_the_member_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """The requester sees the paused reply again as soon as the resume starts, before any model answers."""
+    team, paused = await _pause_on_general(tmp_path, monkeypatch)
+    member = team.models["general-model"] = ScriptedModel([answer("I did not touch it.")])
+    team.models["default"] = ScriptedModel([answer("Declined.")])
+    published: list[tuple[int, str]] = []
+
+    async def progress(chunk: StructuredStreamChunk) -> None:
+        published.append((len(member.requests), chunk.content))
+
+    result = await team.resume(
+        paused,
+        approved=False,
+        approvals=(_approval("call-touch", "dangerous"),),
+        show_tool_calls=True,
+        progress=progress,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert probe.calls == []
+    assert published[0] == (0, paused.response_text)
+    assert published[-1][1] == result.response_text
+    assert "I did not touch it." in result.response_text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("approvals", "error"),
     [

@@ -107,7 +107,7 @@ async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
 
     assert text.endswith("Recovered answer")
     assert len(team.models["default"].requests) == 2
-    assert len(_team_run_ids(team)) == 1
+    assert _team_run_ids(team) == ["run-1"]
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
 
 
@@ -138,6 +138,8 @@ async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records
 
     assert text == ai_runtime.EMPTY_RESPONSE_NOTICE
     assert len(team.models["default"].requests) == 2
+    # Both empty runs left the store, so no later turn replays an answer that ended immediately.
+    assert _team_run_ids(team) == []
     # Each attempt's model request is marked once its context is ready, before the provider received it.
     assert timing.marks["first_model_request_sent"] <= request_times[0]
     assert timing.marks["model_request_sent"] <= request_times[1]
