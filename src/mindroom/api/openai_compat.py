@@ -1201,8 +1201,9 @@ async def _non_stream_team_completion(
             logger.exception("Team execution failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
         record = records.terminal(team_name)
-        # The blocking Matrix reply without its header, as Agno's blocking team reply was on both surfaces; API clients
-        # replay this text as history.
+        # The member and consensus document of the blocking Matrix reply, as Agno's blocking team reply rendered it on
+        # both surfaces; API clients replay this text as history. Without member or consensus text the API falls back
+        # to the leader's content alone, as it did with Agno, where the Matrix reply also reads the leader's messages.
         response_text = format_team_response(record, records.members) or str(record.content or "")
 
         if _is_error_response(response_text):

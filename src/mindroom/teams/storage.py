@@ -46,8 +46,9 @@ class TeamStorage:
 class TeamRunRecords:
     """The records one team run handed over: its terminal team record and each member run's latest record.
 
-    ``record`` comes from the run's persist callback however the run ended, and from its ``RunFinished``; ``members``
-    are in the order the member runs first ended.
+    Each comes from the run's persist callback however the run ended, and from the event that hands it over,
+    ``RunFinished`` or ``MemberRunEnded``. ``members`` are in the order the member runs first ended, so a member run
+    stopped with its team run comes last, as Agno added a stopped member's output when it cancelled the team run.
     """
 
     record: TeamRunRecord | None = None
@@ -60,15 +61,24 @@ class TeamRunRecords:
             self.record = event.record
             return True
         if isinstance(event, MemberRunEnded):
-            # A member resumed within this run ends twice; its later record replaces the paused one where it stood,
-            # as Agno continued the paused member's output in place, so a blocking reply lists it there.
-            run_ids = [record.run_id for record in self.members]
-            if event.record.run_id in run_ids:
-                self.members[run_ids.index(event.record.run_id)] = event.record
-            else:
-                self.members.append(event.record)
+            self.keep(event.record)
             return True
         return False
+
+    def keep(self, record: AnyRunRecord) -> None:
+        """Keep the team's terminal record, or a member run's latest record where that run first ended.
+
+        A member resumed within this run ends twice; its later record replaces the paused one where it stood, as
+        Agno continued the paused member's output in place, so a blocking reply lists it there.
+        """
+        if isinstance(record, TeamRunRecord):
+            self.record = record
+            return
+        run_ids = [member.run_id for member in self.members]
+        if record.run_id in run_ids:
+            self.members[run_ids.index(record.run_id)] = record
+        else:
+            self.members.append(record)
 
     def terminal(self, team_name: str) -> TeamRunRecord:
         """Return the team record the run ended with, which a run that finished without raising always handed over."""
@@ -89,15 +99,15 @@ def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> Tea
 
 
 def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) -> Persist[AnyRunRecord]:
-    """Return the persist callback of one team run: store every record, and keep the team's terminal record when ``records`` is given.
+    """Return the persist callback of one team run: store every record, and keep it in ``records`` when given.
 
     Storing a record updates the session the run loaded, member rows included.
     """
     store_persist = persist_to(storage.store, storage.session) if storage is not None else None
 
     async def persist(record: AnyRunRecord) -> None:
-        if records is not None and isinstance(record, TeamRunRecord):
-            records.record = record
+        if records is not None:
+            records.keep(record)
         if store_persist is not None:
             await store_persist(record)
 

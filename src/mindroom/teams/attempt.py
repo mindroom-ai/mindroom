@@ -1,8 +1,9 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which an interrupted or
-streamed turn records; the attempt also collects the records the run hands over, which a blocking reply renders from,
-and renders the run's metadata from them.
+``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which a streamed turn records,
+also when it is interrupted, and which tells a resume the slots its runs streamed text into; the attempt also collects
+the records the run hands over, which a blocking reply and an interrupted blocking turn render from, and renders the
+run's metadata from them.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.response_turn import TurnPartialSnapshot
-from mindroom.teams.presentation import apply_team_event, render_team_member_slots
+from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
 from mindroom.teams.runtime import MemberEvent, team_usage
 from mindroom.teams.storage import TeamRunRecords
 from mindroom.timing import emit_timing_event
@@ -67,6 +68,13 @@ class TeamReplyText:
         elif isinstance(event, ContentDelta):
             self.consensus += event.text
 
+    def streamed_slots(self) -> set[str]:
+        """Return the slots the run's events gave text: ``team`` for the consensus, ``agent:<id>`` for a member."""
+        slots = {f"agent:{member_id}" for member_id, text in self.per_member.items() if text}
+        if self.consensus:
+            slots.add("team")
+        return slots
+
     def canonical_text(self) -> str:
         """Return the text in the configured member order, then the consensus: what a streamed reply records."""
         return "\n\n".join(
@@ -91,7 +99,7 @@ class TeamAttempt:
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
     prepared_history: PreparedHistoryState | None
-    # The reply without tool markers: what an interrupted or streamed turn records.
+    # The reply without tool markers: what a streamed turn records.
     reply: TeamReplyText = field(init=False)
     records: TeamRunRecords = field(default_factory=TeamRunRecords)
 
@@ -112,6 +120,15 @@ class TeamAttempt:
             interrupted_tools=tuple(pending.trace_entry for pending in self.tool_tracker.pending_tools),
             attempt_run_id=self.run_id,
         )
+
+    def interrupted_text(self) -> str:
+        """Return the text a blocking turn records when this attempt stopped or failed, as Agno's blocking turn did.
+
+        That is the stored runs' document, stripped, or nothing when the run stored no record. A leader that wrote
+        nothing contributes nothing, as Agno's stopped run then held only its cancellation notice, which it dropped.
+        """
+        record = self.records.record
+        return format_team_response(record, self.records.members).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""

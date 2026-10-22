@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.message_builder import opens_with_markdown_block
+from mindroom.providers.assistant_turn import MODEL_PROVENANCE_KEY
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
     StreamingToolTracker,
@@ -116,15 +117,17 @@ def render_team_member_slots(
 
 
 def finished_run_text(record: AnyRunRecord) -> str:
-    """Return a finished run's text: its content, or else the text of its assistant messages.
+    """Return a finished run's text: its content, or else the text its own model requests wrote.
 
-    A record stores only its own messages, never copies of earlier turns, so a run without content never shows an
-    earlier turn's answer.
+    A run's input can carry the entity's earlier replies in the thread as assistant messages; only the messages a
+    model answered carry its provenance, so a run without content never shows an earlier turn's answer.
     """
     if record.content:
         return str(record.content)
     return "\n\n".join(
-        str(message.content) for message in record.messages if message.role == "assistant" and message.content
+        str(message.content)
+        for message in record.messages
+        if message.role == "assistant" and message.content and MODEL_PROVENANCE_KEY in (message.provider_data or {})
     )
 
 
