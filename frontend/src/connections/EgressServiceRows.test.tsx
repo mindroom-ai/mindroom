@@ -1959,6 +1959,31 @@ describe("what a row says about how the key is sent", () => {
     renderRows([custom([rule("httpbin.org", "bearer")], { configured: true })]);
     expect(screen.queryByText(/Requests are refused/)).toBeNull();
   });
+
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
+    [
+      "an account to connect",
+      {},
+      "Requests are refused until you connect an account or set a key.",
+    ],
+    [
+      "a connected account only its tools use",
+      { connected: true, account_label: "octocat", reuse_enabled: false },
+      "Requests are refused until you use this account or set a key.",
+    ],
+    [
+      "an account the sandbox refuses",
+      { unavailable_reason: "shared_sandbox" },
+      "Requests are refused until a key is set.",
+    ],
+  ])("names %s as a way to stop refusals", (_, account, note) => {
+    renderRows([
+      custom([rule("api.github.com", "bearer")], {
+        oauth: { ...githubAccount, ...account },
+      }),
+    ]);
+    expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
+  });
 });
 
 describe("the other way to connect when an account is connected", () => {

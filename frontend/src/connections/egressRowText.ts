@@ -149,11 +149,15 @@ export function serviceHosts(service: EgressCredentialService): string[] {
 
 /** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
-  return service.configured ||
-    service.restrict_only ||
-    service.rules.length === 0
-    ? null
-    : "Requests are refused until a key is set.";
+  if (service.configured || service.restrict_only || service.rules.length === 0)
+    return null;
+  const oauth = service.oauth;
+  // An account Agent Keys could use fixes it as well as a key does.
+  if (oauth && oauth.unavailable_reason === null && !oauth.service_account)
+    return oauth.connected && !oauth.reset_required
+      ? "Requests are refused until you use this account or set a key."
+      : "Requests are refused until you connect an account or set a key.";
+  return "Requests are refused until a key is set.";
 }
 
 /**
