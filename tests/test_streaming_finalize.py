@@ -904,7 +904,6 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_streamed_interactive_metadata_survives_unparseable_canonical_final_body(tmp_path: Path) -> None:
     """Registration should use the same interactive parse that rendered the visible streamed body."""
     config = _config(tmp_path)

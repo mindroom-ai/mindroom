@@ -516,7 +516,6 @@ interactive"""
         assert mock_warning.call_args.args == ("Interactive JSON payload must be an object",)
 
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     async def test_add_reaction_buttons_uses_each_option_emoji(self, mock_client: AsyncMock) -> None:
         """Each visible option becomes one Matrix annotation."""
         mock_client.room_send.return_value = MagicMock(spec=nio.RoomSendResponse)

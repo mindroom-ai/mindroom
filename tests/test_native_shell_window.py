@@ -19,7 +19,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
-from tests.minimal_agent_fixtures import cli_window
+from tests.minimal_agent_fixtures import cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
 
 if TYPE_CHECKING:
@@ -102,13 +102,6 @@ async def _windowed_shell(
     return shell, owner
 
 
-async def _settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, object]:
-    """Poll the call's receipt until it settles, as the CLI client does."""
-    while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running"}:  # noqa: ASYNC110
-        await asyncio.sleep(0.001)
-    return receipt
-
-
 @pytest.mark.asyncio
 async def test_with_the_response_cli_bound_the_shell_command_runs_in_its_own_window(tmp_path: Path) -> None:
     """The command runs in a window of its own, with the response's CLI environment exported to it."""
@@ -151,7 +144,7 @@ async def test_a_shell_command_the_cli_dispatches_keeps_its_parent_command_s_win
                     arguments={"args": "nested"},
                 ),
             )
-            receipt = await _settled_receipt(owner, str(queued["call_id"]))
+            receipt = await settled_receipt(owner, str(queued["call_id"]))
             assert receipt["status"] == "completed", receipt
         return f"ran {args}"
 

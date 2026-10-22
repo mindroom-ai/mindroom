@@ -2,7 +2,6 @@
 
 # ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 
-import asyncio
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -55,6 +54,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     cli_window,
     install_scripted_shell,
     offered_tools,
+    settled_receipt,
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -653,8 +653,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
                 call_id=call_id,
             ),
         )
-        while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - poll actual CLI receipt protocol
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(owner, str(call_id))
         assert receipt["status"] == "completed", receipt
         if switch_model:
             switch_id = uuid4()
@@ -668,8 +667,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
                     call_id=switch_id,
                 ),
             )
-            while (switch_receipt := await owner.get_call(str(switch_id)))["status"] in {"queued", "running"}:  # noqa: ASYNC110 - actual receipt protocol
-                await asyncio.sleep(0)
+            switch_receipt = await settled_receipt(owner, str(switch_id))
             assert switch_receipt["status"] == "completed", switch_receipt
         return "discovered result: " + str(receipt["outcome"])
 

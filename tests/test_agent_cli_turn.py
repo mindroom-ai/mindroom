@@ -52,7 +52,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
-from tests.minimal_agent_fixtures import capture_bash_batch, cli_window
+from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
 
 if TYPE_CHECKING:
@@ -124,8 +124,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         return None
 
     async def wait(call_id):
-        while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, call_id)
         assert receipt["status"] == "completed", receipt
         return receipt
 
@@ -190,8 +189,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
-        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, queued["call_id"])
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
@@ -235,8 +233,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
         )
-        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, queued["call_id"])
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
@@ -264,14 +261,13 @@ async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools
     return owner
 
 
-async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
+async def _call_receipt(owner: LiveTurnTools, function: str) -> dict:
+    """Call ``calls.<function>`` from this command's CLI window and return the call's settled receipt."""
     queued = await owner.operation(
         window=cli_window(),
         operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
     )
-    while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-        await asyncio.sleep(0.001)
-    return receipt
+    return await settled_receipt(owner, queued["call_id"])
 
 
 async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> None:
@@ -374,7 +370,7 @@ async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path
     owner = await _native_owner(tmp_path, [produce], authorize)
 
     async def failing() -> str:
-        assert (await _settled_receipt(owner, "produce"))["status"] == "completed"
+        assert (await _call_receipt(owner, "produce"))["status"] == "completed"
         msg = "worker failed"
         raise RuntimeError(msg)
 
@@ -410,7 +406,7 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
         return "first output"
 
     async def second() -> str:
-        assert (await _settled_receipt(owner, "explode"))["status"] == "failed"
+        assert (await _call_receipt(owner, "explode"))["status"] == "failed"
         second_failed.set()
         # The first command drains before this one, while the failed call is still in flight to its owner.
         while not first_task.done():
@@ -453,7 +449,7 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
     async def first() -> str:
         first_open.set()
         await second_open.wait()
-        seen["first"] = (await _settled_receipt(owner, "tag"))["outcome"]
+        seen["first"] = (await _call_receipt(owner, "tag"))["outcome"]
         first_called.set()
         return "first"
 
@@ -490,7 +486,7 @@ async def test_a_cli_call_from_a_job_command_runs_as_part_of_that_job(tmp_path: 
     owner = await _native_owner(tmp_path, [owned], authorize)
 
     async def command() -> str:
-        return (await _settled_receipt(owner, "owned"))["outcome"]
+        return (await _call_receipt(owner, "owned"))["outcome"]
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         if in_job:
@@ -541,8 +537,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
                 arguments={"args": "nested"},
             ),
         )
-        while (await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        await settled_receipt(owner, queued["call_id"])
         nested_done.set()
         return "first"
 
@@ -634,7 +629,7 @@ async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path:
         first_open.set()
         # The second command starts later, so it is the newest window when this one calls.
         await second_open.wait()
-        receipt = await _settled_receipt(owner, "produce")
+        receipt = await _call_receipt(owner, "produce")
         windows["first call"] = receipt["parent_bash_call_id"]
         first_called.set()
         return "first output"
@@ -742,7 +737,7 @@ async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Pa
     async def command() -> str:
         running.set()
         await reply_finished.wait()
-        statuses.append((await _settled_receipt(owner, "ping"))["status"])
+        statuses.append((await _call_receipt(owner, "ping"))["status"])
         return "job done"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
@@ -779,7 +774,7 @@ async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_too
     owner = await _native_owner(tmp_path, [ping], authorize)
 
     async def command() -> str:
-        return str((await _settled_receipt(owner, "ping"))["status"])
+        return str((await _call_receipt(owner, "ping"))["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         async with execution_resources() as resources:
@@ -812,7 +807,7 @@ async def test_a_second_shell_job_approved_after_the_first_ended_still_calls_its
         return "first done"
 
     async def second() -> str:
-        return str((await _settled_receipt(owner, "ping"))["status"])
+        return str((await _call_receipt(owner, "ping"))["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         async with execution_resources() as resources:
@@ -848,7 +843,7 @@ async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog
     async def command() -> str:
         running.set()
         await rebuilt.wait()
-        return str((await _settled_receipt(owner, "ping"))["status"])
+        return str((await _call_receipt(owner, "ping"))["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         window = asyncio.create_task(owner.run_native_shell(command))
@@ -895,7 +890,7 @@ async def test_cancelling_one_native_shell_leaves_the_others_their_cli(tmp_path:
 
     async def second() -> str:
         await first_cancelled.wait()
-        receipt = await _settled_receipt(owner, "ping")
+        receipt = await _call_receipt(owner, "ping")
         return str(receipt["status"])
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
@@ -1138,8 +1133,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
         )
         receipts.append(receipt)
-        while (await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        await settled_receipt(owner, receipt["call_id"])
         return "drained"
 
     async def change() -> str:
@@ -1390,8 +1384,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             window="describe-bash",
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="tool3", function="send"),
         )
-        while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, receipt["call_id"])
         assert (receipt["status"], receipt["outcome"]) == ("failed", unknown)
     assert loaded == [12, 3]
     assert ToolKey("tool12", "selected") in authorized
@@ -1456,8 +1449,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
         with pytest.raises(CliOperationError, match="at once"):
             await owner.operation(window="bash", operation=call())
         release.set()
-        while (await owner.get_call(first["call_id"]))["status"] != "completed":
-            await asyncio.sleep(0.001)
+        assert (await settled_receipt(owner, first["call_id"]))["status"] == "completed"
         await owner.operation(window="bash", operation=call())
         with pytest.raises(CliOperationError, match="already holds 2"):
             await owner.operation(window="bash", operation=call())
@@ -1611,8 +1603,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
                 function="change",
             ),
         )
-        while (receipt := await owner.get_call(child["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(owner, child["call_id"])
         assert receipt["status"] == "completed"
         assert receipt["parent_bash_call_id"] == "bash-drain"
         return "nested complete"
@@ -1744,8 +1735,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
                 arguments={"value": "exact\nvalue"},
             ),
         )
-        while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running", "waiting"}:
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(owner, receipt["call_id"])
         assert receipt["status"] == ("completed" if approved else "failed")
         return "Bash finished after decision"
 

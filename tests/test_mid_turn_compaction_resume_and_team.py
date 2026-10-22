@@ -38,9 +38,6 @@ from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
 from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -58,6 +55,7 @@ from tests.history_helpers import (
     segments_of,
     summary_rows_of,
 )
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.team_turn_helpers import (
     SESSION_ID,
     TEAM_SCOPE,
@@ -114,26 +112,8 @@ class _ResumeProbeToolkit(Toolkit):
 @pytest.fixture
 def resume_probe() -> Iterator[None]:
     """Register the resume probe toolkit for the test and restore the registries afterwards."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name=RESUME_PROBE_TOOL,
-        file_access=ToolFileAccess.NONE,
-        display_name="Compaction Resume Probe",
-        description="Fills a tool loop and pauses it for approval.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def probe_factory() -> type[_ResumeProbeToolkit]:
-        return _ResumeProbeToolkit
-
-    try:
+    with registered_toolkit(RESUME_PROBE_TOOL, _ResumeProbeToolkit):
         yield
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
 
 
 class _PausingLoop(ToolLoopModel):

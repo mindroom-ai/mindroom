@@ -11,7 +11,7 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -27,7 +27,7 @@ from tests.delegation_helpers import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, squad_turn
+from tests.team_turn_helpers import delegate, squad_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,14 +104,6 @@ async def test_delegating_run_is_stored_without_replayed_history(
         assert replayed == ["Hello", "Hi there"] or any("Hello" in str(item) for item in replayed), replayed
 
 
-def _team_rows(team: TeamTurn, run_id: str) -> tuple[TeamRunRecord, list[RunRecord]]:
-    """Return the team's stored row of ``run_id`` and its members' rows."""
-    session = team.storage.load_session(SESSION_ID, "team")
-    assert session is not None
-    [record] = [run for run in session.runs if isinstance(run, TeamRunRecord) and run.run_id == run_id]
-    return record, [run for run in session.runs if isinstance(run, RunRecord) and run.parent_run_id == run_id]
-
-
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("squad_probe")
 @pytest.mark.parametrize("outcome", ["child_runs", "policy_denied"])
@@ -140,7 +132,7 @@ async def test_delegating_team_run_is_stored_without_replayed_history(
     if outcome == "policy_denied":
         with pytest.raises(ResponsePausedForApproval) as raised:
             await team.respond(message="Delegate", ctx=delegating)
-        mid_row, mid_members = _team_rows(team, "run-2")
+        mid_row, mid_members = team.stored_runs(run_id="run-2")
         assert mid_row.status is RunStatus.paused
         assert [member.agent_id for member in mid_members] == ["writer"]
         for row in (mid_row, *mid_row.member_responses, *mid_members):
@@ -154,7 +146,7 @@ async def test_delegating_team_run_is_stored_without_replayed_history(
     else:
         await team.respond(message="Delegate", ctx=delegating)
 
-    stored, members = _team_rows(team, "run-2")
+    stored, members = team.stored_runs(run_id="run-2")
     assert stored.status is RunStatus.completed
     assert stored.metadata is not None
     assert DELEGATION_STATE_KEY in stored.metadata

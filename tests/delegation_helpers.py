@@ -41,15 +41,13 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import team_response
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
 from tests.history_helpers import RecordingModel
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
@@ -586,24 +584,6 @@ class ReportTools(Toolkit):
 @contextmanager
 def registered_report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit for one test and restore the registries afterwards."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name="report",
-        file_access=ToolFileAccess.NONE,
-        display_name="Report",
-        description="Writes the report a delegated child was asked for.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def report_factory() -> type[ReportTools]:
-        return ReportTools
-
     ReportTools.written.clear()
-    try:
+    with registered_toolkit("report", ReportTools):
         yield ReportTools
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)

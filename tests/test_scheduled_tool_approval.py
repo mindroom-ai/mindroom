@@ -1098,16 +1098,27 @@ def _live_agent(
     runs: list[dict[str, object]] | None = None,
     *,
     outcome: object = "sent",
+    toolkit: Toolkit | None = None,
     toolkit_name: str = _TOOLKIT,
     authored_confirmation: bool = False,
+    external_execution: bool = False,
+    stop_after_tool_call: bool = False,
     middleware: tuple[ToolMiddleware, ...] = (),
 ) -> _LiveRun:
-    """Build a live agent run whose toolkit carries its configured identity, as agent assembly sets it."""
-    toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
+
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given.
+    """
+    if toolkit is None:
+        toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = toolkit_name
         if authored_confirmation:
             function.requires_confirmation = True
+        if external_execution:
+            function.external_execution = True
+        if stop_after_tool_call:
+            function.stop_after_tool_call = True
     return _LiveRun((toolkit,), middleware)
 
 
@@ -2297,14 +2308,10 @@ async def test_call_that_cannot_run_here_spends_nothing(
         await manager.shutdown()
 
 
-class _MediaSlackTools(Toolkit):
-    """A configured Slack toolkit whose one function also takes the run's images, recording each real run."""
+class _MediaSlackTools(_SlackTools):
+    """The recording Slack toolkit whose one function also takes the run's images."""
 
-    def __init__(self, runs: list[dict[str, object]]) -> None:
-        self.runs = runs
-        super().__init__(name="slack", tools=[self.post_slack_message])
-
-    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> str:
+    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> object:
         """Post a Slack message with the run's images.
 
         Args:
@@ -2313,8 +2320,8 @@ class _MediaSlackTools(Toolkit):
             images: The run's images, which the model never supplies.
 
         """
-        self.runs.append({"channel": channel, "text": text, "images": images})
-        return "sent"
+        del images
+        return super().post_slack_message(channel, text)
 
 
 @pytest.mark.asyncio
@@ -2337,16 +2344,15 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
     toolkit = _MediaSlackTools(runs) if needs.startswith("media") else _SlackTools(runs)
     if needs == "media-behind-output-files":
         wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
-        if needs == "external-execution":
-            function.external_execution = True
-        if needs == "stop-after-tool-call":
-            function.stop_after_tool_call = True
+    agent = _live_agent(
+        toolkit=toolkit,
+        external_execution=needs == "external-execution",
+        stop_after_tool_call=needs == "stop-after-tool-call",
+    )
     try:
         await _armed(manager)
 
-        result = await _run(manager, _LiveRun((toolkit,)))
+        result = await _run(manager, agent)
 
         assert isinstance(result, str)
         assert "needs live input or conversation control" in result

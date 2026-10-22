@@ -63,6 +63,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     cli_window,
     install_scripted_shell,
     offered_tools,
+    settled_receipt,
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -113,8 +114,7 @@ class ProtocolShell:
                 call_id=call_id,
             ),
         )
-        while (receipt := await self.owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(self.owner, str(call_id))
         self.receipts.append(receipt)
         self.catalog_snapshots.append(self.owner.catalog.metadata())
         assert receipt["status"] == "completed", receipt

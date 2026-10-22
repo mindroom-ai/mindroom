@@ -55,7 +55,7 @@ from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.minimal_agent_fixtures import cli_window, run_bash_batch
+from tests.minimal_agent_fixtures import cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
 from tests.test_compact_context import _make_config
 
@@ -440,8 +440,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                         function="switch_thread_model",
                     ),
                 )
-                while (await owner.get_call(switched["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
-                    await asyncio.sleep(0)
+                await settled_receipt(owner, switched["call_id"])
             return tuple(
                 apply_exact_approval_decisions(
                     paused.requirements,
@@ -819,8 +818,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         )
         await asyncio.sleep(0)
         release.set()
-        while (await owner.get_call(switch_call["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
-            await asyncio.sleep(0)
+        await settled_receipt(owner, switch_call["call_id"])
         # The fence rejects calls from every window, even one whose command is still running.
         with pytest.raises(CliBashWindowRequiredError, match="continuation requires a rebuilt tool catalog"):
             await owner.operation(
