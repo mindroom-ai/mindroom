@@ -24,7 +24,7 @@ def _serialize_metrics(metrics: RunMetrics | None) -> dict[str, Any] | None:
         return None
     sanitized: dict[str, Any] = {}
     for key, value in metrics.to_dict().items():
-        if isinstance(value, (str, int)) or value is None or isinstance(value, bool):
+        if isinstance(value, (str, int)) or value is None:
             sanitized[key] = value
         elif isinstance(value, float):
             sanitized[key] = format(value, ".12g")
