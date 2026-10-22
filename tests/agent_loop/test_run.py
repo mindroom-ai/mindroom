@@ -29,14 +29,14 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from tests.agent_loop.helpers import add, collect, context, echo, external, gated, spec, toolkit
+from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.llm.agno_dict_helpers import expected_run_dict
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.tool_system.tool_function import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
 LOADED_SESSIONS = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage" / "loaded_sessions.json"
 
@@ -741,3 +741,103 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [event.tool.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.total_tokens == 6
+
+
+# --- toolkit connections ---------------------------------------------------------------------------------------------
+
+
+def _connecting(log: list[str], adapted: AdaptedToolkit, *, owned: bool = True) -> AdaptedToolkit:
+    """Return ``adapted`` as a toolkit that holds a connection for one run; ``owned`` False was connected already."""
+
+    async def close() -> None:
+        log.append(f"{adapted.name} close")
+
+    async def connect() -> ToolkitClose | None:
+        log.append(f"{adapted.name} connect")
+        return close if owned else None
+
+    return replace(adapted, connect=connect)
+
+
+def _logged_request(log: list[str]) -> Await:
+    async def record() -> None:
+        log.append("request")
+
+    return Await(record)
+
+
+@pytest.mark.asyncio
+async def test_a_run_connects_its_toolkits_first_and_closes_what_it_connected_before_reporting_its_end() -> None:
+    log: list[str] = []
+    model = ScriptedModel([[_logged_request(log), *answer("Done.")]])
+    agent = spec(
+        model,
+        _connecting(log, toolkit(add, name="database")),
+        _connecting(log, toolkit(echo, name="server"), owned=False),
+        toolkit(boom, name="plain"),
+    )
+
+    reported: list[str] = []
+    async for event in run_agent(agent, _prompt(), ctx=context()):
+        if isinstance(event, RunFinished):
+            reported = list(log)
+
+    # A toolkit connected before the run belongs to whoever connected it.
+    assert reported == ["database connect", "server connect", "request", "database close"]
+    assert log == reported
+
+
+@pytest.mark.parametrize("ending", ["error", "cancel"])
+@pytest.mark.asyncio
+async def test_a_run_that_fails_or_is_cancelled_closes_what_it_connected_after_storing_its_record(ending: str) -> None:
+    log: list[str] = []
+    waiting = asyncio.Event()
+
+    async def end() -> None:
+        log.append("request")
+        if ending == "error":
+            msg = "Rate limited"
+            raise RateLimited(msg, provider="Synthetic")
+        waiting.set()
+        await asyncio.Event().wait()
+
+    async def persist(record: RunRecord) -> None:
+        log.append(f"stored {record.status.value}")
+
+    model = ScriptedModel([[Await(end)]])
+    agent = spec(model, _connecting(log, toolkit(add, name="database")))
+    task = asyncio.create_task(collect(run_agent(agent, _prompt(), ctx=context(), persist=persist)))
+    if ending == "cancel":
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        task.cancel()
+    with pytest.raises(RateLimited if ending == "error" else asyncio.CancelledError):
+        await task
+
+    status = "ERROR" if ending == "error" else "CANCELLED"
+    assert log == ["database connect", "request", f"stored {status}", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_connects_before_the_approved_call_runs() -> None:
+    log: list[str] = []
+
+    def add(a: int, b: int) -> str:
+        """Add two integers.
+
+        Args:
+            a: First number.
+            b: Second number.
+
+        """
+        log.append("approved call")
+        return json.dumps({"sum": a + b})
+
+    model = ScriptedModel([[_logged_request(log), *answer("Three.")]])
+
+    await _resume(
+        spec(model, _connecting(log, gated(add, name="database"))),
+        _paused_record(_gated_add()),
+        approved=[_approval("c1", "add", {"a": 1, "b": 2})],
+    )
+
+    assert log == ["database connect", "approved call", "request", "database close"]

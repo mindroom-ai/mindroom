@@ -1025,6 +1025,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        list_mcp_functions: bool = False,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -1040,6 +1041,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            list_mcp_functions,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -1085,6 +1087,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        list_mcp_functions: bool = False,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -1100,6 +1103,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            list_mcp_functions,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -2676,6 +2680,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        list_mcp_functions: bool = False,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -2689,6 +2694,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             runtime_config,
+            list_mcp_functions,
         )
         credentials = load_scoped_credentials(
             tool_name,

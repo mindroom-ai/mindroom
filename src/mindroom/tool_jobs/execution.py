@@ -54,6 +54,7 @@ from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.toolkit_connections import connects_per_run
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
@@ -121,12 +122,6 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
     return BACKGROUND_AFTER in parameters.get("properties", {})
 
 
-def _connects_per_run(toolkit: Toolkit) -> bool:
-    """Toolkits the SDK connects for one run, such as Postgres or Agno MCP, must finish inside that run."""
-    # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
-    return toolkit.requires_connect or any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__)
-
-
 def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
     """Whether a policy-gated function's approval can be the first phase of the managed job its call runs as.
 
@@ -138,7 +133,7 @@ def approval_can_run_as_job(function: Function, toolkit: Toolkit) -> bool:
         or function.external_execution
         or function.stop_after_tool_call
         or function.requires_user_input
-        or _connects_per_run(toolkit)
+        or connects_per_run(toolkit)
     )
 
 
@@ -159,7 +154,7 @@ def wait_mode(tool: JobTool | None, *, depth: int) -> ToolWaitMode:
         tool is None
         or isinstance(tool.toolkit, JobTools)
         or _is_background_job_excluded(tool)
-        or _connects_per_run(tool.toolkit)
+        or connects_per_run(tool.toolkit)
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.

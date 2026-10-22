@@ -80,6 +80,7 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -575,6 +576,8 @@ def _build_registered_agent_tool(
     execution_identity: ToolExecutionIdentity | None,
     runtime_overrides: dict[str, object] | None,
     config: Config,
+    *,
+    list_mcp_functions: bool,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     worker_target = build_agent_toolkit_worker_target(
@@ -603,6 +606,7 @@ def _build_registered_agent_tool(
         agent_state_root=agent_state_root,
         tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         worker_target=worker_target,
+        list_mcp_functions=list_mcp_functions,
     )
 
 
@@ -718,6 +722,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
     deferred_toolkits: Sequence[DeferredToolkit] = (),
+    list_mcp_functions: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -729,6 +734,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     explicit ``delegate`` entry without valid delegation targets.
 
     ``deferred_toolkits`` are the wire-deferred toolkits that ``dynamic_tools`` searches.
+    ``list_mcp_functions`` registers the functions of an Agno MCP toolkit that is not connected yet, for an agent
+    whose runs connect it.
     """
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
@@ -890,6 +897,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         execution_identity,
         runtime_overrides,
         config,
+        list_mcp_functions=list_mcp_functions,
     )
 
 
@@ -1418,6 +1426,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     deferred_toolkits: list[DeferredToolkit] = []
     persona_built: dict[str, frozenset[str]] = {}
 
+    def routes_through_worker(tool_name: str) -> bool:
+        return _registry_tool_routes_through_worker(tool_name, runtime_paths=runtime_paths, worker_tools=worker_tools)
+
     def build_entry(tool_entry: EffectiveToolConfig) -> Toolkit | None:
         tool_name = tool_entry.name
         runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
@@ -1436,6 +1447,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
                 deferred_toolkits=tuple(deferred_toolkits),
+                # A worker builds and connects its own copy of a toolkit routed through it.
+                list_mcp_functions=not routes_through_worker(tool_name),
             )
         if toolkit:
             _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
@@ -1465,7 +1478,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     def adapt_entry(toolkit: Toolkit, tool_name: str | None) -> AdaptedToolkit:
         adapted = adapt_toolkit(toolkit)
         # The job controls carry no registered name: they act only on the caller's own jobs, each approved already.
-        if tool_name is None or not supports_native_tool_approval:
+        if tool_name is None:
+            return adapted
+        if not routes_through_worker(tool_name):
+            adapted = replace(adapted, connect=run_connection(toolkit))
+        if not supports_native_tool_approval:
             return adapted
         return apply_tool_approval_capability(
             adapted,
@@ -1504,15 +1521,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             toolkit = build_entry(tool_entry)
             if toolkit:
                 entries.append((toolkit, tool_name))
-                target_names = (
-                    worker_routed_tool_names
-                    if _registry_tool_routes_through_worker(
-                        tool_name,
-                        runtime_paths=runtime_paths,
-                        worker_tools=worker_tools,
-                    )
-                    else local_tool_names
-                )
+                target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
                 target_names.append(tool_name)
                 # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
                 if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:

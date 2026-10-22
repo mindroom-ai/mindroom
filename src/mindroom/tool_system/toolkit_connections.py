@@ -1,0 +1,104 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+"""Connect the Agno toolkits that hold a connection for one run, as Agno 3.0.9's agent did around each of its runs.
+
+An Agno ``MCPTools`` registers its functions only once its session is connected, and a toolkit that sets
+``requires_connect``, such as Postgres or Redshift, holds a connection its run must close. Before each run Agno's
+agent connected every such toolkit, an MCP session only when it was not connected already, and after the run it
+closed what that run had connected; a failure either way was logged as a warning and the run went on.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from functools import partial
+from typing import TYPE_CHECKING, cast
+
+from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agno.tools import Toolkit
+    from agno.tools.mcp import MCPTools
+
+    from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
+
+logger = get_logger(__name__)
+
+
+def _mcp_toolkit(toolkit: Toolkit) -> MCPTools | None:
+    """Return ``toolkit`` as an Agno MCP toolkit, or None for any other toolkit."""
+    # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
+    if any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__):
+        return cast("MCPTools", toolkit)
+    return None
+
+
+def connects_per_run(toolkit: Toolkit) -> bool:
+    """Whether ``toolkit`` holds a connection for one run, so each of its calls must finish inside that run."""
+    return toolkit.requires_connect or _mcp_toolkit(toolkit) is not None
+
+
+def register_mcp_functions(toolkit: Toolkit) -> None:
+    """Register the functions of an Agno MCP toolkit that is not connected yet, which it lists only once connected.
+
+    An agent is built off the event loop its runs use and before any of them, and its approval rules, tool owners,
+    and prompt are derived from the functions it offers, so the build connects the toolkit through a session and a
+    loop of its own and closes that session once the functions are registered. Each run connects it again.
+    """
+    mcp = _mcp_toolkit(toolkit)
+    if mcp is None or mcp.initialized:
+        return
+
+    async def list_functions() -> None:
+        await mcp.connect()
+        await mcp.close()
+
+    try:
+        asyncio.run(list_functions())
+    except Exception as exc:
+        logger.warning("mcp_toolkit_listing_failed", toolkit=toolkit.name, error=str(exc))
+
+
+def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
+    """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
+    mcp = _mcp_toolkit(toolkit)
+    if mcp is not None:
+        return partial(_connect_mcp, mcp)
+    if toolkit.requires_connect:
+        return partial(_connect, toolkit)
+    return None
+
+
+async def _connect_mcp(toolkit: MCPTools) -> ToolkitClose | None:
+    # A session connected before the run belongs to whoever connected it, so the run leaves it open.
+    if toolkit.initialized:
+        return None
+    return await _connect(toolkit)
+
+
+async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
+    try:
+        await run_toolkit_lifecycle(toolkit.connect)
+    except Exception as exc:
+        logger.warning("toolkit_connect_failed", toolkit=toolkit.name, error=str(exc))
+        return None
+    return partial(_close, toolkit)
+
+
+async def _close(toolkit: Toolkit) -> None:
+    try:
+        await run_toolkit_lifecycle(toolkit.close)
+    except Exception as exc:
+        logger.warning("toolkit_close_failed", toolkit=toolkit.name, error=str(exc))
+
+
+async def run_toolkit_lifecycle(operation: Callable[[], object]) -> None:
+    """Run a toolkit's ``connect`` or ``close``: a coroutine function on the loop, a blocking one on a thread."""
+    if inspect.iscoroutinefunction(operation):
+        await operation()
+        return
+    result = await asyncio.to_thread(operation)
+    if inspect.isawaitable(result):
+        await result
