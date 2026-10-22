@@ -1,6 +1,7 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+import json
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace, UnionType
@@ -8,14 +9,18 @@ from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
+from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 SKIP_CONFIG_FIELD_VALIDATION = {
@@ -47,6 +52,10 @@ IGNORED_AGNO_PARAMS = {
     # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
     "newspaper": {"include_summary"},
 }
+# Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that an optional one
+# reads the null words as left out.
+BOOLEAN_WORDS = ("true", "False")
+NULL_WORDS = ("None", "null", " NULL ")
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
     "docker": {"include_tools"},
@@ -329,7 +338,7 @@ def test_zep_metadata_lists_only_model_callable_functions() -> None:
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
 def test_registered_tool_contract(tool_name: str) -> None:
-    """Validate one registered tool's import, managed inputs, and authored config fields."""
+    """Validate one registered tool's import, managed inputs, string arguments, and authored config fields."""
     metadata = TOOL_METADATA[tool_name]
     tool_factory = TOOL_REGISTRY[tool_name]
     try:
@@ -351,8 +360,46 @@ def test_registered_tool_contract(tool_name: str) -> None:
 
     init_signature = inspect.signature(tool_class.__init__)
     verify_managed_init_args(tool_name, init_signature)
+    verify_string_arguments_reach_the_tool(tool_name, tool_class)
     if tool_name not in SKIP_CONFIG_FIELD_VALIDATION:
         verify_tool_configfields(tool_name, tool_class, init_signature)
+
+
+def _string_parameter(schema: dict[str, Any]) -> tuple[list[str], bool] | None:
+    """Return a string parameter's choices (empty for free text) and whether it is optional, or None for no string."""
+    options = (schema, *schema.get("anyOf", ()))
+    strings = [option for option in options if option.get("type") == "string"]
+    if not strings:
+        return None
+    choices = [value for option in strings for value in option.get("enum", ())]
+    return choices, any(option.get("type") == "null" for option in options)
+
+
+def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> object:
+    """Parse one model tool call the way an agent's response loop does."""
+    return parse_tool_arguments(json.dumps(arguments), function)
+
+
+def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
+    """Verify every string parameter receives each of its choices, and free text the literal words, as intended."""
+    for function_name in TOOL_METADATA[tool_name].function_names:
+        method = getattr(tool_class, function_name, None)
+        if method is None:
+            # The toolkit builds this function per instance, for example from an MCP server's tool list.
+            continue
+        function = adapt_function(Function.from_callable(method))
+        parameters = {
+            name: string_parameter
+            for name, schema in function.parameters["properties"].items()
+            if (string_parameter := _string_parameter(schema)) is not None
+        }
+        free_text = {name: optional for name, (choices, optional) in parameters.items() if not choices}
+        for word in (*BOOLEAN_WORDS, *NULL_WORDS) if free_text else ():
+            expected = {name: None if optional and word in NULL_WORDS else word for name, optional in free_text.items()}
+            assert _parsed_arguments(function, dict.fromkeys(free_text, word)) == expected, (tool_name, function_name)
+        for name, (choices, _optional) in parameters.items():
+            for choice in choices:
+                assert _parsed_arguments(function, {name: choice}) == {name: choice}, (tool_name, function_name)
 
 
 def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:
