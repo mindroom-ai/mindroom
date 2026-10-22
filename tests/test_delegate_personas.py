@@ -3,46 +3,50 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
 from mindroom import ai as ai_module
-from mindroom.agents import apply_tool_approval_capability
-from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import _resolve_delegation_target, drive_delegations
+from mindroom.delegation.execution import _resolve_delegation_target
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
 from mindroom.delegation.personas import inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.knowledge import utils as knowledge_utils
-from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.llm.runs import RunStatus, ToolExecution
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.delegation_helpers import DelegationModel, _call, _saved_approval_calls
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+    approval_executor,
+    authored_prompts,
+    offered_tools,
+    respond,
+    resume,
+    stored_run,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_envelopes import _InstructionRecordingModel
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.execution import _DelegationTarget
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _CRITIC = """---
 description: Finds the biggest risk.
@@ -94,20 +98,9 @@ def _write_profile(tmp_path: Path, name: str, content: str) -> Path:
     return path
 
 
-@contextmanager
-def _native_parent(
-    config: Config,
-    paths: RuntimePaths,
-    workspace: Path,
-    responses: list[ModelResponse],
-) -> Iterator[tuple[Agent, ConversationStore]]:
-    """A native-path leader whose delegate tool may run itself, scripted with ``responses``."""
-    identity = _identity()
-    toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity, workspace_root=workspace)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
-    storage = create_session_storage("leader", config, paths, identity)
-    model = DelegationModel(id="test-parent", responses=responses)
-    yield Agent(name="leader", db=storage, tools=[toolkit], model=model), storage
+def _last_tool_results(model: ScriptedModel) -> list[str]:
+    """Return the tool results the model's last request carried."""
+    return [str(message.content) for message in model.requests[-1].messages if message.role == "tool"]
 
 
 class _Harness:
@@ -117,17 +110,9 @@ class _Harness:
         self.paths: RuntimePaths = _runtime_paths(tmp_path)
         self.config = config
         entity_ids(config, self.paths)
-        self.model = _InstructionRecordingModel(
-            id="test",
-            responses=[ModelResponse(content=f"Reply {index}.") for index in range(replies)],
-        )
-        self.models_loaded: list[str] = []
-
-        def load_model(*args: object) -> _InstructionRecordingModel:
-            self.models_loaded.append(str(args[2]))
-            return self.model
-
-        monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+        self.model = ScriptedModel([answer(f"Reply {index}.") for index in range(replies)])
+        self.agents = ScriptedAgents({"leader": self.model, "child": self.model})
+        self.agents.install(monkeypatch)
         self.identity = _identity()
         self.toolkit = self.tools(["leader", "child"])
 
@@ -161,7 +146,7 @@ async def test_inline_persona_starts_self_child(tmp_path: Path, monkeypatch: pyt
     )
 
     assert "Reply 0." in result
-    assert harness.model.authored_prompts == ["Inline {x} prompt"]
+    assert authored_prompts(harness.model) == ["Inline {x} prompt"]
     child = harness.session_child()
     assert child["child_agent_name"] == "leader"
     assert child["persona"] == {
@@ -183,8 +168,8 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
     await harness.run(harness.toolkit.run_subagent(task="Find the risk", profile="critic"))
     await harness.run(harness.toolkit.run_subagent(task="Find another risk", profile="critic", model="sonnet"))
 
-    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
-    assert harness.models_loaded == ["haiku", "sonnet"]
+    assert authored_prompts(harness.model) == ["You are a hostile critic.", "You are a hostile critic."]
+    assert harness.agents.built_models == ["haiku", "sonnet"]
 
 
 @pytest.mark.asyncio
@@ -222,7 +207,7 @@ async def test_invalid_authoring_is_refused_before_a_child_runs(
     result = await harness.run(harness.toolkit.run_subagent(task="Do it", **arguments))
 
     assert result.startswith(refusal)
-    assert harness.model.authored_prompts == []
+    assert authored_prompts(harness.model) == []
 
 
 def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,7 +249,7 @@ async def test_follow_up_keeps_snapshot_after_profile_edit(tmp_path: Path, monke
 
     await harness.run(harness.toolkit.continue_subagent(subagent_id=subagent_id, message="And another?"))
 
-    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
+    assert authored_prompts(harness.model) == ["You are a hostile critic.", "You are a hostile critic."]
 
 
 @pytest.mark.asyncio
@@ -293,7 +278,7 @@ async def test_follow_up_after_caller_lost_a_tool_is_refused(
     )
 
     assert refusal in result
-    assert harness.model.authored_prompts == ["P"]
+    assert authored_prompts(harness.model) == ["P"]
 
 
 @pytest.mark.asyncio
@@ -309,7 +294,7 @@ async def test_persona_naming_a_function_its_caller_lacks_never_runs(
     )
 
     assert "'file.save_file' is not available to you" in result
-    assert harness.model.authored_prompts == []
+    assert authored_prompts(harness.model) == []
 
 
 @pytest.mark.asyncio
@@ -363,61 +348,51 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     config = _config(tools=("calculator", "file"), approval=True, knowledge_bases=("docs", "faq"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = _InstructionRecordingModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("add", "approved-add", a=1, b=2)]),
-            ModelResponse(content="Sum is 3."),
+    identity = _identity()
+    model = ScriptedModel([calls(tool_call("add", "approved-add", a=1, b=2)), answer("Sum is 3.")])
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", task="Add 1 and 2", profile="adder")),
+            answer("Parent finished."),
         ],
     )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    ScriptedAgents({"leader": model}, by_session={identity.session_id: parent}).install(monkeypatch)
     resumed_knowledge: list[object] = []
     # The approval resume imports the resolver from its module when it runs.
     resolve = knowledge_utils.resolve_agent_knowledge_access_async
 
     async def recording_resolve(*args: object, **kwargs: object) -> object:
-        resumed_knowledge.append(kwargs.get("only"))
+        # The resumed parent resolves its own knowledge too; only the child's resolution is the persona's.
+        execution_identity = cast("ToolExecutionIdentity", kwargs["execution_identity"])
+        if execution_identity.session_id != identity.session_id:
+            resumed_knowledge.append(kwargs.get("only"))
         return await resolve(*args, **kwargs)
 
     monkeypatch.setattr(knowledge_utils, "resolve_agent_knowledge_access_async", recording_resolve)
-    identity = _identity()
-    options = {
-        "run_child": run_delegated_child_response,
-        "agent_name": "leader",
-        "config": config,
-        "runtime_paths": paths,
-        "execution_identity": identity,
-    }
-    parent_responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "delegate", task="Add 1 and 2", profile="adder")]),
-        ModelResponse(content="Parent finished."),
-    ]
-    with (
-        _native_parent(config, paths, _workspace(tmp_path), parent_responses) as (parent, storage),
-        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-    ):
-        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-        paused = await drive_delegations(parent, response, **options)
-        assert paused.status == RunStatus.paused
-        state = DelegationState.from_metadata(paused.metadata)
-        profile.unlink()
-        persisted = storage.get_run(paused.run_id)
-        assert isinstance(persisted, RunOutput)
-        decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-        completed = await drive_delegations(
-            parent,
-            persisted,
-            decisions=decisions,
-            denial_reasons=dict.fromkeys(decisions),
-            approval_calls=_saved_approval_calls(state),
-            **options,
-        )
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
 
-    assert completed.status == RunStatus.completed
-    assert model.authored_prompts == ["You add numbers.", "You add numbers."]
+    paused = await respond("leader", "Delegate", **options, run_id="parent-run")
+    assert isinstance(paused, PausedAttempt)
+    state = DelegationState.from_metadata(stored_run("leader", "parent-run", **options).metadata)
+    profile.unlink()
+    approvals = _saved_approval_calls(state)
+    result = await resume(
+        approval_executor(config, paths),
+        paused,
+        approvals,
+        agent_name="leader",
+        **options,
+        decisions={call.tool_call_id: True for call in approvals},
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    completed = stored_run("leader", "parent-run", **options)
+    assert completed.status is RunStatus.completed
+    assert authored_prompts(model) == ["You add numbers.", "You add numbers."]
     assert resumed_knowledge == [("docs",)]
-    assert len(model.offered) == 2
-    assert all("add" in offered and "read_file" not in offered for offered in model.offered)
+    offered = offered_tools(model)
+    assert len(offered) == 2
+    assert all("add" in names and "read_file" not in names for names in offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(
         source_kind="profile",
         source_name="adder",
@@ -432,12 +407,12 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
 async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An authored subagent with delegate can author copies only within its own tools."""
     harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
-    harness.model.responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])]),
-        ModelResponse(tool_calls=[_call("run_subagent", "n2", task="Plain copy.")]),
-        ModelResponse(tool_calls=[_call("run_subagent", "n3", task="Read.", system_prompt="Q")]),
-        ModelResponse(content="Grandchild answer."),
-        ModelResponse(content="Child answer."),
+    harness.model.turns = [
+        calls(tool_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])),
+        calls(tool_call("run_subagent", "n2", task="Plain copy.")),
+        calls(tool_call("run_subagent", "n3", task="Read.", system_prompt="Q")),
+        answer("Grandchild answer."),
+        answer("Child answer."),
     ]
 
     result = await harness.run(
@@ -445,7 +420,7 @@ async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypa
     )
 
     assert "Child answer." in result
-    assert harness.model.authored_prompts == ["P", "P", "P", "Q", "P"]
+    assert authored_prompts(harness.model) == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
@@ -453,7 +428,7 @@ async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypa
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
     assert grandchild["persona"]["tools"] == ["delegate", "file"]
     assert len(records) == 2
-    tool_results = [str(message.content) for message in harness.model.seen_messages if message.role == "tool"]
+    tool_results = _last_tool_results(harness.model)
     assert any(
         "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
     )
@@ -476,10 +451,10 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
         workspace_root=_workspace(harness.paths.storage_root),
         delegation_depth=MAX_DELEGATION_DEPTH - 2,
     )
-    harness.model.responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Read.", system_prompt="Q")]),
-        ModelResponse(content="Grandchild answer."),
-        ModelResponse(content="Child answer."),
+    harness.model.turns = [
+        calls(tool_call("run_subagent", "n1", task="Read.", system_prompt="Q")),
+        answer("Grandchild answer."),
+        answer("Child answer."),
     ]
 
     result = await harness.run(
@@ -487,7 +462,7 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
     )
 
     assert "Child answer." in result
-    assert harness.model.authored_prompts == ["P", "Q", "P"]
+    assert authored_prompts(harness.model) == ["P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
@@ -607,52 +582,35 @@ async def test_native_nested_persona_stays_within_running_child_tools(
     config = _config(tools=("file", "calculator"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = _InstructionRecordingModel(
-        id="test",
-        responses=[
-            ModelResponse(
-                tool_calls=[_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])],
-            ),
-            ModelResponse(tool_calls=[_call("run_subagent", "n2", task="Plain copy.")]),
-            ModelResponse(tool_calls=[_call("run_subagent", "n3", task="Read.", system_prompt="Q")]),
-            ModelResponse(content="Grandchild answer."),
-            ModelResponse(content="Child finished."),
+    identity = _identity()
+    model = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])),
+            calls(tool_call("run_subagent", "n2", task="Plain copy.")),
+            calls(tool_call("run_subagent", "n3", task="Read.", system_prompt="Q")),
+            answer("Grandchild answer."),
+            answer("Child finished."),
         ],
     )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    identity = _identity()
-    parent_responses = [
-        ModelResponse(
-            tool_calls=[
-                _call("run_subagent", "delegate", task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
-            ],
-        ),
-        ModelResponse(content="Parent finished."),
-    ]
-    with (
-        _native_parent(config, paths, _workspace(tmp_path), parent_responses) as (parent, _storage),
-        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-    ):
-        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-        completed = await drive_delegations(
-            parent,
-            response,
-            run_child=run_delegated_child_response,
-            agent_name="leader",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-        )
+    authored = {"system_prompt": "P", "tools": ["delegate", "file"]}
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", task="Coordinate.", **authored)), answer("Parent finished.")],
+    )
+    ScriptedAgents({"leader": model}, by_session={identity.session_id: parent}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
 
-    assert completed.status == RunStatus.completed
-    assert model.authored_prompts == ["P", "P", "P", "Q", "P"]
+    reply = await respond("leader", "Delegate", **options, run_id="parent-run")
+
+    assert isinstance(reply, str)
+    assert stored_run("leader", "parent-run", **options).status is RunStatus.completed
+    assert authored_prompts(model) == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"] for path in (paths.storage_root / "subagent_sessions").glob("*.json")
     ]
     assert len(records) == 2
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
     assert grandchild["persona"]["tools"] == ["delegate", "file"]
-    tool_results = [str(message.content) for message in model.seen_messages if message.role == "tool"]
+    tool_results = _last_tool_results(model)
     assert any(
         "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
     )
@@ -670,7 +628,7 @@ async def test_fresh_direct_persona_checks_the_current_config(tmp_path: Path, mo
     )
 
     assert result.startswith("Cannot delegate: unknown tool 'file'. Your tools: ")
-    assert harness.model.authored_prompts == []
+    assert authored_prompts(harness.model) == []
 
 
 @pytest.mark.asyncio
