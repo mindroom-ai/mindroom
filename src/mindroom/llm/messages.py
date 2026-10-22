@@ -133,7 +133,7 @@ class Message:
         # Agno-backed runtime may hold ``audio_output``, ``image_output``, ``video_output``, ``file_output``,
         # ``citations``, ``references``, ``checkpoint_status``, ``checkpoint_created_at``, ``temporary``, and media
         # ``media_reference``/``external`` entries.
-        # Last legacy release: v2026.10.465; replacement: unreleased.
+        # Last legacy release: v2026.10.467; replacement: unreleased.
         # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
         # Coverage: tests/llm/test_codecs.py::test_message_from_dict_ignores_agno_only_keys,
         #   tests/llm/test_codecs.py::test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads
