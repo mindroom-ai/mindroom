@@ -1605,7 +1605,7 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
 | `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead, and set this too when the port changes | `8765` |
-| `MINDROOM_DASHBOARD_URL` | HTTPS origin where the dashboard is served when another app owns `/` on `MINDROOM_PUBLIC_URL`; the Connections header links administrators there, dashboard changes from it are accepted, and Connections pages opened on it move to `MINDROOM_PUBLIC_URL` (see [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host)) | _(unset: the dashboard is at `/` on the public origin)_ |
+| `MINDROOM_DASHBOARD_URL` | HTTPS origin where the dashboard is served when another app owns `/` on `MINDROOM_PUBLIC_URL`, which must be set to a different origin; the Connections header links administrators there, dashboard changes from it are accepted, and Connections pages opened on it move to `MINDROOM_PUBLIC_URL` (see [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host)) | _(unset: the dashboard is at `/` on the public origin)_ |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin, or `MINDROOM_DASHBOARD_URL` on that host | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | `true` allows every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
@@ -20027,11 +20027,12 @@ Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`
 
 ## Dashboard On Its Own Host
 
-When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
+When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom with the browser's `Host` header unchanged, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
 Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
 The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
 Accounts connected from the dashboard on that host still return through the public host's OAuth callback.
 A Connections sign-in from MindRoom Chat stays on the public host, so administrators reach the dashboard host through the access application or with `MINDROOM_API_KEY`.
+A dashboard sign-in with `MINDROOM_API_KEY` also stays on its host, so the first account connected from the dashboard host asks for the key again on the public host before it finishes.
 With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
 
 ## Security Boundary

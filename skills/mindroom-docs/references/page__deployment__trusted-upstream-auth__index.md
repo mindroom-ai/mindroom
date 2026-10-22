@@ -70,11 +70,12 @@ Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`
 
 ## Dashboard On Its Own Host
 
-When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
+When another app, such as MindRoom Chat, serves `/` on the public host, serve the dashboard on a separate host that sends every path to MindRoom with the browser's `Host` header unchanged, and set `MINDROOM_DASHBOARD_URL` to that host's origin, for example `https://mindroom-admin.example.com`.
 Put that host behind the same access application as the public host, so its requests carry the JWT audience MindRoom already verifies.
 The Connections header then links administrators there, and Connections pages opened on that host move to `MINDROOM_PUBLIC_URL`, where sign-in, account links, and MCP consent run.
 Accounts connected from the dashboard on that host still return through the public host's OAuth callback.
 A Connections sign-in from MindRoom Chat stays on the public host, so administrators reach the dashboard host through the access application or with `MINDROOM_API_KEY`.
+A dashboard sign-in with `MINDROOM_API_KEY` also stays on its host, so the first account connected from the dashboard host asks for the key again on the public host before it finishes.
 With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open that host are sent to the Connections portal, as on the public host.
 
 ## Security Boundary

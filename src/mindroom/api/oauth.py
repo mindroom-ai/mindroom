@@ -1134,7 +1134,18 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
         # and a Connections session.
         if issuing_auth_source == "matrix_openid":
             allow_connections_session_for_oauth_callback(request)
-        await _require_oauth_api_user(request)
+        try:
+            await _require_oauth_api_user(request)
+        except HTTPException as exc:
+            # A dashboard sign-in stays on its host, such as `MINDROOM_DASHBOARD_URL`'s, so sign in here and come back.
+            login_redirect = (
+                login_redirect_for_request(request)
+                if exc.status_code == 401 and issuing_auth_source != "matrix_openid"
+                else None
+            )
+            if login_redirect is None:
+                raise
+            return login_redirect
     try:
         dashboard_flow = await _complete_oauth_callback(
             request,
