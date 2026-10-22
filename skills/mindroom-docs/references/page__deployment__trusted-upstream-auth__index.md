@@ -93,7 +93,7 @@ Changing requests (anything other than `GET`, `HEAD`, `OPTIONS`, or `TRACE`) aut
 Requests marked `Sec-Fetch-Site: cross-site` are rejected even when the `Origin` matches.
 A validated bearer token skips these checks, but adding a bearer header to a trusted-upstream request does not.
 `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` controls which origins may read credentialed responses and never authorizes cross-origin changes.
-Host the dashboard on the app's public origin, or use its development proxy, which authenticates with a bearer token.
+Host the dashboard on the app's public origin or on [its own host](#dashboard-on-its-own-host), or use its development proxy, which authenticates with a bearer token.
 
 ## Troubleshooting
 
@@ -106,6 +106,6 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
 | `401 Invalid trusted upstream Matrix user id` | The Matrix claim is not a valid Matrix user ID |
 | `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
-| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
+| `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin, or from `MINDROOM_DASHBOARD_URL` when set |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
