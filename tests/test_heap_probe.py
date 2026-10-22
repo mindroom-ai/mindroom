@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from mindroom.heap_probe import (
     _heap_probe_interval_seconds,
     _heap_refreeze_interval_seconds,
     _log_heap_type_probe,
+    _raise_full_collection_threshold,
     _refreeze_runtime_heap,
     _run_heap_refreeze,
     _run_heap_type_probe,
@@ -160,6 +162,8 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
             collect=lambda: 0,
             freeze=lambda: steps.append("freeze"),
             get_freeze_count=lambda: 0,
+            get_threshold=lambda: (2000, 10, 10),
+            set_threshold=lambda *thresholds: steps.append(thresholds),
         ),
     )
 
@@ -179,7 +183,22 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert steps == ["unfreeze", "freeze", 600.0, "unfreeze", "freeze", 600.0]
+    assert steps == ["unfreeze", "freeze", (2000, 10, 100), 600.0, "unfreeze", "freeze", 600.0]
+
+
+@pytest.mark.parametrize(("configured", "expected"), [(10, 100), (500, 500)])
+def test_frozen_heap_raises_the_full_collection_threshold_without_lowering_it(configured: int, expected: int) -> None:
+    """Full passes walk everything since the refreeze yet find little garbage, so they run ten times less often."""
+    original = gc.get_threshold()
+    try:
+        gc.set_threshold(original[0], original[1], configured)
+        with capture_logs() as logs:
+            _raise_full_collection_threshold()
+        assert gc.get_threshold() == (original[0], original[1], expected)
+    finally:
+        gc.set_threshold(*original)
+    [record] = [entry for entry in logs if entry["event"] == "gc_full_collection_threshold_raised"]
+    assert (record["previous"], record["threshold"]) == (configured, expected)
 
 
 @pytest.mark.asyncio

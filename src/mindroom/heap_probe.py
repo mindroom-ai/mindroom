@@ -7,7 +7,9 @@ runtime is ready, and then every ``MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS``,
 the primary unfreezes, collects once, and freezes the survivors again. Routine
 full collections then only walk objects created since the last refreeze, and
 bots a config reload replaced are collected at the next refreeze instead of
-staying frozen.
+staying frozen. After the first refreeze, full collections also start ten times
+less often, because each one walks that whole unfrozen heap to find little
+garbage.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -61,6 +63,10 @@ _HEAP_REFREEZE_INTERVAL_ENV = "MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS"
 _DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS = 3600.0
 # A probe walk or a refreeze costs about one full collection; shorter intervals would make it the main source of pauses.
 _MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
+# CPython starts a full collection after 10 middle ones once survivors grow by a quarter of the old generation.
+# Frozen objects do not count, and turn state that outlives two young passes is later freed by refcount, so
+# under load a full pass ran every few seconds, walked every object since the refreeze and found little garbage.
+_FROZEN_HEAP_FULL_COLLECTION_THRESHOLD = 100
 _TOP_TYPE_COUNT = 25
 
 
@@ -231,9 +237,18 @@ async def _run_heap_refreeze(
 ) -> None:
     """Refreeze once the runtime is ready, then after each interval until cancelled."""
     await ready()
+    _refreeze_runtime_heap()
+    _raise_full_collection_threshold()
     while True:
-        _refreeze_runtime_heap()
         await sleep(interval_seconds)
+        _refreeze_runtime_heap()
+
+
+def _raise_full_collection_threshold() -> None:
+    """Make full collections ten times rarer once the runtime heap is frozen."""
+    young, middle, full = gc.get_threshold()
+    gc.set_threshold(young, middle, max(full, _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD))
+    logger.info("gc_full_collection_threshold_raised", previous=full, threshold=gc.get_threshold()[2])
 
 
 def start_heap_tasks(
