@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,7 @@ from agno.models.message import Message, MessageMetrics
 from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
+from mindroom import llm_request_logging
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.llm_request_logging import (
@@ -259,6 +261,53 @@ async def test_llm_request_logging_uses_post_defer_wire_tools(tmp_path: Path) ->
     assert before_load["tool_count"] == 1
     assert after_load["tools"] == catalog_tools
     assert after_load["tool_count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_llm_request_record_is_built_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """Serializing a long conversation must not block the loop; recorded wire tools are not normalized twice."""
+    model = _DeferredWireModel()
+    install_llm_request_logging(
+        model,
+        agent_name="default",
+        debug_config=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        default_log_dir=tmp_path / "unused",
+    )
+    loop_thread = threading.get_ident()
+    build_threads: list[int] = []
+    normalized: list[object] = []
+    message_payloads = llm_request_logging._request_message_payloads
+    json_safe = llm_request_logging._json_safe
+
+    def payloads(messages: list[Message]) -> object:
+        build_threads.append(threading.get_ident())
+        return message_payloads(messages)
+
+    def tracked_json_safe(value: object) -> object:
+        normalized.append(value)
+        return json_safe(value)
+
+    monkeypatch.setattr(llm_request_logging, "_request_message_payloads", payloads)
+    monkeypatch.setattr(llm_request_logging, "_json_safe", tracked_json_safe)
+    tools = [{"name": "always_available"}]
+    request_kwargs = {"messages": [Message(role="user", content="hi")], "tools": tools}
+
+    if stream:
+        assert [chunk.content async for chunk in model.ainvoke_stream(**request_kwargs)] == ["ok"]
+    else:
+        await model.ainvoke(**request_kwargs)
+
+    [entry] = _read_log_entries(tmp_path)
+    assert [(message["role"], message["content"]) for message in entry["messages"]] == [("user", "hi")]
+    assert entry["tools"] == tools
+    assert len(build_threads) == 1
+    assert build_threads[0] != loop_thread
+    assert sum(value == tools for value in normalized) == 1
 
 
 @pytest.mark.asyncio
