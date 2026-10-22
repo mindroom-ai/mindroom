@@ -275,6 +275,7 @@ function deriveConfigCollections(
     id,
     ...agent,
     skills: agent.skills ?? [],
+    rooms: agent.rooms ?? [],
     knowledge_bases: agent.knowledge_bases || [],
     delegate_to: agent.delegate_to || [],
     context_files: agent.context_files ?? [],
@@ -291,6 +292,20 @@ function deriveConfigCollections(
   const rooms = deriveRooms(config, agents, teams);
 
   return { agents, teams, rooms };
+}
+
+// Agents and teams reached only through personal rooms or invitations omit
+// `rooms`. Saving drops the `[]` that loading filled in so their config keeps
+// its authored shape.
+function withAuthoredRooms<T extends { rooms: string[] }>(
+  entity: T,
+  authored: { rooms?: string[] } | undefined,
+): Omit<T, "rooms"> & { rooms?: string[] } {
+  if (entity.rooms.length > 0 || authored?.rooms !== undefined) {
+    return entity;
+  }
+  const { rooms: _rooms, ...rest } = entity;
+  return rest;
 }
 
 function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
@@ -1076,31 +1091,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const currentAgentsObject = agents.reduce(
         (acc, agent) => {
           const { id, ...rest } = agent;
-          acc[id] = rest;
+          acc[id] = withAuthoredRooms(rest, baseConfig.agents[id]);
           return acc;
         },
-        {} as Record<string, Omit<Agent, "id">>,
+        {} as Config["agents"],
       );
-      const payloadAgentsObjectFromAgents = agents.reduce(
-        (acc, agent) => {
-          const { id, ...rest } = agent;
-          const rawToolEntries = currentRawEntriesByAgent.get(id);
-          acc[id] = {
-            ...rest,
-            tools: rawToolEntries ?? rest.tools,
-          };
-          return acc;
-        },
-        {} as configService.ConfigSavePayload["agents"],
+      const payloadAgentsObjectFromAgents = Object.fromEntries(
+        Object.entries(currentAgentsObject).map(([id, agentConfig]) => [
+          id,
+          {
+            ...agentConfig,
+            tools: currentRawEntriesByAgent.get(id) ?? agentConfig.tools,
+          },
+        ]),
       );
 
       const currentTeamsObject = teams.reduce(
         (acc, team) => {
           const { id, ...rest } = team;
-          acc[id] = rest;
+          acc[id] = withAuthoredRooms(rest, baseConfig.teams?.[id]);
           return acc;
         },
-        {} as Record<string, Omit<Team, "id">>,
+        {} as NonNullable<Config["teams"]>,
       );
 
       const updatedConfig: Config = {

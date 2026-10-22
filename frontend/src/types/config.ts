@@ -280,6 +280,11 @@ export interface Team {
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
+// Authored agents and teams may omit `rooms`; the store fills in `[]` on load.
+export type AgentConfig = Omit<Agent, "id" | "rooms"> & {
+  rooms?: string[];
+};
+
 export type TeamConfig = Omit<Team, "id" | "rooms"> & {
   rooms?: string[];
 };
@@ -336,7 +341,7 @@ export interface Config {
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
-  agents: Record<string, Omit<Agent, "id">>;
+  agents: Record<string, AgentConfig>;
   defaults?: {
     markdown: boolean;
     learning?: boolean;

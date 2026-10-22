@@ -595,7 +595,7 @@ describe("configStore", () => {
       expect(state.agents[0].learning_mode).toBe("agentic");
     });
 
-    it("normalizes teams without authored rooms when loading configuration", async () => {
+    it("loads agents and teams without authored rooms and saves them without rooms", async () => {
       const mockConfig = {
         agents: {
           test: {
@@ -604,7 +604,6 @@ describe("configStore", () => {
             tools: [],
             skills: [],
             instructions: [],
-            rooms: [],
           },
         },
         teams: {
@@ -652,6 +651,7 @@ describe("configStore", () => {
 
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe("synced");
+      expect(state.agents[0].rooms).toEqual([]);
       expect(state.teams).toEqual([
         {
           id: "ops",
@@ -662,6 +662,24 @@ describe("configStore", () => {
           mode: "coordinate",
         },
       ]);
+      expect(state.rooms).toEqual([]);
+
+      state.updateAgent("test", { role: "Edited role" });
+      state.updateTeam("ops", { role: "Edited team role" });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+      await useConfigStore.getState().saveConfig();
+
+      const saveCall = (global.fetch as any).mock.calls.find(
+        ([url]: [string]) => url === "/api/config/save",
+      );
+      const saveBody = JSON.parse(saveCall[1].body);
+      expect(saveBody.agents.test.role).toBe("Edited role");
+      expect(saveBody.agents.test).not.toHaveProperty("rooms");
+      expect(saveBody.teams.ops.role).toBe("Edited team role");
+      expect(saveBody.teams.ops).not.toHaveProperty("rooms");
     });
 
     it("should preserve explicit learning=false from configuration", async () => {
