@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import httpx
 
-from mindroom.llm.errors import ContextWindowExceeded, ProviderError, ProviderUnavailable
+from mindroom.llm.errors import ContextWindowExceeded, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.providers.errors import (
     OVERLOADED_ERROR_TYPE,
     RATE_LIMIT_STATUSES,
@@ -28,8 +28,7 @@ __all__ = [
     "sdk_failures",
 ]
 
-# Error codes and types OpenAI-compatible servers put in mid-stream SSE error events for transient failures.
-_TRANSIENT_EVENT_STATUSES = RATE_LIMIT_STATUSES | TRANSIENT_STATUSES
+# Error types OpenAI-compatible servers put in mid-stream SSE error events for transient failures.
 _TRANSIENT_ERROR_TYPES = frozenset({"overloaded", OVERLOADED_ERROR_TYPE, "server_error", "internal_server_error"})
 _RESPONSES_EVENT_STATUSES = {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}
 
@@ -55,9 +54,12 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
 
 
 def _stream_event_error(message: str, *, provider: str, code: str | None, error_type: str | None) -> ProviderError:
-    """Classify an error event sent inside an already committed 200 stream."""
+    """Classify an error event sent inside an already committed 200 stream; a status in ``code`` counts as one."""
+    status = int(code) if code is not None and code.isdecimal() else None
+    if status in RATE_LIMIT_STATUSES:
+        return RateLimited(message, provider=provider, code=code)
     transient = (
-        (code is not None and code.isdecimal() and int(code) in _TRANSIENT_EVENT_STATUSES)
+        status in TRANSIENT_STATUSES
         or error_type in _TRANSIENT_ERROR_TYPES
         or (
             error_type == "api_error"

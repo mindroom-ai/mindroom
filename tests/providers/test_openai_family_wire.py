@@ -17,6 +17,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.structured import select_response_format
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
@@ -542,6 +543,45 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert info.value.retryable is retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "error_type", "user_message"),
+    [
+        (
+            {"message": "Rate limit exceeded: free-models-per-min", "code": 429},
+            RateLimited,
+            "⏱️ Rate limited. Please wait a moment and try again.",
+        ),
+        (
+            {"message": "Slow down", "code": 529},
+            RateLimited,
+            "⏱️ Rate limited. Please wait a moment and try again.",
+        ),
+        (
+            {"message": "Service Unavailable", "code": 503},
+            ProviderUnavailable,
+            "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly.",
+        ),
+    ],
+    ids=["429", "529", "503"],
+)
+async def test_a_rate_limit_error_event_inside_a_stream_reads_as_a_rate_limit(
+    tmp_path: Path,
+    error: dict[str, Any],
+    error_type: type[ProviderError],
+    user_message: str,
+) -> None:
+    """A stream's error event with a rate-limit code reads as a rate limit, as that HTTP status does."""
+    reply = _chat_reply({"data": {"error": error}})
+    built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
+
+    with pytest.raises(ProviderError) as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert get_user_friendly_error_message(info.value) == user_message
+    assert type(info.value) is error_type
 
 
 @pytest.mark.asyncio
