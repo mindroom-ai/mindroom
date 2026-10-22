@@ -190,7 +190,6 @@ def test_known_missing_live_members_fail_before_any_member_is_built() -> None:
         requested_agent_names=["general", "research"],
         builds=[],
         display_names=[],
-        materialized_agent_names=set(),
         failed_agent_names=["research"],
     )
     build_member.assert_not_called()

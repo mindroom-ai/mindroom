@@ -3201,7 +3201,6 @@ def _scripted_team(
         requested_agent_names=[member_id for member_id, _name, _model in members],
         builds=[],
         display_names=[name for _member_id, name, _model in members],
-        materialized_agent_names={member_id for member_id, _name, _model in members},
         failed_agent_names=[],
     )
     return resolved, BuiltTeam(spec=spec, leader_middleware=()), mode

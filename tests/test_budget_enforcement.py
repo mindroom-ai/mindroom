@@ -371,7 +371,6 @@ def _memberless_team() -> tuple[ResolvedExactTeamMembers, BuiltTeam, TeamMode]:
         requested_agent_names=[],
         builds=[],
         display_names=[],
-        materialized_agent_names=set(),
         failed_agent_names=[],
     )
     return members, BuiltTeam(spec=spec, leader_middleware=()), TeamMode.COORDINATE
