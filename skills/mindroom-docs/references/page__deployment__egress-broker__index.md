@@ -17,7 +17,7 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` and `python` call routed to a worker gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` and `python` call that an agent with the [`egress_credentials` tool](#agent-tool) routes to a worker gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
@@ -239,7 +239,7 @@ Many LAN services serve plain HTTP, which gets 403 `tls_required`, or a self-sig
 The broker reads the list for each request, so a change to `config.yaml` applies without a restart.
 
 > [!WARNING]
-> Under `unmatched_hosts: passthrough`, a listed range opens every port on every address in it to every agent that uses the broker, including the primary's own address in that range.
+> Under `unmatched_hosts: passthrough`, a listed range opens every port on every address in it to every agent with the [`egress_credentials` tool](#agent-tool), including the primary's own address in that range.
 > With Docker workers, a range that covers the `docker0` gateway (typically `172.17.0.1`) then reaches every port of the primary host, which the `docker0` firewall rule otherwise keeps closed.
 > On Kubernetes, a range that covers the pod or Service network lets workers reach whatever the primary pod can, which their NetworkPolicy otherwise blocks.
 > Under `unmatched_hosts: deny`, a listed range opens only the hosts and ports the services' rules name.
@@ -326,7 +326,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that can run commands and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell` or `python`) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -449,7 +449,9 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Add the `egress_credentials` tool to an agent so it can tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
+Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: only such agents' worker-routed `shell` and `python` calls go through the broker and get keys, and only they appear on the Agent Keys pages.
+An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
+The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 It replaces `agent_vault_access` for the native broker.
 
 ```yaml
@@ -632,6 +634,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 
 The broker runs in the primary, so Agent Vault's server, its init container, per-worker vaults, and CA ConfigMap have no replacement to deploy: each call carries its own token and CA, and keys live per worker scope in the primary's credential store.
 The `agent_vault_access` tool becomes `egress_credentials`, and the `accessGrants` Job becomes `administrators` and `agents.<name>.credential_managers` in config.
+Add `egress_credentials` to every agent whose commands should keep brokered credentials, because agents without it get none.
 
 Hosted instances never had Agent Vault, so they have nothing to migrate and only gain brokered credentials.
 
@@ -646,8 +649,10 @@ Each of these is a choice you make, so make it on purpose.
   Path tools that run in the primary process, such as `attachments` or `gmail`, can also open any file the primary can reach under `file_access: unrestricted`.
   Use a dedicated worker backend or a sandbox runner, keep `file_access` at `workspace`, and keep such tools off agents that should not see secrets.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.
-  It can also add [`private_networks`](#private-networks) that open your local network to every agent.
+  It can also add [`private_networks`](#private-networks) that open your local network to every agent that uses Agent Keys, and writing an agent's tools can give it the `egress_credentials` tool.
   Give config write access only to people and agents you would trust with every key.
+- **Agents with Agent Keys.** An agent with the [`egress_credentials` tool](#agent-tool) can send any request that the keys and connected accounts of its scope allow from its commands, with the account's full permissions and without the read-only limits or approvals of native tools such as `gmail` or `google_drive`.
+  Add the tool only to agents you would trust with those keys and accounts.
 - **Hosts that echo requests.** A host that sends the request back to the caller, such as a debug endpoint that echoes headers (`httpbin.org/headers`) or an error page with the full URL, hands the injected key to the agent.
   `query` auth is the most exposed, because a redirect `Location`, an error page, or a log line that echoes the URL can hand the key back; use it only for APIs that accept nothing else.
   The broker refuses `TRACE` and `TRACK`, which exist to echo requests, but it cannot see what other pages do, so add keys only for hosts you trust not to echo them.
@@ -669,10 +674,12 @@ Each of these is a choice you make, so make it on purpose.
 ## Troubleshooting
 
 **Workers time out when calling brokered services.** Check that the broker port is open on the interface workers reach it through (`docker0` for Docker workers, the broker Service for Kubernetes workers).
-Verify with `curl -v -x "$HTTPS_PROXY" https://example.com` from an agent's `shell` tool call, whose environment carries the broker URL and token.
+Verify with `curl -v -x "$HTTPS_PROXY" https://example.com` from the `shell` tool call of an agent with the [`egress_credentials` tool](#agent-tool), whose environment carries the broker URL and token.
 A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
+
+**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), so its calls get no broker environment; add the tool.
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.

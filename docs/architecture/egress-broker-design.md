@@ -67,6 +67,11 @@ The trade-off is that a single token cannot be revoked, only all of them at once
 Python `urllib` and Node `fetch` only send `Proxy-Authorization` when both the user name (the token) and the password are non-empty.
 The password is not a secret.
 
+**Agents opt in with the `egress_credentials` tool, not by having a shell.**
+Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
+The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
+A call without a configured agent gets no broker environment, because nothing shows that it opted in.
+
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.
