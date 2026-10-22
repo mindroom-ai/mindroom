@@ -979,6 +979,15 @@ async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
     assert all(request.url.path.startswith("/v1/projects/adc-project/locations/us-east5/") for request in wire.requests)
 
 
+# What google-auth's requests transport reports when the token endpoint cannot be reached.
+_REQUESTS_OAUTH_HOST_FAILURE = (
+    "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token "
+    '(Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7f0>: '
+    "Failed to resolve 'oauth2.googleapis.com' ([Errno -3] Temporary failure in name resolution)\"))"
+)
+_UNAVAILABLE_FINAL_MESSAGE = "⚠️ Model provider temporarily unavailable after automatic retries"
+
+
 class _RefreshFailingCredentials(Credentials):
     """Credentials whose token refresh fails the way google-auth reports it."""
 
@@ -992,13 +1001,34 @@ class _RefreshFailingCredentials(Credentials):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("failure", "expected", "status_code"),
+    ("failure", "expected", "status_code", "final_message"),
     [
-        (google.auth.exceptions.TransportError("token endpoint unreachable"), ProviderUnavailable, None),
-        (google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True), ProviderUnavailable, None),
-        (google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."), ProviderError, 401),
+        (
+            google.auth.exceptions.TransportError("token endpoint unreachable"),
+            ProviderUnavailable,
+            None,
+            _UNAVAILABLE_FINAL_MESSAGE,
+        ),
+        (
+            google.auth.exceptions.TransportError(_REQUESTS_OAUTH_HOST_FAILURE),
+            ProviderUnavailable,
+            None,
+            _UNAVAILABLE_FINAL_MESSAGE,
+        ),
+        (
+            google.auth.exceptions.RefreshError("temporarily_unavailable", retryable=True),
+            ProviderUnavailable,
+            None,
+            _UNAVAILABLE_FINAL_MESSAGE,
+        ),
+        (
+            google.auth.exceptions.RefreshError("invalid_grant: Invalid JWT Signature."),
+            ProviderError,
+            401,
+            "❌ Authentication failed",
+        ),
     ],
-    ids=["transport", "retryable-refresh", "rejected-credentials"],
+    ids=["transport", "transport-requests-message", "retryable-refresh", "rejected-credentials"],
 )
 async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     tmp_path: Path,
@@ -1006,8 +1036,12 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     failure: Exception,
     expected: type[ProviderError],
     status_code: int | None,
+    final_message: str,
 ) -> None:
-    """A network failure while minting the Vertex token is retryable; rejected credentials report as such."""
+    """A network failure while minting the Vertex token is retryable and ends as temporary unavailability.
+
+    Rejected credentials end as an authentication failure.
+    """
     monkeypatch.setattr(google.auth, "default", lambda scopes: (_RefreshFailingCredentials(failure), "adc-project"))  # noqa: ARG005
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
@@ -1025,8 +1059,7 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     assert raised.value.status_code == status_code
     assert raised.value.__cause__ is failure
     assert wire.requests == []
-    if status_code == 401:
-        assert "Authentication failed" in get_user_friendly_error_message(raised.value)
+    assert get_user_friendly_error_message(raised.value).startswith(final_message)
 
 
 @pytest.mark.asyncio

@@ -177,8 +177,11 @@ def get_user_friendly_error_message(  # noqa: PLR0911
             f"{agent_prefix}⚠️ The conversation no longer fits the model's context window. "
             "Start a new thread or compact the conversation, then try again."
         )
+    # A typed transient or rate-limit error is decided by its type, not its wording: the provider's or the
+    # network's text can hold a keyword that means something else, such as "auth" in oauth2.googleapis.com.
+    keyword_text = "" if isinstance(error, RateLimited | ProviderUnavailable) else error_str
     # Only distinguish the most important error types
-    if any(x in error_str for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]) or (
+    if any(x in keyword_text for x in ["401", "auth", "unauthorized", "api key", "api_key", "apikey"]) or (
         isinstance(error, ProviderError) and error.status_code in {401, 403}
     ):
         provider = _extract_provider_from_error(error)
@@ -186,7 +189,7 @@ def get_user_friendly_error_message(  # noqa: PLR0911
         return f"{agent_prefix}❌ Authentication failed{provider_hint}: {safe_error}"
     if (
         isinstance(error, RateLimited)
-        or any(x in error_str for x in ["rate", "429", "quota"])
+        or any(x in keyword_text for x in ["rate", "429", "quota"])
         or _has_provider_status(error, 429)
     ):
         return f"{agent_prefix}⏱️ Rate limited. Please wait a moment and try again."

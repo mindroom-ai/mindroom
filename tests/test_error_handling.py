@@ -16,7 +16,7 @@ from mindroom.error_handling import (
     is_model_safeguard_refusal,
     minimal_mode_failure_message,
 )
-from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
+from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.providers.openai.errors import missing_api_key_error
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
@@ -110,6 +110,61 @@ def test_typed_rate_limit_error_uses_status_code() -> None:
 
     assert "Rate limited" in message
     assert "temporarily unavailable" not in message
+
+
+_PROVIDER_UNAVAILABLE_MESSAGE = (
+    "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+)
+_RATE_LIMITED_MESSAGE = "⏱️ Rate limited. Please wait a moment and try again."
+# How the requests transport starts its report when the Google sign-in host cannot be reached.
+_OAUTH_HOST_UNREACHABLE = (
+    "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token"
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code="connection_error"),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-host-name-holds-auth",
+        ),
+        pytest.param(
+            ProviderUnavailable("upstream replied 401 from the gateway", provider="OpenAI", status_code=503),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-wording-holds-401",
+        ),
+        pytest.param(
+            ProviderUnavailable("failed to generate a response", provider="OpenAI", status_code=500),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-wording-holds-rate",
+        ),
+        pytest.param(
+            RateLimited("oauth2 gateway throttled the request", provider="OpenAI", status_code=429),
+            _RATE_LIMITED_MESSAGE,
+            id="rate-limited-wording-holds-auth",
+        ),
+        pytest.param(
+            ProviderError("Permission denied", provider="OpenAI", status_code=403),
+            "❌ Authentication failed (OpenAI): Permission denied",
+            id="typed-403",
+        ),
+        pytest.param(
+            ProviderError("Credentials were rejected", provider="VertexAI", status_code=401),
+            "❌ Authentication failed (VertexAI): Credentials were rejected",
+            id="typed-401",
+        ),
+        pytest.param(
+            Exception(_OAUTH_HOST_UNREACHABLE),
+            f"❌ Authentication failed: {_OAUTH_HOST_UNREACHABLE}",
+            id="untyped-keeps-keywords",
+        ),
+    ],
+)
+def test_typed_provider_errors_are_decided_by_type_before_keywords(error: Exception, expected: str) -> None:
+    """A typed transient, rate-limit, or 401/403 error picks its message by type; untyped errors match keywords."""
+    assert get_user_friendly_error_message(error) == expected
 
 
 def test_overloaded_provider_error_is_user_friendly() -> None:
