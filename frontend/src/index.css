@@ -138,7 +138,7 @@
     background: hsl(var(--secondary));
   }
 
-  .glass-input:hover {
+  .glass-input:hover:not(:disabled):not([readonly]) {
     border-color: hsl(var(--muted-foreground) / 0.55);
   }
 

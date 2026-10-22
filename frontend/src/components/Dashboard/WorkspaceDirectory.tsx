@@ -104,7 +104,7 @@ function WorkspaceDirectorySkeleton() {
         </div>
         <Skeleton className="h-9 w-32" />
       </div>
-      <div className="workspace-surface overflow-hidden rounded-xl border border-border bg-card">
+      <div className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="flex gap-2 border-b border-border p-3">
           <Skeleton className="h-9 flex-1" />
           <Skeleton className="h-9 w-28" />
@@ -535,7 +535,7 @@ export function WorkspaceDirectory() {
         </Button>
       </header>
 
-      <section className="workspace-surface overflow-hidden rounded-xl border border-border bg-card">
+      <section className="overflow-hidden rounded-xl border border-border bg-card">
         <div className="flex flex-col gap-2 border-b border-border p-3 sm:flex-row">
           <label className="relative min-w-0 flex-1">
             <span className="sr-only">Search workspace</span>

@@ -81,25 +81,11 @@ export function FilterSelector({
             {option.icon
               ? option.icon
               : (showFilterIcon || option.showIcon) && (
-                  <Filter
-                    className={cn(
-                      "w-3.5 h-3.5",
-                      isSelected(option.value) && "text-foreground",
-                    )}
-                  />
+                  <Filter className="h-3.5 w-3.5" />
                 )}
             {option.label}
             {option.count !== undefined && (
-              <span
-                className={cn(
-                  "inline-flex items-center justify-center",
-                  "min-w-[1.25rem] h-5 px-1 rounded-full",
-                  "text-xs font-medium",
-                  isSelected(option.value)
-                    ? "bg-foreground/[0.07] text-foreground"
-                    : "bg-foreground/[0.07] text-muted-foreground",
-                )}
-              >
+              <span className="inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-foreground/[0.07] px-1 text-xs font-medium">
                 {option.count}
               </span>
             )}

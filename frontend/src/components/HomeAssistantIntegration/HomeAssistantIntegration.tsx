@@ -323,7 +323,7 @@ export function HomeAssistantIntegration({
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Home className="h-5 w-5 text-muted-foreground" />
+                <Home className="h-5 w-5" />
                 <CardTitle>Connection Status</CardTitle>
               </div>
               <Badge className="bg-green-500/10 text-green-700 dark:text-green-300">
@@ -640,7 +640,7 @@ export function HomeAssistantIntegration({
             </div>
             <div className="space-y-2">
               <h4 className="font-medium flex items-center gap-2">
-                <Thermometer className="h-4 w-4 text-muted-foreground" />
+                <Thermometer className="h-4 w-4" />
                 Climate Control
               </h4>
               <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1 ml-6">

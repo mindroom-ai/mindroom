@@ -137,7 +137,8 @@
   color: hsl(var(--muted-foreground));
 }
 .home-partial {
-  color: hsl(var(--primary));
+  color: hsl(var(--foreground));
+  font-weight: 500;
 }
 .home-report-date {
   margin-top: 3px;
