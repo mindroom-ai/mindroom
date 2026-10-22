@@ -16,6 +16,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
+from mindroom.participation import ParticipationGate
 from mindroom.tool_jobs.background_after import BACKGROUND_AFTER_SCHEMA
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution import project_definitions, wait_mode
@@ -115,6 +116,32 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
         control_schema = offered["job"].parameters
         assert control_schema == controls["job"].function.parameters
         assert "background_after" not in control_schema["properties"]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_the_participation_decision_offers_the_wait_budget_the_reply_offers(tmp_path: Path) -> None:
+    """The job definitions project before the participation gate decides, so the decision sends the reply's tools.
+
+    The decision is the reply's request plus the decision prompt, so with job starts enabled both carry the
+    optional ``background_after`` of the actor's managed function.
+    """
+
+    def application(value: str) -> str:
+        return value
+
+    context, runtime = await _managed_context(tmp_path)
+    actor = job_actor(job_tool(application))
+    model = ScriptedModel([answer('{"action":"respond","reason":"Asked to start."}'), answer("done")])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                await run_job_turn(actor, model, participation=ParticipationGate())
+        decision, reply = model.requests
+        assert decision.tools == reply.tools
+        [schema] = reply.tools
+        assert schema.parameters["properties"]["background_after"] == BACKGROUND_AFTER_SCHEMA
     finally:
         await runtime.shutdown()
 

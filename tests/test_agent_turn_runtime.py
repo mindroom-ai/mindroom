@@ -896,7 +896,10 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Participation decides first and compaction rewrites next; a fresh reply has no receipt; the rest is wired."""
+    """Without a job actor, participation decides first and compaction rewrites next; a fresh reply has no receipt.
+
+    The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
+    """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
     original = ai.run_agent

@@ -37,6 +37,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.participation_hook import participation_hook
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
     from mindroom.llm.provider import ModelProvider
+    from mindroom.participation import ParticipationGate
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -341,6 +343,7 @@ def _job_turn(
     store: ConversationStore | None,
     generated: tuple[ToolFunction, ...],
     middleware: tuple[ToolMiddleware, ...],
+    participation: ParticipationGate | None = None,
 ) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
     functions = (*(tool.function for tool in actor.tools.values()), *generated)
     spec = AgentSpec(
@@ -351,7 +354,11 @@ def _job_turn(
         toolkits=(AdaptedToolkit(name="tools", functions=functions, instructions=None),),
     )
     hooks = LoopHooks(
-        before_request=(job_definitions_hook(actor),),
+        # The job definitions project before the participation gate decides, as an agent's turn installs them.
+        before_request=(
+            job_definitions_hook(actor),
+            *((participation_hook(participation, model),) if participation is not None else ()),
+        ),
         tool_middleware=with_job_admission(actor, middleware),
         after_tool_batch=(job_notice_hook(actor.name),),
     )
@@ -375,12 +382,14 @@ async def run_job_turn(
     store: ConversationStore | None = None,
     generated: tuple[ToolFunction, ...] = (),
     middleware: tuple[ToolMiddleware, ...] = (),
+    participation: ParticipationGate | None = None,
 ) -> RunRecord:
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
     reply does. ``generated`` are functions the framework offers beside the actor's assembled ones, which never
-    become jobs.
+    become jobs. ``participation`` gates the reply as an agent's turn does, deciding after the job definitions
+    project.
     """
     spec, hooks, session, persist = _job_turn(
         actor,
@@ -390,6 +399,7 @@ async def run_job_turn(
         store=store,
         generated=generated,
         middleware=middleware,
+        participation=participation,
     )
     run = RunContext(run_id=run_id, session_id=session_id, session_state=session.session_state)
     events = run_agent(spec, [Message(role="user", content=prompt)], ctx=run, hooks=hooks, persist=persist)
