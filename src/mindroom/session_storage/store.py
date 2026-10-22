@@ -11,7 +11,7 @@ import copy
 import json
 import sqlite3
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import time
 from typing import TYPE_CHECKING, Any, cast
@@ -154,6 +154,7 @@ class ConversationStore:
             user_id=user_id,
             metadata=_decoded_mapping(metadata),
             session_state=_session_state(session_data),
+            stored_session_state=_session_state(session_data),
             runs=runs,
             summary=summary,
             created_at=created_at,
@@ -232,26 +233,44 @@ class ConversationStore:
         _reconcile(session, saved)
 
     def save_session_fields(self, session: ConversationSession, *fields: SessionField) -> None:
-        """Write the named fields of ``session`` to its row, creating the row if needed, and leave the rest alone."""
+        """Write the named fields of ``session`` to its row, creating the row if needed, and leave the rest alone.
+
+        Writing ``session_state`` records a copy of it as ``session.stored_session_state``.
+        """
+        state = copy.deepcopy(session.session_state) if "session_state" in fields else None
+        self._save_fields(session, metadata="metadata" in fields, state=state)
+
+    def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
+        """Write ``state`` as the session's ``session_state`` and record it as ``session.stored_session_state``.
+
+        ``state`` is a copy of ``session.session_state`` its caller took and hands over: a save in the database's lane
+        takes it before the lane is awaited, because the run's tools change the session's own state in place meanwhile.
+        """
+        self._save_fields(session, metadata=False, state=state)
+
+    def _save_fields(self, session: ConversationSession, *, metadata: bool, state: dict[str, Any] | None) -> None:
+        """Write ``session``'s metadata when asked and ``state`` when given, creating the row if needed."""
         names = self.names
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, names, session)
             assignments: list[str] = ["updated_at = ?"]
             values: list[object] = [int(time())]
-            if "metadata" in fields:
+            if metadata:
                 assignments.append("metadata = ?")
                 values.append(_json_or_null(session.metadata))
-            if "session_state" in fields:
+            if state is not None:
                 (stored,) = connection.execute(
                     f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
                     (session.session_id,),
                 ).fetchone()
                 assignments.append("session_data = ?")
-                values.append(json.dumps({**(_decoded_mapping(stored) or {}), "session_state": session.session_state}))
+                values.append(json.dumps({**(_decoded_mapping(stored) or {}), "session_state": state}))
             connection.execute(
                 f"UPDATE {quote_identifier(names.sessions)} SET {', '.join(assignments)} WHERE session_id = ?",  # noqa: S608
                 (*values, session.session_id),
             )
+        if state is not None:
+            session.stored_session_state = state
 
     def delete_run_subtrees(
         self,
@@ -442,13 +461,12 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
     The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
-    before the lane is awaited, so what lands is what was handed over. The state is written back by field when it
-    differs from the latest state this callback wrote (at first, what the session held when the callback was made),
-    after the record and in the same lane, so a turn whose runs change the state and restore it stores it restored.
+    before the lane is awaited, so what lands is what was handed over. The state is written back when it differs
+    from ``session.stored_session_state``, which every write of the field records, after the record and in the same
+    lane, so a turn whose runs or checkpoints change the state and restore it stores it restored.
     The save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's
     saves run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
     """
-    stored_state = copy.deepcopy(session.session_state)
 
     async def persist(record: AnyRunRecord) -> None:
         data = record.to_dict()
@@ -456,11 +474,9 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
         state = copy.deepcopy(session.session_state)
 
         def operation(opened: ConversationStore) -> None:
-            nonlocal stored_state
             opened._save_run_dict(session, data, row_type=row_type, record_usage=True)
-            if state != stored_state:
-                opened.save_session_fields(replace(session, session_state=state), "session_state")
-                stored_state = state
+            if state != session.stored_session_state:
+                opened.save_session_state(session, state)
 
         await run_session_storage_operation(lambda: store, operation)
 

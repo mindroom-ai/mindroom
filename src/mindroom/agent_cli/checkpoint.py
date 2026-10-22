@@ -153,10 +153,11 @@ async def save_cli_session(
     if store is None:
         msg = "CLI history requires persisted session storage"
         raise RuntimeError(msg)
-    saved = replace(session, session_state=deepcopy(dict(session_state)))
+    state = deepcopy(dict(session_state))
+    saved = replace(session, session_state=state)
 
     def operation(opened: ConversationStore) -> None:
-        opened.save_session_fields(saved, "session_state")
+        opened.save_session_state(session, state)
         write(opened, saved)
 
     await run_session_storage_operation(lambda: store, operation)
