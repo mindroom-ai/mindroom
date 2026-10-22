@@ -80,6 +80,13 @@ def adapt_function(function: Function) -> ToolFunction:
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
+    if function.pre_hook is not None or function.post_hook is not None or function.tool_hooks:
+        # Rejected rather than dropped: such a hook may be a policy gate the tool's author relies on.
+        msg = (
+            f"Tool function {function.name!r} sets an Agno pre_hook, post_hook, or tool_hooks, which MindRoom does not"
+            " run; move that logic into the tool or a `tool:before_call` / `tool:after_call` hook"
+        )
+        raise ValueError(msg)
     prepared = function.model_copy(deep=False)
     prepared.parameters = deepcopy(function.parameters)
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.

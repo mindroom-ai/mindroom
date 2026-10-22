@@ -100,6 +100,27 @@ def test_adapting_leaves_the_shared_function_untouched() -> None:
     assert adapted.parameters["required"] == ["count", "ratio", "enabled", "label"]
 
 
+def _noop_hook(*_args: object, **_kwargs: object) -> None:
+    return None
+
+
+def _lookup(city: str) -> str:
+    return city
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [{"pre_hook": _noop_hook}, {"post_hook": _noop_hook}, {"tool_hooks": [_noop_hook]}],
+    ids=["pre_hook", "post_hook", "tool_hooks"],
+)
+def test_functions_with_agno_hooks_are_rejected_instead_of_running_without_them(hooks: dict[str, Any]) -> None:
+    """MindRoom does not run Agno's per-function hooks, so a tool that sets one fails loudly when adapted."""
+    function = Function(name="lookup", entrypoint=_lookup, **hooks)
+
+    with pytest.raises(ValueError, match=r"'lookup' sets an Agno pre_hook, post_hook, or tool_hooks"):
+        adapt_function(function)
+
+
 def test_async_variants_replace_sync_functions_in_place() -> None:
     """An async run uses the async variant of a name in the sync function's slot, then the async-only functions."""
 
