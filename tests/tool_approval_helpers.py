@@ -29,26 +29,3 @@ def gated_functions(
         approvals_as_jobs=approvals_as_jobs,
     )
     return {function.name: function for function in adapted.functions}
-
-
-def with_agno_approval_flags(
-    toolkit: Toolkit,
-    config: Config,
-    *,
-    registered_tool_name: str | None = None,
-    approvals_as_jobs: bool = False,
-) -> Toolkit:
-    """Copy those flags onto ``toolkit``'s Agno functions, for the runners that still dispatch Agno functions."""
-    gated = gated_functions(
-        toolkit,
-        config,
-        registered_tool_name=registered_tool_name,
-        approvals_as_jobs=approvals_as_jobs,
-    )
-    for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
-        flagged = gated[function.name]
-        function.requires_confirmation = flagged.requires_confirmation
-        function.approval_type = flagged.approval_type
-        function.external_execution = flagged.external_execution
-        function.external_execution_silent = flagged.external_execution_silent
-    return toolkit

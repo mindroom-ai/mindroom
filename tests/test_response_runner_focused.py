@@ -188,6 +188,7 @@ from tests.response_runner_helpers import (
     _plain_request,
     _target,
 )
+from tests.scripted_agent_helpers import install_agent_model
 from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
@@ -198,7 +199,7 @@ from tests.test_response_turn import (
     _model_switch_execution,
     _streaming_adapter,
 )
-from tests.tool_approval_helpers import with_agno_approval_flags
+from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
@@ -4079,7 +4080,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
 
 @pytest.mark.asyncio
 async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Path) -> None:
-    """The synthetic Agno pause marker must not turn an exempt policy call into human approval."""
+    """The policy gate's confirmation flag must not turn an exempt policy call into human approval."""
     register_tool_approval_exemption("synthetic_exempt", lambda arguments: arguments.get("dry_run") is True)
     bot = _bot(tmp_path)
     bot.config.tool_approval = bot.config.tool_approval.model_copy(update={"default": "require_approval"})
@@ -4088,8 +4089,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         name="approval-test",
         tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
     )
-    with_agno_approval_flags(toolkit, bot.config)
-    function = toolkit.functions["synthetic_exempt"]
+    function = gated_functions(toolkit, bot.config)["synthetic_exempt"]
     tool = ToolExecution(
         tool_call_id="call-exempt",
         tool_name=function.name,
@@ -4117,7 +4117,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -> None:
-    """An exact-call script decision remains authoritative after Agno pauses a potentially gated tool."""
+    """An exact-call script decision remains authoritative after the policy gate pauses a potentially gated tool."""
     script_path = tmp_path / "approval.py"
     script_path.write_text(
         "def check(tool_name, arguments, agent_name):\n    return arguments['requires_approval']\n",
@@ -4139,8 +4139,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         name="approval-test",
         tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
     )
-    with_agno_approval_flags(toolkit, bot.config)
-    function = toolkit.functions["scripted_tool"]
+    function = gated_functions(toolkit, bot.config)["scripted_tool"]
     tool = ToolExecution(
         tool_call_id="call-script",
         tool_name=function.name,
@@ -8544,6 +8543,7 @@ class _RecordedSkillReviews:
 
 async def _respond_with_skill_learning(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     request_update: Callable[[ResponseRequest], ResponseRequest] = lambda request: request,
     *,
     streaming: bool = False,
@@ -8557,12 +8557,10 @@ async def _respond_with_skill_learning(
     reviews = _RecordedSkillReviews(fail=fail)
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
     model = ScriptedModel([answer("The scripted answer to the request.")])
-    with (
-        patch("mindroom.agents._build_agent_model_provider", return_value=model),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing,
-            should_use_streaming=AsyncMock(return_value=streaming),
-        ),
+    install_agent_model(monkeypatch, model)
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing,
+        should_use_streaming=AsyncMock(return_value=streaming),
     ):
         await coordinator.generate_response(request_update(_plain_request(_target())))
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
@@ -8573,11 +8571,13 @@ async def _respond_with_skill_learning(
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill_reviews(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
 ) -> None:
     """Both response drivers stop the conversation's review, then count the completed run with its final request."""
     reviews, model, _send = await _respond_with_skill_learning(
         tmp_path,
+        monkeypatch,
         lambda request: replace(request, correlation_id="$correlation"),
         streaming=streaming,
     )
@@ -8598,7 +8598,11 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("requested_by", ["a schedule", "a hook", "another agent", "a job follow-up"])
-async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_path: Path, requested_by: str) -> None:
+async def test_turns_no_person_asked_for_never_count_toward_skill_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_by: str,
+) -> None:
     """Like cron runs in Hermes, automation, agent requests, and job follow-ups have no person to learn from."""
 
     def update(request: ResponseRequest) -> ResponseRequest:
@@ -8636,15 +8640,18 @@ async def test_turns_no_person_asked_for_never_count_toward_skill_review(tmp_pat
         )
         return replace(request, response_envelope=replace(envelope, origin=origin))
 
-    reviews, _model, send = await _respond_with_skill_learning(tmp_path, update)
+    reviews, _model, send = await _respond_with_skill_learning(tmp_path, monkeypatch, update)
     send.assert_awaited()
     assert reviews.counted == []
 
 
 @pytest.mark.asyncio
-async def test_a_failing_skill_review_count_never_fails_the_reply(tmp_path: Path) -> None:
+async def test_a_failing_skill_review_count_never_fails_the_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skill learning is background bookkeeping, so a failed count must not cost the user their answer."""
-    _reviews, _model, send = await _respond_with_skill_learning(tmp_path, fail=True)
+    _reviews, _model, send = await _respond_with_skill_learning(tmp_path, monkeypatch, fail=True)
     send.assert_awaited()
 
 
@@ -8659,7 +8666,10 @@ class _RecordedAutomations:
 
 
 @pytest.mark.asyncio
-async def test_a_finished_response_tells_automations_its_source_events(tmp_path: Path) -> None:
+async def test_a_finished_response_tells_automations_its_source_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An automation prompt's verify step waits for the response whose source is that prompt."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -8668,13 +8678,11 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
     automations = _RecordedAutomations()
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
     model = ScriptedModel([answer("The scripted answer to the request.")])
+    install_agent_model(monkeypatch, model)
     request = _plain_request(_target())
-    with (
-        patch("mindroom.agents._build_agent_model_provider", return_value=model),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing,
-            should_use_streaming=AsyncMock(return_value=False),
-        ),
+    with patch_response_runner_module(
+        typing_indicator=_noop_typing,
+        should_use_streaming=AsyncMock(return_value=False),
     ):
         await coordinator.generate_response(request)
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
