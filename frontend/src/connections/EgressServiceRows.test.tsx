@@ -1960,71 +1960,52 @@ describe("what a row says about how the key is sent", () => {
     expect(screen.queryByText(/Requests are refused/)).toBeNull();
   });
 
-  it.each<
-    [
-      string,
-      Partial<EgressOAuthStatus>,
-      Partial<EgressCredentialService>,
-      string,
-    ]
-  >([
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
     [
       "an account to connect",
       {},
-      {},
-      "Requests are refused until you connect an account or set a key.",
+      "Requests are refused until a key is set or an account is connected.",
     ],
     [
       "a connected account only its tools use",
       { connected: true, account_label: "octocat", reuse_enabled: false },
-      {},
-      "Requests are refused until you use this account or set a key.",
-    ],
-    [
-      "a service account with a personal connection to allow",
-      {
-        connected: true,
-        account_label: "octocat",
-        reuse_enabled: false,
-        service_account: true,
-      },
-      {},
-      "Requests are refused until you use this account or set a key.",
-    ],
-    [
-      "a connection that needs a reset",
-      { connected: true, account_label: "octocat", reset_required: true },
-      {},
-      "Requests are refused until you reset the connection or set a key.",
-    ],
-    [
-      "an account the sandbox refuses",
-      { unavailable_reason: "shared_sandbox" },
-      {},
-      "Requests are refused until a key is set.",
-    ],
-    [
-      "an account nobody here can connect",
-      { can_connect: false },
-      {},
-      "Requests are refused until a key is set.",
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
     ],
     [
       "a connected account the viewer cannot allow",
       {
-        connected: true,
-        account_label: "octocat",
-        reuse_enabled: false,
+        ...{ connected: true, account_label: "octocat", reuse_enabled: false },
         can_connect: false,
       },
-      { can_manage: false },
+      "Requests are refused until a key is set or this account is used for Agent Keys.",
+    ],
+    [
+      "a connection that needs a reset",
+      { connected: true, account_label: "octocat", reset_required: true },
+      "Requests are refused until a key is set or an account is connected.",
+    ],
+    [
+      "an account that cannot be connected here",
+      { can_connect: false },
       "Requests are refused until a key is set.",
     ],
-  ])("names %s as a way to stop refusals", (_, account, changes, note) => {
+    [
+      "an account the sandbox refuses",
+      { unavailable_reason: "shared_sandbox", can_connect: false },
+      "Requests are refused until a key is set.",
+    ],
+    [
+      "a service account Agent Keys cannot use",
+      {
+        ...{ connected: true, account_label: "octocat", reuse_enabled: false },
+        service_account: true,
+      },
+      "Requests are refused until a key is set.",
+    ],
+  ])("states what stops refusals for %s", (_, account, note) => {
     renderRows([
       custom([rule("api.github.com", "bearer")], {
         oauth: { ...githubAccount, ...account },
-        ...changes,
       }),
     ]);
     expect(within(row("httpbin.org")).getByText(note)).toBeVisible();

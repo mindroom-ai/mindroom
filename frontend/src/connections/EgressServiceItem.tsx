@@ -163,6 +163,7 @@ export function EgressServiceItem({
   // Everyone using a shared agent acts as the account connected there.
   const asksAboutSharedAccount = sharesAccount(agent, oauth);
   const limitedText = limitedNote(service);
+  const unsetText = unsetNote(service);
   const limitActions = useLimitActions(
     limit,
     service.display_name,
@@ -280,21 +281,6 @@ export function EgressServiceItem({
     !reuseEnabled &&
     !oauth.reset_required &&
     !service.key_configured;
-  // The account button that also stops refusals, where Agent Keys can use that account.
-  const accountUsable =
-    oauth !== null &&
-    oauth.unavailable_reason === null &&
-    !oauth.service_account;
-  const unsetText = unsetNote(
-    service,
-    canUseAccount
-      ? "use"
-      : accountUsable && canConnect
-        ? "connect"
-        : accountUsable && oauth.reset_required && canResetAccount
-          ? "reset"
-          : null,
-  );
   const keyActions = canManageKey && service.key_configured && !editing;
   // A key is the main action when there is no account to connect instead.
   const setKeyFirst =

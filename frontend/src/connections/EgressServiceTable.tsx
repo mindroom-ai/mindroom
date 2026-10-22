@@ -33,7 +33,7 @@ export function EgressServiceTable({
   children: ReactNode;
 }) {
   return (
-    <div className="overflow-x-auto">
+    <div className="@container overflow-x-auto">
       <table
         aria-label={label}
         // Fixed widths, so a long description or button cannot starve the status column.
@@ -52,7 +52,11 @@ export function EgressServiceTable({
             <th scope="col" className="w-[26%] px-4 py-3 font-medium">
               Status
             </th>
-            <th scope="col" className="w-56 px-5 py-3 text-right font-medium">
+            {/* Narrower in a narrow table, such as the dashboard's panel, so Service keeps room. */}
+            <th
+              scope="col"
+              className="w-44 px-5 py-3 text-right font-medium @3xl:w-56"
+            >
               Actions
             </th>
           </tr>
@@ -81,7 +85,7 @@ export function ServiceGroupHeading({ label }: { label: string }) {
 /** A host, variable, or header name, set apart as code; it wraps only when wider than its cell. */
 function Code({ children }: { children: ReactNode }) {
   return (
-    <code className="inline-block max-w-full break-words rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground">
+    <code className="inline-block max-w-full rounded bg-muted px-1 py-px font-mono text-[0.95em] text-foreground wrap-anywhere">
       {children}
     </code>
   );
@@ -189,9 +193,7 @@ export function AgentSees({ service }: { service: EgressCredentialService }) {
               {index > 0 && ", "}
               <Code>
                 {breakAfterUnderscores(name)}=<wbr />
-                <span className="whitespace-nowrap">
-                  {BROKERED_PLACEHOLDER}
-                </span>
+                {BROKERED_PLACEHOLDER}
               </Code>
             </Fragment>
           ))}
