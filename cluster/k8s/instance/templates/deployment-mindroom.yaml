@@ -100,10 +100,12 @@ spec:
               find "${STORAGE}/tracking" \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) \
                 -prune -exec rm -rf {} +
             fi
-            # Sandbox tool code can write agents/, so this matches only agents/<agent>/<record> and follows no links.
+            # Sandbox tool code can write agents/, so this matches only agents/<agent>/<record>, follows no links, and
+            # skips what it cannot read, as the startup migration does, instead of holding the pod in Init.
             if [ -d "${STORAGE}/agents" ]; then
               find "${STORAGE}/agents" -mindepth 2 -maxdepth 2 \
-                \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) -exec rm -rf {} +
+                \( -name personal_rooms -o -name invited_rooms.json -o -name pending_room_invites.json \) -exec rm -rf {} + \
+                || true
             fi
             touch "${STORAGE}/.homeserver-tuwunel"
           fi

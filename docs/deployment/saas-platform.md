@@ -289,6 +289,8 @@ Tenant homeservers run MindRoom's Tuwunel fork, `ghcr.io/mindroom-ai/mindroom-tu
 Set them there to pin or upgrade Tuwunel; the script keeps them across releases, and each instance switches when it is re-provisioned.
 An instance that still runs Synapse gets an empty Tuwunel server on its first re-provision.
 That deletes the instance's Matrix accounts, rooms, messages, uploaded files, and scheduled tasks, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
+Signed [external triggers](../external-triggers.md) name their room by ID, so they stop delivering and must be created again.
+Paired MindRoom Desktop computers stop, because the agents get new Matrix devices, and each must be set up again from a new storage path, as for changing the cloud controller under [Desktop operations](../tools/desktop.md#operations).
 Deploy the first release with Tuwunel using `--instances all`, so held and manually stopped instances switch too, and re-provision any instance left in another status, such as `error`, with `--instances <id>`.
 The switch cannot be rolled back: deploying an earlier release replaces each Tuwunel server with an empty Synapse server that the instances cannot start against, and switching forward again needs `.homeserver-tuwunel` deleted from each instance's MindRoom volume first.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.

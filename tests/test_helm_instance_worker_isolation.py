@@ -602,7 +602,13 @@ def test_instance_chart_reset_keeps_pre_move_room_records_from_coming_back(tmp_p
     (storage / "agents" / "linked").symlink_to(storage / "credentials")
     (storage / "agents" / "router" / "notes").mkdir()
     (storage / "agents" / "router" / "notes" / "invited_rooms.json").write_text("kept\n")
-    _run_reset(_reset_container(), storage)
+    # An entry the reset cannot read is skipped, as the startup migration skips it, so the pod still starts.
+    (storage / "agents" / "unreadable").mkdir(mode=0)
+    try:
+        _run_reset(_reset_container(), storage)
+    finally:
+        (storage / "agents" / "unreadable").chmod(0o700)
+    assert (storage / ".homeserver-tuwunel").exists()
 
     assert migrated(storage) == []
     assert (storage / "credentials" / "invited_rooms.json").read_text() == "kept\n"
