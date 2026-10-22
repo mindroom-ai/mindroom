@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameter_names
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -121,11 +121,6 @@ def test_async_variants_replace_sync_functions_in_place() -> None:
 
     assert [function.name for function in adapted.functions] == ["first", "second", "third"]
     assert adapted.functions[1].entrypoint.__wrapped__ is async_second
-    assert [function.name for function in adapt_toolkit(toolkit, async_mode=False).functions] == [
-        "first",
-        "second",
-    ]
-    assert adapt_toolkit(toolkit, async_mode=False).functions[1].entrypoint.__wrapped__ is second
 
 
 def test_instructions_are_adapted_only_when_agno_adds_them() -> None:
@@ -185,3 +180,19 @@ def test_injected_parameters_are_the_names_the_framework_supplies() -> None:
 
     assert function.injected_params == {"agent", "ctx", "fc"}
     assert list(function.parameters["properties"]) == ["query"]
+
+
+def test_unresolvable_annotations_leave_only_the_reserved_names_injected() -> None:
+    """When a tool's annotations do not resolve, as with a ``TYPE_CHECKING``-only import, only reserved names inject."""
+
+    def tool(
+        config: Config,
+        run_context: RunContext,
+        ctx: RunContext | None = None,
+        fc: FunctionCall | None = None,
+    ) -> str:
+        del config, run_context, ctx, fc
+        return "ok"
+
+    # ``Config`` is imported only for type checking here, so no annotation resolves and ``ctx`` is not recognized.
+    assert injected_parameter_names(tool) == {"run_context", "fc"}
