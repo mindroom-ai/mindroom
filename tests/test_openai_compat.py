@@ -69,6 +69,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
@@ -83,7 +84,7 @@ from mindroom.routing import ResponderSelection
 from mindroom.teams import envelope
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
-from mindroom.teams.runtime import MemberEvent, MemberRunEnded
+from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
@@ -3465,41 +3466,36 @@ class TestTeamCompletion:
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
     def test_team_non_streaming_is_the_blocking_team_document(self, team_app_client: TestClient) -> None:
-        """The completion is the document a blocking Matrix reply delivers, as Agno's blocking team reply was.
+        """The completion is the document a blocking Matrix reply delivers, rendered from the runs that ended.
 
-        The members come in the order they finished, a member's text joins across its hidden tool call with no marker
-        or gap, and the consensus follows: main's ``format_team_response`` rendered ``member_responses`` and the
-        content this way, and API clients replay the text as history.
+        The members come in the order their runs ended: one that failed before any text shows its error, and one
+        delegated twice shows twice, then the consensus follows. Agno's blocking team reply rendered the finished team
+        output this way, and API clients replay the text as history.
         """
-        team = _scripted_team(
-            members=[("writer", "Writer", ScriptedModel([])), ("checker", "Checker", ScriptedModel([]))],
-        )
-        tool = ToolExecution(tool_call_id="call-touch", tool_name="touch", tool_args={}, result="touched")
 
-        def ended(member_id: str, name: str, content: str) -> MemberRunEnded:
-            record = RunRecord(
-                run_id=f"{member_id}-run",
-                agent_id=member_id,
-                status=RunStatus.completed,
-                content=content,
-            )
-            return MemberRunEnded(member_id, name, record)
+        async def overloaded() -> None:
+            msg = "Checker overloaded"
+            raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+        def delegation(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
+            return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task))
+
+        team = _scripted_team(
+            delegation("call-check", "checker", "Check"),
+            delegation("call-draft", "writer", "Draft"),
+            delegation("call-revise", "writer", "Revise"),
+            answer("All three done."),
+            members=[
+                ("writer", "Writer", ScriptedModel([answer("Draft one."), answer("Draft two.")])),
+                ("checker", "Checker", ScriptedModel([[Await(overloaded)]])),
+            ],
+        )
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             patch(
-                "mindroom.teams.envelope.run_team",
-                new=_team_events(
-                    MemberEvent("checker", "Checker", "checker-run", ContentDelta("Checked.")),
-                    ended("checker", "Checker", "Checked."),
-                    MemberEvent("writer", "Writer", "writer-run", ContentDelta("Let me check.")),
-                    MemberEvent("writer", "Writer", "writer-run", ToolStarted(tool)),
-                    MemberEvent("writer", "Writer", "writer-run", ToolCompleted(tool, parent_run_id="team-run")),
-                    MemberEvent("writer", "Writer", "writer-run", ContentDelta("Done.")),
-                    ended("writer", "Writer", "Let me check.Done."),
-                    ContentDelta("Both done."),
-                    _finished("Both done."),
-                ),
+                "mindroom.api.openai_compat.prepare_materialized_team_execution",
+                new=AsyncMock(return_value=_PREPARED_TEAM_TURN),
             ),
         ):
             response = team_app_client.post(
@@ -3509,7 +3505,8 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert response.json()["choices"][0]["message"]["content"] == (
-            "**Checker**: Checked.\n\n**Writer**: Let me check.Done.\n\n\n**Team Consensus**:\n\nBoth done."
+            "**Checker**: Checker overloaded\n\n**Writer**: Draft one.\n\n**Writer**: Draft two."
+            "\n\n\n**Team Consensus**:\n\nAll three done."
         )
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:

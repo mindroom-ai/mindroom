@@ -1,7 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-``TeamReplyText`` is the reply's text without tool markers, which an interrupted turn records and a blocking reply
-delivers, on Matrix and on the OpenAI-compatible API alike; the attempt also collects the records the run hands over
+``TeamReplyText`` is the reply's text without tool markers as the run's events build it, which an interrupted or
+streamed turn records; the attempt also collects the records the run hands over, which a blocking reply renders from,
 and renders the run's metadata from them.
 """
 
@@ -14,7 +14,7 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.teams.presentation import apply_team_event, render_team_member_slots
-from mindroom.teams.runtime import MemberEvent, MemberRunEnded, team_usage
+from mindroom.teams.runtime import MemberEvent, team_usage
 from mindroom.teams.storage import TeamRunRecords
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk
@@ -46,27 +46,21 @@ class TeamReplyText:
     """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
 
     ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
-    member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as Agno's
-    blocking reply joined them.
+    member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
+    run's own content joins them.
     """
 
     presentation: TeamStreamPresentation
     per_member: dict[str, str] = field(init=False)
     consensus: str = ""
-    # The slots in the order their members' runs first ended, which a blocking reply lists them in.
-    ended_member_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Give every configured slot empty text."""
         self.per_member = dict.fromkeys(self.presentation.member_ids, "")
 
     def apply(self, event: TeamRunEvent) -> None:
-        """Fold one run event into the text: a member's or the leader's delta, or the end of a member's run."""
-        if isinstance(event, MemberRunEnded):
-            member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
-            if member_id not in self.ended_member_ids:
-                self.ended_member_ids.append(member_id)
-        elif isinstance(event, MemberEvent):
+        """Fold one run event into the text: a member's or the leader's delta."""
+        if isinstance(event, MemberEvent):
             if isinstance(event.event, ContentDelta):
                 member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
                 self.per_member[member_id] += event.event.text
@@ -75,23 +69,9 @@ class TeamReplyText:
 
     def canonical_text(self) -> str:
         """Return the text in the configured member order, then the consensus: what a streamed reply records."""
-        return self._render(self.presentation.member_ids)
-
-    def completed_text(self) -> str:
-        """Return the text in the order the members finished, then the consensus: what a blocking reply delivers.
-
-        Agno's blocking reply listed the members as they finished, while the streamed document keeps the configured
-        order; a member whose run has not ended follows the others, so no text is dropped.
-        """
-        ended = self.ended_member_ids
-        return self._render(
-            [*ended, *(member_id for member_id in self.presentation.member_ids if member_id not in ended)],
-        )
-
-    def _render(self, member_ids: Sequence[str]) -> str:
         return "\n\n".join(
             render_team_member_slots(
-                member_ids,
+                self.presentation.member_ids,
                 display_names_by_id=self.presentation.display_names_by_id,
                 per_member=self.per_member,
                 consensus=self.consensus,
@@ -111,7 +91,7 @@ class TeamAttempt:
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
     prepared_history: PreparedHistoryState | None
-    # The reply without tool markers: what an interrupted turn records and a blocking reply delivers.
+    # The reply without tool markers: what an interrupted or streamed turn records.
     reply: TeamReplyText = field(init=False)
     records: TeamRunRecords = field(default_factory=TeamRunRecords)
 

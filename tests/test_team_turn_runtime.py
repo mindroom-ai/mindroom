@@ -33,7 +33,8 @@ from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta
-from mindroom.llm.provider import TextDelta, UsageReported
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -42,8 +43,9 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
+from mindroom.teams.runtime import MemberRunEnded
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import under_team_scope
+from mindroom.teams.storage import TeamRunRecords, under_team_scope
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -276,6 +278,78 @@ async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_st
         "**Writer**: Written.\n\n**Checker**: Checked." if stream else "**Checker**: Checked.\n\n**Writer**: Written."
     )
     assert text == f"{HEADER}{slots}\n\n\n**Team Consensus**:\n\nBoth done."
+    assert team.recorder.assistant_text == text
+
+
+async def _checker_overloaded() -> None:
+    msg = "Checker overloaded"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "writer", "checker", "body"),
+    [
+        pytest.param(
+            [delegate("call-check", "checker", "Check"), answer("The checker is unavailable.")],
+            [],
+            [[Await(_checker_overloaded)]],
+            "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nThe checker is unavailable.",
+            id="member-failed-before-text",
+        ),
+        pytest.param(
+            [delegate("call-write", "writer", "Touch it"), answer("Done.")],
+            [calls(tool_call("touch", "call-touch", label="a")), answer("")],
+            [],
+            "\n**Team Consensus**:\n\nDone.",
+            id="tool-only-member",
+        ),
+        pytest.param(
+            [delegate("call-check", "checker", "Check"), answer("Done.")],
+            [],
+            [answer("")],
+            "\n**Team Consensus**:\n\nDone.",
+            id="empty-member",
+        ),
+        pytest.param(
+            [
+                delegate("call-draft", "writer", "Draft"),
+                delegate("call-revise", "writer", "Revise"),
+                answer("Both drafts done."),
+            ],
+            [answer("Draft one."), answer("Draft two.")],
+            [],
+            "**Writer**: Draft one.\n\n**Writer**: Draft two.\n\n\n**Team Consensus**:\n\nBoth drafts done.",
+            id="member-delegated-twice",
+        ),
+        pytest.param(
+            [delegate("call-write", "writer", "Write"), answer("")],
+            [answer("Written.\n")],
+            [],
+            "**Writer**: Written.\n\n\n\n*No team consensus - showing individual responses only*",
+            id="no-consensus",
+        ),
+    ],
+)
+async def test_a_blocking_team_reply_renders_each_finished_member_run_and_the_consensus_as_main_did(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    checker: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """Each member run that ended shows its own text, then the leader's text, and the turn records the reply.
+
+    The bodies are what the Agno-backed blocking reply rendered for the same runs: a member that failed before any
+    text shows its error, one without text shows nothing, a member delegated twice shows twice, and text keeps its
+    whitespace.
+    """
+    team = squad_turn(tmp_path, monkeypatch, leader=leader, writer=writer, checker=checker)
+
+    text = await team.respond(show_tool_calls=False)
+
+    assert text == HEADER + body
     assert team.recorder.assistant_text == text
 
 
@@ -863,6 +937,89 @@ async def test_a_blocking_team_continues_after_a_member_s_delegation_with_stream
 
     assert text.endswith("**Team Consensus**:\n\nConsensus.")
     assert [request.stream for request in team.models["default"].requests] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_reply_shows_a_member_paused_on_its_delegation_once_with_its_resumed_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that paused on its delegation and resumed within the turn shows once, with what its resumed run wrote.
+
+    Agno continued the paused member's output in place and started its content afresh, so its blocking reply showed
+    only the resumed text; what the member wrote before it paused stays in its stored messages.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[
+            calls(
+                tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig"),
+                content="Asking the helper.",
+                metrics=usage(10, 1),
+            ),
+            answer("Writer: the helper found it."),
+        ],
+        helper=[answer("Helper found it.")],
+    )
+
+    text = await team.respond(show_tool_calls=False)
+
+    assert text == f"{HEADER}**Writer**: Writer: the helper found it.\n\n\n**Team Consensus**:\n\nConsensus."
+    assert team.recorder.assistant_text == text
+    _, member, _ = _delegation_state(team)
+    assert [message.content for message in member.messages if message.role == "assistant"] == [
+        "Asking the helper.",
+        "Writer: the helper found it.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote_before_its_member_paused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader's continuation starts its content afresh, so a silent continuation leaves its earlier text the reply.
+
+    Nobody wrote anything after the member's delegation, so the reply is the text of the leader's own messages, as
+    Agno's blocking reply read a team run without content, and the turn records it.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Research it"),
+                content="Asking the writer.",
+                metrics=usage(40, 4),
+            ),
+            [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")],
+        ],
+        writer=[_delegate_to_helper("Dig"), answer("")],
+        helper=[answer("Helper found it.")],
+    )
+
+    text = await team.respond(show_tool_calls=False)
+
+    assert text == f"{HEADER}Asking the writer."
+    assert team.recorder.assistant_text == text
+    record, _, _ = _delegation_state(team)
+    assert record.content is None
+
+
+def test_a_member_resumed_within_the_run_keeps_the_place_where_its_run_first_ended() -> None:
+    """The resumed record replaces the paused one where it stood, so a blocking reply lists the member there."""
+    records = TeamRunRecords()
+    paused = RunRecord(run_id="writer-run", agent_id="writer", agent_name="Writer", status=RunStatus.paused)
+    checked = RunRecord(run_id="checker-run", agent_id="checker", agent_name="Checker", status=RunStatus.completed)
+    resumed = replace(paused, status=RunStatus.completed, content="Written.")
+
+    for member_id, name, record in (("writer", "Writer", paused), ("checker", "Checker", checked)):
+        assert records.collect(MemberRunEnded(member_id, name, record))
+    assert records.collect(MemberRunEnded("writer", "Writer", resumed))
+
+    assert records.members == [resumed, checked]
 
 
 @pytest.mark.asyncio

@@ -169,9 +169,9 @@ Matrix sync callback
 | `teams/prompt.py` | The leader's system message in the layout Agno rendered: roster, mode block, tool instructions, provider note, context |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, and the pause a paused member propagates to the team run |
 | `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
-| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, and the live document a resumed run publishes |
+| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and `format_team_response`, the blocking Matrix or API reply rendered from a finished run's records |
 | `teams/envelope.py` | `team_response` and `team_response_stream`: prepare a team turn, run its leader through the turn drivers, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
-| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the marker-free reply text an interrupted turn records and a blocking Matrix or API reply delivers, and its run metadata |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the marker-free reply text an interrupted or streamed turn records, the records the run hands over, and its run metadata |
 | `teams/storage.py` | Where a team's new runs and resumes store, the records a run hands over, and the team scope its tools address |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, and `continue_paused_team_run` rebuilds the team from a saved approval |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
