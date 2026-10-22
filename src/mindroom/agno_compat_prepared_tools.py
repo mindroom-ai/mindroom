@@ -1,7 +1,7 @@
-"""Shared private Agno tool preparation and temporary instruction-state workarounds.
+"""Private Agno tool preparation and temporary instruction-state workarounds for the CLI tool catalog.
 
-Keep SDK internals here; prompt_tokens owns caching and token estimation.
-Verified against the pinned Agno version by prompt-surface integration tests.
+Keep SDK internals here; ``tool_system/agent_tool_calls.py`` is the only caller.
+Verified against the pinned Agno version by the CLI tool-call tests.
 """
 
 from __future__ import annotations
@@ -30,15 +30,16 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
 
-# AGNO_COMPAT: Prompt inspection requires private tool preparation.
-# Reason: Prompt estimation needs private tool preparation and temporary _tool_instructions.
+# AGNO_COMPAT: Tool preparation requires private APIs and mutates live instruction state.
+# Reason: The CLI tool catalog (tool_system/agent_tool_calls.py) prepares each hidden toolkit through Agno's private
+# determine_tools_for_model, which also replaces Agent._tool_instructions with that toolkit's instructions; the
+# catalog restores the list afterwards, so preparing a hidden toolkit leaves the agent's tool instructions unchanged.
 # Upstream issue: https://github.com/agno-agi/agno/issues/7806
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807
 # Remove when: Public prepared-request inspection supplies the actual messages, tools,
 # and tool instructions without persisting a run or mutating live instruction state.
 # Coverage: tests/test_agent_tool_calls.py::test_prepared_call_preserves_real_owner_context_and_hooks;
-# tests/test_agent_tool_calls.py::test_authored_alias_and_bare_source_instructions_survive_preparation
-# (the remaining caller is the CLI tool catalog in tool_system/agent_tool_calls.py, which F3 moves).
+# tests/test_agent_tool_calls.py::test_authored_alias_and_bare_source_instructions_survive_preparation.
 
 
 @contextmanager
