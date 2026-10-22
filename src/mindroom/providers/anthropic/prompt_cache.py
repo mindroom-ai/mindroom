@@ -211,10 +211,9 @@ def _without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]
 def _with_tool_choice(body: dict[str, Any], tool_choice: ToolChoice | None) -> dict[str, Any]:
     """Turn tool selection off for a ``"none"`` request that offers tools; the API rejects a choice without them.
 
-    MindRoom asks for no other choice. The SDK merges ``extra_body`` over the named fields, so an authored
-    ``extra_body.tool_choice`` is replaced too.
+    The SDK merges ``extra_body`` over the named fields, so an authored ``extra_body.tool_choice`` is replaced too.
     """
-    if tool_choice != "none" or not body.get("tools"):
+    if tool_choice is None or not body.get("tools"):
         return body
     choice = {"type": "none"}
     prepared = {**body, "tool_choice": choice}

@@ -369,16 +369,9 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
     assert body["generationConfig"] == {"responseMimeType": "application/json"}
 
 
-@pytest.mark.parametrize(("tool_choice", "mode"), [("none", "NONE"), ("required", "ANY")])
-def test_gemini_tool_choice_modes(tool_choice: str, mode: str) -> None:
-    """The protocol's tool choices map to Gemini function-calling modes."""
-    assert gemini_wire.tool_config(tool_choice) == {"function_calling_config": {"mode": mode}}
-
-
-def test_gemini_rejects_a_named_tool_choice() -> None:
-    """Gemini has no single-function choice in this adapter, so a mapping fails loudly."""
-    with pytest.raises(ValueError, match="Gemini supports tool_choice"):
-        gemini_wire.tool_config({"type": "function", "function": {"name": "get_weather"}})
+def test_gemini_tool_choice_none_turns_function_calling_off() -> None:
+    """Outside a decision request too, a ``"none"`` tool choice sets Gemini's function-calling mode NONE."""
+    assert gemini_wire.tool_config("none") == {"function_calling_config": {"mode": "NONE"}}
 
 
 @pytest.mark.asyncio

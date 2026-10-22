@@ -18,7 +18,7 @@ GOLDENS = golden_paths(OPENAI_FAMILIES)
 def test_every_openai_family_golden_is_replayed() -> None:
     """The parity suite covers every golden of the families the owned adapters serve."""
     assert {path.parent.name for path in GOLDENS} == set(OPENAI_FAMILIES)
-    assert len(GOLDENS) == 265
+    assert len(GOLDENS) == 255
 
 
 @pytest.mark.asyncio

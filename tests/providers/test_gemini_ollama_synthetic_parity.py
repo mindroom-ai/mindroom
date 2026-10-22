@@ -40,7 +40,7 @@ from tests.providers.golden_support import comparable_metrics, expected_parsed, 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.llm.provider import StreamEvent
+    from mindroom.llm.provider import StreamEvent, ToolChoice
 
 GOLDENS = goldens()
 
@@ -122,7 +122,7 @@ class SyntheticCase:
     characters: int
     text_sha256: str
     tools: tuple[ToolSpec, ...] = ()
-    tool_choice: str | None = None
+    tool_choice: ToolChoice | None = None
     call_id: str | None = None
 
 

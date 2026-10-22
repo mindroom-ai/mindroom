@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import StreamEvent, ToolSpec
+    from mindroom.llm.provider import StreamEvent, ToolChoice, ToolSpec
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = [
@@ -400,7 +400,7 @@ def _dialect_params(
 def _add_tools(
     params: dict[str, Any],
     tool_dicts: list[dict[str, Any]],
-    tool_choice: object,
+    tool_choice: ToolChoice | None,
     *,
     model_id: str,
     settings: ChatSettings,
@@ -455,7 +455,7 @@ def chat_request_kwargs(
     model_id: str,
     messages: Sequence[Message],
     tools: Sequence[ToolSpec],
-    tool_choice: object,
+    tool_choice: ToolChoice | None,
     response_format: type[BaseModel] | Mapping[str, Any] | None,
     stream: bool,
     settings: ChatSettings,
