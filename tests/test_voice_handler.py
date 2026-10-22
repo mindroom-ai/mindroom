@@ -766,6 +766,24 @@ class TestVoiceHandler:
         assert result == expected
 
     @pytest.mark.asyncio
+    async def test_a_failed_normalizer_run_keeps_the_transcription(self) -> None:
+        """Agno returns a provider failure as the run's content, which must never replace what the user said."""
+        from agno.run.agent import RunOutput  # noqa: PLC0415
+        from agno.run.base import RunStatus  # noqa: PLC0415
+
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        failed = RunOutput(
+            content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
+            status=RunStatus.error,
+        )
+        with (
+            patch("mindroom.voice.handler.model_loading.get_model_instance"),
+            patch("mindroom.voice.handler.Agent") as agent_class,
+        ):
+            agent_class.return_value.arun = AsyncMock(return_value=failed)
+            assert await _process_transcription("recognized speech", config) == "recognized speech"
+
+    @pytest.mark.asyncio
     async def test_cleanup_cancellation_propagates(self) -> None:
         """Cancellation remains control flow instead of becoming a transcript fallback."""
         config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))

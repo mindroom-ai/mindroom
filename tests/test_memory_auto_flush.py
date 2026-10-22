@@ -7,6 +7,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from agno.models.message import Message
@@ -1081,6 +1082,39 @@ async def test_extraction_runs_on_the_extractor_model_when_one_is_set(
     )
 
     assert requested == [used_model]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_extraction_run_is_a_failure_not_a_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agno returns a provider failure as the run's content; raising backs the pass off instead of saving the error."""
+    config = _config(tmp_path)
+    session = _thread("t1")
+    monkeypatch.setattr(
+        auto_flush.model_loading,
+        "get_model_instance",
+        lambda *_args: FakeModel(id="m", provider="fake"),
+    )
+    agent = MagicMock()
+    agent.arun = AsyncMock(
+        return_value=RunOutput(
+            content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
+            status=RunStatus.error,
+        ),
+    )
+    monkeypatch.setattr(auto_flush, "Agent", MagicMock(return_value=agent))
+    with pytest.raises(RuntimeError, match=r"^Memory extraction failed: Error code: 401"):
+        await auto_flush._extract_memory_summary(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            agent_name="general",
+            session_id=session,
+            lines=_lines("r1"),
+            existing_context="",
+            execution_identity=None,
+        )
 
 
 def test_credentials_are_removed_before_the_extractor() -> None:

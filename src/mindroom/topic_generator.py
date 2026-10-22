@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import nio
 from agno.agent import Agent
+from agno.run.base import RunStatus
 from pydantic import BaseModel, Field
 
 from mindroom.ai_runtime import cached_agent_run
@@ -127,6 +128,10 @@ Generate the topic:"""
         return None
     await record_system_usage(response, runtime_paths=runtime_paths, kind="room_topic")
     content = response.content
+    if response.status == RunStatus.error:
+        # Agno returns a provider failure as the run's content, which must never become the topic.
+        logger.warning("room_topic_generation_failed", room_key=room_key, session_id=session_id, error=str(content))
+        return None
     if not isinstance(content, _RoomTopic):
         logger.warning(
             "room_topic_generation_unexpected_type",

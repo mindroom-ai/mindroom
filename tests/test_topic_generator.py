@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -120,6 +121,25 @@ async def test_generate_room_topic_includes_team_only_room_entities(tmp_path) ->
     assert captured_prompt is not None
     assert "- Configured agents and teams: Ops Team" in captured_prompt
     assert "No specific agents or teams configured yet" not in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_a_failed_model_run_never_becomes_the_topic(tmp_path: Path) -> None:
+    """Agno returns a provider failure, such as a bad API key, as the run's content; the room then gets no topic."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(models={"default": ModelConfig(provider="test", id="test-model")}),
+        runtime_paths,
+    )
+    failed = RunOutput(
+        content="Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
+        status=RunStatus.error,
+    )
+    with (
+        patch("mindroom.providers.model_loading.get_model_instance", return_value=None),
+        patch("mindroom.topic_generator.cached_agent_run", new=AsyncMock(return_value=failed)),
+    ):
+        assert await generate_room_topic_ai("lobby", "Lobby", config, runtime_paths_for(config)) is None
 
 
 @pytest.mark.asyncio
