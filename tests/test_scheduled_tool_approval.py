@@ -2006,6 +2006,25 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
         TOOL_METADATA.update(original_metadata)
 
 
+@pytest.mark.parametrize("offers_scheduler", [True, False])
+def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
+    monkeypatch: pytest.MonkeyPatch,
+    offers_scheduler: bool,
+) -> None:
+    """Only the scheduler reads the run's live functions, so a build without it calls its tools without that step."""
+    config = _code_config()
+    if not offers_scheduler:
+        config.defaults.tools = []
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+
+    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+
+    assert ("run_scheduled_call" in prepare_run_tools(build.spec).functions) is offers_scheduler
+    names = [middleware.__name__ for middleware in build.tool_middleware]
+    assert names.count("bind_live_functions") == int(offers_scheduler)
+    assert (names[0] == "bind_live_functions") is offers_scheduler
+
+
 @pytest.mark.asyncio
 async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_policy(
     journal_database: Callable[[], EventJournalStore],
