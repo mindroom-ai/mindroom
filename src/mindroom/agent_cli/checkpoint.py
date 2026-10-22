@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-    from mindroom.tool_system.agno_toolkits import ToolValue
+    from mindroom.tool_system.tool_function import ToolValue
 
 __all__ = ["BatchCheckpoint", "save_cli_session"]
 

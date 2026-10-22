@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 _NOTICE = "WRAP UP NOW"
 _NOTICE_HOOKS = LoopHooks(

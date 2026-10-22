@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.llm.provider import ToolSpec
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 # Importing these SDKs to build their tools warns about their own deprecated usage.
 pytestmark = [

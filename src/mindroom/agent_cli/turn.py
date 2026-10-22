@@ -41,12 +41,12 @@ from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.agent_tool_calls import AgentToolCallEvent, execute_agent_shell_call, execute_agent_tool_call
-from mindroom.tool_system.agno_toolkits import ToolValue
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import ToolOutcome
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping

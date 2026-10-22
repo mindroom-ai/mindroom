@@ -52,10 +52,11 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
+from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
