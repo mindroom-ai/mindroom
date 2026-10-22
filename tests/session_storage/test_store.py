@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import sqlite3
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -1000,6 +1001,53 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
     )
     await persist(_run("r2"))
     assert _loaded(store).session_state == {"cwd": "/other"}
+
+
+def _row_state(store: ConversationStore, session_id: str) -> dict[str, Any]:
+    fields = store.read_session_fields(session_id)
+    assert fields is not None
+    return fields.session_state
+
+
+@pytest.mark.asyncio
+async def test_saves_read_a_session_state_another_thread_keeps_changing(store: ConversationStore) -> None:
+    """Saves copy ``session_state`` while another thread changes it in place, and each records what its row holds.
+
+    The lane saves on its worker thread while tools change the live state on the event loop, and a sync tool changes
+    it from its own thread, so a copy must read it in one step no other thread runs during: a copy that walks the
+    dict in Python fails with "dictionary changed size during iteration". A tiny switch interval hands the
+    interpreter to the changing thread every few bytecodes, so a walking copy fails on the first save.
+    """
+    live: dict[str, Any] = {f"key-{index}": [index] for index in range(2_000)}
+    stop = threading.Event()
+
+    def churn() -> None:
+        # One change per pass, so the thread can hand the interpreter over with the extra key present.
+        while not stop.is_set():
+            if live.pop("churn", None) is None:
+                live["churn"] = True
+
+    sessions = [
+        ConversationSession(session_id=f"s{index}", kind="agent", owner_id="code", session_state=live)
+        for index in range(3)
+    ]
+    switch_interval = sys.getswitchinterval()
+    changer = threading.Thread(target=churn)
+    sys.setswitchinterval(1e-6)
+    changer.start()
+    try:
+        for index, session in enumerate(sessions):
+            # The terminal save creates the row, and the field save writes the state again.
+            await persist_to(store, session)(_run(f"r{index}"))
+            assert session.stored_session_state == _row_state(store, session.session_id)
+            store.save_session_fields(session, "session_state")
+            assert session.stored_session_state == _row_state(store, session.session_id)
+    finally:
+        stop.set()
+        changer.join()
+        sys.setswitchinterval(switch_interval)
+
+    assert all(session.stored_session_state is not live for session in sessions)
 
 
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:

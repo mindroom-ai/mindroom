@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.store import session_state_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -157,7 +158,7 @@ async def save_cli_session(
     if store is None:
         msg = "CLI history requires persisted session storage"
         raise RuntimeError(msg)
-    state = deepcopy(dict(session_state))
+    state = session_state_snapshot(session_state)
     saved = replace(session, session_state=deepcopy(state))
 
     def operation(opened: ConversationStore) -> None:
