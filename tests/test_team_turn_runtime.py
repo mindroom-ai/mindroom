@@ -65,16 +65,11 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
     TEAM_SCOPE,
     THREAD_ID,
     ProbeToolkit,
-    SquadTurn,
-    blocking_reply,
+    TeamTurn,
     delegate,
     member_approval,
-    resume_approval,
     squad_probe,
     squad_turn,
-    stored_runs,
-    stream_reply,
-    turn_context,
 )
 
 if TYPE_CHECKING:
@@ -113,7 +108,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Member answer.")],
     )
 
-    chunks = await stream_reply(team, show_tool_calls=False)
+    chunks = await team.stream(show_tool_calls=False)
 
     assert ProbeToolkit.calls == ["a"]
     assert all(isinstance(chunk, StructuredStreamChunk) for chunk in chunks)
@@ -125,7 +120,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     ]
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text == chunks[-1].content
-    record, members = stored_runs(team)
+    record, members = team.stored_runs()
     assert (record.status, record.content, record.team_id) == (RunStatus.completed, "Consensus answer.", "squad")
     [member] = members
     assert (member.agent_id, member.parent_run_id, member.status) == ("writer", record.run_id, RunStatus.completed)
@@ -133,12 +128,12 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert record.tools is not None
     assert [(tool.tool_name, tool.result) for tool in record.tools] == [("delegate_task_to_member", "Member answer.")]
     # The leader's prompt names both members and the mode; the member got the task alone.
-    leader_system = team.leader.requests[0].messages[0].content
+    leader_system = team.models["default"].requests[0].messages[0].content
     assert isinstance(leader_system, str)
     assert '<member id="writer" name="Writer">' in leader_system
     assert "coordinate mode" in leader_system
-    assert [message.content for message in team.writer.requests[0].messages[1:]] == ["Report"]
-    assert team.checker.requests == []
+    assert [message.content for message in team.models["writer-model"].requests[0].messages[1:]] == ["Report"]
+    assert team.models["checker-model"].requests == []
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
@@ -159,7 +154,7 @@ async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_fo
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Member answer.")],
     )
 
-    chunks = await stream_reply(team, show_tool_calls=show_tool_calls)
+    chunks = await team.stream(show_tool_calls=show_tool_calls)
 
     canonical = f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
     shown = (
@@ -182,11 +177,11 @@ async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_th
         checker=[answer("Checked.")],
     )
 
-    text = await blocking_reply(team, show_tool_calls=False)
+    text = await team.respond(show_tool_calls=False)
 
     assert text == f"{HEADER}**Checker**: Checked.\n\n\n**Team Consensus**:\n\nAll good."
-    assert all(not request.stream for request in team.leader.requests)
-    record, members = stored_runs(team)
+    assert all(not request.stream for request in team.models["default"].requests)
+    record, members = team.stored_runs()
     assert record.status is RunStatus.completed
     assert [member.agent_id for member in members] == ["checker"]
 
@@ -208,16 +203,16 @@ async def test_a_collaborate_team_puts_the_task_to_every_member_and_reads_them_i
         mode="collaborate",
     )
 
-    chunks = await stream_reply(team, mode=TeamMode.COLLABORATE, show_tool_calls=False)
+    chunks = await team.stream(mode=TeamMode.COLLABORATE, show_tool_calls=False)
 
     assert chunks[-1].content == (
         f"{HEADER}**Writer**: Writer fact.\n\n**Checker**: Checker fact.\n\n\n**Team Consensus**:\n\nTwo facts."
     )
-    record, members = stored_runs(team)
+    record, members = team.stored_runs()
     assert record.tools is not None
     assert record.tools[0].result == "Writer fact.Checker fact."
     assert sorted(member.agent_id or "" for member in members) == ["checker", "writer"]
-    assert "broadcast mode" in str(team.leader.requests[0].messages[0].content)
+    assert "broadcast mode" in str(team.models["default"].requests[0].messages[0].content)
 
 
 @pytest.mark.asyncio
@@ -233,10 +228,10 @@ async def test_a_member_tool_addresses_the_team_history_scope(
         writer=[calls(tool_call("scope", "call-scope"), metrics=usage(10, 1)), answer("The team's.")],
     )
 
-    await stream_reply(team)
+    await team.stream()
 
     assert ProbeToolkit.scopes == ["team:squad"]
-    _, [member] = stored_runs(team)
+    _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == "team:squad"
 
@@ -254,14 +249,16 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
         writer=[answer("Drafted.")],
     )
     transient = "Sample transient turn context."
-    ctx = replace(turn_context(), transient_enrichment_items=(EnrichmentItem(key="sample", text=transient),))
+    ctx = team.ctx(transient_enrichment_items=(EnrichmentItem(key="sample", text=transient),))
 
-    await stream_reply(team, ctx=ctx)
+    await team.stream(ctx=ctx)
 
-    assert [message.role for message in team.leader.requests[0].messages if transient in str(message.content)] == [
+    assert [
+        message.role for message in team.models["default"].requests[0].messages if transient in str(message.content)
+    ] == [
         "user",
     ]
-    record, members = stored_runs(team)
+    record, members = team.stored_runs()
     assert len(members) == 1
     assert all(transient not in json.dumps(run.to_dict()) for run in [record, *members])
 
@@ -283,9 +280,9 @@ async def test_a_member_s_todo_work_defaults_to_the_member(
     )
     team.config.agents["writer"].tools = [PROBE_TOOL, "todo"]
 
-    await stream_reply(team)
+    await team.stream()
 
-    _, [member] = stored_runs(team)
+    _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result is not None
     assert member.tools[0].result.endswith("assigned to writer")
@@ -305,9 +302,9 @@ async def test_a_member_s_claude_sessions_are_the_member_s_own(
     )
     team.config.agents["writer"].tools = [PROBE_TOOL, "claude_agent"]
 
-    await stream_reply(team)
+    await team.stream()
 
-    _, [member] = stored_runs(team)
+    _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
 
@@ -365,7 +362,7 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
     monkeypatch.setattr(envelope, "run_team", capture_run_team)
     monkeypatch.setattr(envelope, "mid_turn_compaction_hook", capture_compaction_hook)
 
-    await stream_reply(team)
+    await team.stream()
 
     hooks = captured["hooks"]
     assert isinstance(hooks, LoopHooks)
@@ -375,14 +372,14 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
     compaction = captured["compaction"]
     assert (compaction["is_team"], compaction["scope_id"], compaction["entity_name"]) == (True, "squad", "squad")
     assert compaction["scope"] == TEAM_SCOPE
-    assert compaction["model"] is team.leader
+    assert compaction["model"] is team.models["default"]
     assert compaction["prompt_id"] is not None
 
 
 async def _pause_on_the_checker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[SquadTurn, ResponsePausedForApproval]:
+) -> tuple[TeamTurn, ResponsePausedForApproval]:
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -391,7 +388,7 @@ async def _pause_on_the_checker(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await stream_reply(team, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
     return team, raised.value
 
 
@@ -422,7 +419,7 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     ]
     # With tool calls hidden and no member text yet, the pause shows no document of its own.
     assert paused.response_text == ""
-    record, [member] = stored_runs(team)
+    record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.paused, RunStatus.paused)
     assert record.member_responses[0].run_id == member.run_id
     assert record.content == "Team run paused. The following require input:\n- Checker: touch requires confirmation"
@@ -438,24 +435,23 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
-    result = await resume_approval(
-        team,
+    result = await team.resume(
         raised.paused,
         approved=True,
-        calls_=(member_approval("call-touch", "dangerous"),),
+        approvals=(member_approval("call-touch", "dangerous"),),
     )
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == f"{HEADER}**Checker**: Touched.\n\n\n**Team Consensus**:\n\nThe checker touched it."
     assert result.metadata_content["io.mindroom.ai_run"]["status"] == "completed"
-    record, [member] = stored_runs(team)
+    record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert record.requirements == []
     assert member.tools is not None
     assert (member.tools[0].confirmed, member.tools[0].result) == (True, "touched dangerous")
     # The leader reads the member's result where it read the pause notice.
-    assert team.leader.requests[-1].messages[-1].content == (
+    assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Checker]: Touched."
     )
 
@@ -479,12 +475,12 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     )
 
     with approval_receipt_context(receipt):
-        await resume_approval(team, raised.paused, approved=True, calls_=(call,))
+        await team.resume(raised.paused, approved=True, approvals=(call,))
 
-    for model in (team.checker, team.leader):
+    for model in (team.models["checker-model"], team.models["default"]):
         [request] = model.requests
         assert [message.role for message in request.messages if receipt in str(message.content)] == ["system"]
-    record, members = stored_runs(team)
+    record, members = team.stored_runs()
     assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
 
 
@@ -497,17 +493,16 @@ async def test_a_denied_member_call_never_runs_and_the_member_answers_the_denial
     team.models["default"] = ScriptedModel([answer("The checker declined.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("I did not touch it.")])
 
-    result = await resume_approval(
-        team,
+    result = await team.resume(
         raised.paused,
         approved=False,
-        calls_=(member_approval("call-touch", "dangerous"),),
+        approvals=(member_approval("call-touch", "dangerous"),),
     )
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == []
-    assert team.checker.requests[-1].messages[-1].content == "Declined by requester"
-    _, [member] = stored_runs(team)
+    assert team.models["checker-model"].requests[-1].messages[-1].content == "Declined by requester"
+    _, [member] = team.stored_runs()
     assert member.tools is not None
     assert (member.tools[0].confirmed, member.tools[0].tool_call_error) == (False, True)
 
@@ -528,10 +523,10 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
     with pytest.raises(ProviderError, match="provider connection lost"):
-        await resume_approval(team, raised.paused, approved=True, calls_=(member_approval("call-touch", "dangerous"),))
+        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
     assert ProbeToolkit.calls == ["dangerous"]
-    record, [member] = stored_runs(team)
+    record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.error, RunStatus.completed)
     assert "provider connection lost" in str(record.content)
     assert member.tools is not None
@@ -549,16 +544,16 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     team.models["checker-model"] = ScriptedModel([])
 
     with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
-        await resume_approval(team, raised.paused, approved=True, calls_=(member_approval("call-other", "dangerous"),))
+        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-other", "dangerous"),))
     team.config.agents["checker"].tools = []
     with pytest.raises(ExceptionGroup) as refused:
-        await resume_approval(team, raised.paused, approved=True, calls_=(member_approval("call-touch", "dangerous"),))
+        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
     [error] = refused.value.exceptions
     assert str(error) == f"Saved approval toolkit {PROBE_TOOL!r} is no longer permitted; retry the request"
     assert ProbeToolkit.calls == []
-    assert (team.leader.requests, team.checker.requests) == ([], [])
-    record, _ = stored_runs(team)
+    assert (team.models["default"].requests, team.models["checker-model"].requests) == ([], [])
+    record, _ = team.stored_runs()
     assert record.status is RunStatus.paused
 
 
@@ -573,17 +568,16 @@ async def test_an_approval_from_another_session_never_resumes_the_paused_run(
     team.models["checker-model"] = ScriptedModel([])
 
     with pytest.raises(RuntimeError, match="is no longer available"):
-        await resume_approval(
-            team,
+        await team.resume(
             raised.paused,
             approved=True,
-            calls_=(member_approval("call-touch", "dangerous"),),
+            approvals=(member_approval("call-touch", "dangerous"),),
             session_id=f"{ROOM_ID}:$other-thread:localhost",
         )
 
     assert ProbeToolkit.calls == []
-    assert (team.leader.requests, team.checker.requests) == ([], [])
-    record, _ = stored_runs(team)
+    assert (team.models["default"].requests, team.models["checker-model"].requests) == ([], [])
+    record, _ = team.stored_runs()
     assert record.status is RunStatus.paused
 
 
@@ -591,8 +585,8 @@ def _delegate_to_helper(task: str) -> list[ScriptStep]:
     return calls(tool_call("run_subagent", "call-sub", agent_name="helper", task=task), metrics=usage(10, 1))
 
 
-def _delegation_state(team: SquadTurn) -> tuple[TeamRunRecord, RunRecord, DelegationState]:
-    record, [member] = stored_runs(team)
+def _delegation_state(team: TeamTurn) -> tuple[TeamRunRecord, RunRecord, DelegationState]:
+    record, [member] = team.stored_runs()
     return record, member, DelegationState.from_metadata(record.metadata)
 
 
@@ -610,7 +604,7 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
         helper=[calls(tool_call("touch", "call-helper", label="dug"), metrics=usage(5, 1)), answer("Helper found it.")],
     )
 
-    chunks = await stream_reply(team)
+    chunks = await team.stream()
 
     assert ProbeToolkit.calls == ["dug"]
     assert chunks[-1].content == (
@@ -636,8 +630,8 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert helper_run is not None
     assert (helper_run.status, helper_run.content) == (RunStatus.completed, "Helper found it.")
     # The writer read the helper's result where its call paused; the leader read the writer's answer.
-    assert "Helper found it." in str(team.writer.requests[-1].messages[-1].content)
-    assert team.leader.requests[-1].messages[-1].content == (
+    assert "Helper found it." in str(team.models["writer-model"].requests[-1].messages[-1].content)
+    assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
     )
 
@@ -656,10 +650,10 @@ async def test_a_blocking_team_continues_after_a_member_s_delegation_with_stream
         helper=[answer("Helper found it.")],
     )
 
-    text = await blocking_reply(team, show_tool_calls=False)
+    text = await team.respond(show_tool_calls=False)
 
     assert text.endswith("**Team Consensus**:\n\nConsensus.")
-    assert [request.stream for request in team.leader.requests] == [False, True]
+    assert [request.stream for request in team.models["default"].requests] == [False, True]
 
 
 @pytest.mark.asyncio
@@ -677,7 +671,7 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await stream_reply(team, show_tool_calls=False)
+        await team.stream(show_tool_calls=False)
 
     paused = raised.value.paused
     assert ProbeToolkit.calls == []
@@ -691,7 +685,7 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
     assert paused.toolkit_owners == {("helper", "touch"): PROBE_TOOL}
     assert team.recorder.outcome == "suspended"
 
-    result = await resume_approval(team, paused, approved=True, calls_=_saved_approval_calls(state))
+    result = await team.resume(paused, approved=True, approvals=_saved_approval_calls(state))
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["deep"]
@@ -699,7 +693,7 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]
-    assert "Dug deep." in str(team.writer.requests[-1].messages[-1].content)
+    assert "Dug deep." in str(team.models["writer-model"].requests[-1].messages[-1].content)
 
 
 @pytest.mark.asyncio
@@ -720,13 +714,13 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
         leader=[delegate("call-team", "writer", "Write")],
         writer=[[TextDelta("Dra"), UsageReported(usage(30, 2), final=False), Await(wait_to_be_cancelled)]],
     )
-    task = asyncio.create_task(stream_reply(team))
+    task = asyncio.create_task(team.stream())
     await asyncio.wait_for(streaming.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    record, [member] = stored_runs(team)
+    record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.cancelled, RunStatus.cancelled)
     assert member.parent_run_id == record.run_id
     [member_usage] = _usage_rows(team.storage, member.run_id)
@@ -739,7 +733,7 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     )
 
 
-def _runner(team: SquadTurn, tmp_path: Path) -> Any:  # noqa: ANN401
+def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
     """Build the squad's team bot on the team's config, with a mocked Matrix client, and return its runner."""
     bot = make_test_team_bot(
         AgentMatrixUser(
