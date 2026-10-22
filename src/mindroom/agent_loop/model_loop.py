@@ -158,7 +158,7 @@ async def run_model_loop(
 
     ``messages`` is the list the run stores from: every assistant and tool message is appended to it.
     ``record`` collects the loop's text as ``content`` (the loop's requests concatenated, replacing what the record
-    held), its tool executions, its pause requirements, and its usage, in the metrics every run record starts with.
+    held), its tool executions, its pause requirements, and its usage, in the metrics the record must carry.
     ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
     Provider errors, tool-call errors other than a tool's own exception, and cancellation propagate after the
     usage a cut-off request already reported is recorded on an assistant message, exactly once.
@@ -192,7 +192,7 @@ async def run_model_loop(
                 else:
                     yield event
         assert turn is not None
-        message = _accept_turn(turn.message, state, progress, identity)
+        message = _accept_turn(turn.message, state, progress, metrics, identity)
         yield RequestCompleted(model_id=identity.id, provider=identity.provider_name, usage=message.metrics)
         if not message.tool_calls:
             break
@@ -244,7 +244,13 @@ async def _before_request(
     return outbound
 
 
-def _accept_turn(message: Message, state: LoopState, progress: _Progress, identity: ModelIdentity) -> Message:
+def _accept_turn(
+    message: Message,
+    state: LoopState,
+    progress: _Progress,
+    metrics: RunMetrics,
+    identity: ModelIdentity,
+) -> Message:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
     A request that answers with tool calls and no text leaves the content as it was, as Agno's loop did, so a
@@ -252,8 +258,7 @@ def _accept_turn(message: Message, state: LoopState, progress: _Progress, identi
     """
     _stamp_model(message, identity)
     state.messages.append(message)
-    assert state.record.metrics is not None
-    _count_request(state.record.metrics, message.metrics, identity)
+    _count_request(metrics, message.metrics, identity)
     state.request_index += 1
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())

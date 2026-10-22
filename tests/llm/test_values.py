@@ -93,7 +93,8 @@ def test_file_text_content_round_trips_by_mime_type() -> None:
 def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
     # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
     assert File(content="plain text").to_dict()["content"] == "plain text"
-    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content.
+    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content; reading
+    # a text/* file decodes its stored content as UTF-8 text, as Agno did, so these bytes do not come back.
     assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
 
 
