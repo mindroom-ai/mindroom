@@ -304,7 +304,7 @@ export function Usage() {
         <Card>
           <CardContent className="flex items-center gap-3 p-8">
             <Loader2
-              className="h-5 w-5 animate-spin text-primary"
+              className="h-5 w-5 animate-spin text-muted-foreground"
               aria-hidden="true"
             />
             <div role="status">

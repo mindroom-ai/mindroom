@@ -345,7 +345,7 @@ function Home({
                           kind={member.kind}
                           id={member.id}
                           name={member.name}
-                          className="h-[22px] w-[22px] text-[8px] ring-2 ring-background"
+                          className="h-[22px] w-[22px] text-[11px] ring-2 ring-background"
                         />
                       ))}
                       {members.length > 4 && (
