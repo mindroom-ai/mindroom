@@ -119,14 +119,6 @@ def _session_columns(
 
 def _archive_sessions(db_dir: Path, missing_columns: frozenset[str]) -> None:
     archive = db_dir.with_name(f"sessions.incompatible-{uuid4().hex}")
-    try:
-        archive.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        msg = f"Session archive already exists: {archive}"
-        raise FileExistsError(msg)
-
     mode = stat.S_IMODE(db_dir.stat().st_mode)
     db_dir.rename(archive)
     fsync_directory_durable(db_dir.parent)
