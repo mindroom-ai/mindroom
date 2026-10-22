@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
@@ -21,8 +20,6 @@ from mindroom.usage.storage import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-    from agno.run.agent import RunOutput
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
@@ -83,7 +80,7 @@ def helper_usage_owner_context(owner: HelperUsageOwner | None) -> Iterator[None]
 
 
 async def record_helper_usage(
-    response: RunOutput | RunRecord,
+    response: RunRecord,
     *,
     owner: HelperUsageOwner,
     invocation_id: str,
@@ -108,7 +105,7 @@ async def record_helper_usage(
 
 
 async def record_system_usage(
-    response: RunOutput | RunRecord,
+    response: RunRecord,
     *,
     runtime_paths: RuntimePaths,
     kind: IndependentUsageKind,
@@ -131,7 +128,7 @@ async def record_system_usage(
         await record_helper_usage(
             response,
             owner=owner,
-            invocation_id=response.run_id or uuid4().hex,
+            invocation_id=response.run_id,
             kind=kind,
             requester_id=requester_id,
         )

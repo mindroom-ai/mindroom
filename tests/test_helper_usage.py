@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
 from openai.types import CompletionUsage
 
 from mindroom import agents
@@ -389,7 +387,7 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
             storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
             session_id="session",
         ),
-        invocation_id=extraction.run_id or "",
+        invocation_id=extraction.run_id,
         kind="memory_extraction",
         requester_id="@user:localhost",
     )
@@ -651,7 +649,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         session.metadata = {"marker": "concurrent session"}
         context.storage.save_session_fields(session, "metadata")
         await record_helper_usage(
-            RunOutput(run_id="paid", metrics=RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11)),
+            RunRecord(run_id="paid", metrics=llm_usage.RunMetrics(input_tokens=10, output_tokens=1, total_tokens=11)),
             owner=owner,
             invocation_id="paid",
             kind="dynamic_workflow",
@@ -685,7 +683,10 @@ async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path:
         connection.execute("BEGIN IMMEDIATE")
         task = asyncio.create_task(
             record_helper_usage(
-                RunOutput(metrics=RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22)),
+                RunRecord(
+                    run_id="paid-attempt",
+                    metrics=llm_usage.RunMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+                ),
                 owner=HelperUsageOwner(create_storage, "session"),
                 invocation_id="paid-attempt",
                 kind="memory_auto_flush",

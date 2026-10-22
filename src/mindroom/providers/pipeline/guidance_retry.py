@@ -53,7 +53,7 @@ async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> 
         provider=identity.provider,
         model_id=identity.id,
     )
-    guidance = Message(role="user", content=MALFORMED_FUNCTION_CALL_GUIDANCE, temporary=True)
+    guidance = Message(role="user", content=MALFORMED_FUNCTION_CALL_GUIDANCE)
     events = inner.stream(replace(request, messages=(*request.messages, guidance)))
     async with closing_async_stream(events):
         async for event in events:

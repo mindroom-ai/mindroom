@@ -12,8 +12,6 @@ from time import monotonic
 from typing import ClassVar, Literal, Protocol, cast, runtime_checkable
 from uuid import uuid4
 
-from agno.metrics import ModelMetrics, RunMetrics
-from agno.run.agent import RunOutput
 from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
@@ -26,6 +24,8 @@ from claude_agent_sdk import (
 )
 
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 
@@ -331,7 +331,7 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     requester_context = get_tool_runtime_context() or get_detached_requester_context()
     invocation_id = uuid4().hex
     await record_helper_usage(
-        RunOutput(run_id=invocation_id, metrics=metrics),
+        RunRecord(run_id=invocation_id, metrics=metrics),
         owner=owner,
         invocation_id=invocation_id,
         kind="claude_agent",

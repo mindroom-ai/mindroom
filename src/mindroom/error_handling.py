@@ -7,8 +7,6 @@ import json
 import re
 from typing import TYPE_CHECKING
 
-from agno.exceptions import ModelProviderError
-
 from mindroom.llm.errors import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     ContextWindowExceeded,
@@ -104,9 +102,7 @@ def _structured_provider_error(error_str: str) -> tuple[str, str] | None:
 
 def _has_provider_status(error: Exception, status_code: int) -> bool:
     """Return whether a typed provider exception has the given status."""
-    if getattr(error, "status_code", None) != status_code:
-        return False
-    return isinstance(error, ModelProviderError) or _extract_provider_from_error(error) is not None
+    return getattr(error, "status_code", None) == status_code and _extract_provider_from_error(error) is not None
 
 
 def _is_transient_provider_error(error: Exception) -> bool:
@@ -114,8 +110,6 @@ def _is_transient_provider_error(error: Exception) -> bool:
     if isinstance(error, ProviderUnavailable):
         return True
     status_code = getattr(error, "status_code", None)
-    if isinstance(error, ModelProviderError | ProviderError) and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
-        return True
     if _extract_provider_from_error(error) is not None and status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
         return True
 

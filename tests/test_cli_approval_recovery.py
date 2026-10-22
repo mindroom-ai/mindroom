@@ -34,6 +34,7 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PlannedCall
 from mindroom.approval import execution as approval_execution
 from mindroom.approval import tool_owners as approval_tools
+from mindroom.approval.receipt import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.llm.provider import ModelRequest
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -120,6 +122,10 @@ def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tupl
     assert session is not None
     assert isinstance(persisted, RunRecord)
     return persisted, session
+
+
+def _carries_receipt(request: ModelRequest) -> bool:
+    return any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
 
 
 def _helper_runtime(tmp_path: Path, **helper) -> ToolRuntimeContext:
@@ -196,7 +202,10 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     continuation_count: int,
 ) -> None:
-    """Recovery preserves knowledge, cancellation registration, typing and the remaining budget."""
+    """Recovery preserves knowledge, cancellation registration, typing and the remaining budget.
+
+    The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds.
+    """
     runtime = _helper_runtime(tmp_path, tools=["shell", "thread_model"])
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -287,18 +296,19 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
 
     monkeypatch.setattr(execution.client(), "room_typing", room_typing)
     run_ids = []
-    result = await execution.continue_run(
-        continuation,
-        paused_answer=PausedAnswer(),
-        execution_identity=identity,
-        tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
-        decisions={"switch": True},
-        denial_reasons={"switch": None},
-        tool_trace_collector=[],
-        typing_log_context={},
-        progress=None,
-        run_id_callback=run_ids.append,
-    )
+    with approval_receipt_context("Trusted approval receipt."):
+        result = await execution.continue_run(
+            continuation,
+            paused_answer=PausedAnswer(),
+            execution_identity=identity,
+            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            decisions={"switch": True},
+            denial_reasons={"switch": None},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+            run_id_callback=run_ids.append,
+        )
     if continuation_count == 4:
         assert "Model switching did not produce a final answer" in result.response_text
         assert model.requests == []
@@ -306,6 +316,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     else:
         assert "Recovered with knowledge." in result.response_text
         assert len(model.requests) == 1
+        assert _carries_receipt(model.requests[0])
         assert len(builds) == 2
         # The fresh minimal turn is built with the knowledge the recovery resolved.
         assert [source.description for source in builds[-1].surface.knowledge_sources] == ["Saved notes"]
@@ -739,7 +750,10 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     missing_shell_function: str | None,
     nested: str | None,
 ) -> None:
-    """An approved saved call keeps its exact owner, and its old Bash stays interrupted."""
+    """An approved saved call keeps its exact owner, and its old Bash stays interrupted.
+
+    The follow-up turn sends the approval receipt the runner binds with its first request only.
+    """
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     registry = TurnToolRegistry()
     runtime = replace(
@@ -961,7 +975,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         assert stored is not None
         return [run.to_dict() for run in stored.runs]
 
-    with tool_runtime_context(runtime):
+    with tool_runtime_context(runtime), approval_receipt_context("Trusted approval receipt."):
         if missing_shell_function:
             saved_before = stored_runs()
             # A saved shell call loses its own toolkit first; any other call loses minimal mode's shell.
@@ -993,6 +1007,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert published[0].tool_trace
     assert any("finished" in chunk.content for chunk in published)
     assert len(provider.requests) == (2 if nested == "approval" else 1)
+    assert [_carries_receipt(request) for request in provider.requests] == (
+        [True, False] if nested == "approval" else [True]
+    )
     first = provider.requests[0]
     assert offered_tools(first) == ["bash"]
     assert sibling_image.url in str(first.messages)

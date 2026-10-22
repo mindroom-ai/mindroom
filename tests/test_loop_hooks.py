@@ -35,7 +35,10 @@ def _stages(hooks: Sequence[object]) -> list[str]:
 
 
 def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> None:
-    """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture."""
+    """Both runs share one policy; the leader has no gate, job definitions, tool search, or skill capture.
+
+    Only a run an approval continuation resumes carries the receipt, right after mid-turn compaction.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
@@ -85,13 +88,30 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         jobs=JobActor(name="squad", team=True, depth=0, tools={}),
     )
 
+    resumed_agent = agent_loop_hooks(build, turn, agent_name="general", approval_receipt=True)
+    resumed_leader = leader_loop_hooks(
+        turn,
+        entity_name=None,
+        scope_id="squad",
+        model=model,
+        history_settings=settings,
+        tool_middleware=(_middleware,),
+        jobs=None,
+        approval_receipt=True,
+    )
+
     assert _stages(agent.before_request) == [
         "participation_hook",
+        "mid_turn_compaction_hook",
+        "job_definitions_hook",
+    ]
+    assert _stages(leader.before_request) == ["mid_turn_compaction_hook"]
+    assert _stages(resumed_agent.before_request) == [
         "mid_turn_compaction_hook",
         "approval_receipt_hook",
         "job_definitions_hook",
     ]
-    assert _stages(leader.before_request) == ["mid_turn_compaction_hook", "approval_receipt_hook"]
+    assert _stages(resumed_leader.before_request) == ["mid_turn_compaction_hook", "approval_receipt_hook"]
     assert agent.answer_tool_calls is not None
     assert leader.answer_tool_calls is not None
     assert agent.rewrite_tool_calls is resolve_call_tool_calls

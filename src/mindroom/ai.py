@@ -255,6 +255,8 @@ class _AgentAttempt:
 
     run_input: list[Message]
     run_id: str
+    # Whether the attempt's first request carries the approval receipt bound around the turn.
+    approval_receipt: bool = False
 
 
 @dataclass
@@ -758,11 +760,18 @@ def _persist_into(terminal: _TerminalRecord, storage: _AttemptStorage) -> Persis
     return persist
 
 
-def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, storage: _AttemptStorage) -> LoopHooks:
+def _agent_loop_hooks(
+    run_context: _AgentRunContext,
+    attempt: _AgentAttempt,
+    storage: _AttemptStorage,
+    *,
+    approval_receipt: bool = False,
+) -> LoopHooks:
     """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
 
     A fold appends a summary row to the scope only when this request replays the scope's stored history; a turn
     that carries none (a scheduled turn whose budget disabled replay) keeps its summary as a message of its own run.
+    ``approval_receipt`` sends the bound approval receipt with the run's first request.
     """
     ctx = run_context.turn
     prepared = run_context.prepared_run
@@ -787,6 +796,7 @@ def _agent_loop_hooks(run_context: _AgentRunContext, attempt: _AgentAttempt, sto
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
         run_id=attempt.run_id,
+        approval_receipt=approval_receipt,
     )
 
 
@@ -814,7 +824,8 @@ async def _start_agent_run(
         metadata=run_context.metadata,
         session_state=storage.session.session_state,
     )
-    spec, hooks = prepared.spec, _agent_loop_hooks(run_context, attempt, storage)
+    spec = prepared.spec
+    hooks = _agent_loop_hooks(run_context, attempt, storage, approval_receipt=attempt.approval_receipt)
     if build.surface.mode == "minimal":
         spec, hooks = await minimal_attempt(
             build,
@@ -879,7 +890,8 @@ async def _continue_turn_run(
     """Continue this attempt's paused run with its delegations' results, under the attempt's hooks and store.
 
     The resume replays the scope's history as the attempt did and reuses the paused run's stored system message. It
-    streams its requests even when the turn does not, as Agno's delegation continuation did.
+    streams its requests even when the turn does not, as Agno's delegation continuation did. It sends no approval
+    receipt, because the attempt's first request already carried any.
     """
     prepared = run_context.prepared_run
     events = resume_from_session(
@@ -2010,6 +2022,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     reusable_build: AgentBuild | None = None,
     resumed_attempt: ResumedAttempt | None = None,
     initial_continuation_count: int = 0,
+    approval_receipt: bool = False,
     on_completed: Callable[[CompletedAttempt], None] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate one streaming agent response on the owned loop.
@@ -2054,6 +2067,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         reusable_build: Optional caller-owned agent build materialized for repeated sequential turns.
         resumed_attempt: Restored attempt to settle before preparing a fresh model request.
         initial_continuation_count: Same-turn attempts consumed before the first fresh request.
+        approval_receipt: Whether the first request of the turn's first attempt carries the approval receipt bound
+            around the turn, as the first model request after an approval does.
         on_completed: Optional sink for the terminal typed attempt, independent of display metadata.
 
     Yields:
@@ -2104,11 +2119,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
+    receipt_pending = approval_receipt
+
     async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
+        nonlocal receipt_pending
+        attempt_receipt, receipt_pending = receipt_pending, False
         try:
             run_context = await _prepare_agent_run_context(
                 (
@@ -2157,6 +2176,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         attempt = _AgentAttempt(
             run_input=prepared_run.run_input(media_inputs),
             run_id=continuation_state.active_run_id or str(uuid4()),
+            approval_receipt=attempt_receipt,
         )
         holder.attempt = attempt
         holder.attempt_started = True

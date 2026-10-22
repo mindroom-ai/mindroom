@@ -503,6 +503,7 @@ async def continue_paused_team_run(
                     history_settings=settings,
                     tool_middleware=built.leader_middleware,
                     jobs=built.leader_jobs,
+                    approval_receipt=True,
                 ),
                 request_template=ModelRequest(
                     messages=(),

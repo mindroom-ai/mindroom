@@ -124,7 +124,7 @@ def test_message_defaults() -> None:
     assert first.id != second.id
     assert isinstance(first.created_at, int)
     assert first.metrics == MessageMetrics()
-    assert (first.from_history, first.add_to_agent_memory, first.temporary) == (False, True, False)
+    assert (first.from_history, first.add_to_agent_memory) == (False, True)
     assert Message.from_dict({"role": "user"}).to_dict().keys() == {
         "id",
         "from_history",

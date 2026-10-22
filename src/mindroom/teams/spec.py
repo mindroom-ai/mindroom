@@ -33,14 +33,14 @@ class TeamMember:
     """One member as the leader sees and runs it.
 
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
-    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``hooks()`` builds the hooks of one run
-    or resume of this member, since a hook such as mid-turn compaction keeps state for the run it serves;
-    ``request_template`` applies to every run.
+    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``hooks(resumed)`` builds the hooks of one
+    run of this member, or of one resume when ``resumed``, since a hook such as mid-turn compaction keeps state for
+    the run it serves and only a resume carries the approval receipt; ``request_template`` applies to every run.
     """
 
     spec: AgentSpec
     role: str
-    hooks: Callable[[], LoopHooks] = lambda: NO_HOOKS
+    hooks: Callable[[bool], LoopHooks] = lambda _resumed: NO_HOOKS
     request_template: ModelRequest = EMPTY_REQUEST
 
 

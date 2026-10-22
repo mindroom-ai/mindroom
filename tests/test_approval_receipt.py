@@ -2,17 +2,51 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
+from mindroom.ai import stream_agent_response
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
+from mindroom.approval.receipt import (
+    approval_receipt_context,
+    approval_receipt_hook,
+    build_approval_receipt,
+    messages_with_approval_receipt,
+)
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, context, spec
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.conftest import make_turn_context
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    registered_report_tool,
+    respond,
+    resume,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.scripted_agent_helpers import streamed_text
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
@@ -208,6 +242,139 @@ async def test_the_hook_projects_the_receipt_into_the_first_request_only() -> No
     assert all(
         "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
     )
+
+
+def _leader_delegating_to_code(tmp_path: Path) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return a ``leader`` that may delegate to ``code`` and needs approval to write a report, with its turn's identity."""
+    paths = _runtime_paths(tmp_path)
+    requester = "@alice:example.org"
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", tools=["report"], delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
+        ),
+        "code",
+        users=[requester],
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        requester,
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "session",
+    )
+    return config, paths, identity
+
+
+def _receipt_flags(model: ScriptedModel) -> list[bool]:
+    """Return, per request the model received, whether it carried the approval receipt."""
+    return [
+        any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+        for request in model.requests
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The receipt goes with the resumed parent's first request only.
+
+    No continuation after a delegation repeats it, and the fresh children the resumed parent starts never get it.
+    """
+    config, paths, identity = _leader_delegating_to_code(tmp_path)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("write_report", "call-1")),
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Check the intro")),
+            calls(tool_call("run_subagent", "delegate-2", agent_name="code", task="Check the outro")),
+            answer("Report written and checked."),
+        ],
+    )
+    code = ScriptedModel([answer("Intro is fine."), answer("Outro is fine.")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    with registered_report_tool():
+        paused = await respond("leader", "Write the report", **options)
+        assert isinstance(paused, PausedAttempt)
+        approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
+        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
+        with approval_receipt_context(build_approval_receipt(decided)):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                approvals,
+                agent_name="leader",
+                **options,
+                decisions={call.tool_call_id: True for call in approvals},
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    # The fresh turn's request, the resumed request, and one continuation after each delegation.
+    assert _receipt_flags(leader) == [False, True, False, False]
+    assert _receipt_flags(code) == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_opted_into_the_receipt_sends_it_once_across_its_delegations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh turn that carries the receipt, as a recovered CLI call's follow-up does, sends it with its first request.
+
+    No continuation after a delegation repeats it, and the fresh children the turn starts never get it.
+    """
+    config, paths, identity = _leader_delegating_to_code(tmp_path)
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Check the intro")),
+            calls(tool_call("run_subagent", "delegate-2", agent_name="code", task="Check the outro")),
+            answer("Both parts are fine."),
+        ],
+    )
+    code = ScriptedModel([answer("Intro is fine."), answer("Outro is fine.")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    ctx = make_turn_context(
+        "leader",
+        session_id=identity.session_id,
+        correlation_id="corr-turn",
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+    )
+
+    with (
+        registered_report_tool(),
+        approval_receipt_context("Trusted approval receipt."),
+        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+    ):
+        chunks = [
+            chunk
+            async for chunk in stream_agent_response(
+                ctx,
+                prompt="Check the report",
+                runtime_paths=paths,
+                config=config,
+                execution_identity=identity,
+                supports_native_tool_approval=True,
+                approval_receipt=True,
+            )
+        ]
+
+    assert "".join(streamed_text(chunks)).endswith("Both parts are fine.")
+    # The first request, then one continuation after each delegation.
+    assert _receipt_flags(leader) == [True, False, False]
+    assert _receipt_flags(code) == [False, False]
 
 
 @pytest.mark.asyncio

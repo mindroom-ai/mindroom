@@ -409,11 +409,14 @@ async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
 
 
 @pytest.mark.asyncio
-async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_team_scope(
+async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The leader loop gets mid-turn compaction then the receipt before each request, and the notices around tools."""
+    """The leader loop gets mid-turn compaction before each request, and the notices around tools.
+
+    A fresh turn carries no approval receipt; only a resume does.
+    """
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
     # Every member's hooks come from the same builder; the leader's compaction is the one built for the team.
@@ -436,7 +439,7 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
 
     hooks = captured["hooks"]
     assert isinstance(hooks, LoopHooks)
-    assert len(hooks.before_request) == 2
+    assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == ["mid_turn_compaction_hook"]
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["is_team"]]
@@ -557,11 +560,14 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     """The member whose call was approved and the leader each read the trusted receipt in their first resumed request.
 
     The response runner binds the receipt around the resume; it is projected into each loop's request only, so no
-    stored run holds it.
+    stored run holds it. A member the resumed leader then hands a new task runs fresh and never reads it.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-    team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
+    team.models["default"] = ScriptedModel(
+        [delegate("call-polish", "writer", "Polish it"), answer("The checker touched it.", usage(50, 5))],
+    )
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Polished.")])
     call = member_approval("call-touch", "dangerous")
     receipt = build_approval_receipt(
         (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),),
@@ -570,9 +576,15 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     with approval_receipt_context(receipt):
         await team.resume(raised.paused, approved=True, approvals=(call,))
 
-    for model in (team.models["checker-model"], team.models["default"]):
-        [request] = model.requests
-        assert [message.role for message in request.messages if receipt in str(message.content)] == ["system"]
+    def receipt_roles(model: str) -> list[list[str]]:
+        return [
+            [message.role for message in request.messages if receipt in str(message.content)]
+            for request in team.models[model].requests
+        ]
+
+    assert receipt_roles("checker-model") == [["system"]]
+    assert receipt_roles("default") == [["system"], []]
+    assert receipt_roles("writer-model") == [[]]
     record, members = team.stored_runs()
     assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
 

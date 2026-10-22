@@ -580,7 +580,7 @@ async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_req
     *resent, guidance = retried.messages
     assert first is request
     assert resent == [message]
-    assert (guidance.role, guidance.content, guidance.temporary) == ("user", MALFORMED_FUNCTION_CALL_GUIDANCE, True)
+    assert (guidance.role, guidance.content) == ("user", MALFORMED_FUNCTION_CALL_GUIDANCE)
     assert conversation == [message]
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)

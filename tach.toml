@@ -3536,7 +3536,7 @@ visibility = ["mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
-depends_on = []
+depends_on = ["mindroom.llm"]
 visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 
 [[modules]]

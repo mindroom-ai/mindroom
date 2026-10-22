@@ -851,23 +851,43 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
 
 @pytest.mark.asyncio
-async def test_an_approval_receipt_is_projected_into_the_first_request_only(
+async def test_a_turn_opted_into_the_approval_receipt_sends_it_with_its_first_request_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The trusted receipt reaches the model once, on the system message, and never enters the stored run."""
-    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("ok")])
+    """The bound receipt reaches the model once, on the system message, and never enters a stored run.
+
+    The rejected model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
+            answer("ok"),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
 
     with approval_receipt_context("Trusted approval receipt."):
-        await _stream(reply)
+        await _stream(reply, approval_receipt=True)
 
     assert probe.calls == ["a"]
-    first, second = reply.model.requests
+    first, *later = reply.model.requests
     assert str(first.messages[0].content).endswith("Trusted approval receipt.")
     assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
-    assert "Trusted approval receipt." not in str(second.messages[0].content)
-    assert all("Trusted approval receipt." not in str(message.content) for message in _stored(reply).messages)
+    assert len(later) == 2
+    assert all(
+        "Trusted approval receipt." not in str(message.content) for request in later for message in request.messages
+    )
+    session = reply.storage.load_session(SESSION_ID, "agent")
+    assert session is not None
+    assert len(session.runs) == 2
+    assert all(
+        "Trusted approval receipt." not in str(message.content) for run in session.runs for message in run.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -876,7 +896,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Participation decides first, compaction rewrites next, the receipt projects last; the other stages are wired."""
+    """Participation decides first and compaction rewrites next; a fresh reply has no receipt; the rest is wired."""
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
     original = ai.run_agent
@@ -893,7 +913,6 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
         "participation_hook",
         "mid_turn_compaction_hook",
-        "approval_receipt_hook",
     ]
     assert hooks.answer_tool_calls is None
     assert hooks.rewrite_tool_calls is None
