@@ -42,7 +42,11 @@ from mindroom.entity_resolution import (
     is_configured_room,
 )
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.event_loop_stall import EventLoopStallDetector, start_event_loop_stall_detector
+from mindroom.event_loop_stall import (
+    EventLoopStallDetector,
+    shorten_gil_switch_interval,
+    start_event_loop_stall_detector,
+)
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.heap_probe import freeze_startup_heap, start_heap_tasks
 from mindroom.hooks import (
@@ -3203,6 +3207,7 @@ async def _run_runtime(  # noqa: PLR0915
         # Configure logging before any background tasks or account setup begin.
         setup_logging(level=log_level, runtime_paths=runtime_paths)
 
+        shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
 
         # Credential synchronization and storage setup are synchronous. Keep the

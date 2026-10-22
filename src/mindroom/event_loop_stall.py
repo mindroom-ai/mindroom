@@ -59,6 +59,7 @@ _MAX_OTHER_THREAD_STACK_CHARACTERS = 1_000
 _STACK_TRUNCATION_MARKER = "\n...\n"
 _GC_REPORT_THRESHOLD_SECONDS = 0.05
 _MAX_GC_RECORDS = 128
+_GIL_SWITCH_INTERVAL_SECONDS = 0.001
 
 
 def _event_loop_stall_threshold_seconds(runtime_paths: RuntimePaths) -> float:
@@ -473,6 +474,18 @@ class EventLoopStallDetector:
                 self._note_stall_ended(last_beat)
             if now - last_beat > self.threshold_seconds:
                 self._note_stalled(now, heartbeat)
+
+
+def shorten_gil_switch_interval() -> None:
+    """Hand the GIL back to the event loop within 1 ms instead of CPython's 5 ms.
+
+    The loop releases the GIL around every SQLite statement, socket write and
+    selector poll. Getting it back from a busy worker thread takes at least one
+    switch interval, and one more for each other runnable thread, so a callback
+    with tens of such calls stalled the loop for hundreds of milliseconds.
+    """
+    sys.setswitchinterval(_GIL_SWITCH_INTERVAL_SECONDS)
+    logger.info("gil_switch_interval_set", interval_seconds=_GIL_SWITCH_INTERVAL_SECONDS)
 
 
 def _nearest_rank_percentile(samples: list[float], percentile: int) -> float:

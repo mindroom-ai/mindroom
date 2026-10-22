@@ -3017,6 +3017,14 @@ def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_gil_switch_interval() -> Generator[None, None, None]:
+    """Keep a primary started by one test from shortening the GIL switch interval for later tests."""
+    interval = sys.getswitchinterval()
+    yield
+    sys.setswitchinterval(interval)
+
+
+@pytest.fixture(autouse=True)
 def _reopen_primary_worker_manager() -> Generator[None, None, None]:
     """Reopen the process-wide primary worker manager after a test runs a real shutdown."""
     yield

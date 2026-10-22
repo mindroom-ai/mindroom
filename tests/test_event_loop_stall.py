@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import sys
 import threading
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from mindroom.event_loop_stall import (
     EventLoopStallDetector,
     _event_loop_stall_stack_seconds,
     _event_loop_stall_threshold_seconds,
+    shorten_gil_switch_interval,
     start_event_loop_stall_detector,
 )
 
@@ -790,3 +792,11 @@ async def test_detector_rejects_repeated_or_stopped_start_without_leaking_callba
             gc.callbacks.remove(detector._gc_callback)
         if first_thread is not None:
             first_thread.join(timeout=2.0)
+
+
+def test_primary_hands_the_gil_back_within_one_millisecond() -> None:
+    """Each GIL-releasing call on the loop waits at most one switch interval per busy thread."""
+    with capture_logs() as logs:
+        shorten_gil_switch_interval()
+    assert sys.getswitchinterval() == pytest.approx(0.001)
+    assert [entry["interval_seconds"] for entry in logs if entry["event"] == "gil_switch_interval_set"] == [0.001]
