@@ -458,20 +458,13 @@ async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> N
 
 
 def paused_content(tools: Sequence[ToolExecution]) -> str:
-    """Return Agno's text for a paused run that produced none of its own; silent external calls say nothing."""
-    content = ""
-    for tool in tools:
-        if tool.external_execution_silent:
-            continue
-        confirmation = tool.requires_confirmation is True and not tool.confirmed
-        external = tool.external_execution_required is True
-        if confirmation and external:
-            content = "I have tools to execute, but I need confirmation or external execution."
-        elif confirmation:
-            content = "I have tools to execute, but I need confirmation."
-        elif external:
-            content = "I have tools to execute, but it needs external execution."
-    return content
+    """Return Agno's text for a paused run that produced none of its own.
+
+    Only a call waiting for confirmation has one; the only externally executed calls, delegations, pause silently.
+    """
+    if any(tool.requires_confirmation is True and not tool.confirmed for tool in tools):
+        return "I have tools to execute, but I need confirmation."
+    return ""
 
 
 __all__ = [
