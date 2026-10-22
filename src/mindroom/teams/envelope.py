@@ -226,7 +226,8 @@ def _team_member(
 
     A member's tool-call policy, output-limit policy, portable tool search, and mid-turn compaction are its own, and
     its tools run under its own identity; it replays no history, so its compaction stays within the run, and the
-    leader owns the queued-message notices of the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
+    leader owns the queued-message notices of the turn. ``model_name`` is the member's configured model for this
+    turn, whose window its compaction sizes against.
     """
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),

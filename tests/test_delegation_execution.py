@@ -752,7 +752,7 @@ async def test_a_blocking_turn_continues_after_its_delegation_with_streamed_requ
 
 @pytest.mark.asyncio
 async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path) -> None:
-    """The parent row is serialized before the database's lane frees, so a later change never lands in that write."""
+    """The driver saves the parent as it was handed over; a change made while the lane is busy never lands in that write."""
     paths = _runtime_paths(tmp_path)
     store = create_session_storage("leader", _config(paths), paths, _leader_identity())
     session = new_scope_session(session_id="parent", scope_id="leader", is_team=False)
