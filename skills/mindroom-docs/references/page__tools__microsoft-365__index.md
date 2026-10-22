@@ -150,6 +150,7 @@ The tool covers sites, lists, list items, and pages; files and the files in docu
 List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_get_list` reports next to the display name.
 A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
 A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
+Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_list_lists` or `microsoft_sharepoint_get_list` as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
 Site addresses must be the site itself, without a page, list, or library path after it.
 Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
 Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
