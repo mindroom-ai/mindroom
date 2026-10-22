@@ -444,7 +444,7 @@ def run_prepared_team(
 def _persist_bound_seen_event_ids(
     *,
     scope_context: ScopeSessionContext | None,
-    session_id: str | None,
+    session_id: str,
     event_ids: list[str],
 ) -> None:
     """Record the Matrix events this team turn consumed on the stored session row.
@@ -452,7 +452,7 @@ def _persist_bound_seen_event_ids(
     The row is re-read and only then written, so the seen ids land without putting the loaded snapshot's fields
     back over what the run stored.
     """
-    if not event_ids or scope_context is None or session_id is None:
+    if not event_ids or scope_context is None:
         return
     session = scope_context.storage.load_session(session_id, "team")
     if session is None:
@@ -494,8 +494,6 @@ class _TeamTurnHolder:
         Cancel snapshots taken between this release and the next attempt must not see the spent attempt's partials;
         its completed tools already carried over via the turn state.
         """
-        if self.team_members is None:
-            return
         self.team_members = None
         self.attempt = None
 
@@ -759,9 +757,7 @@ class _TeamTurn:
     def terminal_record(self, attempt: TeamAttempt) -> TeamRunRecord:
         """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
         record = attempt.records.record
-        if record is None:
-            msg = f"team run {attempt.run_id!r} ended without its terminal record"
-            raise RuntimeError(msg)
+        assert record is not None
         return record
 
     def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
@@ -815,7 +811,7 @@ class _TeamTurn:
         if self.ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
-                session_id=self.ctx.session_id,
+                session_id=self.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         tool_executions = team_tool_executions(record, attempt.records.members)
@@ -875,12 +871,9 @@ class _TeamTurn:
         )
 
     def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
-        resolved_session_id = _resolved_team_session_id(scope_context, discard.session_id or self.ctx.session_id)
-        if resolved_session_id is None:
-            return
         ai_runtime.discard_empty_completed_run(
             scope_context=scope_context,
-            session_id=resolved_session_id,
+            session_id=discard.session_id or self.session_id,
             run_id=discard.run_id,
             entity_name=self.entity_name,
             output_tokens=discard.output_tokens,
@@ -912,15 +905,6 @@ class _TeamTurn:
             run_id=self.ctx.run_id,
             continuation_model_prompt_tail="",
         )
-
-
-def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session_id: str | None) -> str | None:
-    """Return the effective team session id, falling back to the opened scope session."""
-    if session_id is not None:
-        return session_id
-    if scope_context is not None and scope_context.session is not None:
-        return scope_context.session.session_id
-    return None
 
 
 def _team_turn(

@@ -164,6 +164,28 @@ async def test_a_blocking_team_turn_whose_attempts_all_came_back_empty_still_mar
 
 
 @pytest.mark.asyncio
+async def test_only_a_team_turn_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn that fails while preparing its first attempt ran nothing in the team session, so it registers none."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(10, 1))])
+
+    with ai_runtime.queued_message_signal_context(None) as notices:
+        assert await team.respond() == f"{HEADER}\n**Team Consensus**:\n\nDone."
+    assert list(notices.storage_targets) == [("squad", SESSION_ID, "team")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(envelope, "prepare_materialized_team_execution", history_unavailable)
+    with ai_runtime.queued_message_signal_context(None) as notices:
+        assert "history unavailable" in await team.respond()
+    assert notices.storage_targets == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_format(
     tmp_path: Path,
