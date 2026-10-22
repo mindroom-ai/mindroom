@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from ast import literal_eval
 from typing import TYPE_CHECKING
 
 import pytest
@@ -36,22 +37,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-# Without the job middleware, the job tool's auto-saved receipt reaches the record as the dict's repr, not JSON.
-_JOB_RECEIPT_IS_JSON = pytest.mark.xfail(
-    strict=True,
-    reason="F1: the owned loop runs the job tool without the tool-job middleware that JSON-encodes its receipt",
-)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "execution"),
     [
-        pytest.param(
-            mode,
-            execution,
-            marks=[_JOB_RECEIPT_IS_JSON] if (mode, execution) == ("automatic", "detached") else [],
-        )
+        (mode, execution)
         for mode in ("explicit", "automatic", "invalid", "resumed", "resumed_invalid")
         for execution in ("inline", "foreground", "detached", "excluded")
         # A managed child asks for its own approvals through job cards, so only unmanaged children resume a parent.
@@ -181,7 +171,15 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
             assert runtime is not None
             assert await runtime.list_jobs(owner=identity, depth=0) == []
         delegation = next(tool for tool in result.tools or [] if tool.tool_name == result_tool_name)
-        receipt = json.loads(str(delegation.result))["mindroom_tool_output"]
+        recorded = str(delegation.result)
+        if result_tool_name == "job" and mode == "automatic":
+            # The job call's own output policy saves the retrieved receipt again, and its receipt reaches the record
+            # as the dict's text, as Agno recorded every tool's dict result.
+            saved_again = literal_eval(recorded)["mindroom_tool_output"]
+            assert saved_again["auto_saved"] is True
+            assert saved_again["path"].startswith("mindroom_tool_outputs/job-")
+            recorded = (workspace / saved_again["path"]).read_text()
+        receipt = json.loads(recorded)["mindroom_tool_output"]
         if mode in {"invalid", "resumed_invalid"}:
             assert receipt["status"] == "error"
             assert not (tmp_path / "escape.txt").exists()
