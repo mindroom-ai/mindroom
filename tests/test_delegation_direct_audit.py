@@ -26,7 +26,7 @@ from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
-from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -232,8 +232,12 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
 
 
 @pytest.mark.asyncio
-async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> None:
-    """A tool middleware that skips the tool body must not leak its parent IDs into a later direct call."""
+@pytest.mark.parametrize("runner", ["loop", "same-task"])
+async def test_denied_tool_middleware_clears_direct_provenance(tmp_path: Path, runner: str) -> None:
+    """A tool middleware that skips the tool body must not leak its parent IDs into a later direct call.
+
+    The loop runs each tool call in a task of its own; a runner outside the loop runs it in the caller's task.
+    """
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
@@ -241,28 +245,45 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
     async def deny_call(_call: ToolCall, _call_next: ToolNext) -> str:
         return "denied before delegation"
 
-    parent = ScriptedModel(
-        [
-            calls(scripted_call("run_subagent", "denied-call", agent_name="child", task="Skip")),
-            answer("parent complete"),
-        ],
-    )
-    spec = AgentSpec(id="leader", name="leader", model=parent, system_message=None, toolkits=(adapt_toolkit(tools),))
-    with tool_runtime_context(context):
-        _events, record = await collect(
-            run_agent(
-                spec,
-                [Message(role="user", content="delegate")],
-                ctx=RunContext(
-                    run_id="denied-parent-run",
-                    session_id="denied-parent-session",
-                    user_id=_identity().requester_id,
-                ),
-                hooks=LoopHooks(tool_middleware=(deny_call,)),
-            ),
+    if runner == "loop":
+        parent = ScriptedModel(
+            [
+                calls(scripted_call("run_subagent", "denied-call", agent_name="child", task="Skip")),
+                answer("parent complete"),
+            ],
         )
-    assert record.status is RunStatus.completed
-    assert parent.requests[-1].messages[-1].content == "denied before delegation"
+        spec = AgentSpec(
+            id="leader",
+            name="leader",
+            model=parent,
+            system_message=None,
+            toolkits=(adapt_toolkit(tools),),
+        )
+        with tool_runtime_context(context):
+            _events, record = await collect(
+                run_agent(
+                    spec,
+                    [Message(role="user", content="delegate")],
+                    ctx=RunContext(
+                        run_id="denied-parent-run",
+                        session_id="denied-parent-session",
+                        user_id=_identity().requester_id,
+                    ),
+                    hooks=LoopHooks(tool_middleware=(deny_call,)),
+                ),
+            )
+        assert record.status is RunStatus.completed
+        assert parent.requests[-1].messages[-1].content == "denied before delegation"
+    else:
+        [delegate] = [function for function in adapt_toolkit(tools).functions if function.name == "run_subagent"]
+        with tool_runtime_context(context):
+            result = await run_tool_call(
+                delegate,
+                {"agent_name": "child", "task": "Skip"},
+                ToolCallContext(run_id="denied-parent-run", session_id="denied-parent-session", call_id="denied-call"),
+                middleware=(deny_call,),
+            )
+        assert result == "denied before delegation"
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
     async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
