@@ -43,16 +43,11 @@ logger = get_logger(__name__)
 
 
 class ConnectionService(BaseModel):
-    """One available account connection, without credential storage details.
-
-    `connected` is only filled in by the catalog route: it is what the status route would report to this viewer,
-    read without refreshing the token, so a page can count connected accounts before it loads each status.
-    """
+    """One available account connection, without credential storage details."""
 
     provider: str
     is_shared: bool
     can_manage: bool
-    connected: bool = False
     display_name: str
     description: str
     icon: str | None
@@ -71,11 +66,8 @@ class ConnectionTool(BaseModel):
 
 
 class AgentConnections(BaseModel):
-    """Allowed services for one personal or managed shared agent.
+    """Allowed services for one personal or managed shared agent; what is connected loads per agent (`AgentState`).
 
-    `egress_services` is a list for an agent whose egress credentials the user may use, empty when it has no
-    services, so the portal can link every such agent to the services page. It is null for any other agent, for
-    every agent while the egress broker is off, and for an agent whose egress state cannot be read.
     `managers` is a shared or unscoped agent's credential managers as Matrix IDs, as the egress listing reports them;
     it is empty for any other agent, and for an agent with none only administrators manage its credentials. While the
     egress broker is off, it is filled only for a user with a connection on the agent that they cannot change, whose
@@ -90,13 +82,27 @@ class AgentConnections(BaseModel):
     mcp_available: bool
     services: list[ConnectionService]
     tools: list[ConnectionTool]
-    egress_services: list[EgressCredentialService] | None = None
 
 
 class ConnectionsCatalog(BaseModel):
     """Agents the authenticated user may use or manage connections for."""
 
     agents: list[AgentConnections]
+
+
+class AgentState(BaseModel):
+    """What one agent's connections are, loaded apart from the catalog so the portal can show the catalog at once.
+
+    `connected` says, by provider, whether each of the agent's services is connected as the status route would report
+    it to this viewer, read without refreshing the token, so the portal can count connected accounts before it loads
+    each status; a service whose state cannot be read counts as not connected.
+    `egress_services` is a list for an agent whose egress credentials the user may use, empty when it has no
+    services, so the portal can link every such agent to the services page. It is null for any other agent, for
+    every agent while the egress broker is off, and for an agent whose egress state cannot be read.
+    """
+
+    connected: dict[str, bool]
+    egress_services: list[EgressCredentialService] | None
 
 
 class ConnectionStatus(BaseModel):
@@ -268,7 +274,7 @@ async def _agent_scope_status(
     *,
     listing: bool = False,
 ) -> oauth.OAuthStatusResponse:
-    """Read a non-manager's connection for the status route and the catalog; `listing` skips refresh and bootstrap."""
+    """Read a non-manager's connection for the status and state routes; `listing` skips refresh and bootstrap."""
     agent = resolve_connection_agent(context.user, agent_name)
     credential_context = resolve_oauth_credential_context(
         context.providers[provider_id],
@@ -289,10 +295,10 @@ async def _service_connected(
 ) -> bool:
     """Say whether the status route would report the service connected, without refreshing its token.
 
-    It reads state the way that route does, so a viewer sees the same answer in the catalog and in the expanded row.
-    It never bootstraps an OAuth client over the network, which every service of the catalog would otherwise attempt:
-    a provider with no stored client reads as not connected. Any failure also reads as not connected: one
-    unreadable service must not fail the catalog.
+    It reads state the way that route does, so a viewer sees the same answer in the agent's state and in the expanded
+    row. It never bootstraps an OAuth client over the network, which every service of the page would otherwise
+    attempt: a provider with no stored client reads as not connected. Any failure also reads as not connected: one
+    unreadable service must not fail the agent's state.
     """
     try:
         if service.can_manage:
@@ -307,7 +313,7 @@ async def _service_connected(
             result = await _agent_scope_status(request, context, agent_name, service.provider, listing=True)
     except Exception as exc:
         logger.warning(
-            "connection_catalog_status_unavailable",
+            "connection_state_status_unavailable",
             provider_id=service.provider,
             error_type=type(exc).__name__,
         )
@@ -320,11 +326,11 @@ async def _egress_services(
     agent_name: str,
     requester_id: str,
 ) -> list[EgressCredentialService] | None:
-    """List an agent's egress rows for the catalog; one agent whose egress state cannot be read must not fail it."""
+    """List an agent's egress rows for its state; egress state that cannot be read must not fail it."""
     try:
         return await egress_services_for_agent(request, agent_name, requester_id)
     except Exception as exc:
-        logger.warning("connection_catalog_egress_unavailable", agent_name=agent_name, error_type=type(exc).__name__)
+        logger.warning("connection_state_egress_unavailable", agent_name=agent_name, error_type=type(exc).__name__)
         return None
 
 
@@ -373,12 +379,21 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
 
 
 @router.get("")
-async def catalog(request: Request, context: _ConnectionsContext) -> ConnectionsCatalog:
-    """List allowed services with whether each is connected; the full status of an account is loaded per card.
+async def catalog(context: _ConnectionsContext) -> ConnectionsCatalog:
+    """List allowed agents, services, and tools from config alone, so the page shows before any stored state is read.
 
-    `connected` on a service is read like the status route reads it, without refreshing the token or bootstrapping an
-    OAuth client, so the portal can count connected accounts before a card is opened; a service whose state cannot be
-    read counts as not connected.
+    What is connected loads per agent from the state route, and the full status of an account per card.
+    """
+    return context.catalog
+
+
+@router.get("/agents/{agent_name}/state")
+async def agent_state(agent_name: str, request: Request, context: _ConnectionsContext) -> AgentState:
+    """Load whether each of a listed agent's services is connected, and its egress rows.
+
+    `connected` is read like the status route reads it, without refreshing the token or bootstrapping an OAuth
+    client, concurrently for the agent's services; a scope that never stored a connection reads as not connected
+    without creating its store.
 
     Egress rows exist only while the egress broker is on. They follow the personal egress API's eligibility rule,
     only agents the user may use, and carry the stored OAuth state of their services. That state is read only here,
@@ -386,24 +401,20 @@ async def catalog(request: Request, context: _ConnectionsContext) -> Connections
     read is shown as not connectable. Reading it skips the token refresh; resolving the OAuth client of an egress
     service's provider can still bootstrap it over the network once when none is stored.
     """
-    requester_id = context.user.owner.requester_id
-    agents = [
-        agent.model_copy(
-            update={
-                "services": [
-                    service.model_copy(
-                        update={"connected": await _service_connected(request, context, agent.agent_name, service)},
-                    )
-                    for service in agent.services
-                ],
-                "egress_services": (
-                    await _egress_services(request, agent.agent_name, requester_id) if context.egress_enabled else None
-                ),
-            },
-        )
-        for agent in context.catalog.agents
-    ]
-    return ConnectionsCatalog(agents=agents)
+    agent = next((agent for agent in context.catalog.agents if agent.agent_name == agent_name), None)
+    if agent is None:
+        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
+    connected = await asyncio.gather(
+        *(_service_connected(request, context, agent_name, service) for service in agent.services),
+    )
+    return AgentState(
+        connected={service.provider: flag for service, flag in zip(agent.services, connected, strict=True)},
+        egress_services=(
+            await _egress_services(request, agent_name, context.user.owner.requester_id)
+            if context.egress_enabled
+            else None
+        ),
+    )
 
 
 def _no_avatar() -> Response:

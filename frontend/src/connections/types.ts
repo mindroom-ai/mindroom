@@ -2,8 +2,12 @@ export interface ConnectionService {
   provider: string;
   is_shared: boolean;
   can_manage: boolean;
-  /** Whether the account is connected, as the viewer's status would show it, read without refreshing the token. */
-  connected: boolean;
+  /**
+   * Whether the account is connected, as the viewer's status would show it,
+   * read without refreshing the token. Filled in from the agent's state; absent
+   * until it loads.
+   */
+  connected?: boolean;
   display_name: string;
   description: string;
   icon: string | null;
@@ -25,9 +29,17 @@ export interface AgentConnections {
   tools: ConnectionTool[];
   /**
    * The agent's egress services: an array, empty when it has none, for an agent
-   * the viewer may use egress credentials with. Absent or `null` for any other.
+   * the viewer may use egress credentials with, and `null` for any other.
+   * Filled in from the agent's state; absent until it loads.
    */
   egress_services?: EgressCredentialService[] | null;
+}
+
+/** What one agent's connections are, from `GET /api/connections/agents/{agent}/state`. */
+export interface AgentState {
+  /** Whether each of the agent's services is connected, by provider. */
+  connected: Record<string, boolean>;
+  egress_services: EgressCredentialService[] | null;
 }
 
 export interface ConnectionTool {
