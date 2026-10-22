@@ -100,9 +100,9 @@ async def _load_service_statuses_for_target(
 
     worker_target = worker_target_for_credentials_target(target)
 
-    services: list[_ServiceStatus] = []
     scope_services = await asyncio.to_thread(effective_services, config, target.base_manager, worker_target)
-    for name, service_config in scope_services.items():
+
+    async def load_status(name: str, service_config: EgressService) -> _ServiceStatus:
         oauth_part = await egress_oauth_status(
             request,
             name,
@@ -122,19 +122,18 @@ async def _load_service_statuses_for_target(
             reuse_target=lambda provider: _oauth_reuse_target(request, target, worker_target, provider),
         )
         sources = await egress_service_status(target.base_manager, worker_target, service_config, name, oauth_part)
-        services.append(
-            _ServiceStatus(
-                name=name,
-                display_name=service_config.display_name,
-                description=service_config.description,
-                source=service_source(config.egress_broker, name),
-                rules=rule_summaries(service_config),
-                restrict_only=service_config.restrict_only,
-                **asdict(sources),
-            ),
+        return _ServiceStatus(
+            name=name,
+            display_name=service_config.display_name,
+            description=service_config.description,
+            source=service_source(config.egress_broker, name),
+            rules=rule_summaries(service_config),
+            restrict_only=service_config.restrict_only,
+            **asdict(sources),
         )
 
-    return services
+    # Like the personal listing, the services load concurrently so the panel does not wait for each hop in turn.
+    return list(await asyncio.gather(*(load_status(name, service) for name, service in scope_services.items())))
 
 
 def _resolve_scope_and_service(

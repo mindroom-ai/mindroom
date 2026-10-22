@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -26,7 +27,7 @@ from mindroom.api import config_lifecycle, connections, egress_credentials, egre
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.config.main import Config
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.env import egress_agent_scope
@@ -1596,6 +1597,61 @@ def test_key_status_is_read_off_the_event_loop(
     _state_services(portal, "alice", "personal")
     assert on_loop
     assert not any(on_loop)
+
+
+def test_listing_and_state_read_no_oauth_client_on_the_event_loop(
+    oauth_egress_portal: dict[str, Any],
+    calls_on_event_loop: Callable[[object, str], list[bool]],
+) -> None:
+    """The OAuth client is a credential file, read in a thread, and not at all for an account never connected."""
+    portal = oauth_egress_portal
+    on_loop = calls_on_event_loop(CredentialsManager, "load_credentials")
+    _listing(portal, "alice")
+    _state_services(portal, "alice", "personal")
+    assert on_loop
+    assert not any(on_loop)
+
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    on_loop.clear()
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["connected"] is True
+    _state_services(portal, "alice", "personal")
+    assert on_loop
+    assert not any(on_loop)
+
+
+def require_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str, expected: int) -> list[str]:
+    """Make each call of the async `module.name` wait until `expected` calls have started; return the service names.
+
+    Calls that run one after another never get there, so the first one fails after a short wait.
+    """
+    real = getattr(module, name)
+    started: list[str] = []
+    all_started: list[asyncio.Event] = []
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if not all_started:
+            all_started.append(asyncio.Event())
+        started.append(args[3])
+        if len(started) == expected:
+            all_started[0].set()
+        async with asyncio.timeout(5):
+            await all_started[0].wait()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, gated)
+    return started
+
+
+def test_listing_loads_the_rows_of_every_agent_at_once(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every row awaits several thread hops, so rows one after another would keep a busy server's page loading."""
+    started = require_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status", expected=4)
+    agents = _listed_agents(egress_portal, "alice")
+    assert list(agents) == ["personal", "shared_dev"]
+    assert [[row["name"] for row in agent["services"]] for agent in agents.values()] == [["github", "openai"]] * 2
+    assert sorted(started) == ["github", "github", "openai", "openai"]
 
 
 def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
