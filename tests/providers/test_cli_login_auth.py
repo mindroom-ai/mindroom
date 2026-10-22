@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 
 from mindroom.providers.openai import codex_auth, kimi_auth
@@ -42,6 +43,26 @@ def _write_kimi_credentials(kimi_home: Path, access_token: str, refresh_value: s
         "scope": "kimi-code",
     }
     (credentials_dir / "kimi-code.json").write_text(json.dumps(credentials), encoding="utf-8")
+
+
+def _answer_refresh(monkeypatch: pytest.MonkeyPatch, reply: httpx.Response | httpx.HTTPError) -> None:
+    """Answer the CLI's token refresh call with ``reply``: an HTTP response, or a transport failure."""
+
+    def post(_url: str, **_kwargs: object) -> httpx.Response:
+        if isinstance(reply, httpx.HTTPError):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(httpx, "post", post)
+
+
+# Refresh answers a CLI login cannot use; the expected message tells the user how to recover.
+_FAILED_REFRESHES = [
+    pytest.param(httpx.ConnectError("connection refused"), "refresh failed: connection refused", id="unreachable"),
+    pytest.param(httpx.Response(500, text="upstream down"), r"refresh failed \(HTTP 500\): upstream down", id="status"),
+    pytest.param(httpx.Response(200, text="<html>"), "refresh returned invalid JSON", id="invalid-json"),
+    pytest.param(httpx.Response(200, json={"token_type": "Bearer"}), "did not include an access token", id="no-token"),
+]
 
 
 def _temp_file_modes(monkeypatch: pytest.MonkeyPatch, temp_name: str) -> list[int]:
@@ -185,6 +206,76 @@ def test_concurrent_codex_borrowers_share_one_refresh(tmp_path: Path, monkeypatc
     assert results == [(refreshed_token, "acct_123"), (refreshed_token, "acct_123")]
 
 
+def test_a_codex_token_that_is_not_a_jwt_is_refreshed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token whose expiry cannot be read counts as expired, so the login refreshes instead of failing later."""
+    codex_home = tmp_path / ".codex"
+    _write_codex_auth(codex_home, "opaque-token", "refresh-value")
+    refreshed_token = _jwt_with_exp(int(time.time()) + 7200)
+    _answer_refresh(monkeypatch, httpx.Response(200, json={"access_token": refreshed_token}))
+
+    assert codex_auth.borrow_codex_key(codex_home=codex_home) == (refreshed_token, "acct_123")
+
+
+@pytest.mark.parametrize(
+    ("auth", "error"),
+    [
+        (None, "Codex auth file not found"),
+        ({"auth_mode": "apikey", "OPENAI_API_KEY": "key-value"}, "must use ChatGPT OAuth auth_mode"),
+        ({"auth_mode": "chatgpt", "tokens": {"refresh_token": "refresh-value"}}, "No ChatGPT access token"),
+        (
+            {"auth_mode": "chatgpt", "tokens": {"access_token": _jwt_with_exp(int(time.time()) - 60)}},
+            "No Codex refresh token",
+        ),
+    ],
+    ids=["no-login", "api-key-login", "no-access-token", "expired-without-refresh-token"],
+)
+def test_an_unusable_codex_login_tells_the_user_to_log_in(
+    tmp_path: Path,
+    auth: dict[str, object] | None,
+    error: str,
+) -> None:
+    """A login that cannot yield a token fails with the reason, instead of sending a request without credentials."""
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    if auth is not None:
+        (codex_home / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+
+    with pytest.raises(codex_auth.CodexAuthError, match=error):
+        codex_auth.borrow_codex_key(codex_home=codex_home)
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        *_FAILED_REFRESHES,
+        *(
+            pytest.param(
+                httpx.Response(401, json={"error": code}),
+                rf"refresh token is no longer valid \({code}\)\. Run `codex login` again",
+                id=code,
+            )
+            for code in ("refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated")
+        ),
+    ],
+)
+def test_a_failed_codex_refresh_keeps_the_saved_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: httpx.Response | httpx.HTTPError,
+    error: str,
+) -> None:
+    """Nothing is written when the refresh fails, so a later ``codex login`` or retry starts from the same file."""
+    codex_home = tmp_path / ".codex"
+    _write_codex_auth(codex_home, _jwt_with_exp(int(time.time()) - 60), "refresh-value")
+    saved = (codex_home / "auth.json").read_text(encoding="utf-8")
+    _answer_refresh(monkeypatch, reply)
+
+    with pytest.raises(codex_auth.CodexAuthError, match=error):
+        codex_auth.borrow_codex_key(codex_home=codex_home)
+
+    assert (codex_home / "auth.json").read_text(encoding="utf-8") == saved
+
+
 # --- Kimi ---------------------------------------------------------------------------------------------------
 
 
@@ -269,3 +360,66 @@ def test_concurrent_kimi_borrowers_share_one_refresh(tmp_path: Path, monkeypatch
 
     assert refreshes == ["refresh-value"]
     assert results == ["new-access", "new-access"]
+
+
+def test_a_kimi_refresh_keeps_an_absolute_expiry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refresh answer's absolute ``expires_at`` is saved as it is."""
+    kimi_home = tmp_path / ".kimi-code"
+    _write_kimi_credentials(kimi_home, "old-access", "refresh-value", expires_at=int(time.time()) - 60)
+    expires_at = int(time.time()) + 3600
+    _answer_refresh(monkeypatch, httpx.Response(200, json={"access_token": "new-access", "expires_at": expires_at}))
+
+    assert kimi_auth.borrow_kimi_token(kimi_home=kimi_home) == "new-access"
+
+    credentials = json.loads((kimi_home / "credentials" / "kimi-code.json").read_text(encoding="utf-8"))
+    assert credentials["expires_at"] == expires_at
+
+
+@pytest.mark.parametrize(
+    ("credentials", "error"),
+    [
+        (None, "Kimi Code credentials not found"),
+        ({"refresh_token": "refresh-value"}, "No Kimi Code access token"),
+        ({"access_token": "access-value"}, "No Kimi Code refresh token"),
+    ],
+    ids=["no-login", "no-access-token", "no-expiry-and-no-refresh-token"],
+)
+def test_an_unusable_kimi_login_tells_the_user_to_log_in(
+    tmp_path: Path,
+    credentials: dict[str, object] | None,
+    error: str,
+) -> None:
+    """A login that cannot yield a token fails with the reason, instead of sending a request without credentials."""
+    credentials_dir = tmp_path / ".kimi-code" / "credentials"
+    credentials_dir.mkdir(parents=True)
+    if credentials is not None:
+        (credentials_dir / "kimi-code.json").write_text(json.dumps(credentials), encoding="utf-8")
+
+    with pytest.raises(kimi_auth.KimiAuthError, match=error):
+        kimi_auth.borrow_kimi_token(kimi_home=tmp_path / ".kimi-code")
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        *_FAILED_REFRESHES,
+        pytest.param(httpx.Response(200, json=["new-access"]), "refresh returned an unexpected payload", id="list"),
+    ],
+)
+def test_a_failed_kimi_refresh_keeps_the_saved_login(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: httpx.Response | httpx.HTTPError,
+    error: str,
+) -> None:
+    """Nothing is written when the refresh fails, so a later ``/login`` or retry starts from the same file."""
+    kimi_home = tmp_path / ".kimi-code"
+    _write_kimi_credentials(kimi_home, "old-access", "refresh-value", expires_at=int(time.time()) - 60)
+    credentials_path = kimi_home / "credentials" / "kimi-code.json"
+    saved = credentials_path.read_text(encoding="utf-8")
+    _answer_refresh(monkeypatch, reply)
+
+    with pytest.raises(kimi_auth.KimiAuthError, match=error):
+        kimi_auth.borrow_kimi_token(kimi_home=kimi_home)
+
+    assert credentials_path.read_text(encoding="utf-8") == saved
