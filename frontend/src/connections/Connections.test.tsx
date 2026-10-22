@@ -380,6 +380,7 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
         email: null,
         is_administrator: false,
         egress_enabled: true,
+        dashboard_url: "/",
       });
     if (path === "/api/connections/agents/personal/mail/status")
       return json(status);
@@ -2174,6 +2175,7 @@ describe("connections header", () => {
           email: null,
           is_administrator: false,
           egress_enabled: false,
+          dashboard_url: "/",
         }),
     });
     render(<Connections />);

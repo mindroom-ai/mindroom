@@ -150,7 +150,7 @@ export function ConnectionsHeader({
             </a>
           ))}
           {identity?.is_administrator && (
-            <a href="/" className={linkClass(false)}>
+            <a href={identity.dashboard_url} className={linkClass(false)}>
               Dashboard
             </a>
           )}

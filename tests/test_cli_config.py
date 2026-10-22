@@ -2950,6 +2950,33 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
+    @pytest.mark.parametrize(
+        ("dashboard_url", "message"),
+        [
+            ("https://admin.example.org", "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth"),
+            # The value is echoed as text, never read as console markup.
+            ("http://admin.example.org/[/x]", "'http://admin.example.org/[/x]'"),
+        ],
+    )
+    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(
+        self,
+        tmp_path: Path,
+        dashboard_url: str,
+        message: str,
+    ) -> None:
+        """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+
+        assert result.exit_code == 1
+        assert message in result.output
+        assert isinstance(result.exception, SystemExit)
+        mock_main.assert_not_called()
+
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
         tmp_path: Path,

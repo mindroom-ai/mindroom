@@ -73,7 +73,7 @@ Apart from the dashboard rule below, a session authenticates only these paths:
 For a user listed in `administrators`, the session also opens the dashboard and its APIs, with no API key, when the homeserver binds tokens: MindRoom's Tuwunel fork with `mindroom_openid_audience` on, which MindRoom detects from `/_matrix/client/versions` at sign-in.
 Without binding, a token could have been replayed from another deployment on the same homeserver, and the dashboard is full control of this one.
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
-The Connections header links the dashboard for administrators only.
+The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 

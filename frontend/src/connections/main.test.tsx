@@ -28,6 +28,7 @@ beforeEach(() => {
         email: null,
         is_administrator: false,
         egress_enabled: true,
+        dashboard_url: "/",
       });
     if (path === "/api/connections/mcp/selection")
       return json({ enabled: false, agents: {} });

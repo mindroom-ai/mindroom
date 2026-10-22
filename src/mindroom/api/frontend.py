@@ -6,9 +6,15 @@ from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
-from mindroom.api.auth import login_redirect_for_request, request_has_frontend_access, sanitize_next_path
+from mindroom.api.auth import (
+    dashboard_host_public_origin,
+    login_redirect_for_request,
+    request_has_frontend_access,
+    request_path_with_query,
+    sanitize_next_path,
+)
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -60,6 +66,10 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     first_segment = path.split("/", 1)[0] if path else ""
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")
+
+    # Connections sign-in, account links, and MCP consent belong to the public origin, so their pages move there.
+    if first_segment == "connections" and (public := dashboard_host_public_origin(request)) is not None:
+        return RedirectResponse(f"{public}{request_path_with_query(request)}")
 
     # The Agent Keys page is absent for everyone while the broker is off, before any login redirect.
     if first_segment == "connections" and not _connections_frontend_enabled(api_runtime_paths(request), path):

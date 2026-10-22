@@ -962,6 +962,102 @@ def test_oauth_entrypoints_allow_dynamic_client_with_matching_https_redirect(
     assert response.status_code == expected_status
 
 
+def test_oauth_connect_from_the_dashboard_host_returns_to_the_dashboard(tmp_path: Path) -> None:
+    """A flow started on `MINDROOM_DASHBOARD_URL` uses the public callback and tells the dashboard when it ends."""
+    public_url = "https://chat.mindroom.chat"
+    dashboard_url = "https://admin.mindroom.chat"
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **trusted_upstream_env(),
+            "MINDROOM_PUBLIC_URL": public_url,
+            "MINDROOM_DASHBOARD_URL": dashboard_url,
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload())
+    _use_runtime_auth_settings(api_app)
+    redirect_uri = f"{public_url}/api/oauth/public_mail/callback"
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "public_mail_oauth_client",
+        {
+            "client_id": "provisioned-client-id",
+            "client_secret": "provisioned-client-secret",
+            "redirect_uri": redirect_uri,
+            OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY: redirect_uri,
+            "_source": "oauth_dynamic_client_registration",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: True,
+        },
+    )
+    provider = OAuthProvider(
+        id="public_mail",
+        display_name="Public Mail",
+        authorization_url="https://auth.example.test/authorize",
+        token_url="https://auth.example.test/token",
+        scopes=("mail.read",),
+        credential_service="public_mail_oauth",
+        client_config_services=("public_mail_oauth_client",),
+        pkce_code_challenge_method="S256",
+    )
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=dashboard_url) as client:
+            response = client.post(
+                "/api/oauth/public_mail/connect?agent_name=general",
+                headers={"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"], "Origin": dashboard_url},
+            )
+
+    assert response.status_code == 200, response.text
+    state = parse_qs(urlparse(response.json()["auth_url"]).query)["state"][0]
+    state_store = runtime_paths.storage_root / "oauth_state" / "oauth_state.json"
+    pending = json.loads(state_store.read_text(encoding="utf-8"))["states"][state]["data"]
+    assert pending["opener_origin"] == dashboard_url
+
+
+_PUBLIC_ORIGIN = "https://chat.mindroom.chat"
+_DASHBOARD_ORIGIN = "https://admin.mindroom.chat"
+
+
+def _dashboard_host_app(tmp_path: Path, env: dict[str, str]) -> tuple[FastAPI, constants.RuntimePaths, OAuthProvider]:
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            "MINDROOM_PUBLIC_URL": _PUBLIC_ORIGIN,
+            "MINDROOM_DASHBOARD_URL": _DASHBOARD_ORIGIN,
+            **env,
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    _use_runtime_auth_settings(api_app)
+    provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
+    return api_app, runtime_paths, provider
+
+
+def test_oauth_started_on_the_dashboard_host_finishes_under_trusted_upstream_auth(tmp_path: Path) -> None:
+    """The access gateway signs requests on both hosts, so the public callback finishes without another sign-in."""
+    api_app, runtime_paths, provider = _dashboard_host_app(tmp_path, trusted_upstream_env())
+    signed = {"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"]}
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url=_DASHBOARD_ORIGIN) as dashboard:
+            connect = dashboard.post(
+                f"/api/oauth/{provider.id}/connect?agent_name=general",
+                headers={**signed, "Origin": _DASHBOARD_ORIGIN},
+            )
+            assert connect.status_code == 200, connect.text
+            state = _state_from_auth_url(connect.json()["auth_url"])
+        with TestClient(api_app, base_url=_PUBLIC_ORIGIN) as public:
+            finished = public.get(
+                f"/api/oauth/{provider.id}/callback?code=test-code&state={state}",
+                headers=signed,
+                follow_redirects=False,
+            )
+
+    assert finished.status_code == 307, finished.text
+    assert urlparse(finished.headers["location"]).path == f"/api/oauth/{provider.id}/success"
+    assert _stored_oauth_credentials(provider, runtime_paths) is not None
+
+
 @pytest.mark.parametrize(
     ("callback_uri", "request_hostname"),
     [

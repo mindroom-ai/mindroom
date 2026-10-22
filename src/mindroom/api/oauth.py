@@ -19,6 +19,7 @@ from mindroom.api.auth import (
     authenticate_user,
     dashboard_cors_origins,
     login_redirect_for_request,
+    oauth_callback_hostname,
     verify_user,
 )
 from mindroom.api.credentials_oauth_flows import (
@@ -86,6 +87,7 @@ from mindroom.oauth.service import (
     oauth_provider_service_account_configured,
     oauth_success_redirect_url,
 )
+from mindroom.origins import dashboard_origin
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     build_agent_toolkit_worker_target,
@@ -223,7 +225,12 @@ async def _client_config_resolution_for_request(
         resolution is None
         or resolution.custom
         or is_oauth_loopback_hostname(request.url.hostname)
-        or _dynamic_client_matches_hosted_callback(resolution, provider, runtime_paths, request.url.hostname)
+        or _dynamic_client_matches_hosted_callback(
+            resolution,
+            provider,
+            runtime_paths,
+            oauth_callback_hostname(request),
+        )
     ):
         return resolution
     if reject_remote_provisioned:
@@ -705,11 +712,15 @@ def _oauth_browser_error_response(
 
 
 def _validated_opener_origin(origin: str | None, provider: OAuthProvider, runtime_paths: RuntimePaths) -> str | None:
-    """Return `origin` when a popup's last page may post to it: its completion origin or a dashboard CORS origin.
+    """Return `origin` when a popup's last page may post to it: its completion, dashboard, or dashboard CORS origin.
 
     The dashboard's CORS `*` allows every origin to call the API, never to receive this message, so it adds none.
     """
-    allowed = {_oauth_success_origin(provider, runtime_paths), *dashboard_cors_origins(runtime_paths)} - {"*"}
+    allowed = {
+        _oauth_success_origin(provider, runtime_paths),
+        dashboard_origin(runtime_paths),
+        *dashboard_cors_origins(runtime_paths),
+    } - {"*", None}
     return origin if origin in allowed else None
 
 

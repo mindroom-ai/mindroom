@@ -1859,6 +1859,7 @@ depends_on = [
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
     "mindroom.oauth.service",
+    "mindroom.origins",
     "mindroom.tool_system.worker_routing",
 ]
 

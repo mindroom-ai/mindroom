@@ -74,6 +74,7 @@ const identity = {
   email: "bob@example.org",
   is_administrator: false,
   egress_enabled: true,
+  dashboard_url: "/",
 };
 
 beforeEach(() => {

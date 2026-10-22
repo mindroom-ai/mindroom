@@ -5070,6 +5070,59 @@ def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     return api_app
 
 
+def test_dashboard_url_origin_may_change_the_dashboard(tmp_path: Path) -> None:
+    """A dashboard on its own host may change things from that host's origin, and only there."""
+    env = {
+        **trusted_upstream_env(),
+        "MINDROOM_PUBLIC_URL": "https://chat.example.org",
+        "MINDROOM_DASHBOARD_URL": "https://admin.example.org",
+    }
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, _runtime_paths(tmp_path, process_env=env))
+
+    @api_app.post("/change")
+    async def _change(_auth_user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, bool]:
+        return {"changed": True}
+
+    signed = {"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"]}
+    for host, origin, expected in (
+        ("https://admin.example.org", "https://admin.example.org", 200),
+        ("https://admin.example.org", "https://chat.example.org", 403),
+        ("https://admin.example.org", "https://evil.example.org", 403),
+        ("https://chat.example.org", "https://chat.example.org", 200),
+        ("https://chat.example.org", "https://admin.example.org", 403),
+    ):
+        with TestClient(api_app, base_url=host) as client:
+            response = client.post("/change", headers={**signed, "Origin": origin})
+        assert response.status_code == expected, (host, origin, response.text)
+
+
+def test_dashboard_url_without_trusted_upstream_auth_fails_startup(tmp_path: Path) -> None:
+    """Only a gateway's signed identity reaches both hosts, so the setting needs trusted upstream auth."""
+    with pytest.raises(ValueError, match="MINDROOM_DASHBOARD_URL requires trusted upstream auth"):
+        auth._build_auth_settings(
+            _runtime_paths(tmp_path, process_env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"}),
+        )
+
+
+@pytest.mark.parametrize("public_url", [None, "https://admin.example.org", "https://admin.example.org/mindroom"])
+def test_dashboard_url_on_the_public_host_fails_startup(tmp_path: Path, public_url: str | None) -> None:
+    """The dashboard host must be another host or port than a set `MINDROOM_PUBLIC_URL`."""
+    env = {**trusted_upstream_env(), "MINDROOM_DASHBOARD_URL": "https://admin.example.org"}
+    if public_url is not None:
+        env["MINDROOM_PUBLIC_URL"] = public_url
+    with pytest.raises(ValueError, match="must name another host or port than MINDROOM_PUBLIC_URL"):
+        auth._build_auth_settings(_runtime_paths(tmp_path, process_env=env))
+
+
+def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:
+    """A dashboard URL that is not an HTTPS origin, or HTTP on a local address, is a setup error."""
+    with pytest.raises(ValueError, match="Browser origin must be explicit HTTPS"):
+        auth._build_auth_settings(
+            _runtime_paths(tmp_path, process_env={"MINDROOM_DASHBOARD_URL": "http://admin.example.org"}),
+        )
+
+
 def test_trusted_upstream_assertion_ignored_when_disabled(tmp_path: Path) -> None:
     """A signed upstream assertion must do nothing unless trusted upstream auth is enabled."""
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path))

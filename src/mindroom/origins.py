@@ -97,6 +97,12 @@ def parse_browser_origin(value: str) -> str:
     return origin
 
 
+def dashboard_origin(paths: RuntimePaths) -> str | None:
+    """Return the origin `MINDROOM_DASHBOARD_URL` names, where the dashboard is served when not at the public origin."""
+    value = (paths.env_value("MINDROOM_DASHBOARD_URL") or "").strip()
+    return parse_browser_origin(value) if value else None
+
+
 def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
     """Read a JSON list of exact web and bundled iOS app origins from `env_name`; invalid configuration fails closed."""
     try:

@@ -331,8 +331,21 @@ def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, i
         "email": f"{user}@example.org",
         "is_administrator": is_administrator,
         "egress_enabled": False,
+        "dashboard_url": "/",
     }
     assert "no-store" in response.headers["cache-control"]
+
+
+def test_me_links_the_dashboard_on_its_own_host(portal: dict[str, Any]) -> None:
+    """With `MINDROOM_DASHBOARD_URL` set, the Connections pages send administrators to that host."""
+    snapshot = config_lifecycle.require_api_state(main.app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_DASHBOARD_URL": "https://Admin.example.org/"},
+    )
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["admin"])
+    assert response.status_code == 200, response.text
+    assert response.json()["dashboard_url"] == "https://admin.example.org/"
 
 
 @pytest.mark.parametrize(
