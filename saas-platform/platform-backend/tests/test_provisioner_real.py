@@ -267,8 +267,8 @@ class TestProvisionerCommandValidation:
                 INSTANCE_MINDROOM_IMAGE="ghcr.io/mindroom-ai/mindroom:latest",
                 INSTANCE_MINDROOM_IMAGE_PULL_POLICY="IfNotPresent",
                 INSTANCE_IMAGE_PULL_SECRET_NAMES="ghcr-pull, secondary-pull",
-                INSTANCE_SYNAPSE_IMAGE="matrixdotorg/synapse:latest",
-                INSTANCE_SYNAPSE_IMAGE_PULL_POLICY="IfNotPresent",
+                INSTANCE_TUWUNEL_IMAGE="ghcr.io/mindroom-ai/mindroom-tuwunel:latest",
+                INSTANCE_TUWUNEL_IMAGE_PULL_POLICY="IfNotPresent",
                 INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED="true",
                 INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN="example.com",
                 INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE="@{localpart}:example.org",
@@ -281,7 +281,7 @@ class TestProvisionerCommandValidation:
                 INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM="matrix_user_id",
                 INSTANCE_MATRIX_OIDC_ENABLED="true",
                 INSTANCE_MATRIX_OIDC_ISSUER="https://api.mindroom.chat/matrix-oidc",
-                INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-synapse",
+                INSTANCE_MATRIX_OIDC_CLIENT_ID="mindroom-matrix",
                 INSTANCE_MATRIX_OIDC_CLIENT_SECRET="matrix-client-secret",
             ),
             patch("backend.services.provisioner_service.run_helm", side_effect=capture_helm_command),
@@ -318,8 +318,8 @@ class TestProvisionerCommandValidation:
         assert "imagePullSecrets[0].name" not in set_args
         assert set_string_args["imagePullSecrets[0].name"] == "ghcr-pull"
         assert set_string_args["imagePullSecrets[1].name"] == "secondary-pull"
-        assert set_args["synapse_image"] == "matrixdotorg/synapse:latest"
-        assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
+        assert set_args["tuwunel_image"] == "ghcr.io/mindroom-ai/mindroom-tuwunel:latest"
+        assert set_args["tuwunel_image_pull_policy"] == "IfNotPresent"
         assert set_args["trustedUpstreamAuth.enabled"] == "true"
         assert set_args["trustedUpstreamAuth.emailDomain"] == "example.com"
         assert set_args["trustedUpstreamAuth.emailToMatrixUserIdTemplate"] == "@{localpart}:example.org"
@@ -332,7 +332,7 @@ class TestProvisionerCommandValidation:
         assert set_args["trustedUpstreamAuth.jwtMatrixUserIdClaim"] == "matrix_user_id"
         assert set_args["matrixOidc.enabled"] == "true"
         assert set_args["matrixOidc.issuer"] == "https://api.mindroom.chat/matrix-oidc"
-        assert set_args["matrixOidc.clientId"] == "mindroom-synapse"
+        assert set_args["matrixOidc.clientId"] == "mindroom-matrix"
         assert set_args["instanceSecrets.create"] == "false"
         assert set_args["instanceSecrets.name"] == "mindroom-api-keys-123"
         assert "instanceSecrets.hash" in set_string_args
@@ -363,7 +363,7 @@ class TestProvisionerCommandValidation:
                                     "metadata": {"name": "mindroom-storage-1"},
                                     "spec": {"storageClassName": "local-path"},
                                 },
-                                {"metadata": {"name": "synapse-storage-1"}, "spec": {"storageClassName": "local-path"}},
+                                {"metadata": {"name": "tuwunel-storage-1"}, "spec": {"storageClassName": "local-path"}},
                             ]
                         }
                     ),
@@ -421,7 +421,7 @@ class TestProvisionerCommandValidation:
 
         assert captured_kubectl_args == [
             (["scale", "deployment/mindroom-123", "--replicas=0"], "mindroom-instances"),
-            (["scale", "deployment/synapse-123", "--replicas=0"], "mindroom-instances"),
+            (["scale", "deployment/tuwunel-123", "--replicas=0"], "mindroom-instances"),
         ]
 
 

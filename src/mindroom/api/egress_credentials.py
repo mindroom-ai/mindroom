@@ -9,6 +9,7 @@ unscoped agent the caller manages.
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -35,6 +36,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    load_concurrently,
     oauth_provider_of_service,
     presets_response,
     require_egress_broker_enabled,
@@ -67,6 +69,7 @@ from mindroom.requester_identity import resolve_human_requester_alias
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.config.agent import AgentConfig
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -307,8 +310,8 @@ async def egress_services_for_agent(
     manager = get_runtime_credentials_manager(runtime_paths)
     target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
     services = await asyncio.to_thread(effective_services, config, manager, target)
-    rows = []
-    for name, service in services.items():
+
+    async def row(name: str, service: EgressService) -> EgressCredentialService:
         oauth_part = await egress_oauth_status(
             request,
             name,
@@ -330,21 +333,23 @@ async def egress_services_for_agent(
             reuse_target=lambda _provider: target,
         )
         sources = await egress_service_status(manager, target, service, name, oauth_part)
-        rows.append(
-            EgressCredentialService(
-                name=name,
-                display_name=service.display_name or name.replace("_", " ").title(),
-                description=service.description,
-                is_shared=is_shared,
-                can_manage=can_manage,
-                source=service_source(config.egress_broker, name),
-                rules=rule_summaries(service),
-                placeholder_names=list(service.placeholder_env),
-                restrict_only=service.restrict_only,
-                **asdict(sources),
-            ),
+        return EgressCredentialService(
+            name=name,
+            display_name=service.display_name or name.replace("_", " ").title(),
+            description=service.description,
+            is_shared=is_shared,
+            can_manage=can_manage,
+            source=service_source(config.egress_broker, name),
+            rules=rule_summaries(service),
+            placeholder_names=list(service.placeholder_env),
+            restrict_only=service.restrict_only,
+            **asdict(sources),
         )
-    return rows
+
+    return await load_concurrently(
+        (functools.partial(row, name, service) for name, service in services.items()),
+        limited=True,
+    )
 
 
 async def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
@@ -370,32 +375,35 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
         if agent_name in eligible and egress_agent_scope(config, agent_name) == "user"
     ]
 
-    agents: list[EgressCredentialAgent] = []
-    for agent_name, agent in config.agents.items():
+    async def listed_agent(agent_name: str, agent: AgentConfig) -> EgressCredentialAgent | None:
         eligibility = eligible.get(agent_name)
         scope = egress_agent_scope(config, agent_name)
         if eligibility is None or scope is None:
-            continue
+            return None
         is_shared, can_manage = eligibility
         services = await egress_services_for_agent(request, agent_name, human_requester, eligibility=eligibility)
         if services is None:
-            continue
+            return None
         target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
         inactive = await asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target)
-        agents.append(
-            EgressCredentialAgent(
-                agent_name=agent_name,
-                agent_display_name=agent.display_name,
-                shared=is_shared,
-                can_manage=can_manage,
-                scope=scope,
-                scope_agents=list(user_store_agents) if scope == "user" else [],
-                managers=list(agent.credential_managers) if is_shared else [],
-                services=services,
-                inactive_services=inactive,
-            ),
+        return EgressCredentialAgent(
+            agent_name=agent_name,
+            agent_display_name=agent.display_name,
+            shared=is_shared,
+            can_manage=can_manage,
+            scope=scope,
+            scope_agents=list(user_store_agents) if scope == "user" else [],
+            managers=list(agent.credential_managers) if is_shared else [],
+            services=services,
+            inactive_services=inactive,
         )
-    return agents
+
+    # Agents load concurrently, like their rows, so the page waits for the slowest agent instead of all of them.
+    # Only rows take the shared limit: an agent waits on its rows, so an agent holding a slot could starve them.
+    listed = await load_concurrently(
+        functools.partial(listed_agent, name, agent) for name, agent in config.agents.items()
+    )
+    return [agent for agent in listed if agent is not None]
 
 
 @router.get("", response_model=EgressCredentialsResponse)

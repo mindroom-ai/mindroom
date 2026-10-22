@@ -151,7 +151,7 @@ class TestAdminEndpoints:
         assert response.json()["success"] is True
         mock_kubectl.assert_has_awaits(
             [
-                call(["scale", "deployment/synapse-123", "--replicas=1"], namespace="mindroom-instances"),
+                call(["scale", "deployment/tuwunel-123", "--replicas=1"], namespace="mindroom-instances"),
                 call(["scale", "deployment/mindroom-123", "--replicas=1"], namespace="mindroom-instances"),
             ]
         )

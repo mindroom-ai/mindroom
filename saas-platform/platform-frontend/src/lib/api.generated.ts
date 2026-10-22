@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Openid Configuration
-         * @description Return OIDC discovery metadata for Synapse.
+         * @description Return OIDC discovery metadata for tenant homeservers.
          */
         get: operations["openid_configuration__well_known_openid_configuration_matrix_oidc_get"];
         put?: never;
@@ -367,7 +367,7 @@ export interface paths {
         };
         /**
          * Openid Configuration
-         * @description Return OIDC discovery metadata for Synapse.
+         * @description Return OIDC discovery metadata for tenant homeservers.
          */
         get: operations["openid_configuration_matrix_oidc__well_known_openid_configuration_get"];
         put?: never;
@@ -387,7 +387,7 @@ export interface paths {
         };
         /**
          * Authorize
-         * @description Issue an authorization code to Synapse after platform-cookie authentication.
+         * @description Issue an authorization code to a tenant homeserver after platform-cookie authentication.
          */
         get: operations["authorize_matrix_oidc_authorize_get"];
         put?: never;
@@ -429,7 +429,7 @@ export interface paths {
         put?: never;
         /**
          * Token
-         * @description Exchange a Synapse authorization code for OIDC tokens.
+         * @description Exchange a tenant homeserver authorization code for OIDC tokens.
          */
         post: operations["token_matrix_oidc_token_post"];
         delete?: never;
@@ -447,7 +447,7 @@ export interface paths {
         };
         /**
          * Userinfo
-         * @description Return user claims for Synapse's OIDC userinfo fetch.
+         * @description Return user claims for a tenant homeserver's OIDC userinfo fetch.
          */
         get: operations["userinfo_matrix_oidc_userinfo_get"];
         put?: never;

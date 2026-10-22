@@ -72,8 +72,8 @@ provisioner:
   instanceMindroomImage: ""
   instanceMindroomImagePullPolicy: ""
   instanceImagePullSecretNames: []
-  instanceSynapseImage: ""
-  instanceSynapseImagePullPolicy: ""
+  instanceTuwunelImage: ""
+  instanceTuwunelImagePullPolicy: ""
   trustedUpstreamAuth:
     enabled: "false"
     emailToMatrixUserIdTemplate: ""
@@ -89,7 +89,7 @@ provisioner:
 matrixOidc:
   enabled: "false"
   issuer: ""
-  clientId: "mindroom-synapse"
+  clientId: "mindroom-matrix"
   clientSecret: ""
   privateKey: ""
   keyId: "mindroom-platform"

@@ -1289,8 +1289,12 @@ async def test_pending_welcome_refuses_changed_device(tmp_path: Path, monkeypatc
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     server.fail_send = False
     server.device_id = "OTHER"
-    with pytest.raises(RuntimeError, match="device"):
+    with pytest.raises(PersonalRoomValidationError, match="device"):
         await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    # The owner's join must settle rather than hold the room's event lane, since the old device never returns.
+    server.set_member("!personal1:localhost", "@alice:localhost", "join")
+    with pytest.raises(PersonalRoomValidationError, match="device"):
+        await owner.owner_membership_event("!personal1:localhost", "@alice:localhost", "join")
     assert not server.messages
 
 

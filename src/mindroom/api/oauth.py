@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, replace
@@ -1210,6 +1211,18 @@ def personal_connection_view(result: OAuthStatusResponse, *, can_manage: bool) -
     )
 
 
+async def _credentials_usable(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    credentials: dict[str, object],
+) -> bool:
+    """Check stored credentials against the OAuth client, whose credential file is read in a thread."""
+    if not credentials:
+        # Without credentials the check reads nothing, so it stays on the loop.
+        return oauth_credentials_usable(provider, runtime_paths, credentials)
+    return await asyncio.to_thread(oauth_credentials_usable, provider, runtime_paths, credentials)
+
+
 async def connection_status(
     request: Request,
     context: OAuthCredentialContext,
@@ -1229,7 +1242,7 @@ async def connection_status(
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
-        provider.client_config_resolution(runtime_paths)
+        await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
         if has_service_account_config or not bootstrap_client
         else await _client_config_resolution_for_request(
             request,
@@ -1239,7 +1252,7 @@ async def connection_status(
         )
     )
     has_client_config = client_config_resolution is not None
-    credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+    credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     if refresh and credentials_usable and has_client_config and not has_service_account_config:
         try:
             refreshed_credentials = await refresh_oauth_credentials(context)
@@ -1250,10 +1263,10 @@ async def connection_status(
                 error_type=type(exc).__name__,
             )
             credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
-            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}
-            credentials_usable = oauth_credentials_usable(provider, runtime_paths, credentials)
+            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service

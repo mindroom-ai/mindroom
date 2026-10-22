@@ -182,13 +182,15 @@ class PersonalRoomLifecycle:
     ) -> None:
         """Serve one onboarding-room trigger without letting a broken personal room hold that room's lane.
 
-        A room no retry can fix is logged and the event settles; reconciliation,
-        which runs at startup and after a configuration reload, retries it after
-        doubling delays up to hourly. Any other failure, such as a requester
-        whose server refuses the invite, also settles the event and hands the
-        trigger to reconciliation, which retries it with the same backoff. A
-        personal-room agent that is not connected yet still raises, so the
-        journal keeps the trigger across restarts until that agent is ready.
+        A room no retry can fix is logged and the event settles without queuing
+        a retry: a room whose reconciliation is still failing keeps retrying
+        after doubling delays up to hourly; otherwise the room is checked again
+        on restart or configuration reload. Any other failure, such as a
+        requester whose server refuses the invite, also settles the event and
+        hands the trigger to reconciliation, which retries it after doubling
+        delays up to hourly. A personal-room agent that is not connected yet
+        still raises, so the journal keeps the trigger across restarts until
+        that agent is ready.
         """
         try:
             await self._onboard(user_id, source_room_id, reinvite_departed_owner=reinvite_departed_owner)

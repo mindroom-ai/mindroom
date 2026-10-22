@@ -16,24 +16,24 @@ def instance_deployment_ref(instance_id: str | int) -> str:
     return f"deployment/{instance_workload_name(instance_id)}"
 
 
-def synapse_workload_name(instance_id: str | int) -> str:
+def homeserver_workload_name(instance_id: str | int) -> str:
     """Return the Kubernetes workload name for an instance homeserver."""
-    return f"synapse-{instance_id}"
+    return f"tuwunel-{instance_id}"
 
 
-def synapse_deployment_ref(instance_id: str | int) -> str:
+def homeserver_deployment_ref(instance_id: str | int) -> str:
     """Return the Kubernetes deployment reference for an instance homeserver."""
-    return f"deployment/{synapse_workload_name(instance_id)}"
+    return f"deployment/{homeserver_workload_name(instance_id)}"
 
 
 def tenant_start_deployment_refs(instance_id: str | int) -> tuple[str, str]:
     """Return tenant deployments in startup order."""
-    return (synapse_deployment_ref(instance_id), instance_deployment_ref(instance_id))
+    return (homeserver_deployment_ref(instance_id), instance_deployment_ref(instance_id))
 
 
 def tenant_stop_deployment_refs(instance_id: str | int) -> tuple[str, str]:
     """Return tenant deployments in shutdown order."""
-    return (instance_deployment_ref(instance_id), synapse_deployment_ref(instance_id))
+    return (instance_deployment_ref(instance_id), homeserver_deployment_ref(instance_id))
 
 
 async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:

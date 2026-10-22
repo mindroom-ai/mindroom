@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -53,6 +54,55 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+
+# Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
+# OAuth store's SQLite connection open between its thread steps, so this bounds the open connections and file
+# descriptors however large the config is and however many listings overlap. It is about the width of asyncio's
+# default thread pool (at most 32 workers), which runs each load's file reads.
+_STATUS_LOAD_LIMIT = 32
+_status_load_limits: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _status_load_limit() -> asyncio.Semaphore:
+    """Return the running loop's shared limit on concurrent status loads."""
+    loop = asyncio.get_running_loop()
+    limit = _status_load_limits.get(loop)
+    if limit is None:
+        limit = _status_load_limits[loop] = asyncio.Semaphore(_STATUS_LOAD_LIMIT)
+    return limit
+
+
+async def load_concurrently[Result](
+    loads: Iterable[Callable[[], Awaitable[Result]]],
+    *,
+    limited: bool = False,
+) -> list[Result]:
+    """Run `loads` at once and return their results in order; the first failure cancels and drains the rest.
+
+    A listing awaits many thread and OAuth store hops per service, and in series each one resumes behind the event
+    loop's other work. That failure is raised itself, not as an exception group, so callers handle what a single load
+    raises. Each `limited` load runs under the loop's shared limit (`_STATUS_LOAD_LIMIT`); use it for complete service
+    status loads only, never for a load that waits on limited loads of its own.
+    """
+    limit = _status_load_limit() if limited else None
+
+    async def run(load: Callable[[], Awaitable[Result]]) -> Result:
+        if limit is None:
+            return await load()
+        async with limit:
+            return await load()
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(run(load)) for load in loads]
+    except BaseExceptionGroup as errors:
+        first = errors.exceptions[0]
+    else:
+        return [task.result() for task in tasks]
+    # Raised outside the handler, so its cause and context stay the load's own.
+    raise first
 
 
 async def require_egress_broker_enabled(request: Request) -> None:

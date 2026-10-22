@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,7 @@ from mindroom.heap_probe import (
     _heap_probe_interval_seconds,
     _heap_refreeze_interval_seconds,
     _log_heap_type_probe,
+    _raise_full_collection_threshold,
     _refreeze_runtime_heap,
     _run_heap_refreeze,
     _run_heap_type_probe,
@@ -160,6 +163,8 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
             collect=lambda: 0,
             freeze=lambda: steps.append("freeze"),
             get_freeze_count=lambda: 0,
+            get_threshold=lambda: (2000, 10, 10),
+            set_threshold=lambda *thresholds: steps.append(thresholds),
         ),
     )
 
@@ -179,7 +184,26 @@ async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_in
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert steps == ["unfreeze", "freeze", 600.0, "unfreeze", "freeze", 600.0]
+    assert steps == ["unfreeze", "freeze", (2000, 10, 100), 600.0, "unfreeze", "freeze", 600.0]
+
+
+@pytest.mark.skipif((3, 14) <= sys.version_info < (3, 14, 5), reason="3.14.0-3.14.4's incremental GC ignores it")
+@pytest.mark.parametrize(("configured", "expected", "logged"), [(10, 100, True), (500, 500, False)])
+def test_frozen_heap_raises_the_full_collection_threshold_without_lowering_it(
+    configured: int,
+    expected: int,
+    logged: bool,
+) -> None:
+    """Full passes walk everything since the refreeze yet find little garbage, so they run less often."""
+    young, middle, _ = gc.get_threshold()
+    gc.set_threshold(young, middle, configured)
+    with capture_logs() as logs:
+        _raise_full_collection_threshold()
+    assert gc.get_threshold() == (young, middle, expected)
+    records = [entry for entry in logs if entry["event"] == "gc_full_collection_threshold_raised"]
+    assert [(record["previous"], record["threshold"]) for record in records] == (
+        [(configured, expected)] if logged else []
+    )
 
 
 @pytest.mark.asyncio
