@@ -297,6 +297,8 @@ async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_r
         ended[0],
         ("checker", ended[1][1], RunStatus.completed),
     ]
+    # The paused record is left as it was.
+    assert [(run.agent_id, run.run_id, run.status) for run in paused.ended_member_runs] == ended
 
 
 async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() -> None:
