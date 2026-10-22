@@ -42,7 +42,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
-from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
+from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
@@ -68,7 +68,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 __all__ = [
-    "DENIED_WITHOUT_REASON",
     "AttemptResolved",
     "BlockingAttemptResolution",
     "BlockingTurnAdapter",
@@ -108,10 +107,6 @@ class CompletedApprovalRun:
 
     response_text: str
     metadata_content: dict[str, Any]
-
-
-# The note MindRoom's continuation has always given the model for a call denied without a reason.
-DENIED_WITHOUT_REASON = "Not approved by requester"
 
 
 def apply_exact_approval_decisions(

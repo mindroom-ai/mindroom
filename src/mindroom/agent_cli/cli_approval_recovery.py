@@ -23,6 +23,7 @@ from mindroom.history.interrupted_replay import (
 )
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.runs import DENIED_WITHOUT_REASON
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -241,7 +242,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
         elif not decisions[call_id] or call_id == payload.parent_bash_call_id:
             # An approval for the outer Bash itself never authorizes replaying its script.
             if not decisions[call_id]:
-                result = denial_reasons[call_id] or "Not approved by requester"
+                result = denial_reasons[call_id] or DENIED_WITHOUT_REASON
             assert requirement is not None
             denied = replace(
                 requirement.tool_execution,
