@@ -329,7 +329,11 @@ async def _stream_continuation_turn(
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Stream resumed work and any fresh attempts into the continued reply through the shared response driver."""
+    """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
+
+    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, sends
+    the approval receipt with its first request; a resumed run already sent it.
+    """
     tool_context = runtime_context_from_dispatch_context(tool_dispatch)
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
@@ -350,6 +354,7 @@ async def _stream_continuation_turn(
         reusable_build=reusable_build,
         resumed_attempt=resumed_attempt,
         initial_continuation_count=initial_continuation_count,
+        approval_receipt=resumed_attempt is None,
         delegation_depth=delegation_depth,
         media=media,
         on_completed=completed.append,

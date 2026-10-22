@@ -15,6 +15,7 @@ from mindroom.approval.execution import (
     _continuation_turn_context,
     _stream_continuation_turn,
 )
+from mindroom.approval.receipt import approval_receipt_context
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
@@ -196,7 +197,10 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     show_tool_calls: bool,
     outcome: str,
 ) -> None:
-    """A fresh continuation attempt retains history and may pause again without replaying approved work."""
+    """A fresh continuation attempt retains history and may pause again without replaying approved work.
+
+    Each approval's receipt goes with the resumed run's first request only, never with a fresh attempt after it.
+    """
     switch_when = {"switch_after": "after-toolcall", "switch_next": "next-turn"}.get(outcome)
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -329,20 +333,23 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
     paused_answer = PausedAnswer()
+    resume_starts: list[int] = []
 
     async def resume() -> CompletedApprovalRun | PausedAttempt:
-        return await execution.continue_run(
-            continuation,
-            paused_answer=paused_answer,
-            execution_identity=identity,
-            tool_dispatch=dispatch,
-            decisions={call.tool_call_id: True for call in continuation.calls},
-            denial_reasons={call.tool_call_id: None for call in continuation.calls},
-            tool_trace_collector=trace,
-            typing_log_context={},
-            run_id_callback=run_ids.append,
-            progress=None,
-        )
+        resume_starts.append(len(model.requests))
+        with approval_receipt_context(f"Trusted approval receipt {len(resume_starts)}."):
+            return await execution.continue_run(
+                continuation,
+                paused_answer=paused_answer,
+                execution_identity=identity,
+                tool_dispatch=dispatch,
+                decisions={call.tool_call_id: True for call in continuation.calls},
+                denial_reasons={call.tool_call_id: None for call in continuation.calls},
+                tool_trace_collector=trace,
+                typing_log_context={},
+                run_id_callback=run_ids.append,
+                progress=None,
+            )
 
     if outcome in {"error", "preparation_error"}:
         # The fresh attempt's provider failure becomes the reply's error text, which the continuation raises.
@@ -417,6 +424,12 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     assert any(message.role == "tool" and message.tool_call_id == "continue" for message in last)
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
+    receipt_requests = [
+        index
+        for index, request in enumerate(model.requests)
+        if any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+    ]
+    assert receipt_requests == resume_starts
 
 
 def _finished(

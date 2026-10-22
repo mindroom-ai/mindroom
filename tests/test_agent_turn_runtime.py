@@ -24,6 +24,7 @@ from mindroom import agents, ai, ai_runtime, loop_hooks, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.approval.receipt import approval_receipt_context
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -847,6 +848,46 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
         for entry in logs
         if entry["event"] == "tool_call_limit_reached"
     ] == [("assistant", 1, 3)]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_opted_into_the_approval_receipt_sends_it_with_its_first_request_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The bound receipt reaches the model once, on the system message, and never enters a stored run.
+
+    The rejected model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
+            answer("ok"),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+
+    with approval_receipt_context("Trusted approval receipt."):
+        await _stream(reply, approval_receipt=True)
+
+    assert probe.calls == ["a"]
+    first, *later = reply.model.requests
+    assert str(first.messages[0].content).endswith("Trusted approval receipt.")
+    assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
+    assert len(later) == 2
+    assert all(
+        "Trusted approval receipt." not in str(message.content) for request in later for message in request.messages
+    )
+    session = reply.storage.load_session(SESSION_ID, "agent")
+    assert session is not None
+    assert len(session.runs) == 2
+    assert all(
+        "Trusted approval receipt." not in str(message.content) for run in session.runs for message in run.messages
+    )
 
 
 @pytest.mark.asyncio

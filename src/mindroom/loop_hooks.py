@@ -87,7 +87,8 @@ def agent_loop_hooks(
     The run compacts as ``agent_name``, in the turn's scope when one is given and under its own name otherwise, and
     a top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
     turn's notices; ``skill_review_capture`` records the final request of run ``run_id``; ``approval_receipt`` is
-    on for a run an approval continuation resumes, whose first request carries the receipt the continuation binds.
+    on for a run an approval continuation resumes or the first run of a recovered CLI call's follow-up, whose first
+    request carries the receipt the continuation binds.
     """
     jobs = build.tool_jobs
     return _loop_hooks(
