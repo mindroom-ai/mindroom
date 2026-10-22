@@ -85,7 +85,8 @@ spec:
       # Handling: the first start on Tuwunel deletes that set once, as `just local-matrix-reset` does, so the runtime
       # registers its accounts and rooms again instead of refusing to start; the marker keeps later starts from
       # touching it. Remove once every tenant has started on Tuwunel.
-      # Coverage: tests/test_helm_instance_worker_isolation.py::test_instance_chart_resets_synapse_matrix_state_once
+      # Coverage: tests/test_helm_instance_worker_isolation.py::test_instance_chart_resets_synapse_matrix_state_once,
+      # tests/test_helm_instance_worker_isolation.py::test_instance_chart_reset_keeps_pre_move_room_records_from_coming_back
       - name: reset-synapse-matrix-state
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
         imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}

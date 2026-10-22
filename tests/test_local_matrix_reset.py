@@ -139,6 +139,25 @@ def test_local_matrix_reset_removes_only_selected_matrix_state(
         ).read_text() == "unrelated agent record\n"
 
 
+def test_local_matrix_reset_follows_no_link_in_agents(reset_project: Path) -> None:
+    """Tool code can write agents/, so a planted link must not turn the reset onto data outside it."""
+    storage = reset_project / "mindroom_data"
+    outside = reset_project / "outside"
+    (outside / "personal_rooms").mkdir(parents=True)
+    (outside / "invited_rooms.json").write_text("outside\n")
+    (outside / "personal_rooms" / "owner.json").write_text("outside\n")
+    (storage / "agents" / "router").mkdir(parents=True)
+    (storage / "agents" / "linked").symlink_to(outside)
+    (storage / "agents" / "router" / "personal_rooms").symlink_to(outside / "personal_rooms")
+
+    result = _reset(reset_project)
+
+    assert result.returncode == 0, result.stderr
+    assert (outside / "invited_rooms.json").read_text() == "outside\n"
+    assert (outside / "personal_rooms" / "owner.json").read_text() == "outside\n"
+    assert not (storage / "agents" / "router" / "personal_rooms").is_symlink()
+
+
 def test_local_matrix_reset_allows_missing_state(reset_project: Path) -> None:
     """A first reset succeeds without creating a storage directory."""
     result = _reset(reset_project)

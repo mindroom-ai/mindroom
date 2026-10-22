@@ -290,6 +290,7 @@ Set them there to pin or upgrade Tuwunel; the script keeps them across releases,
 An instance that still runs Synapse gets an empty Tuwunel server on its first re-provision.
 That deletes the instance's Matrix accounts, rooms, messages, uploaded files, and scheduled tasks, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
 Deploy the first release with Tuwunel using `--instances all`, so held and manually stopped instances switch too, and re-provision any instance left in another status, such as `error`, with `--instances <id>`.
+The switch cannot be rolled back: deploying an earlier release replaces each Tuwunel server with an empty Synapse server that the instances cannot start against, and switching forward again needs `.homeserver-tuwunel` deleted from each instance's MindRoom volume first.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
 An instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`) is redeployed only with `--instances all` or its id, and then scaled back to zero so it stays stopped; the default `running` selection leaves it alone.

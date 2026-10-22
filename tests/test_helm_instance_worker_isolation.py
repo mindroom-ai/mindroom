@@ -628,13 +628,14 @@ def test_instance_chart_runs_one_tuwunel_that_reads_its_rendered_config() -> Non
 
     assert tuwunel["spec"]["strategy"] == {"type": "Recreate"}
     assert pod["enableServiceLinks"] is False
+    assert container["securityContext"] == {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
     assert _env_by_name(container)["TUWUNEL_CONFIG"]["value"] == mounts["tuwunel-config"]["mountPath"]
     assert config["database_path"] == mounts["tuwunel-data"]["mountPath"]
     assert {
         config["registration_shared_secret_file"],
         config["identity_provider"][0]["client_secret_file"],
     } == secret_files
-    # Tuwunel reads its config only at startup, so a config change must roll the pod.
+    # The config is mounted with subPath, which never refreshes in a running pod, so a change must roll the pod.
     plain = _resource(_render_instance_chart(), "Deployment", "tuwunel-demo")
     config_hashes = {
         deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/tuwunel-config-hash"]

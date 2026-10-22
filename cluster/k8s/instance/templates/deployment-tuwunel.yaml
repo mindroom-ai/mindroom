@@ -58,6 +58,12 @@ spec:
           readOnly: true
         resources:
           {{- toYaml (.Values.tuwunelResources | default (dict)) | nindent 10 }}
+        # The image runs Tuwunel as root, so it gets no capabilities and cannot gain privileges.
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
         readinessProbe:
           httpGet:
             path: /_matrix/client/versions
