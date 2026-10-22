@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime
+from collections.abc import Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
 from mindroom import agents
@@ -59,6 +60,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
@@ -2007,23 +2009,32 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
         restore_tool_registry_snapshot(snapshot)
 
 
-@pytest.mark.parametrize("offers_scheduler", [True, False])
+@pytest.mark.parametrize(
+    "offered",
+    ["schedule_tool_call", "run_scheduled_call", None],
+    ids=["scheduling-only", "running-only", "no-scheduler"],
+)
 def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     monkeypatch: pytest.MonkeyPatch,
-    offers_scheduler: bool,
+    offered: str | None,
 ) -> None:
-    """Only the scheduler reads the run's live functions, so a build without it calls its tools without that step."""
+    """Each scheduler function reading the run's live functions binds them; a build offering neither has no such step.
+
+    The build offers the scheduler with only the named function, so each name is checked against the scheduler's own.
+    """
     config = _code_config()
-    if not offers_scheduler:
-        config.defaults.tools = []
+    config.defaults.tools = []
+    if offered is not None:
+        config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
 
     build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
 
-    assert ("run_scheduled_call" in prepare_run_tools(build.spec).functions) is offers_scheduler
+    functions = prepare_run_tools(build.spec).functions
+    assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
     names = [middleware.__name__ for middleware in build.tool_middleware]
-    assert names.count("bind_live_functions") == int(offers_scheduler)
-    assert (names[0] == "bind_live_functions") is offers_scheduler
+    assert names.count("bind_live_functions") == int(offered is not None)
+    assert (names[0] == "bind_live_functions") is (offered is not None)
 
 
 @pytest.mark.asyncio
@@ -2159,6 +2170,65 @@ async def test_call_that_cannot_run_here_spends_nothing(
 
         assert isinstance(result, str)
         assert reason in result
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+class _MediaSlackTools(Toolkit):
+    """A configured Slack toolkit whose one function also takes the run's images, recording each real run."""
+
+    def __init__(self, runs: list[dict[str, object]]) -> None:
+        self.runs = runs
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> str:
+        """Post a Slack message with the run's images.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+            images: The run's images, which the model never supplies.
+
+        """
+        self.runs.append({"channel": channel, "text": text, "images": images})
+        return "sent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "needs",
+    ["external-execution", "stop-after-tool-call", "media", "media-behind-output-files"],
+)
+async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    needs: str,
+) -> None:
+    """A stored call whose function runs elsewhere, ends the turn, or takes the run's media runs nothing, unspent.
+
+    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    toolkit = _MediaSlackTools(runs) if needs.startswith("media") else _SlackTools(runs)
+    if needs == "media-behind-output-files":
+        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = _TOOLKIT
+        if needs == "external-execution":
+            function.external_execution = True
+        if needs == "stop-after-tool-call":
+            function.stop_after_tool_call = True
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, _LiveRun((toolkit,)))
+
+        assert isinstance(result, str)
+        assert "needs live input or conversation control" in result
+        assert runs == []
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
         await manager.shutdown()

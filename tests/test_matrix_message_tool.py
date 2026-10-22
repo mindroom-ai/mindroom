@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -14,7 +15,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.attachments.storage import load_attachment, register_local_attachment
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
@@ -671,6 +672,57 @@ async def test_matrix_message_send_with_attachment_in_room_mode_stays_room_level
         latest_thread_event_id=None,
         extra_content={SKIP_MENTIONS_KEY: True},
     )
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp_path: Path) -> None:
+    """A team member posts through the team's account, so its send follows the team's thread mode, not its own."""
+    tool = MatrixMessageTools()
+    sample_file = tmp_path / "upload.txt"
+    sample_file.write_text("payload", encoding="utf-8")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_member")
+    assert attachment is not None
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", thread_mode="room"),
+                "helper": AgentConfig(display_name="Helper Agent", thread_mode="thread"),
+            },
+            teams={"squad": TeamConfig(display_name="Squad", role="Helps", agents=["general", "helper"])},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    context = _make_context(
+        storage_path=tmp_path,
+        attachment_ids=("att_member",),
+        thread_id="$ctx-thread:localhost",
+        resolved_thread_id=None,
+    )
+    # A member's tool call runs under the team's turn context with the member named as the running agent.
+    member_call = replace(
+        context,
+        agent_name="general",
+        transport_agent_name="squad",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mock_send_file,
+        tool_runtime_context(member_call),
+    ):
+        payload = json.loads(await tool.matrix_message(action="send", message="hello", attachments=["att_member"]))
+
+    assert payload["status"] == "ok"
+    assert payload["thread_id"] == "$evt"
+    assert mock_send_file.await_args.kwargs["thread_id"] == "$evt"
 
 
 @pytest.mark.asyncio

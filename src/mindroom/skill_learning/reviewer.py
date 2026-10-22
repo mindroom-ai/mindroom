@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import validate_call
 
-from mindroom.agent_loop.model_loop import EndRun, LoopHooks, SendRequest, run_model_loop
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, EndRun, LoopHooks, SendRequest, run_model_loop
 from mindroom.agent_loop.output_limit import output_limit_answers
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PreparedTools
@@ -25,7 +25,6 @@ from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
@@ -44,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, ToolSpec
+    from mindroom.llm.provider import ModelProvider, ModelRequest, ToolSpec
     from mindroom.llm.usage import MessageMetrics
     from mindroom.skill_learning.capture import CapturedRequest
     from mindroom.skill_learning.tools import ReviewProgress
@@ -100,7 +99,7 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
     return min(_MAX_INPUT_TOKENS, int(context_window * _INPUT_CONTEXT_FRACTION))
 
 
-def _waits_for_decision(definition: ToolSpec) -> bool:
+def _tool_awaits_decision(definition: ToolSpec) -> bool:
     """Return whether a call of this tool waits for a decision: it pauses its run, asks as its job, or runs elsewhere."""
     return bool(
         definition.requires_confirmation
@@ -124,7 +123,7 @@ def _review_tools(definitions: Sequence[ToolSpec], tools: SkillTools) -> tuple[P
         "get_skill_reference": validate_call(tools.get_skill_reference),
         "get_skill_script": validate_call(tools.get_skill_script),
     }
-    answered = {definition.name: definition for definition in definitions if not _waits_for_decision(definition)}
+    answered = {definition.name: definition for definition in definitions if not _tool_awaits_decision(definition)}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]
 
     async def deny(**_arguments: object) -> str:
@@ -293,7 +292,7 @@ async def _replay(
         messages=[Message(role="user", content=f"{evidence}\n\n{_review_prompt(config, catalog, runnable)}")],
         definitions=definitions,
         tools=functions,
-        settings=_review_settings(ModelRequest(messages=())),
+        settings=_review_settings(EMPTY_REQUEST),
         forked=False,
     )
 
