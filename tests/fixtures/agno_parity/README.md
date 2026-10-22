@@ -123,16 +123,16 @@ Each file has these keys:
 - `requests` lists each request with the model `id` and `provider` string, whether it was a streaming call, its `messages`, its `tools`, its `tool_choice`, its `response_format`, and its `deferred_tool_names`.
 - `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
 
-The capture replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
+The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
 Messages are `Message.to_dict()` without the volatile `id`, `created_at`, and `metrics` keys, plus `"add_to_agent_memory": false` on transient context messages that are never stored.
 `tools` holds the formatted tool definitions in the order the request loop passed them to the provider call.
-`deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the capture, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
+`deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the recorder, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
 It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.
 A pydantic `response_format` is recorded as `{"pydantic_model": <class name>, "json_schema": <model_json_schema()>}`; a dict format is recorded as passed.
 
 Normalization:
 
-- The capture's temporary root becomes `<TMP>`, which appears in preloaded context-file headings.
+- The scenario's temporary root becomes `<TMP>`, which appears in preloaded context-file headings.
 - Today's date in the date context, such as `Monday, October 19, 2026`, becomes `<DATE>`; the timezone is pinned to `UTC`, and message timestamps and the schedule parser's current time are fixed inputs.
 - A delegation's tool result names its record by a random 32-digit hex id under the day the delegation started; the ids become `<ID-1>`, `<ID-2>`, and so on in first-appearance order, and the day becomes `<DATE>`.
 - Requests are grouped by the model instance that received them, in the order MindRoom built those models, and each model's requests stay in call order.
@@ -140,7 +140,7 @@ Normalization:
 - Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
 
 Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
-Structured-output helpers are captured on each of Agno's three structured-output paths: on `anthropic`, which receives the schema as `response_format`; on `vertexai_claude`, which Agno asks for JSON in the system message with `{"type": "json_object"}`; and on `cerebras`, which receives `{"type": "json_schema", "json_schema": {"name", "schema"}}` and no JSON prompt.
+Structured-output helpers run on each of the three structured-output paths: on `anthropic`, which receives the schema as `response_format`; on `vertexai_claude`, which is asked for JSON in the system message with `{"type": "json_object"}`; and on `cerebras`, which receives `{"type": "json_schema", "json_schema": {"name", "schema"}}` and no JSON prompt.
 
 ## Tool goldens (`tools/`)
 
@@ -256,13 +256,13 @@ The `run-error` record holds the previous turn's answer followed by `(turn faile
 
 ### Normalization
 
-- The wall clock is frozen, and every turn starts at the next minute after 2027-01-15T08:00:00Z, so Unix timestamps run `1800000060`, `1800000120`, and so on.
-- `time.time`, `datetime.now` in every `agno` and `mindroom` module, Agno's message, run, and tool timestamps, summary rows, requirement `created_at`, and the system prompt's date follow that clock, and local time is UTC.
-- Agno's timers report every timed span as 0.5 seconds and every `time_to_first_token` as 0.25 seconds, since parallel tool calls run concurrently and would otherwise time in whatever order they ran.
-- Random ids become sequential ones in first-appearance order across the dumps, the events, and then the pre-resume dumps and two capture outputs that are not kept, reply-linkage rows and cancelled-turn events, so the numbering can skip ids: UUIDs become `00000000-0000-4000-8000-<n>`, 32-digit hex ids such as delegation, child run, correlation, and viewed-image ids become `<n>` padded to 32 hex digits, and completion ids become `chatcmpl-<n>` padded to 12 hex digits.
-- The capture's temporary directory becomes `/mindroom-capture`.
-- Dumps sort their `CREATE INDEX` statements, because Agno creates indexes in a different order on every run, and strip the trailing spaces SQLAlchemy leaves in table definitions.
-- The capture runs with `PYTHONHASHSEED=0`, because Agno's `Model.to_dict` orders `agent_data.model` and `team_data.model` by iterating a set.
+- The wall clock was frozen, and every turn started at the next minute after 2027-01-15T08:00:00Z, so Unix timestamps run `1800000060`, `1800000120`, and so on.
+- `time.time`, `datetime.now` in every `agno` and `mindroom` module, Agno's message, run, and tool timestamps, summary rows, requirement `created_at`, and the system prompt's date followed that clock, and local time was UTC.
+- Agno's timers reported every timed span as 0.5 seconds and every `time_to_first_token` as 0.25 seconds, since parallel tool calls ran concurrently and would otherwise have timed in whatever order they ran.
+- Random ids became sequential ones in first-appearance order across the dumps, the events, and then the pre-resume dumps and two capture outputs that were not kept, reply-linkage rows and cancelled-turn events, so the numbering can skip ids: UUIDs became `00000000-0000-4000-8000-<n>`, 32-digit hex ids such as delegation, child run, correlation, and viewed-image ids became `<n>` padded to 32 hex digits, and completion ids became `chatcmpl-<n>` padded to 12 hex digits.
+- The capture's temporary directory became `/mindroom-capture`.
+- Dumps sorted their `CREATE INDEX` statements, because Agno created indexes in a different order on every run, and stripped the trailing spaces SQLAlchemy left in table definitions.
+- The capture ran with `PYTHONHASHSEED=0`, because Agno's `Model.to_dict` orders `agent_data.model` and `team_data.model` by iterating a set.
 
 ## Knowledge goldens (`knowledge/`)
 
