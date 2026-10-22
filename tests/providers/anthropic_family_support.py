@@ -7,7 +7,6 @@ documents the format. Request building, the pipeline stages, and normalization a
 
 from __future__ import annotations
 
-import json
 import os
 from contextlib import contextmanager
 from copy import deepcopy
@@ -20,7 +19,7 @@ from google.oauth2.credentials import Credentials
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider
-from tests.providers.golden_support import Replay, replay_through_pipeline
+from tests.providers.golden_support import Replay, encoded_response, replay_through_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -29,22 +28,6 @@ if TYPE_CHECKING:
 FAMILIES = ("anthropic", "vertexai_claude", "bedrock_claude")
 # Provider SDKs read these environment variables directly; the harness hides them from the run.
 _PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLOUD_ML_", "GOOGLE_")
-
-
-def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
-    """Build the provider HTTP response a golden's ``response_raw`` describes."""
-    if "sse" in response_raw:
-        lines: list[str] = []
-        for event in response_raw["sse"]:
-            if "event" in event:
-                lines.append(f"event: {event['event']}")
-            data = event["data"]
-            lines.append(f"data: {data if isinstance(data, str) else json.dumps(data)}")
-            lines.append("")
-        content = ("\n".join(lines) + "\n").encode()
-    else:
-        content = json.dumps(response_raw["json"]).encode()
-    return httpx.Response(response_raw["status"], headers=response_raw["headers"], content=content)
 
 
 @contextmanager

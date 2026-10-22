@@ -20,7 +20,15 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
-from tests.providers.golden_support import FIXTURE_ROOT, Replay, normalized_request, replay_through_pipeline
+from tests.providers.golden_support import (
+    FIXTURE_ROOT,
+    Replay,
+    encoded_response,
+    ndjson_response,
+    normalized_request,
+    replay_through_pipeline,
+    sse_response,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,18 +80,6 @@ def runtime_paths_for(root: Path) -> RuntimePaths:
     return resolve_runtime_paths(config_path=config_path, storage_path=root / "data", process_env={})
 
 
-def _encoded_response(golden: Golden) -> httpx.Response:
-    """Build the canned reply: an SSE or ndjson stream, or the JSON body of a non-streaming reply."""
-    raw = golden.data["response_raw"]
-    if "sse" in raw:
-        content = "".join(f"data: {json.dumps(event['data'])}\n\n" for event in raw["sse"]).encode()
-        return httpx.Response(raw["status"], headers={"content-type": "text/event-stream"}, content=content)
-    if "ndjson" in raw:
-        content = b"".join(json.dumps(event).encode() + b"\n" for event in raw["ndjson"])
-        return httpx.Response(raw["status"], headers={"content-type": "application/x-ndjson"}, content=content)
-    return httpx.Response(raw["status"], json=raw["json"])
-
-
 def build_adapter(
     model_config: dict[str, Any],
     root: Path,
@@ -108,7 +104,7 @@ async def replay(golden: Golden, root: Path) -> Replay:
 
     def respond(request: httpx.Request) -> httpx.Response:
         recorded.append(request)
-        return _encoded_response(golden)
+        return encoded_response(golden.data["response_raw"])
 
     adapter = build_adapter(golden.data["input"]["model_config"], root, respond)
     return await replay_through_pipeline(adapter, golden.data["input"], recorded)
@@ -116,14 +112,12 @@ async def replay(golden: Golden, root: Path) -> Replay:
 
 def gemini_sse(*chunks: dict[str, Any], status: int = 200) -> httpx.Response:
     """Return a streamed Gemini reply made of ``chunks``."""
-    content = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks).encode()
-    return httpx.Response(status, headers={"content-type": "text/event-stream"}, content=content)
+    return sse_response(chunks, status=status)
 
 
 def ollama_ndjson(*chunks: dict[str, Any], status: int = 200) -> httpx.Response:
     """Return a streamed Ollama reply made of ``chunks``."""
-    content = b"".join(json.dumps(chunk).encode() + b"\n" for chunk in chunks)
-    return httpx.Response(status, headers={"content-type": "application/x-ndjson"}, content=content)
+    return ndjson_response(chunks, status=status)
 
 
 async def run_adapter(

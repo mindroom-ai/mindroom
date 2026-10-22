@@ -31,10 +31,10 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.anthropic.messages import ClaudeProvider, build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from tests.providers.anthropic_family_support import encoded_response, isolated_provider_environment, provider_for
+from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.golden_support import Wire, encoded_response
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
 _ROUTE_CONFIGS: dict[str, dict[str, Any]] = {
@@ -54,23 +54,6 @@ _USAGE = {"input_tokens": 40, "output_tokens": 9, "cache_creation_input_tokens":
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
 )
-
-
-class _Wire:
-    """Records the requests one adapter sends and answers each from a queue."""
-
-    def __init__(self, *responses: httpx.Response | Callable[[httpx.Request], httpx.Response]) -> None:
-        self.requests: list[httpx.Request] = []
-        self._responses = list(responses)
-        self.client = httpx.AsyncClient(transport=httpx.MockTransport(self._respond))
-
-    def _respond(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        response = self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
-        return response if isinstance(response, httpx.Response) else response(request)
-
-    def body(self, index: int = -1) -> dict[str, Any]:
-        return json.loads(self.requests[index].content)
 
 
 def _message(
@@ -156,7 +139,7 @@ def _sse_reply(
     )
 
 
-def _provider(route: str, tmp_path: Path, wire: _Wire, **config: Any) -> ClaudeProvider:  # noqa: ANN401
+def _provider(route: str, tmp_path: Path, wire: Wire, **config: Any) -> ClaudeProvider:  # noqa: ANN401
     model_config = {**_ROUTE_CONFIGS[route], **config}
     if "extra_kwargs" in config:
         model_config["extra_kwargs"] = {**_ROUTE_CONFIGS[route].get("extra_kwargs", {}), **config["extra_kwargs"]}
@@ -209,7 +192,7 @@ def test_identity_and_capabilities_per_route(
     native_tool_search: bool,
 ) -> None:
     """Identity strings stay what stored runs and usage rows carry, and capabilities replace class probes."""
-    provider = _provider(route, tmp_path, _Wire(_json_reply([])))
+    provider = _provider(route, tmp_path, Wire(_json_reply([])))
     assert (provider.identity.provider, provider.identity.provider_name) == (provider_name, provider_name)
     capabilities = provider.capabilities
     assert capabilities.structured_output == structured_output
@@ -224,7 +207,7 @@ def test_identity_and_capabilities_per_route(
 @pytest.mark.asyncio
 async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_message(tmp_path: Path) -> None:
     """The partial usage comes first, output events follow the blocks, and the turn ends with the parsed message."""
-    wire = _Wire(
+    wire = Wire(
         _sse_reply(
             [
                 {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
@@ -289,7 +272,7 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
         "input": {},
         "partial_json": '{"name": "notes.md", "content": "# Not',
     }
-    wire = _Wire(_sse_reply([truncated], stop_reason="max_tokens"))
+    wire = Wire(_sse_reply([truncated], stop_reason="max_tokens"))
     completed = await _turn(_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
     assert completed.stop_reason == "output_limit"
     assert completed.message.tool_calls == [
@@ -309,7 +292,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
     else:
         reply = _json_reply([unknown, text])
     events = await _events(
-        _provider("anthropic", tmp_path, _Wire(reply)),
+        _provider("anthropic", tmp_path, Wire(reply)),
         ModelRequest(messages=_user(), stream=stream),
     )
     outputs = [event for event in events if isinstance(event, (TextDelta, ReasoningDelta, ToolCallReady))]
@@ -327,7 +310,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
 @pytest.mark.asyncio
 async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) -> None:
     """A safeguard refusal is a completed turn the loop recognizes by its stop reason, not an adapter error."""
-    wire = _Wire(_json_reply([], stop_reason="refusal"))
+    wire = Wire(_json_reply([], stop_reason="refusal"))
     provider = _provider("anthropic", tmp_path, wire)
     completed = await _turn(provider, ModelRequest(messages=_user(), stream=False))
     assert completed.stop_reason == "refusal"
@@ -360,7 +343,7 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     retryable: bool,
 ) -> None:
     """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
-    wire = _Wire(httpx.Response(status, json={"type": "error", "error": body}))
+    wire = Wire(httpx.Response(status, json={"type": "error", "error": body}))
     provider = _provider("anthropic", tmp_path, wire)
     request = ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0))
     with pytest.raises(expected) as raised:
@@ -380,7 +363,7 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
         msg = "connection refused"
         raise httpx.ConnectError(msg, request=request)
 
-    provider = _provider("anthropic", tmp_path, _Wire(fail))
+    provider = _provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
         await _turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(sdk_max_retries=0)))
     assert raised.value.retryable is True
@@ -390,7 +373,7 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 @pytest.mark.asyncio
 async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(tmp_path: Path) -> None:
     """One-off summary requests run without thinking or cache writes, with their own limits."""
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Summary."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Summary."}]))
     provider = _provider(
         "anthropic",
         tmp_path,
@@ -418,7 +401,7 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
 @pytest.mark.asyncio
 async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_path: Path) -> None:
     """The newest Claude generations reject non-default sampling, so authored and overriding values are dropped."""
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
     provider = _provider(
         "anthropic",
         tmp_path,
@@ -435,7 +418,7 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_pat
 @pytest.mark.asyncio
 async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(tmp_path: Path) -> None:
     """Models without prefill, and any model with thinking on, need the request to end with a user turn."""
-    wire = _Wire(_sse_reply([{"type": "text", "text": "More."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "More."}]))
     provider = _provider("anthropic", tmp_path, wire)
     stored = {
         "content_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
@@ -456,7 +439,7 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
 @pytest.mark.asyncio
 async def test_audio_inputs_are_not_sent(tmp_path: Path) -> None:
     """Claude takes images and documents; audio stays out of the request for the media fallback to describe."""
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
     provider = _provider("anthropic", tmp_path, wire)
     audio = Audio(content=b"RIFF....WAVE", mime_type="audio/wav")
     await _turn(provider, ModelRequest(messages=[Message(role="user", content="Listen.", audio=[audio])]))
@@ -470,7 +453,7 @@ class _Answer(BaseModel):
 @pytest.mark.asyncio
 async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_outputs_beta(tmp_path: Path) -> None:
     """Strict tools and a pydantic response format use the beta endpoint with its header."""
-    wire = _Wire(_json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
+    wire = Wire(_json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = _provider("anthropic", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
     completed = await _turn(
@@ -493,7 +476,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
 @pytest.mark.asyncio
 async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Path) -> None:
     """Vertex rejects provider-level strict fields and has no structured output, so the schema stays out."""
-    wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
     provider = _provider("vertexai_claude", tmp_path, wire)
     tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=True)]
     await _turn(provider, ModelRequest(messages=_user(), tools=tools, response_format=_Answer, stream=False))
@@ -526,7 +509,7 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
     through the beta endpoint without one.
     """
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
     provider = _provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
     schema = {"type": "object", "properties": {"city": {"type": "string"}}}
     tools = [
@@ -584,7 +567,7 @@ async def test_request_tool_choice_replaces_an_authored_one(
     expected: dict[str, str],
 ) -> None:
     """A request's choice wins over ``request_params``, including the ``extra_body`` copy the SDK merges last."""
-    wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
     authored = {"request_params": {"tool_choice": {"type": "auto"}, "extra_body": {"tool_choice": {"type": "any"}}}}
     provider = _provider("anthropic", tmp_path, wire, extra_kwargs=authored)
     tools = [ToolSpec(name="get_weather", description="Forecast.", parameters={"type": "object", "properties": {}})]
@@ -595,7 +578,7 @@ async def test_request_tool_choice_replaces_an_authored_one(
 @pytest.mark.asyncio
 async def test_tool_choice_is_left_out_of_a_request_without_tools(tmp_path: Path) -> None:
     """The API rejects a tool choice without tools, so a decision request that offers none sends no choice."""
-    wire = _Wire(_json_reply([{"type": "text", "text": "{}"}]))
+    wire = Wire(_json_reply([{"type": "text", "text": "{}"}]))
     await _turn(
         _provider("anthropic", tmp_path, wire),
         ModelRequest(messages=_user(), tool_choice="none", stream=False),
@@ -627,7 +610,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
             },
         ],
     }
-    wire = _Wire(
+    wire = Wire(
         _json_reply([checkpoint, {"type": "text", "text": "Done."}], usage=usage),
         _sse_reply([{"type": "text", "text": "Next."}]),
     )
@@ -683,7 +666,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
 async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_path: Path) -> None:
     """A model that authored its own compaction edit replays checkpoints without MindRoom's trigger."""
     authored = {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 80000}}]}
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Ok."}]))
     provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     assert provider.capabilities.native_compaction is False
     assert provider.native_compaction_settings(threshold=60000) is None
@@ -708,7 +691,7 @@ async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: 
     tool_use = {"type": "tool_use", "id": "toolu_save", "name": "save_file", "input": {"file_name": "notes.md"}}
     unfinished = {"type": "tool_use", "id": "toolu_shell", "name": "run_shell_command", "input": {}}
     stored = [signed, tool_use, unsigned, unfinished]
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Saved."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Saved."}]))
     provider = _provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
     messages = [
         Message(role="user", content="Save the notes."),
@@ -746,7 +729,7 @@ async def test_bedrock_session_credentials_are_resolved_for_every_request(tmp_pa
             self.resolutions += 1
             return _Credentials()
 
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
     config = {
         "provider": "bedrock_claude",
         "id": "anthropic.claude-sonnet-5-5",
@@ -774,7 +757,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         "AWS_REGION": "us-west-2",
     }
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
     with isolated_provider_environment():
         direct = build_provider(
             ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="config-key"),
@@ -812,7 +795,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
 
 def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path: Path) -> None:
     """Results stay separate tool messages in history; the formatter merges them into one user turn on the wire."""
-    provider = _provider("anthropic", tmp_path, _Wire(_json_reply([])))
+    provider = _provider("anthropic", tmp_path, Wire(_json_reply([])))
     results = [Message(role="tool", tool_call_id="a", content="1"), Message(role="tool", tool_call_id="b", content="2")]
     assert provider.format_tool_results(_user(), results) == results
 
@@ -820,7 +803,7 @@ def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path:
 @pytest.mark.asyncio
 async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
     """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
     direct = _provider(
         "anthropic",
         tmp_path,
@@ -883,7 +866,7 @@ async def test_vertex_discovers_ambient_google_credentials_once_per_adapter(
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
-    wire = _Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
+    wire = Wire(_sse_reply([{"type": "text", "text": "Hi."}]))
     with isolated_provider_environment():
         built = build_provider(
             ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs={"region": "us-east5"}),
@@ -911,7 +894,7 @@ async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) 
             return httpx.Response(200, content=_PNG, headers={"content-type": "application/octet-stream"})
         return httpx.Response(200, content=b"# Notes\n", headers={"content-type": "text/markdown; charset=utf-8"})
 
-    wire = _Wire(respond)
+    wire = Wire(respond)
     provider = _provider("anthropic", tmp_path, wire)
     message = Message(
         role="user",
@@ -951,7 +934,7 @@ async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_pa
         msg = "connection refused"
         raise httpx.ConnectError(msg, request=request)
 
-    wire = _Wire(respond)
+    wire = Wire(respond)
     provider = _provider("anthropic", tmp_path, wire)
     message = Message(
         role="user",

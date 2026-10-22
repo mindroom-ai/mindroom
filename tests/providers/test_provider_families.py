@@ -34,7 +34,7 @@ from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 from tests.providers.anthropic_family_support import provider_for
 from tests.providers.gemini_ollama_support import build_adapter, runtime_paths_for
-from tests.providers.golden_support import PacedBytes
+from tests.providers.golden_support import Wire, ndjson_response, sse_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -78,53 +78,6 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     forget_learned_media_limits()
-
-
-class _Wire:
-    """Records the requests one adapter sends and answers each from a queue; the last answer repeats."""
-
-    def __init__(self, *responses: httpx.Response | Callable[[], httpx.Response]) -> None:
-        self.requests: list[httpx.Request] = []
-        self._responses = list(responses)
-        self.transport = httpx.MockTransport(self.respond)
-
-    def respond(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        response = self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
-        return response if isinstance(response, httpx.Response) else response()
-
-    def body(self, index: int = -1) -> dict[str, Any]:
-        return json.loads(self.requests[index].content)
-
-
-def _streamed(chunks: list[bytes], content_type: str, *, pause_seconds: float, drop: bool) -> httpx.Response:
-    headers = {"content-type": content_type}
-    if pause_seconds or drop:
-        return httpx.Response(200, headers=headers, stream=PacedBytes(chunks, pause_seconds=pause_seconds, drop=drop))
-    return httpx.Response(200, headers=headers, content=b"".join(chunks))
-
-
-def _sse(
-    events: list[dict[str, Any] | str],
-    *,
-    named: bool = False,
-    pause_seconds: float = 0.0,
-    drop: bool = False,
-) -> httpx.Response:
-    chunks = [
-        (
-            f"data: {event}\n\n".encode()
-            if isinstance(event, str)
-            else (f"event: {event['type']}\n" if named else "").encode() + f"data: {json.dumps(event)}\n\n".encode()
-        )
-        for event in events
-    ]
-    return _streamed(chunks, "text/event-stream", pause_seconds=pause_seconds, drop=drop)
-
-
-def _ndjson(events: list[dict[str, Any]], *, pause_seconds: float = 0.0, drop: bool = False) -> httpx.Response:
-    chunks = [json.dumps(event).encode() + b"\n" for event in events]
-    return _streamed(chunks, "application/x-ndjson", pause_seconds=pause_seconds, drop=drop)
 
 
 # --- Per-family wire shapes -------------------------------------------------------------------------------------
@@ -228,26 +181,31 @@ def _responses_events(text: str, usage: dict[str, int]) -> list[dict[str, Any]]:
 
 
 def _claude_reply() -> httpx.Response:
-    return _sse(_claude_events([{"type": "text", "text": "ok"}]), named=True)
+    return sse_response(_claude_events([{"type": "text", "text": "ok"}]), named=True)
 
 
 def _gemini_reply() -> httpx.Response:
-    return _sse([_gemini_chunk({"text": "ok"}, finish=True)])
+    return sse_response([_gemini_chunk({"text": "ok"}, finish=True)])
 
 
 def _ollama_reply() -> httpx.Response:
-    return _ndjson([_ollama_chunk("ok"), _ollama_chunk(done=True)])
+    return ndjson_response([_ollama_chunk("ok"), _ollama_chunk(done=True)])
 
 
 def _chat_reply() -> httpx.Response:
-    return _sse([_chat_chunk({"content": "ok"}), _chat_chunk({}, finish_reason="stop"), _chat_chunk(None), "[DONE]"])
+    return sse_response(
+        [_chat_chunk({"content": "ok"}), _chat_chunk({}, finish_reason="stop"), _chat_chunk(None), "[DONE]"],
+    )
 
 
 def _responses_reply() -> httpx.Response:
-    return _sse(_responses_events("ok", {"input_tokens": 40, "output_tokens": 9, "total_tokens": 49}), named=True)
+    return sse_response(
+        _responses_events("ok", {"input_tokens": 40, "output_tokens": 9, "total_tokens": 49}),
+        named=True,
+    )
 
 
-def _openai_family_adapter(config: dict[str, Any], root: Path, wire: _Wire) -> ModelProvider:
+def _openai_family_adapter(config: dict[str, Any], root: Path, wire: Wire) -> ModelProvider:
     config_path = root / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime = ProviderRuntime(
@@ -270,7 +228,7 @@ class _Family:
     # The media kind the route omits up front; empty when it omits none.
     omitted_media: str = ""
 
-    def adapter(self, root: Path, wire: _Wire) -> ModelProvider:
+    def adapter(self, root: Path, wire: Wire) -> ModelProvider:
         if self.config["provider"] == "anthropic":
             return provider_for(self.config, root, httpx.AsyncClient(transport=wire.transport))
         if self.config["provider"] in {"google", "ollama"}:
@@ -378,7 +336,7 @@ async def test_unset_tool_fields_are_omitted_where_agno_omitted_them(family: str
     only name, description, and parameters; Gemini sends an empty description for a tool without one.
     """
     spec = FAMILIES[family]
-    wire = _Wire(spec.reply())
+    wire = Wire(spec.reply())
     provider = _pipeline(spec.adapter(tmp_path, wire))
 
     await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], tools=_TRI_STATE_TOOLS))
@@ -438,7 +396,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     attempt.
     """
     spec = FAMILIES[family]
-    wire = _Wire(_error_reply(family), spec.reply())
+    wire = Wire(_error_reply(family), spec.reply())
     log_dir = tmp_path / "logs"
     provider = _pipeline(spec.adapter(tmp_path, wire), log_dir=log_dir)
     request = ModelRequest(
@@ -521,7 +479,11 @@ def _claude_argument_stream(*, pause_seconds: float) -> httpx.Response:
     pieces = [arguments[index : index + step] for index in range(0, len(arguments), step)]
     block = {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}
     deltas = [{"type": "input_json_delta", "partial_json": piece} for piece in pieces]
-    return _sse(_claude_events([block], deltas=deltas, stop_reason="tool_use"), named=True, pause_seconds=pause_seconds)
+    return sse_response(
+        _claude_events([block], deltas=deltas, stop_reason="tool_use"),
+        named=True,
+        pause_seconds=pause_seconds,
+    )
 
 
 def _gemini_code_execution_stream(*, pause_seconds: float = 0.0, drop: bool = False) -> httpx.Response:
@@ -529,14 +491,14 @@ def _gemini_code_execution_stream(*, pause_seconds: float = 0.0, drop: bool = Fa
     chunks: list[dict[str, Any] | str] = [running] * (_SILENT_EVENTS if not drop else 1)
     if not drop:
         chunks.append(_gemini_chunk({"text": "ok"}, finish=True))
-    return _sse(chunks, pause_seconds=pause_seconds, drop=drop)
+    return sse_response(chunks, pause_seconds=pause_seconds, drop=drop)
 
 
 def _ollama_silent_stream(*, pause_seconds: float = 0.0, drop: bool = False) -> httpx.Response:
     chunks = [_ollama_chunk("")] * (_SILENT_EVENTS if not drop else 1)
     if not drop:
         chunks.extend([_ollama_chunk("ok"), _ollama_chunk(done=True)])
-    return _ndjson(chunks, pause_seconds=pause_seconds, drop=drop)
+    return ndjson_response(chunks, pause_seconds=pause_seconds, drop=drop)
 
 
 @pytest.mark.asyncio
@@ -557,7 +519,7 @@ async def test_provider_events_without_output_keep_a_stream_inside_the_idle_limi
 ) -> None:
     """The idle limit measures the gap between provider events, including those that carry no output."""
     spec = FAMILIES[family]
-    wire = _Wire(spec.reply(), reply())
+    wire = Wire(spec.reply(), reply())
     provider = _pipeline(spec.adapter(tmp_path, wire), idle=_IDLE_LIMIT_SECONDS)
     request = ModelRequest(messages=[Message(role="user", content="Hi")], tools=[_tool("get_weather")])
     # The first request builds and caches the SDK client, which must not count against the paced stream's limit.
@@ -574,7 +536,7 @@ def _claude_server_tool_then_drop() -> httpx.Response:
     events = _claude_events([])[:1]
     block = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "paris"}}
     events.append({"type": "content_block_start", "index": 0, "content_block": block})
-    return _sse(events, named=True, drop=True)
+    return sse_response(events, named=True, drop=True)
 
 
 @pytest.mark.asyncio
@@ -590,7 +552,7 @@ async def test_failure_after_a_server_tool_started_is_final(
 ) -> None:
     """Once a hosted tool ran, a retry would run it again, so the dropped connection ends the request for good."""
     spec = FAMILIES[family]
-    wire = _Wire(reply)
+    wire = Wire(lambda _request: reply())
     provider = _pipeline(spec.adapter(tmp_path, wire))
     request = ModelRequest(messages=[Message(role="user", content="Hi")], overrides=RequestOverrides(sdk_max_retries=0))
 
@@ -606,7 +568,7 @@ async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_pa
     """Gemini's MALFORMED_FUNCTION_CALL is the model's failure, not the media's: only the guidance retry follows."""
     spec = FAMILIES["gemini"]
     malformed = {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}]}
-    wire = _Wire(lambda: _sse([malformed]))
+    wire = Wire(lambda _request: sse_response([malformed]))
     provider = _pipeline(spec.adapter(tmp_path, wire))
     image = Image(content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
     request = ModelRequest(
@@ -627,7 +589,7 @@ async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_pa
 async def test_a_dropped_connection_without_server_tools_is_still_retried(tmp_path: Path) -> None:
     """Ollama has no hosted tools, so a stream that drops before output keeps the transient retry budget."""
     spec = FAMILIES["ollama"]
-    wire = _Wire(lambda: _ollama_silent_stream(drop=True))
+    wire = Wire(lambda _request: _ollama_silent_stream(drop=True))
     provider = _pipeline(spec.adapter(tmp_path, wire))
 
     with pytest.raises(ProviderUnavailable):
