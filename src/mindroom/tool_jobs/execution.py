@@ -58,13 +58,11 @@ from mindroom.tool_system.worker_routing import get_tool_execution_identity, too
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
-    from agno.tools.function import Function
-
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
