@@ -20,7 +20,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY
-from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -111,14 +110,7 @@ def _checkpointed_run() -> RunRecord:
 
 def _responses_input(tmp_path: Path, request: ModelRequest) -> list[Any]:
     """Return the ``input`` a Responses route sends for ``request``, the projection that replays checkpoints."""
-    adapter = responses_adapter(tmp_path)
-    kwargs = responses_request_kwargs(
-        model_id=adapter.identity.id,
-        request=request,
-        settings=adapter.settings,
-        wire=adapter.wire,
-    )
-    return kwargs["input"]
+    return responses_adapter(tmp_path)._request_kwargs(request)["input"]
 
 
 async def _resume(

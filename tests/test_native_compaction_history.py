@@ -29,7 +29,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import record_native_checkpoint
-from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
@@ -84,12 +83,7 @@ def _sent(adapter: ResponsesAdapter, messages: Sequence[Message], native: Native
         native_compaction=native.native_compaction if native is not None else None,
         portable_replay=native.portable_replay if native is not None else False,
     )
-    return responses_request_kwargs(
-        model_id=adapter.identity.id,
-        request=request,
-        settings=adapter.settings,
-        wire=adapter.wire,
-    )
+    return adapter._request_kwargs(request)
 
 
 def _continues(sent: dict[str, Any]) -> str | None:
