@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime
+from collections.abc import Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
 from mindroom import agents
@@ -59,6 +60,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
@@ -2168,6 +2170,65 @@ async def test_call_that_cannot_run_here_spends_nothing(
 
         assert isinstance(result, str)
         assert reason in result
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+class _MediaSlackTools(Toolkit):
+    """A configured Slack toolkit whose one function also takes the run's images, recording each real run."""
+
+    def __init__(self, runs: list[dict[str, object]]) -> None:
+        self.runs = runs
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> str:
+        """Post a Slack message with the run's images.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+            images: The run's images, which the model never supplies.
+
+        """
+        self.runs.append({"channel": channel, "text": text, "images": images})
+        return "sent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "needs",
+    ["external-execution", "stop-after-tool-call", "media", "media-behind-output-files"],
+)
+async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    needs: str,
+) -> None:
+    """A stored call whose function runs elsewhere, ends the turn, or takes the run's media runs nothing, unspent.
+
+    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    toolkit = _MediaSlackTools(runs) if needs.startswith("media") else _SlackTools(runs)
+    if needs == "media-behind-output-files":
+        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = _TOOLKIT
+        if needs == "external-execution":
+            function.external_execution = True
+        if needs == "stop-after-tool-call":
+            function.stop_after_tool_call = True
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, _LiveRun((toolkit,)))
+
+        assert isinstance(result, str)
+        assert "needs live input or conversation control" in result
+        assert runs == []
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
         await manager.shutdown()
