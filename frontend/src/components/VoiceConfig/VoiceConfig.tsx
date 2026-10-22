@@ -194,7 +194,7 @@ export function VoiceConfig() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Volume2 className="h-5 w-5 text-primary" />
+              <Volume2 className="h-5 w-5 text-muted-foreground" />
               <CardTitle>Voice Message Support</CardTitle>
             </div>
             <input
@@ -450,7 +450,7 @@ export function VoiceConfig() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <PhoneCall className="h-5 w-5 text-primary" />
+            <PhoneCall className="h-5 w-5 text-muted-foreground" />
             Voice Calls
           </CardTitle>
           <CardDescription>

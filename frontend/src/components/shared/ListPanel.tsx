@@ -93,10 +93,6 @@ export interface ListPanelProps<T extends ListItem> {
    * Whether to show create button
    */
   showCreateButton?: boolean;
-  /**
-   * Creation form border color variant
-   */
-  creationBorderVariant?: "blue" | "orange";
 }
 
 /**
@@ -136,7 +132,6 @@ export function ListPanel<T extends ListItem>({
   emptySubtitle,
   className = "",
   showCreateButton = true,
-  creationBorderVariant = "blue",
 }: ListPanelProps<T>) {
   const [searchTerm, setSearchTerm] = useState("");
   const [isCreating, setIsCreating] = useState(false);
@@ -200,11 +195,6 @@ export function ListPanel<T extends ListItem>({
   const headerClass = sharedStyles.panel.header;
   const contentClass = sharedStyles.panel.content;
 
-  const creationBorderClass =
-    creationBorderVariant === "orange"
-      ? sharedStyles.creation.containerTeam
-      : sharedStyles.creation.container;
-
   const headerContent = (
     <>
       <div className={sharedStyles.header.titleContainer}>
@@ -254,7 +244,7 @@ export function ListPanel<T extends ListItem>({
     <div className={contentClass}>
       {/* Inline creation form */}
       {isCreating && creationMode === "inline-form" && (
-        <Card className={creationBorderClass}>
+        <Card className={sharedStyles.creation.container}>
           <CardContent className={sharedStyles.creation.content}>
             <div className={sharedStyles.creation.inputContainer}>
               <Input

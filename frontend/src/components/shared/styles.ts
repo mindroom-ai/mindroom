@@ -34,12 +34,11 @@ export const sharedStyles = {
     containerHover: "hover:bg-secondary",
     containerCard:
       "cursor-pointer rounded-lg outline-none transition-colors duration-150 hover:bg-secondary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-    selected: "bg-accent text-foreground hover:bg-accent",
-    selectedCard:
-      "bg-accent shadow-[inset_3px_0_0_hsl(var(--primary))] hover:bg-accent",
+    selected: "bg-active text-foreground hover:bg-active",
+    selectedCard: "bg-active hover:bg-active",
     iconContainer: "flex items-center gap-2 transition-colors duration-150",
     icon: "h-4 w-4 transition-colors duration-150",
-    iconSelected: "text-primary dark:text-primary",
+    iconSelected: "text-foreground",
     iconDefault: "text-muted-foreground",
     content: "flex-1 min-w-0",
     title: "font-medium text-sm",
@@ -53,7 +52,6 @@ export const sharedStyles = {
   // Creation forms
   creation: {
     container: "border border-primary",
-    containerTeam: "border border-primary",
     inputContainer: "flex items-center gap-2",
     input: "flex-1",
     content: "p-3",
