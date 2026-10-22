@@ -49,6 +49,7 @@ from mindroom.teams.storage import TeamRunRecords, under_team_scope
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -85,7 +86,7 @@ from tests.team_turn_helpers import (
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
     from pathlib import Path
 
     from mindroom.bot import TeamBot
@@ -504,6 +505,35 @@ async def test_a_member_s_claude_sessions_are_the_member_s_own(
     _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_calls_run_through_the_member_s_tool_call_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The policy the member's agent build runs its calls under, such as call recording, sees each call it makes."""
+    recorded: list[tuple[str, dict[str, object]]] = []
+
+    class _Recorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            recorded.append((tool_name, dict(args)))
+            return tool_name
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del call_id, tool_name, args, result
+
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+
+    with recording_tool_calls(_Recorder()):
+        await team.stream()
+
+    assert recorded == [("touch", {"label": "a"})]
 
 
 @pytest.mark.asyncio
