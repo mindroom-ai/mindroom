@@ -12,6 +12,8 @@ import httpx
 import nio
 import pytest
 from agno.media import Audio
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
@@ -713,7 +715,7 @@ class TestVoiceHandler:
         assert result == "turn on the lights"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "timeout", "empty"])
+    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "errored", "timeout", "empty"])
     @pytest.mark.parametrize("unavailable_mention", [False, True])
     async def test_cleanup_failure_preserves_recognized_transcript(
         self,
@@ -741,9 +743,12 @@ class TestVoiceHandler:
                     message = "cleanup construction failed"
                     raise RuntimeError(message)
 
-            async def arun(self, *_args: object, **_kwargs: object) -> None:
+            async def arun(self, *_args: object, **_kwargs: object) -> RunOutput | None:
                 if failure_stage == "empty":
-                    return
+                    return None
+                if failure_stage == "errored":
+                    # Agno returns a provider failure, such as a bad API key, as an errored run carrying the error.
+                    return RunOutput(content="Error code: 401 - invalid x-api-key", status=RunStatus.error)
                 if failure_stage == "timeout":
                     raise TimeoutError
                 message = "cleanup provider failed"

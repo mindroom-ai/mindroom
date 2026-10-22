@@ -51,6 +51,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
 
     @property
+    def api_enabled(self) -> bool: ...  # noqa: D102
+
+    @property
     def agent_bots(self) -> object: ...  # noqa: D102
 
     @property

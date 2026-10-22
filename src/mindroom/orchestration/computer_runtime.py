@@ -70,7 +70,7 @@ async def _authorize_computer(
     return _resolve_target(requester_id, room_id, agent_user_id, name, config, runtime_paths)
 
 
-def computer_browser_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str:
+def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Return the one browser tool that gives this agent a worker computer, or raise the API's error."""
     if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
@@ -98,6 +98,16 @@ def computer_browser_provider(agent_name: str, config: Config, runtime_paths: Ru
     return provider
 
 
+def worker_computer_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the browser tool that gives this agent a worker computer, or None when it has none."""
+    if agent_name not in config.agents or not runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
+        return None
+    try:
+        return _computer_browser_provider(agent_name, config, runtime_paths)
+    except ComputerError:
+        return None
+
+
 def _resolve_target(
     requester_id: str,
     room_id: str,
@@ -106,7 +116,7 @@ def _resolve_target(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> ComputerTarget:
-    computer_browser_provider(name, config, runtime_paths)
+    _computer_browser_provider(name, config, runtime_paths)
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=name,

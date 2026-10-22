@@ -17,6 +17,7 @@ from agno.media import Audio
 from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
 
 from mindroom.attachments.storage import register_audio_attachment
 from mindroom.authorization import responder_candidate_entities_from_cached_room
@@ -731,6 +732,10 @@ async def _process_transcription(
 
         if response is not None:
             await record_system_usage(response, runtime_paths=runtime_paths, kind="voice_normalization")
+            if response.status == RunStatus.error:
+                # Agno returns a provider failure as the run's content; the transcription is still usable.
+                logger.warning("voice_transcription_normalizer_failed", error=str(response.content))
+                response = None
 
         # Extract the content from the response
         if response and response.content:

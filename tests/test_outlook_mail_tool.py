@@ -11,6 +11,7 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from agno.tools.function import Function
+from agno.utils.functions import get_function_call
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
@@ -997,7 +998,18 @@ def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
 
 @pytest.mark.parametrize(
     "mailbox",
-    ["", "me", "support", "a@b@contoso.com", "support@contoso.com/../me", "x" * 250 + "@contoso.com", "a?b@c.com", 3],
+    [
+        "",
+        "me",
+        "support",
+        "a@b@contoso.com",
+        "support@contoso.com/../me",
+        "x" * 250 + "@contoso.com",
+        "a?b@c.com",
+        f" {SHARED}",
+        f"{SHARED}\u200b",
+        3,
+    ],
 )
 @pytest.mark.parametrize(
     "call",
@@ -1023,7 +1035,44 @@ def test_a_malformed_mailbox_is_refused_before_any_request(
     result = _payload(call(tools, mailbox))
 
     assert (result["code"], "mailbox" in result["message"]) == ("invalid_argument", True)
+    assert "mailbox" not in result
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools: tools.outlook_mail_search(limit=0, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_search(page_token=NEXT_MESSAGES, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_get_message("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_download_attachment(MESSAGE_ID, "a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_create_draft([], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_send(["not-an-email"], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_reply(MESSAGE_ID, ["sam@contoso.com"], " ", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_mark_read("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_move(MESSAGE_ID, "a/b", mailbox=SHARED),
+    ],
+)
+def test_a_refused_call_with_a_mailbox_names_the_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[OutlookMailTools], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(call(tools))
+
+    assert result["code"] in {"invalid_argument", "invalid_page_token"}
+    assert result["mailbox"] == SHARED
+    assert graph.requests == []
+
+
+def test_a_graph_error_in_a_shared_mailbox_names_the_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(tools.outlook_mail_get_message("AAMk-missing=", mailbox=SHARED))
+
+    assert (result["code"], result["graph_code"], result["mailbox"]) == ("not_found", "ErrorItemNotFound", SHARED)
 
 
 def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
@@ -1037,6 +1086,7 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
     refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, ["alex@contoso.com"], "Thanks", mailbox=SHARED))
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
+    assert refused["mailbox"] == SHARED
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
         ("POST", f"{SHARED_PREFIX}messages/{MESSAGE_ID}/createReply"),
         ("DELETE", f"{SHARED_PREFIX}messages/{DRAFT_ID}"),
@@ -1045,7 +1095,13 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
 
 @pytest.mark.parametrize(
     "graph_owner",
-    [f"/users/{SHARED}", f"/users/{SHARED.replace('@', '%40')}", f"/users('{SHARED_ID}')", f"/users/{SHARED_ID}"],
+    [
+        f"/users/{SHARED}",
+        f"/users/{SHARED.replace('@', '%40')}",
+        f"/users('{SHARED_ID}')",
+        f"/users({SHARED_ID})",
+        f"/users/{SHARED_ID}",
+    ],
 )
 def test_a_shared_mailbox_page_token_names_that_mailbox_and_continues_there(
     tmp_path: Path,
@@ -1165,6 +1221,34 @@ def test_get_automatic_replies_reads_the_requesters_own_setting_as_text(
     }
 
 
+@pytest.mark.parametrize(
+    ("graph_status", "graph_audience", "status", "audience"),
+    [
+        ("alwaysEnabled", "none", "alwaysEnabled", "internal_only"),
+        ("Scheduled", "None", "scheduled", "internal_only"),
+        ("disabled", "ContactsOnly", "disabled", "contactsOnly"),
+        ("AlwaysEnabled", "All", "alwaysEnabled", "all"),
+    ],
+)
+def test_get_automatic_replies_reports_values_the_setter_takes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_status: str,
+    graph_audience: str,
+    status: str,
+    audience: str,
+) -> None:
+    # Graph's examples write these values in either case.
+    mail = _Graph()
+    setting = _automatic_replies(status=graph_status, externalAudience=graph_audience)
+    mail.override = lambda _request: httpx.Response(200, json=setting)
+    tools, _graph = _tools(tmp_path, monkeypatch, mail)
+
+    result = _payload(tools.outlook_mail_get_automatic_replies())["automatic_replies"]
+
+    assert (result["status"], result["external_audience"]) == (status, audience)
+
+
 def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mail = _Graph()
     mail.write = httpx.Response(200, json={"automaticRepliesSetting": _automatic_replies()})
@@ -1204,7 +1288,7 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
         ({"status": "disabled"}, {"status": "disabled"}),
         ({"status": "disabled", "external_message": ""}, {"status": "disabled", "externalReplyMessage": ""}),
         (
-            {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "none"},
+            {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "internal_only"},
             {"status": "alwaysEnabled", "internalReplyMessage": "Away", "externalAudience": "none"},
         ),
         (
@@ -1254,6 +1338,7 @@ PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
         {**ON, **PERIOD},
         {"status": "disabled", "end": PERIOD["end"]},
         {**ON, "external_audience": "everyone"},
+        {**ON, "external_audience": "none"},
         {**ON, "external_audience": ["all"]},
         {**ON, "internal_message": 3},
         {**ON, "external_message": ["Away"]},
@@ -1275,3 +1360,33 @@ def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
 
     assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
     assert graph.requests == []
+
+
+def _enum_values(schema: object) -> list[object]:
+    if isinstance(schema, dict):
+        return [*schema.get("enum", []), *(value for item in schema.values() for value in _enum_values(item))]
+    if isinstance(schema, list):
+        return [value for item in schema for value in _enum_values(item)]
+    return []
+
+
+def test_every_choice_reaches_the_tool_through_agnos_argument_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Agno turns an argument such as "none", "null", "true", or "false" into None or a boolean before the tool runs.
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+    choices = [
+        (name, parameter, value)
+        for name in tools.functions
+        for parameter, schema in Function.from_callable(getattr(tools, name))
+        .to_dict()["parameters"]["properties"]
+        .items()
+        for value in _enum_values(schema)
+    ]
+
+    assert ("outlook_mail_set_automatic_replies", "external_audience", "internal_only") in choices
+    for name, parameter, value in choices:
+        call = get_function_call(name, json.dumps({parameter: value}), functions=tools.functions)
+        assert call is not None
+        assert call.arguments == {parameter: value}, (name, parameter, value)
