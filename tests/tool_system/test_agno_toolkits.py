@@ -121,11 +121,6 @@ def test_async_variants_replace_sync_functions_in_place() -> None:
 
     assert [function.name for function in adapted.functions] == ["first", "second", "third"]
     assert adapted.functions[1].entrypoint.__wrapped__ is async_second
-    assert [function.name for function in adapt_toolkit(toolkit, async_mode=False).functions] == [
-        "first",
-        "second",
-    ]
-    assert adapt_toolkit(toolkit, async_mode=False).functions[1].entrypoint.__wrapped__ is second
 
 
 def test_instructions_are_adapted_only_when_agno_adds_them() -> None:

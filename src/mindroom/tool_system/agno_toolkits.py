@@ -28,6 +28,7 @@ from agno.utils.schema import (
     AGNO_INJECTED_PARAMS,
     FRAMEWORK_INJECTED_PARAMS,
     IDENTITY_INJECTED_PARAMS,
+    MEDIA_INJECTED_PARAMS,
     annotation_binds,
     is_framework_typed,
     unwrap_annotation,
@@ -57,9 +58,9 @@ _UNBINDABLE_KINDS = frozenset(
 )
 
 
-def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolkit:
-    """Adapt every function of ``toolkit`` in the order Agno prepares them for a run of the given mode."""
-    functions = toolkit.get_async_functions() if async_mode else toolkit.get_functions()
+def adapt_toolkit(toolkit: Toolkit) -> AdaptedToolkit:
+    """Adapt every function of ``toolkit`` in the order Agno prepares them for an async run."""
+    functions = toolkit.get_async_functions()
     added = toolkit.add_instructions and toolkit.instructions is not None
     return AdaptedToolkit(
         name=toolkit.name,
@@ -102,10 +103,7 @@ def adapt_function(function: Function) -> ToolFunction:
 
 def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
     """Return the entrypoint parameters Agno supplies instead of the model: reserved names and identity-typed ones."""
-    try:
-        parameters = inspect.signature(entrypoint).parameters
-    except (TypeError, ValueError):
-        return frozenset()
+    parameters = inspect.signature(entrypoint).parameters
     names = {name for name in parameters if name in _RESERVED_NAMES}
     try:
         hints = get_type_hints(entrypoint)
@@ -163,10 +161,9 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
         "_agno_agent": actor,
         "_agno_team": actor,
         "_agno_run_context": run_context,
-        "images": [_agno_image(image) for image in context.images] or None,
-        "videos": [_agno_video(video) for video in context.videos] or None,
-        "audios": [_agno_audio(audio) for audio in context.audios] or None,
-        "files": [_agno_file(file) for file in context.files] or None,
+        # Agno passed the run's input media to these names; the owned loop gives a tool none, so each receives None,
+        # as under Agno for a run without media.
+        **dict.fromkeys(MEDIA_INJECTED_PARAMS),
     }
     arguments = {name: by_name[name] for name in function.injected_params if name in by_name}
     typed = function.injected_params - set(by_name) - {"fc"}
@@ -262,76 +259,6 @@ def tool_value(result: object) -> ToolValue:
         audios=tuple(_owned_audio(audio) for audio in result.audios or ()),
         videos=tuple(_owned_video(video) for video in result.videos or ()),
         files=tuple(_owned_file(file) for file in result.files or ()),
-    )
-
-
-def _agno_image(image: Image) -> AgnoImage:
-    return AgnoImage(
-        id=image.id,
-        url=image.url,
-        filepath=image.filepath,
-        content=image.content,
-        format=image.format,
-        mime_type=image.mime_type,
-        detail=image.detail,
-        original_prompt=image.original_prompt,
-        revised_prompt=image.revised_prompt,
-        alt_text=image.alt_text,
-        metadata=image.metadata,
-    )
-
-
-def _agno_audio(audio: Audio) -> AgnoAudio:
-    return AgnoAudio(
-        id=audio.id,
-        url=audio.url,
-        filepath=audio.filepath,
-        content=audio.content,
-        format=audio.format,
-        mime_type=audio.mime_type,
-        duration=audio.duration,
-        sample_rate=audio.sample_rate,
-        channels=audio.channels,
-        transcript=audio.transcript,
-        expires_at=audio.expires_at,
-        metadata=audio.metadata,
-    )
-
-
-def _agno_video(video: Video) -> AgnoVideo:
-    return AgnoVideo(
-        id=video.id,
-        url=video.url,
-        filepath=video.filepath,
-        content=video.content,
-        format=video.format,
-        mime_type=video.mime_type,
-        duration=video.duration,
-        width=video.width,
-        height=video.height,
-        fps=video.fps,
-        eta=video.eta,
-        original_prompt=video.original_prompt,
-        revised_prompt=video.revised_prompt,
-        metadata=video.metadata,
-    )
-
-
-def _agno_file(file: File) -> AgnoFile:
-    # Agno's File accepts only its MIME allow-list; an owned file keeps any value, so an unlisted one is not passed.
-    mime_type = file.mime_type if file.mime_type in AgnoFile.valid_mime_types() else None
-    return AgnoFile(
-        id=file.id,
-        url=file.url,
-        filepath=file.filepath,
-        content=file.content,
-        mime_type=mime_type,
-        file_type=file.file_type,
-        filename=file.filename,
-        size=file.size,
-        format=file.format,
-        name=file.name,
-        metadata=file.metadata,
     )
 
 

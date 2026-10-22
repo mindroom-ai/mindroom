@@ -18,7 +18,7 @@ from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
-from mindroom.llm.media import File, Image
+from mindroom.llm.media import Image
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
 from mindroom.tool_system.invocation import (
     ToolArgumentError,
@@ -187,12 +187,10 @@ async def test_middleware_rewrites_cannot_replace_injected_objects() -> None:
 
 
 @pytest.mark.asyncio
-async def test_input_media_is_injected_as_agno_media_and_result_media_comes_back_owned() -> None:
-    """Reserved media parameters receive Agno media built from the context; ``ToolResult`` media returns as owned."""
-    received: list[object] = []
+async def test_result_media_comes_back_owned() -> None:
+    """``ToolResult`` media reaches the outcome as owned media."""
 
-    def tool(images: list[AgnoImage] | None, files: list[object] | None) -> ToolResult:
-        received.extend((images, files))
+    def tool() -> ToolResult:
         return ToolResult(
             content="made",
             images=[AgnoImage(url="https://example.invalid/out.png", id="out", alt_text="out")],
@@ -200,20 +198,9 @@ async def test_input_media_is_injected_as_agno_media_and_result_media_comes_back
         )
 
     [function] = _functions(tool).values()
-    image = Image(url="https://example.invalid/in.png", detail="low", metadata={"source": "test"})
 
-    outcome = await _run(function, "{}", images=[image], files=[File(content=b"x", mime_type="application/x-custom")])
+    outcome = await _run(function, "{}")
 
-    [injected_images, injected_files] = received
-    assert isinstance(injected_images, list)
-    [injected_image] = injected_images
-    assert isinstance(injected_image, AgnoImage)
-    assert (injected_image.id, injected_image.url, injected_image.detail) == (image.id, image.url, "low")
-    assert injected_image.metadata == {"source": "test"}
-    assert isinstance(injected_files, list)
-    [injected_file] = injected_files
-    assert injected_file.content == b"x"
-    assert injected_file.mime_type is None  # Agno's File accepts only its MIME allow-list.
     assert outcome.content == "made"
     assert outcome.images == (Image(id="out", url="https://example.invalid/out.png", alt_text="out"),)
     [file] = outcome.files
