@@ -259,10 +259,15 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
 
     await team.stream(ctx=ctx)
 
-    assert [
-        message.role for message in team.models["default"].requests[0].messages if transient in str(message.content)
-    ] == [
-        "user",
+    # The transient block is the user message right after the prompt, apart from it.
+    assert [(message.role, message.content) for message in team.models["default"].requests[0].messages[1:]] == [
+        ("user", f'Current message:\n<msg event_id="{EVENT_ID}" from="{REQUESTER_ID}"><![CDATA[Hello]]></msg>'),
+        (
+            "user",
+            "<mindroom_transient_context>\n<mindroom_message_context>\n"
+            f'<item key="sample" cache_policy="volatile">\n{transient}\n</item>\n'
+            "</mindroom_message_context>\n</mindroom_transient_context>",
+        ),
     ]
     record, members = team.stored_runs()
     assert len(members) == 1
