@@ -901,6 +901,30 @@ async def test_persist_to_saves_the_record_with_its_usage_and_the_session_state_
     assert _loaded_ids(store) == ["r1", "r2", "r3", "r4"]
 
 
+@pytest.mark.asyncio
+async def test_persist_to_writes_back_a_session_state_restored_after_an_earlier_save(store: ConversationStore) -> None:
+    """A state changed and saved with one record, then restored before the next, is stored restored.
+
+    One callback saves every member and leader record of a turn, so a member that restores what an earlier member
+    changed must not leave the earlier change stored.
+    """
+    _seed(store, [_run("r1")])
+    session = _loaded(store)
+    session.session_state = {"cwd": "/repo"}
+    store.save_session_fields(session, "session_state")
+    persist = persist_to(store, session)
+
+    session.session_state["cwd"] = "/repo/sub"
+    await persist(_run("r2"))
+    assert _loaded(store).session_state == {"cwd": "/repo/sub"}
+
+    session.session_state["cwd"] = "/repo"
+    await persist(_run("r3"))
+
+    assert _loaded(store).session_state == {"cwd": "/repo"}
+    assert _loaded_ids(store) == ["r1", "r2", "r3"]
+
+
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
     """Agno 2 columns encoded twice load, and a field save writes them encoded once."""
     store.save_session_fields(_session())

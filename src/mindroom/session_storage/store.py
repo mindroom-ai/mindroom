@@ -441,23 +441,26 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
 def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
-    The record is serialized on the caller's task before the lane is awaited, so what lands is the record as it was
-    handed over. ``session.session_state``, which the run's tools change in place, is written back by field when it
-    differs from what the session held when this callback was made, after the record and in the same lane. The
-    save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's saves
-    run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
+    The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
+    before the lane is awaited, so what lands is what was handed over. The state is written back by field when it
+    differs from the latest state this callback wrote (at first, what the session held when the callback was made),
+    after the record and in the same lane, so a turn whose runs change the state and restore it stores it restored.
+    The save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's
+    saves run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
     """
-    loaded_state = copy.deepcopy(session.session_state)
+    stored_state = copy.deepcopy(session.session_state)
 
     async def persist(record: AnyRunRecord) -> None:
         data = record.to_dict()
         row_type = run_type(record)
-        state = copy.deepcopy(session.session_state) if session.session_state != loaded_state else None
+        state = copy.deepcopy(session.session_state)
 
         def operation(opened: ConversationStore) -> None:
+            nonlocal stored_state
             opened._save_run_dict(session, data, row_type=row_type, record_usage=True)
-            if state is not None:
+            if state != stored_state:
                 opened.save_session_fields(replace(session, session_state=state), "session_state")
+                stored_state = state
 
         await run_session_storage_operation(lambda: store, operation)
 
