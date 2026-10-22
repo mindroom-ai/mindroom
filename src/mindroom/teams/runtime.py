@@ -5,7 +5,8 @@ A team run is the leader's loop over its own tools plus the delegation tool for 
 children of the team run, each ending in a record of its own with ``parent_run_id``, and their events reach the
 team's stream tagged with the member. A paused member pauses the team: its requirements sit on the team run naming
 the member, and ``continue_team`` resumes the members first, then the leader. The team record holds paused members in
-``member_responses`` and the leader's usage in ``metrics``; ``team_usage`` adds the member runs' usage once.
+``member_responses``, every member run that ended while it ran in ``ended_member_runs``, and the leader's usage in
+``metrics``; ``team_usage`` adds the member runs' usage once.
 """
 
 from __future__ import annotations
@@ -160,6 +161,8 @@ def continue_team(
     delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
     requirements on the team run, and the leader sends no request.
     """
+    # The resumed record keeps ``ended_member_runs``, the members that ended before the pause, as Agno's
+    # continuation of its live run did.
     record = resumed_record(paused)
     record.member_responses = []
     # Agno's continuation started the leader's text afresh; the paused notice is not part of the answer.
@@ -231,6 +234,19 @@ def team_paused_content(record: TeamRunRecord) -> str:
     if not parts:
         return ""
     return "Team run paused. The following require input:\n" + "\n".join(parts)
+
+
+def keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
+    """Keep a member run's terminal ``record`` in ``ended``, the member runs in the order they first ended.
+
+    A member resumed within the run ends twice; its later record replaces the paused one where it stood, as Agno
+    continued the paused member's output in place.
+    """
+    run_ids = [member.run_id for member in ended]
+    if record.run_id in run_ids:
+        ended[run_ids.index(record.run_id)] = record
+    else:
+        ended.append(record)
 
 
 def team_usage(record: TeamRunRecord, members: Sequence[RunRecord]) -> RunMetrics | None:
@@ -499,6 +515,7 @@ class _MemberRuns:
                 error=str(error),
             )
         record = ended[-1]
+        keep_ended_member_run(self.record.ended_member_runs, record)
         self.emit(MemberRunEnded(member.spec.id, member.spec.name, record))
         return record
 
@@ -530,6 +547,7 @@ __all__ = [
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",
+    "keep_ended_member_run",
     "leader_tool_specs",
     "run_team",
     "team_paused_content",

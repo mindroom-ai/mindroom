@@ -347,15 +347,15 @@ async def _compact_scope(
 def _segment(record: AnyRunRecord, layout: _Layout, folded_member_ids: set[str]) -> Segment:
     """Return what this fold takes out of the running run, from the live request and run tree.
 
-    The run's messages and member rows are written only when the run ends, so the request's folded exchanges and
-    the member responses attached so far are the fold's part of the turn.
+    The run's messages are written only when the run ends, so the request's folded exchanges and the member runs
+    that ended so far, less those an earlier fold of the run stored, are the fold's part of the turn.
     """
     folded = layout.folded
     call_ids = {
         call["id"] for message in folded for call in message.tool_calls or [] if isinstance(call.get("id"), str)
     }
     members = (
-        [member for member in record.member_responses if member.run_id not in folded_member_ids]
+        [member for member in record.ended_member_runs if member.run_id not in folded_member_ids]
         if isinstance(record, TeamRunRecord)
         else []
     )

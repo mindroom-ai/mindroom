@@ -342,11 +342,17 @@ class RunRecord(_RunRecordCommon):
 
 @dataclass(kw_only=True)
 class TeamRunRecord(_RunRecordCommon):
-    """A persisted team run; paused member runs ride along in ``member_responses``."""
+    """A persisted team run; paused member runs ride along in ``member_responses``.
+
+    ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, as Agno's live
+    team run held each finished member; a mid-turn fold stores them in its segment. It is never stored, so a loaded
+    record starts without it, while a resume of the live record carries it on.
+    """
 
     team_id: str | None = None
     team_name: str | None = None
     member_responses: list[RunRecord | TeamRunRecord] = field(default_factory=list)
+    ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored ``run_data`` dict, keys in the order Agno wrote them; ``member_responses`` is always present."""

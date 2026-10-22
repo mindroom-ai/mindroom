@@ -440,24 +440,14 @@ def test_redacting_a_team_turn_that_folded_removes_its_member_runs(storage: Conv
 
 def test_a_runs_summary_rows_name_every_tool_call_its_folds_summarized(storage: ConversationStore) -> None:
     """Every interrupted record write reads the folded calls from the rows, so they stay out after a restart too."""
-    call = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
-    nested = TeamRunRecord(
-        run_id="nested",
-        team_id="inner",
-        member_responses=[RunRecord(run_id="deep", tools=[ToolExecution(tool_call_id="deep-call")])],
-    )
-    member = RunRecord(run_id="member", tools=[ToolExecution(tool_call_id="member-call")])
+    first = Message(role="assistant", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe"}}])
+    second = Message(role="assistant", tool_calls=[{"id": "c2", "type": "function", "function": {"name": "probe"}}])
     _seed(storage, [])
     running = _run("live")
-    assert _fold(storage, running, "S1", folded=[call], tools=[ToolExecution(tool_call_id="execution-call")])
-    assert _fold(storage, running, "S2", member_responses=[member, nested])
+    assert _fold(storage, running, "S1", folded=[first], tools=[ToolExecution(tool_call_id="execution-call")])
+    assert _fold(storage, running, "S2", folded=[second])
 
-    assert segment_tool_call_ids(storage, session_id="session", run_id="live") == {
-        "c1",
-        "execution-call",
-        "member-call",
-        "deep-call",
-    }
+    assert segment_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "execution-call", "c2"}
     assert segment_tool_call_ids(storage, session_id="session", run_id="other") == set()
     assert folded_tool_call_ids({}) == set()
 

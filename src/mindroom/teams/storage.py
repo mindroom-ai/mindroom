@@ -14,7 +14,7 @@ from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.runtime import MemberRunEnded
+from mindroom.teams.runtime import MemberRunEnded, keep_ended_member_run
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
@@ -60,13 +60,8 @@ class TeamRunRecords:
             self.record = event.record
             return True
         if isinstance(event, MemberRunEnded):
-            # A member resumed within this run ends twice; its later record replaces the paused one where it stood,
-            # as Agno continued the paused member's output in place, so a blocking reply lists it there.
-            run_ids = [record.run_id for record in self.members]
-            if event.record.run_id in run_ids:
-                self.members[run_ids.index(event.record.run_id)] = event.record
-            else:
-                self.members.append(event.record)
+            # A resumed member's later record stands where its paused one did, so a blocking reply lists it there.
+            keep_ended_member_run(self.members, event.record)
             return True
         return False
 
