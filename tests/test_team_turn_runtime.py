@@ -641,13 +641,14 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member that lost the approved toolkit, or an approval naming another call, leaves the paused row untouched."""
+    """A member that lost the approved toolkit, or a decision naming another call, leaves the paused row untouched."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
     team.models["checker-model"] = ScriptedModel([])
 
-    with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
-        await team.resume(raised.paused, approved=True, approvals=(member_approval("call-other", "dangerous"),))
+    for approved in (True, False):
+        with pytest.raises(RuntimeError, match="no longer match the pending requirements"):
+            await team.resume(raised.paused, approved=approved, approvals=(member_approval("call-other", "dangerous"),))
     team.config.agents["checker"].tools = []
     with pytest.raises(ExceptionGroup) as refused:
         await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
