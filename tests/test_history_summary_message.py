@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -190,9 +190,8 @@ _LEGACY_SYSTEM_SUFFIX = (
 )
 
 
-def _seeded_squad(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **scripts: Any) -> TeamTurn:  # noqa: ANN401
-    """Return the squad whose team scope holds two earlier runs and a summary, scripted as ``scripts`` says."""
-    team = squad_turn(tmp_path, monkeypatch, **scripts)
+def _seeded(team: TeamTurn) -> TeamTurn:
+    """Seed two earlier runs and a summary into ``team``'s scope and return the team."""
     session = seed_session(
         team.storage,
         _team_session(
@@ -216,11 +215,17 @@ async def _paused_on_the_checker(team: TeamTurn) -> PausedAttempt:
 
 
 _PAST = ["past-1 team question", "past-1 team answer", "past-2 team question", "past-2 team answer"]
-_CHECKER_PAUSES = {
-    "leader": [delegate("call-team", "checker", "Touch it")],
-    "checker": [calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-    "approval_rules": [ApprovalRuleConfig(match="touch", action="require_approval")],
-}
+
+
+def _checker_pauses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TeamTurn:
+    """Return the squad whose leader hands the checker a ``touch`` call that waits for approval."""
+    return squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
 
 
 @pytest.mark.asyncio
@@ -229,7 +234,7 @@ async def test_a_team_turn_replays_the_summary_before_its_history_and_outside_an
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    team = _seeded_squad(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))])
+    team = _seeded(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
 
     await team.stream()
 
@@ -252,7 +257,7 @@ async def test_a_team_turn_whose_plan_replays_no_history_sends_no_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scheduled turn whose history budget is spent replays neither the summary nor the stored runs."""
-    team = _seeded_squad(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))])
+    team = _seeded(squad_turn(tmp_path, monkeypatch, leader=[answer("Done.", usage(50, 5))]))
     spent = ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
 
     await team.stream(ctx=team.ctx(scheduled_history_budget=spent))
@@ -295,7 +300,7 @@ async def test_a_team_resume_replays_the_summary_once_behind_the_paused_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The leader's resumed request keeps the summary and history its paused request saw, once, as its prefix."""
-    team = _seeded_squad(tmp_path, monkeypatch, **_CHECKER_PAUSES)
+    team = _seeded(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
     [paused_request] = team.models["default"].requests
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
@@ -319,15 +324,17 @@ async def test_a_team_continued_within_its_turn_replays_the_summary_only_under_a
     replays: bool,
 ) -> None:
     """The leader continues after a member's child finished, with the summary only when the turn replays history."""
-    team = _seeded_squad(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
-        writer=[
-            calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig"), metrics=usage(10, 1)),
-            answer("Writer: found it."),
-        ],
-        helper=[answer("Helper found it.")],
+    team = _seeded(
+        squad_turn(
+            tmp_path,
+            monkeypatch,
+            leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+            writer=[
+                calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig"), metrics=usage(10, 1)),
+                answer("Writer: found it."),
+            ],
+            helper=[answer("Helper found it.")],
+        ),
     )
     ctx = team.ctx()
     if not replays:
@@ -348,7 +355,7 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A team paused while Agno rendered the summary into the leader's system message resumes with only that copy."""
-    team = _seeded_squad(tmp_path, monkeypatch, **_CHECKER_PAUSES)
+    team = _seeded(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
