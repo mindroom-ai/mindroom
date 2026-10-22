@@ -133,7 +133,7 @@ class TeamAttempt:
         if self.stream:
             return self.reply.canonical_text()
         record = self.records.record
-        return format_team_response(record, self.records.members).strip() if record is not None else ""
+        return format_team_response(record, record.ended_member_runs).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""
@@ -194,10 +194,10 @@ class TeamAttempt:
             status=status,
             model=record.model if record is not None else None,
             model_provider=record.model_provider if record is not None else None,
-            metrics=team_usage(record, self.records.members) if record is not None else None,
+            metrics=team_usage(record, record.ended_member_runs) if record is not None else None,
             context_metrics=record.metrics if record is not None else None,
             context_input_tokens=prepared_history.prepared_context_tokens if prepared_history is not None else None,
-            tool_count=len(team_tool_executions(record, self.records.members)) if record is not None else 0,
+            tool_count=len(team_tool_executions(record, record.ended_member_runs)) if record is not None else 0,
             prepared_history=prepared_history,
         )
 

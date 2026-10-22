@@ -237,7 +237,7 @@ def team_paused_content(record: TeamRunRecord) -> str:
     return "Team run paused. The following require input:\n" + "\n".join(parts)
 
 
-def keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
+def _keep_ended_member_run(ended: list[RunRecord], record: RunRecord) -> None:
     """Keep a member run's terminal ``record`` in ``ended``, the member runs in the order they first ended.
 
     A member resumed within the run ends twice; its later record replaces the paused one where it stood, as Agno
@@ -481,6 +481,7 @@ class _MemberRuns:
     def _capture(self, ended: list[RunRecord]) -> Persist[RunRecord]:
         async def persist(record: RunRecord) -> None:
             ended.append(record)
+            _keep_ended_member_run(self.record.ended_member_runs, record)
             if self.persist is not None:
                 await self.persist(record)
 
@@ -516,7 +517,6 @@ class _MemberRuns:
                 error=str(error),
             )
         record = ended[-1]
-        keep_ended_member_run(self.record.ended_member_runs, record)
         self.emit(MemberRunEnded(member.spec.id, member.spec.name, record))
         return record
 
@@ -548,7 +548,6 @@ __all__ = [
     "TeamCallKey",
     "TeamRunEvent",
     "continue_team",
-    "keep_ended_member_run",
     "leader_tool_specs",
     "run_team",
     "team_paused_content",

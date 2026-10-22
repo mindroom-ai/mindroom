@@ -812,7 +812,7 @@ class _TeamTurn:
             blocking_team_pause(
                 paused,
                 record,
-                attempt.records.members,
+                record.ended_member_runs,
                 config_names=attempt.members.requested_agent_names,
                 display_names=attempt.members.display_names,
                 show_tool_calls=attempt.show_tool_calls,
@@ -845,7 +845,7 @@ class _TeamTurn:
                 session_id=self.session_id,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        members = attempt.records.members
+        members = record.ended_member_runs
         tool_executions = team_tool_executions(record, members)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows

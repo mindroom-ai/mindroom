@@ -6,15 +6,13 @@ The finished runs are the records a team run hands over, in the order a blocking
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 from agno.utils.string import url_safe_string
 
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
@@ -26,8 +24,7 @@ from mindroom.teams.presentation import (
     strip_team_display,
     url_safe_member_id,
 )
-from mindroom.teams.runtime import MemberEvent, MemberRunEnded
-from mindroom.teams.storage import TeamRunRecords
+from mindroom.teams.runtime import MemberEvent
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
@@ -149,20 +146,6 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     assert format_team_response(TeamRunRecord(run_id="team-run", content="Five in all."), [scout]) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
-
-
-def test_a_member_resumed_within_the_run_keeps_the_place_where_its_run_first_ended() -> None:
-    """The resumed record replaces the paused one where it stood, so a blocking reply lists the member there."""
-    records = TeamRunRecords()
-    paused = RunRecord(run_id="writer-run", agent_id="writer", agent_name="Writer", status=RunStatus.paused)
-    checked = RunRecord(run_id="checker-run", agent_id="checker", agent_name="Checker", status=RunStatus.completed)
-    resumed = replace(paused, status=RunStatus.completed, content="Written.")
-
-    for member_id, name, record in (("writer", "Writer", paused), ("checker", "Checker", checked)):
-        assert records.collect(MemberRunEnded(member_id, name, record))
-    assert records.collect(MemberRunEnded("writer", "Writer", resumed))
-
-    assert records.members == [resumed, checked]
 
 
 def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_snapshot() -> None:

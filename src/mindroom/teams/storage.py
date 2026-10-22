@@ -6,7 +6,7 @@ are pulled, and ``register_team_notice_storage`` hands the team's storage to the
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom import ai_runtime
@@ -14,7 +14,6 @@ from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.store import persist_to
-from mindroom.teams.runtime import MemberRunEnded, keep_ended_member_run
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import HistoryScope, ResolvedHistorySettings
-    from mindroom.llm.runs import AnyRunRecord, RunRecord
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.teams.runtime import TeamRunEvent
@@ -44,36 +43,25 @@ class TeamStorage:
 
 @dataclass
 class TeamRunRecords:
-    """The records one team run handed over: its terminal team record and each member run's latest record.
+    """The terminal team record one team run handed over, whose ``ended_member_runs`` hold its members' latest records.
 
-    Each comes from the run's persist callback however the run ended, and from the event that hands it over,
-    ``RunFinished`` or ``MemberRunEnded``. ``members`` are in the order the member runs first ended, so a member run
-    stopped with its team run comes last, as Agno added a stopped member's output when it cancelled the team run.
+    It comes from the run's persist callback however the run ended, and from the ``RunFinished`` that hands it over.
     """
 
     record: TeamRunRecord | None = None
-    members: list[RunRecord] = field(default_factory=list)
 
     def collect(self, event: TeamRunEvent) -> bool:
-        """Keep the record ``event`` carries; return whether it carried one."""
+        """Keep the team record a ``RunFinished`` carries; return whether ``event`` was one."""
         if isinstance(event, RunFinished):
             assert isinstance(event.record, TeamRunRecord)
             self.record = event.record
             return True
-        if isinstance(event, MemberRunEnded):
-            self.keep(event.record)
-            return True
         return False
 
     def keep(self, record: AnyRunRecord) -> None:
-        """Keep the team's terminal record, or a member run's latest record where that run first ended.
-
-        A resumed member's later record stands where its paused one did, so a blocking reply lists it there.
-        """
+        """Keep the team's terminal record; a member run's record reaches the team record's ``ended_member_runs``."""
         if isinstance(record, TeamRunRecord):
             self.record = record
-            return
-        keep_ended_member_run(self.members, record)
 
     def terminal(self, team_name: str) -> TeamRunRecord:
         """Return the team record the run ended with, which a run that finished without raising always handed over."""

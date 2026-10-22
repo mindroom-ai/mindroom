@@ -344,9 +344,10 @@ class RunRecord(_RunRecordCommon):
 class TeamRunRecord(_RunRecordCommon):
     """A persisted team run; paused member runs ride along in ``member_responses``.
 
-    ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, as Agno's live
-    team run held each finished member; a mid-turn fold stores them in its segment. It is never stored, so a loaded
-    record starts without it, while a resume of the live record carries it on.
+    ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, in the order
+    they first ended, as Agno's live team run held each finished member: a member run stopped with its team run comes
+    last. A mid-turn fold stores them in its segment, and the turn's reply and usage read them. It is never stored,
+    so a loaded record starts without it, while a resume of the live record carries it on.
     """
 
     team_id: str | None = None

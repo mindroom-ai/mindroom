@@ -1204,7 +1204,7 @@ async def _non_stream_team_completion(
         # The member and consensus document of the blocking Matrix reply, as Agno's blocking team reply rendered it on
         # both surfaces; API clients replay this text as history. Without member or consensus text the API falls back
         # to the leader's content alone, as it did with Agno, where the Matrix reply also reads the leader's messages.
-        response_text = format_team_response(record, records.members) or str(record.content or "")
+        response_text = format_team_response(record, record.ended_member_runs) or str(record.content or "")
 
         if _is_error_response(response_text):
             logger.warning("Team response returned error", team=team_name, error=response_text)
@@ -1220,7 +1220,7 @@ async def _non_stream_team_completion(
                     message=_ChatMessage(role="assistant", content=response_text),
                 ),
             ],
-            usage=_usage_from_team_output(record, records.members),
+            usage=_usage_from_team_output(record, record.ended_member_runs),
         )
         return _OpenAIJSONResponse(content=result.model_dump())
 
