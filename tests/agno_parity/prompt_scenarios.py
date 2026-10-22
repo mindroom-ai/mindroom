@@ -90,7 +90,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
@@ -256,10 +256,6 @@ class _RecordingAdapter:
             yield TextDelta(response.content)
         message = OwnedMessage(role="assistant", content=response.content, tool_calls=response.tool_calls or None)
         yield TurnCompleted(message=message, stop_reason="tool_use" if response.tool_calls else "end")
-
-    def format_tool_results(self, messages: Sequence[OwnedMessage], results: Sequence[OwnedMessage]) -> list[Any]:
-        """Format tool results the adapter's way."""
-        return self.adapter.format_tool_results(messages, results)
 
 
 @dataclass(frozen=True)

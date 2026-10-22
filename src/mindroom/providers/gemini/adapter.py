@@ -23,7 +23,7 @@ from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -48,7 +48,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Google"
@@ -98,10 +97,6 @@ class GeminiProvider:
     settings: GeminiSettings
     vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result; the wire format merges them into one user turn."""
-        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.

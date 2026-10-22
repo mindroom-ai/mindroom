@@ -198,9 +198,9 @@ async def run_model_loop(  # noqa: C901 - one request-and-tools iteration, each 
             break
         answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, turn.stop_reason)
         if answers is not None:
-            await append_tool_results(model, state.messages, answers, hooks.after_tool_batch)
+            await append_tool_results(state.messages, answers, hooks.after_tool_batch)
             continue
-        async for event in _run_tool_batch(model, message, state, tools, progress, hooks, tool_call_limit):
+        async for event in _run_tool_batch(message, state, tools, progress, hooks, tool_call_limit):
             yield event
         if progress.stopped or progress.paused:
             break
@@ -262,7 +262,6 @@ def _accept_turn(message: Message, state: LoopState, progress: _Progress, identi
 
 
 async def _run_tool_batch(
-    model: ModelProvider,
     message: Message,
     state: LoopState,
     tools: PreparedTools,
@@ -292,7 +291,7 @@ async def _run_tool_batch(
             yield ToolCompleted(call.execution)
     results = [*batch.refused, *executed]
     progress.calls_so_far += len(results)
-    await append_tool_results(model, state.messages, results, hooks.after_tool_batch)
+    await append_tool_results(state.messages, results, hooks.after_tool_batch)
     progress.stopped = any(result.stop_after_tool_call for result in results)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
@@ -303,18 +302,17 @@ def _waits_for_decision(record: AnyRunRecord) -> bool:
 
 
 async def append_tool_results(
-    model: ModelProvider,
     messages: list[Message],
     results: Sequence[Message],
     after_tool_batch: Sequence[AfterToolBatchHook],
 ) -> None:
-    """Append one batch's results as the provider formats them, then the media follow-up, then run the batch hooks.
+    """Append one batch's results, one canonical tool message each, then the media follow-up, then run the batch hooks.
 
-    Media leave the result messages before formatting, so a provider that merges results never carries them, and
-    reach the model on one user message after the results.
+    Media leave the result messages first, so a wire that merges results never carries them, and reach the model on
+    one user message after the results.
     """
     follow_up = media_follow_up(results)
-    messages.extend(model.format_tool_results(messages, results))
+    messages.extend(results)
     if follow_up is not None:
         messages.append(follow_up)
     for hook in after_tool_batch:

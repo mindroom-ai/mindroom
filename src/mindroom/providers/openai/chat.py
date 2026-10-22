@@ -19,7 +19,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
@@ -32,9 +32,8 @@ from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
 
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
     from mindroom.providers.openai.settings import ChatSettings
 
@@ -53,10 +52,6 @@ class ChatAdapter:
     wire: ChatWire
     settings: ChatSettings
     clients: SDKClients
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Chat Completions takes one tool message per result, in order."""
-        return one_message_per_result(messages, results)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

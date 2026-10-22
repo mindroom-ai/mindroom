@@ -21,7 +21,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.native_compaction import native_compaction_route
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
@@ -40,7 +40,7 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
 
     from openai import AsyncOpenAI
 
@@ -71,10 +71,6 @@ class ResponsesAdapter:
     wire: ResponsesWire
     settings: ResponsesSettings
     clients: SDKClients
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Responses takes one ``function_call_output`` per result, in order."""
-        return one_message_per_result(messages, results)
 
     def native_compaction_settings(
         self,

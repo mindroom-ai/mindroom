@@ -56,11 +56,6 @@ class ScriptedModel:
             else:
                 yield step
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message, as OpenAI-style wires do."""
-        del messages
-        return list(results)
-
 
 def usage(input_tokens: int, output_tokens: int, **counters: float) -> MessageMetrics:
     """Return one request's usage; ``total_tokens`` is the sum unless given."""

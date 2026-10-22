@@ -53,7 +53,7 @@ from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import AGGREGATE_USAGE_KEY, WrappedProvider
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.provider import StreamEvent
@@ -91,10 +91,6 @@ class _ScriptedProvider:
                 yield cast("StreamEvent", step)
         finally:
             self.closed += 1
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
 
 
 def _turn(text: str = "done", usage: MessageMetrics | None = None) -> TurnCompleted:

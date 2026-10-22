@@ -158,10 +158,6 @@ class _ToolLoopModel:
         yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason="tool_use" if message.tool_calls else "end")
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
-
 
 def probe() -> str:
     """Return one large tool result."""

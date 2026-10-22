@@ -716,13 +716,6 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         )
 
 
-def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path: Path) -> None:
-    """Results stay separate tool messages in history; the formatter merges them into one user turn on the wire."""
-    provider = route_provider("anthropic", tmp_path, Wire(json_reply([])))
-    results = [Message(role="tool", tool_call_id="a", content="1"), Message(role="tool", tool_call_id="b", content="2")]
-    assert provider.format_tool_results(_user(), results) == results
-
-
 @pytest.mark.asyncio
 async def test_client_params_override_route_settings_but_not_headers_or_the_http_client(tmp_path: Path) -> None:
     """``client_params`` may override any SDK client argument, while ``default_headers`` and the HTTP client win."""

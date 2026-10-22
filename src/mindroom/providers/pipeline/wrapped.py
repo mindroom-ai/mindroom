@@ -18,9 +18,8 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, Turn
 from mindroom.usage.storage import has_token_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
@@ -58,10 +57,6 @@ class WrappedProvider:
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Run the stage around the wrapped provider's stream."""
         return self.stage(self.inner, request)
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Delegate tool-result formatting to the wrapped provider."""
-        return self.inner.format_tool_results(messages, results)
 
 
 def bare_adapter(provider: ModelProvider) -> ModelProvider:

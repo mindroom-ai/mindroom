@@ -35,7 +35,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result, split_thinking
+from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.remote_media import download_media
@@ -91,10 +91,6 @@ class OllamaProvider:
     settings: OllamaSettings
     host: str
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result, as Ollama's wire format takes them."""
-        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one chat request, streamed unless ``request.stream`` is False, and yield its events.

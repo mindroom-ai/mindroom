@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 if TYPE_CHECKING:
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Synthetic"
@@ -114,10 +113,6 @@ class SyntheticProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: SyntheticSettings
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result."""
-        return one_message_per_result(messages, results)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.

@@ -29,7 +29,7 @@ from mindroom.llm.usage import MessageMetrics
 from tests.agno_parity.prompt_scenarios import message_dict
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic")
 
@@ -52,10 +52,6 @@ class _RecordingProvider:
         usage = MessageMetrics(input_tokens=12, output_tokens=5, total_tokens=17)
         yield UsageReported(usage)
         yield TurnCompleted(message=Message(role="assistant", content=self.answer, metrics=usage), stop_reason="end")
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
 
 
 class _Verdict(BaseModel):

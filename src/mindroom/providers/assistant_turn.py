@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 __all__ = [
     "MODEL_PROVENANCE_KEY",
     "finished_assistant_message",
-    "one_message_per_result",
     "split_thinking",
     "stamp_finished_turn",
 ]
@@ -85,9 +84,3 @@ def split_thinking(content: str) -> tuple[str | None, str]:
     if not reasoning:
         return None, content
     return reasoning, content[end + len("</think>") :].strip()
-
-
-def one_message_per_result(messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-    """Append each tool result as its own stored message; wire formats merge them where a provider wants one turn."""
-    del messages
-    return list(results)

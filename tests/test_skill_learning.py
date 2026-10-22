@@ -146,11 +146,6 @@ class _ScriptedModel:
         cut_off = len(self.requests) in self.cut_off_requests
         yield TurnCompleted(message=message, stop_reason="output_limit" if cut_off else "tool_use")
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message."""
-        del messages
-        return list(results)
-
     @property
     def offered_tools(self) -> list[set[str]]:
         """The names of the tools each request offered."""

@@ -209,10 +209,6 @@ class ModelProvider(Protocol):
         """Send one request and yield its events; ``TurnCompleted`` is the last one."""
         ...
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Return the messages to append for one batch of tool results, given the conversation so far."""
-        ...
-
 
 async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
     """Drain one request's stream and return its finished turn."""

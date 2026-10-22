@@ -82,7 +82,7 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import one_message_per_result, stamp_finished_turn
+from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -91,7 +91,7 @@ from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping
 
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
@@ -191,10 +191,6 @@ class ClaudeProvider:
     settings: ClaudeSettings
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message; the wire formatter merges them into one user turn."""
-        return one_message_per_result(messages, results)
 
     def native_compaction_settings(
         self,

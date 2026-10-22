@@ -249,10 +249,6 @@ class _ScriptedProvider:
         for event in self._events:
             yield event
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
-
 
 @pytest.mark.asyncio
 async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
