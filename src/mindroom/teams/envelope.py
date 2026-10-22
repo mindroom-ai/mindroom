@@ -678,7 +678,6 @@ class _TeamTurn:
                     user_id=self.user_id,
                     toolkit_owners=tool_owners_by_agent(*members.builds),
                 ),
-                owners={},
                 team_name=self.entity_name,
                 config=config,
                 runtime_paths=self.runtime_paths,

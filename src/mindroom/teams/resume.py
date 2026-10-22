@@ -301,12 +301,12 @@ def drive_team_delegations(
     events: AsyncIterator[TeamRunEvent],
     resume: TeamResume,
     *,
-    owners: dict[str, _MemberCall],
     team_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    paused: TeamRunRecord | None = None,
     decisions: dict[str, bool] | None = None,
     denial_reasons: dict[str, str | None] | None = None,
     approval_calls: Sequence[ApprovalCall] = (),
@@ -315,6 +315,8 @@ def drive_team_delegations(
 
     The driver sees the team run as a parent and ``resume`` continues it with the children's results. Member ids
     are their config names on the owned loop, which the driver needs as the callers of the members' delegations.
+    ``paused`` is the stored pause a saved approval resumes, whose members already own the delegation calls it
+    waits on; a turn's run announces its members' calls in ``events``.
     """
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
@@ -332,6 +334,7 @@ def drive_team_delegations(
         approval_calls=approval_calls,
         member_config_names={member.spec.id: member.spec.id for member in resume.spec.members},
     )
+    owners = _delegation_owners(paused) if paused is not None else {}
     return _tag_member_delegation_events(cast("AsyncIterator[TeamRunEvent]", driven), owners)
 
 
@@ -511,7 +514,7 @@ async def continue_paused_team_run(
                 if delegated
                 else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
                 resume,
-                owners=_delegation_owners(persisted),
+                paused=persisted,
                 team_name=configured_team_name,
                 config=config,
                 runtime_paths=runtime_paths,
