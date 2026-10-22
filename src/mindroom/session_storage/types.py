@@ -37,9 +37,8 @@ class ConversationSession:
     session can keep a run a fresh load no longer returns. A delete handed the session takes the deleted runs out.
     ``summary`` is the owner scope's latest summary row, derived on load and never written back.
     ``session_state`` is the dict the run's tools share and change in place. ``stored_session_state`` is the state the
-    store holds for the session as far as this session knows: as loaded, then as its latest write of that field left
-    it. A run's terminal save writes ``session_state`` back only when the two differ, so every writer of the field
-    must record what it wrote here.
+    store holds for the session as far as this session knows: as loaded, then as the store's latest write of that
+    field for this session left it. A run's terminal save writes ``session_state`` back only when the two differ.
     """
 
     session_id: str
