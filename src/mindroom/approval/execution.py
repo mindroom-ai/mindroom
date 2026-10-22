@@ -12,6 +12,7 @@ from uuid import uuid4
 from mindroom import ai_runtime
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -230,7 +231,7 @@ async def _continue_persisted_agent(
         response,
         fallback_session_id=continuation.session_id,
         fallback_run_id=continuation.run_id,
-        toolkit_owners=_toolkit_owners(continuation.entity_name, build),
+        toolkit_owners=tool_owners_by_agent(build),
     )
     if paused is not None:
         return replace(
@@ -283,11 +284,6 @@ async def _continue_persisted_agent(
         tool_dispatch=tool_dispatch,
         progress=progress,
     )
-
-
-def _toolkit_owners(agent_name: str, build: AgentBuild) -> dict[tuple[str, str], str | None]:
-    """Return the authored toolkit of each of the agent's functions, keyed as approvals look them up."""
-    return {(agent_name, name): toolkit for name, toolkit in build.tool_owners.items()}
 
 
 def _continuation_turn_context(
@@ -555,7 +551,7 @@ class AgentApprovalExecution:
                     # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds
                     # each approval to the toolkit it was granted for before the agent's tools are reached.
                     validate_approval_tool_owners(
-                        _toolkit_owners(continuation.entity_name, build),
+                        tool_owners_by_agent(build),
                         approved_calls,
                         local_approval_requirements(persisted),
                     )

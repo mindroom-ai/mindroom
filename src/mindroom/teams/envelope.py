@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.prompt import model_note_for
@@ -29,7 +29,7 @@ from mindroom.agents import team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.receipt import approval_receipt_hook
-from mindroom.approval.resume import ResumeDecisions, approval_decisions
+from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
@@ -44,7 +44,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook, without_fold_records
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import build_request, build_resume_request, scope_history_messages
+from mindroom.history.request_messages import build_request, build_resume_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import (
     open_bound_scope_session_context,
@@ -409,22 +409,14 @@ def _replayed_team_history(
     configured_team_name: str | None,
 ) -> tuple[list[Message], ScopeSummary | None]:
     """Return the stored team history this request replays under the resolved plan, and the scope summary."""
-    plan = prepared_history.replay_plan
-    if scope_context is None or scope_context.session is None or plan is None or not plan.add_history_to_context:
+    if scope_context is None:
         return [], None
-    session = scope_context.session
-    settings = config.resolve_entity(
-        configured_team_name if configured_team_name in config.teams else None,
-    ).history_settings
-    history = scope_history_messages(
-        session.runs,
-        scope=scope_context.scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
+    return replayed_history(
+        scope_context.session,
+        scope_context.scope,
+        _team_history_settings(config, configured_team_name),
+        prepared_history.replay_plan,
     )
-    return history, session.summary
 
 
 async def prepare_materialized_team_execution(
@@ -603,9 +595,7 @@ def _leader_hooks(
                 is_team=True,
                 model_name=runtime_model_name,
                 model=model,
-                history_settings=config.resolve_entity(
-                    entity_name if entity_name in config.teams else None,
-                ).history_settings,
+                history_settings=_team_history_settings(config, entity_name),
                 store=storage.store if storage is not None else None,
                 session=storage.session if storage is not None and scoped else None,
                 scope=storage.scope if storage is not None and scoped else None,
@@ -627,11 +617,6 @@ def _leader_hooks(
 def _team_history_settings(config: Config, team_name: str | None) -> ResolvedHistorySettings:
     """Return the history settings of the configured team, or the defaults for an ad hoc one."""
     return config.resolve_entity(team_name if team_name in config.teams else None).history_settings
-
-
-def _toolkit_owners(members: ResolvedExactTeamMembers) -> dict[tuple[str, str], str | None]:
-    """Return the authored toolkit of each member function, keyed as approvals look them up."""
-    return {(build.spec.id, name): toolkit for build in members.builds for name, toolkit in build.tool_owners.items()}
 
 
 def _persist_bound_seen_event_ids(
@@ -1034,11 +1019,12 @@ class _TeamTurn:
                     storage=storage,
                     terminal=attempt.terminal,
                     hooks=hooks,
-                    request_template=request_template,
+                    # A delegation continuation streams its requests even in a blocking turn, as Agno's did.
+                    request_template=replace(request_template, stream=True),
                     settings=_team_history_settings(config, self.configured_team_name),
                     plan=prepared.prepared_history.replay_plan,
                     user_id=self.user_id,
-                    toolkit_owners=_toolkit_owners(members),
+                    toolkit_owners=tool_owners_by_agent(*members.builds),
                 ),
                 owners={},
                 team_name=self.entity_name,
@@ -1155,7 +1141,7 @@ class _TeamTurn:
             record,
             fallback_session_id=self.ctx.session_id,
             fallback_run_id=attempt.run_id,
-            toolkit_owners=_toolkit_owners(attempt.members),
+            toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
         )
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
@@ -1695,18 +1681,8 @@ def _resume_request(
     plan: ResolvedReplayPlan | None,
 ) -> list[Message]:
     """Return the leader's resume request: its stored system message, the summary and history ``plan`` replays, then the rest."""
-    session = storage.session
-    if plan is None or not plan.add_history_to_context:
-        return build_resume_request(paused=persisted.messages, summary=None, history=[])
-    history = scope_history_messages(
-        session.runs,
-        scope=storage.scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
-    )
-    return build_resume_request(paused=persisted.messages, summary=session.summary, history=history)
+    history, summary = replayed_history(storage.session, storage.scope, settings, plan)
+    return build_resume_request(paused=persisted.messages, summary=summary, history=history)
 
 
 @dataclass(frozen=True)
@@ -1761,21 +1737,12 @@ class _TeamResume:
         decisions: ResumeDecisions,
         on_event: ResumeEvents | None,
     ) -> TeamRunRecord:
-        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record."""
-        record: TeamRunRecord | None = None
-        events = self.events(paused, decisions)
-        async with closing_async_stream(events):
-            async for event in events:
-                if isinstance(event, RunFinished):
-                    assert isinstance(event.record, TeamRunRecord)
-                    record = event.record
-                elif on_event is not None:
-                    # The driver forwards a parent's events without reading them, so member events ride along.
-                    on_event(cast("RunEvent", event))
-        if record is None:
-            msg = f"team run {paused.run_id!r} ended its resume without its terminal record"
-            raise RuntimeError(msg)
-        return record
+        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record.
+
+        The driver forwards a parent's events without reading them, so member events ride along.
+        """
+        events = cast("AsyncIterator[RunEvent]", self.events(paused, decisions))
+        return await forward_resume(events, on_event, record_type=TeamRunRecord)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1956,7 +1923,7 @@ async def continue_paused_team_run(
                 model_name=model_name,
                 configured_team_name=configured_team_name,
             )
-            toolkit_owners = _toolkit_owners(members)
+            toolkit_owners = tool_owners_by_agent(*members.builds)
             native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
             presentation = TeamStreamPresentation.restore(
                 config_names=member_names,

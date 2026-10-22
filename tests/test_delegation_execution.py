@@ -725,6 +725,32 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
 
 
 @pytest.mark.asyncio
+async def test_a_blocking_turn_continues_after_its_delegation_with_streamed_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent's continuation streams even when its turn does not, as Agno's delegation continuation did."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "fresh", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Report written")])}).install(monkeypatch)
+
+    text = await respond(
+        "leader",
+        "delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=_leader_identity(),
+        run_id="parent-run",
+    )
+
+    assert "Parent done" in text
+    assert [request.stream for request in leader.requests] == [False, True]
+
+
+@pytest.mark.asyncio
 async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path) -> None:
     """The parent row is serialized before the database's lane frees, so a later change never lands in that write."""
     paths = _runtime_paths(tmp_path)

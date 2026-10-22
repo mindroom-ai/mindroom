@@ -790,6 +790,28 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
 
 
 @pytest.mark.asyncio
+async def test_a_blocking_team_continues_after_a_member_s_delegation_with_streamed_leader_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The team's continuation after a member's delegation streams even in a blocking turn, as Agno's did."""
+    del probe
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: the helper found it.")],
+        helper=[answer("Helper found it.")],
+    )
+
+    text = await _respond(team, show_tool_calls=False)
+
+    assert text.endswith("**Team Consensus**:\n\nConsensus.")
+    assert [request.stream for request in team.leader.requests] == [False, True]
+
+
+@pytest.mark.asyncio
 async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegation_driver(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

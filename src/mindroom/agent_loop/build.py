@@ -63,6 +63,11 @@ class AgentBuild:
     tool_middleware: tuple[ToolMiddleware, ...] = ()
 
 
+def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str | None]:
+    """Return the authored toolkit of each function the builds offer, keyed ``(agent id, function)`` as approvals look it up."""
+    return {(build.spec.id, name): toolkit for build in builds for name, toolkit in build.tool_owners.items()}
+
+
 def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
     """Render the system message of one turn: the build's prompt with the turn's context blocks appended in order.
 
@@ -86,4 +91,5 @@ __all__ = [
     "AgentBuild",
     "AgentSurface",
     "prompt_for_turn",
+    "tool_owners_by_agent",
 ]

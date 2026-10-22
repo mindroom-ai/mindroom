@@ -1,6 +1,6 @@
 """Resume a persisted paused agent run on the owned loop, as an approval or a delegation continues it.
 
-A resume rebuilds the agent, replays its scope's stored history as the paused request did, restores the paused
+A resume rebuilds the agent, replays the stored history its scope's configured policy selects, restores the paused
 request's native history settings, installs the hooks an agent turn installs, and continues the run with the
 decisions on exactly the calls it waits for. The loop refuses anything but exact coverage of those calls before it
 runs any of them.
@@ -16,10 +16,11 @@ from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import build_resume_request, scope_history_messages
+from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.events import RunFinished
 from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import agent_loop_hooks
+from mindroom.response_turn import DENIED_WITHOUT_REASON
 from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -28,18 +29,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.run import Persist
+    from mindroom.agent_loop.spec import AgentSpec
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
-    from mindroom.history.types import HistoryScope, ResolvedReplayPlan, ScopeSummary
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-
-# The note MindRoom's continuation has always given the model for a call denied without a reason.
-DENIED_WITHOUT_REASON = "Not approved by requester"
 
 type ResumeEvents = Callable[[RunEvent], None]
 type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents | None], Awaitable[R]]
@@ -73,37 +74,58 @@ def approval_decisions(
     )
 
 
-def resume_history(
-    session: ConversationSession | None,
+def resume_from_session(
+    spec: AgentSpec,
+    paused: RunRecord,
+    decisions: ResumeDecisions,
+    *,
+    session: ConversationSession,
     scope: HistoryScope | None,
-    build: AgentBuild,
+    settings: ResolvedHistorySettings,
     plan: ResolvedReplayPlan | None,
-) -> tuple[list[Message], ScopeSummary | None]:
-    """Return the stored history a run of ``build`` replays under ``plan`` and the scope summary it follows.
+    user_id: str | None,
+    hooks: LoopHooks,
+    persist: Persist[RunRecord],
+    request_template: ModelRequest,
+) -> AsyncIterator[RunEvent]:
+    """Resume ``paused`` in ``session`` with ``decisions``: the history ``plan`` replays, then the paused request.
 
-    A run without a scope, or whose plan replays nothing, sends its own messages only.
+    The resume reuses the paused run's stored system message and shares the session's state with its tools; the
+    stream ends with ``RunFinished`` as ``resume_agent``'s does.
     """
-    if session is None or scope is None or plan is None or not plan.add_history_to_context:
-        return [], None
-    settings = build.history_settings
-    history = scope_history_messages(
-        session.runs,
-        scope=scope,
-        num_history_runs=plan.num_history_runs,
-        num_history_messages=plan.num_history_messages,
-        max_tool_calls_from_history=settings.max_tool_calls_from_history,
-        system_message_role=settings.system_message_role,
+    history, summary = replayed_history(session, scope, settings, plan)
+    return resume_agent(
+        spec,
+        paused,
+        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        approved=decisions.approved,
+        denied=decisions.denied,
+        external_results=decisions.external_results,
+        ctx=RunContext(
+            run_id=paused.run_id,
+            session_id=session.session_id,
+            user_id=user_id,
+            metadata=deepcopy(paused.metadata),
+            session_state=session.session_state,
+        ),
+        hooks=hooks,
+        persist=persist,
+        request_template=request_template,
     )
-    return history, session.summary
 
 
-async def forward_resume(events: AsyncIterator[RunEvent], on_event: ResumeEvents | None) -> RunRecord:
-    """Drain a resume, handing every event but the last to ``on_event``, and return its terminal record."""
-    record: RunRecord | None = None
+async def forward_resume[R: AnyRunRecord](
+    events: AsyncIterator[RunEvent],
+    on_event: ResumeEvents | None,
+    *,
+    record_type: type[R],
+) -> R:
+    """Drain a resume, handing every event but the last to ``on_event``, and return its terminal ``record_type`` record."""
+    record: R | None = None
     async with closing_async_stream(events):
         async for event in events:
             if isinstance(event, RunFinished):
-                assert isinstance(event.record, RunRecord)
+                assert isinstance(event.record, record_type)
                 record = event.record
             elif on_event is not None:
                 on_event(event)
@@ -117,8 +139,9 @@ async def forward_resume(events: AsyncIterator[RunEvent], on_event: ResumeEvents
 class ResumeRunner:
     """Resumes paused runs of one rebuilt agent against its store, with the hooks an agent turn installs.
 
-    The history a resume replays is the configured policy's selection from ``session``, as the paused request's
-    was; the run's native history settings come from the paused request's last response.
+    A resume replays the history the configured policy selects from ``session`` now, not a turn's narrowed plan; the
+    run's native history settings come from the paused request's last response. Every resume streams its requests,
+    as Agno's continuation did.
     """
 
     build: AgentBuild
@@ -130,13 +153,11 @@ class ResumeRunner:
     session: ConversationSession
     scope: HistoryScope
     user_id: str | None
-    stream: bool = True
 
     def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
         build = self.build
         plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
-        history, summary = resume_history(self.session, self.scope, build, plan)
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         native_compaction = native.native_compaction if native is not None else None
         store_record = persist_to(self.store, self.session)
@@ -145,20 +166,15 @@ class ResumeRunner:
             await store_record(record)
             self.session.runs = [*runs_without(self.session.runs, [record.run_id]), record]
 
-        return resume_agent(
+        return resume_from_session(
             build.spec,
             paused,
-            build_resume_request(paused=paused.messages, summary=summary, history=history),
-            approved=decisions.approved,
-            denied=decisions.denied,
-            external_results=decisions.external_results,
-            ctx=RunContext(
-                run_id=paused.run_id,
-                session_id=self.session.session_id,
-                user_id=self.user_id,
-                metadata=deepcopy(paused.metadata),
-                session_state=self.session.session_state,
-            ),
+            decisions,
+            session=self.session,
+            scope=self.scope,
+            settings=build.history_settings,
+            plan=plan,
+            user_id=self.user_id,
             hooks=agent_loop_hooks(
                 build,
                 config=self.config,
@@ -177,7 +193,7 @@ class ResumeRunner:
                 build.request_template,
                 native_compaction=native_compaction,
                 portable_replay=native.portable_replay if native is not None else False,
-                stream=self.stream,
+                stream=True,
             ),
         )
 
@@ -188,16 +204,15 @@ class ResumeRunner:
         on_event: ResumeEvents | None,
     ) -> RunRecord:
         """Resume ``paused`` with ``decisions``, forwarding its events, and return its terminal record."""
-        return await forward_resume(self.events(paused, decisions), on_event)
+        return await forward_resume(self.events(paused, decisions), on_event, record_type=RunRecord)
 
 
 __all__ = [
-    "DENIED_WITHOUT_REASON",
     "ContinueRun",
     "ResumeDecisions",
     "ResumeEvents",
     "ResumeRunner",
     "approval_decisions",
     "forward_resume",
-    "resume_history",
+    "resume_from_session",
 ]

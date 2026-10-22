@@ -12,7 +12,8 @@ from functools import partial
 from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions
+from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import (
@@ -351,7 +352,7 @@ async def _execute_child(
     if session is None:
         msg = "Delegated run's session is no longer available"
         raise RuntimeError(msg)
-    toolkit_owners = {(child.child_agent_name, name): owner for name, owner in build.tool_owners.items()}
+    toolkit_owners = tool_owners_by_agent(build)
     validate_approval_tool_owners(toolkit_owners, approved_calls, local_approval_requirements(persisted))
     runner = ResumeRunner(
         build=build,
@@ -433,6 +434,14 @@ async def _start_child_envelope(
     return _ChildOutcome(response, toolkit_owners)
 
 
+async def _observed_child_events(events: AsyncIterator[RunEvent]) -> AsyncIterator[RunEvent]:
+    """Pass a child's resume through its audit and progress observers; its events are this context's own."""
+    async with closing_async_stream(events):
+        async for event in events:
+            await observe_child_event(event)
+            yield event
+
+
 async def _continue_child(
     runner: ResumeRunner,
     run_child: ChildResponseRunner,
@@ -450,19 +459,7 @@ async def _continue_child(
     """Apply child decisions and drive any further nested delegations."""
 
     async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-        # The child's events are this context's own; the audit and progress observers read them here.
-        events = runner.events(paused, resume)
-        record: RunRecord | None = None
-        async with closing_async_stream(events):
-            async for event in events:
-                await observe_child_event(event)
-                if isinstance(event, RunFinished):
-                    assert isinstance(event.record, RunRecord)
-                    record = event.record
-        if record is None:
-            msg = "Delegated continuation did not yield its retained outcome"
-            raise RuntimeError(msg)
-        return record
+        return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, record_type=RunRecord)
 
     if not has_delegation_state(persisted):
         if decisions is None:
