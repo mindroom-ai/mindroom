@@ -1888,7 +1888,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, ToolStarted):
                 emit_timing_event(
                     "Dispatch tool-call timing",
-                    phase="agno_tool_call_started",
+                    phase="tool_call_started",
                     agent_name=agent_name,
                     tool_name=event.tool.tool_name,
                     tool_call_id=tool_execution_call_id(event.tool),
@@ -1903,7 +1903,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
             if isinstance(event, ToolCompleted):
                 emit_timing_event(
                     "Dispatch tool-call timing",
-                    phase="agno_tool_call_completed",
+                    phase="tool_call_completed",
                     agent_name=agent_name,
                     tool_name=event.tool.tool_name,
                     tool_call_id=tool_execution_call_id(event.tool),
