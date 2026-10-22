@@ -8322,7 +8322,6 @@ visibility = [
     "mindroom.providers.portable_tool_search",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
-    "mindroom.tool_jobs.notices",
     "mindroom.history.mid_turn_compaction",
 ]
 
@@ -8330,7 +8329,6 @@ visibility = [
 from = ["mindroom.agno_compat_model_hooks"]
 expose = [
     "install_message_projection",
-    "install_tool_result_callback",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
     "temporary_async_invocation_hooks",

@@ -10,9 +10,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 import mindroom.tool_system.metadata as metadata_module
@@ -29,14 +28,9 @@ from mindroom.matrix import state as matrix_state
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
-from mindroom.tool_jobs.authorization import (
-    authority_snapshot,
-    bind_actor_authority,
-    bind_toolkit_authority,
-    function_authority,
-)
+from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
+from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
@@ -45,6 +39,7 @@ from mindroom.tool_jobs.runtime import (
     register_background_runtime,
 )
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origin
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -64,6 +59,7 @@ from tests.tool_job_helpers import (
     team_coordinator,
     tool_job_journal,
     tool_job_runtime,
+    toolkit_job_tools,
     wait_for_status,
 )
 
@@ -423,28 +419,26 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
         runtime_paths=coordinator.runtime_paths,
         caller_execution_identity=completed_delegation_job().owner,
     )
-    function = Function(name="add", entrypoint=lambda: None)
     toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = function
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "worker"))
+    tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))["add"]
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with tool_runtime_context(
             _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
         ):
             with pytest.raises(JobAccessError):
-                coordinator._authorize_execution(owner, function)
+                coordinator._authorize_execution(owner, tool)
             async with child_run_context(child, config=config, runtime_paths=coordinator.runtime_paths):
-                coordinator._authorize_execution(owner, function)
+                coordinator._authorize_execution(owner, tool)
                 config.agents["worker"].tools = []
                 with pytest.raises(JobAccessError):
-                    coordinator._authorize_execution(owner, function)
+                    coordinator._authorize_execution(owner, tool)
                 config.agents["worker"].tools = ["calculator"]
                 config.agents["lead"].delegate_to = []
                 with pytest.raises(JobAccessError):
-                    coordinator._authorize_execution(owner, function)
+                    coordinator._authorize_execution(owner, tool)
     finally:
         await coordinator.stop()
 
@@ -470,12 +464,10 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
         runtime_paths=coordinator.runtime_paths,
         caller_execution_identity=completed_delegation_job().owner,
     )
-    function = Function(name="add", entrypoint=lambda: None)
     toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = function
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "worker"))
+    tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))["add"]
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with tool_runtime_context(
@@ -484,10 +476,10 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
             async with child_run_context(child, config=config, runtime_paths=coordinator.runtime_paths):
                 for state in ("pending", "member"):
                     membership.state = state
-                    coordinator._authorize_execution(owner, function)
+                    coordinator._authorize_execution(owner, tool)
                 membership.state = "stranger"
                 with pytest.raises(JobAccessError):
-                    coordinator._authorize_execution(owner, function)
+                    coordinator._authorize_execution(owner, tool)
     finally:
         await coordinator.stop()
 
@@ -509,17 +501,22 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
         tool_name="mcp_demo",
         server_config=config.mcp_servers["demo"],
     )
-    function = next(item for name, item in toolkit.async_functions.items() if name.endswith("_call_tool"))
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", TOOL_REGISTRY["mcp_demo"]))
-    bind_toolkit_authority(toolkit, authored_name="mcp_demo")
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
+    tools = toolkit_job_tools(toolkit, authored_name="mcp_demo", snapshot=authority_snapshot(config, "lead"))
+    tool = next(item for name, item in tools.items() if name.endswith("_call_tool"))
+    call = JobCall(
+        tool=tool,
+        arguments={"tool_name": "read"},
+        context=ToolCallContext(run_id="run", session_id="session"),
+        team=False,
+    )
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with (
             tool_runtime_context(
                 _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
             ),
-            authorized_tool_call(owner, FunctionCall(function=function, arguments={"tool_name": "read"})),
+            authorized_tool_call(owner, call),
         ):
             check_current_execution_authority()
             config.mcp_servers["demo"] = config.mcp_servers["demo"].model_copy(update={"exclude_tools": ["write"]})
@@ -549,7 +546,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
     authored: str,
     function_name: str,
 ) -> None:
-    """Implied filters and preset child factory identity survive Function copying and saved-result projection."""
+    """Implied filters and preset child factory identity survive agent assembly and saved-result projection."""
     config = managed_team_config(tmp_path)
     config.agents["lead"].tools = [
         ToolConfigEntry(
@@ -567,31 +564,26 @@ async def test_expanded_tool_authority_retains_exact_construction(
         with tool_runtime_context(
             _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
         ):
-            agent = create_agent(
+            build = create_agent(
                 "lead",
                 config,
                 coordinator.runtime_paths,
                 execution_identity=owner,
                 persist_runtime_state=False,
             )
-            function = next(
-                function
-                for toolkit in agent.tools
-                for function in toolkit.get_async_functions().values()
-                if function.name == function_name
-            ).model_copy(deep=True)
-            function._agent = agent
-            assert function.owning_toolkit == authored
+            assert build.tool_jobs is not None
+            tool = build.tool_jobs.tools[function_name]
+            assert tool.toolkit_name == authored
             stored = replace(
                 completed_delegation_job(),
                 kind="tool",
                 tool_name=function_name,
                 toolkit_name=authored,
                 adapter=json.loads(
-                    json.dumps({"authority": function_authority(function), "origin": function_provenance(function)}),
+                    json.dumps({"authority": dict(tool.authority), "origin": function_provenance(tool)}),
                 ),
             )
-            coordinator._authorize_execution(owner, function)
+            coordinator._authorize_execution(owner, tool)
             assert coordinator._authorized(stored)
             if authored == "openclaw_compat":
 
@@ -600,7 +592,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
 
                 monkeypatch.setitem(TOOL_REGISTRY, "shell", replaced_factory)
                 with pytest.raises(JobAccessError):
-                    coordinator._authorize_execution(owner, function)
+                    coordinator._authorize_execution(owner, tool)
                 assert not coordinator._authorized(stored)
     finally:
         await coordinator.stop()
@@ -646,15 +638,13 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
         disable_sandbox_proxy=not wrapped,
         worker_target=None,
     )
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    function = toolkit.get_async_functions()["add"].model_copy(deep=True)
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
+    tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))["add"]
     stored = replace(
         completed_delegation_job(),
         kind="tool",
         tool_name="add",
         toolkit_name="calculator",
-        adapter={"authority": function_authority(function), "origin": function_provenance(function)},
+        adapter={"authority": dict(tool.authority), "origin": function_provenance(tool)},
     )
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
@@ -662,7 +652,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
             _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
         ):
             with pytest.raises(JobAccessError):
-                coordinator._authorize_execution(owner, function)
+                coordinator._authorize_execution(owner, tool)
             assert not coordinator._authorized(stored)
     finally:
         await coordinator.stop()

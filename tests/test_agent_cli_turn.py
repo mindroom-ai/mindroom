@@ -1326,7 +1326,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
         task = asyncio.create_task(
             owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "wait"}, calls[0]),
         )
-        await started.wait()
+        await asyncio.wait_for(started.wait(), SETTLE_TIMEOUT_SECONDS)
         request_task_cancel(task, process_shutdown=True)
         # The deadline sits inside the raises check, or its own cancellation would pass for the task's.
         with pytest.raises(asyncio.CancelledError):
