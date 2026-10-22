@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _USAGE = "Usage: `!yolo <minutes>`, `!yolo <hours>h`, `!yolo off`, or `!yolo` to show the current window"
-_STATUS_ARGUMENTS = frozenset({"", "show", "status"})
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
 
@@ -94,7 +93,7 @@ async def handle_yolo_command(
     # A room without threads is one conversation, so its window covers the whole room.
     place = "this thread" if thread_id is not None else "this room"
 
-    if requested in _STATUS_ARGUMENTS:
+    if not requested:
         expires_at = yolo_expires_at(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
         return (
             f"YOLO mode is off in {place}.\n\n{_USAGE}"
