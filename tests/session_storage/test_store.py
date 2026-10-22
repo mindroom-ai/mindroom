@@ -606,6 +606,18 @@ def test_a_rewrite_that_makes_a_run_visible_moves_the_session_s_copy_last(store:
     assert _as_stored(session) == _as_stored(_loaded(store))
 
 
+def test_a_delete_takes_the_runs_and_their_members_out_of_the_session(store: ConversationStore) -> None:
+    """A delete handed the loaded session takes the deleted runs out of it with their member runs, as out of the log."""
+    team = _session(kind="team", owner="eng")
+    _seed(store, [_run("m0", parent="t0", agent_id="helper"), _team_run("t0"), _team_run("t1")], team)
+    session = _loaded(store, "team")
+
+    assert store.delete_run_subtrees(["t0"], session_id="s1", session=session) == {"t0", "m0"}
+
+    assert [run.run_id for run in session.runs] == ["t1"]
+    assert _as_stored(session) == _as_stored(_loaded(store, "team"))
+
+
 def test_runs_without_removes_every_descendant() -> None:
     """Grandchildren leave with their root even when stored before it."""
     runs: list[AnyRunRecord] = [

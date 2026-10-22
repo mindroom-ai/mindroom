@@ -11,9 +11,10 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 type SessionKind = Literal["agent", "team"]
-# What a run save did: wrote the row, refused it because a cut removed the run, or refused it because the run
-# is folded behind its scope's latest summary row.
-type SaveOutcome = Literal["written", "removed", "frozen"]
+# Why a run save wrote no row: a cut removed the run, or it is folded behind its scope's latest summary row.
+type Refusal = Literal["removed", "frozen"]
+# What a run save did: wrote the row, or refused it.
+type SaveOutcome = Literal["written"] | Refusal
 type SessionField = Literal["metadata", "session_state"]
 
 
@@ -30,9 +31,11 @@ class ConversationSession:
     """One conversation's session row and the runs a load returns.
 
     ``owner_id`` is the agent or team the session belongs to (the row's ``agent_id`` or ``team_id``).
-    ``runs`` holds the runs after the owner scope's latest summary row, every paused, cancelled, or errored
-    run, and their member runs, in log order; the store's saves leave each run they save here as the store holds
-    it. ``summary`` is the owner scope's latest summary row, derived on load and never written back.
+    ``runs`` holds, as loaded, the runs after the owner scope's latest summary row, every paused, cancelled, or
+    errored run, and their member runs, in log order. The store's saves leave each run they write here as the store
+    holds it and take a removed run out; a frozen save leaves the session's copy, or its absence, as it was, so the
+    session can keep a run a fresh load no longer returns. A delete handed the session takes the deleted runs out.
+    ``summary`` is the owner scope's latest summary row, derived on load and never written back.
     ``session_state`` is the dict the run's tools share and change in place.
     """
 
@@ -50,6 +53,7 @@ class ConversationSession:
 
 __all__ = [
     "ConversationSession",
+    "Refusal",
     "SaveOutcome",
     "SessionField",
     "SessionFields",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -21,14 +20,14 @@ from mindroom.history.run_visibility import (
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.store import runs_without
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
+
     from mindroom.agent_loop.model_loop import AfterToolBatchHook, ResumeEntryHook
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.media_inputs import MediaInputs
     from mindroom.mid_turn import MidTurnGate, QueuedMessage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession, SessionKind
@@ -36,10 +35,7 @@ if TYPE_CHECKING:
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
     "AttemptModelRuntime",
-    "ModelRunInput",
-    "attach_media_to_run_input",
     "bind_mid_turn_conversation_context",
-    "copy_run_input",
     "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
     "is_empty_completed_run",
@@ -55,8 +51,6 @@ __all__ = [
 ]
 
 logger = get_logger(__name__)
-
-type ModelRunInput = str | Sequence[Message]
 
 
 class AttemptModelRuntime(Protocol):
@@ -112,32 +106,6 @@ def stream_attempt_with_model[ChunkT](
 _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try again."
-
-
-def _normalize_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Coerce legacy string input into canonical provider messages."""
-    if isinstance(run_input, str):
-        return [Message(role="user", content=run_input)]
-    return [deepcopy(message) for message in run_input]
-
-
-def copy_run_input(run_input: ModelRunInput) -> list[Message]:
-    """Deep-copy canonical run input so retries can mutate safely."""
-    return _normalize_run_input(run_input)
-
-
-def attach_media_to_run_input(
-    run_input: ModelRunInput,
-    media_inputs: MediaInputs,
-) -> list[Message]:
-    """Attach media to the current user message."""
-    run_messages = copy_run_input(run_input)
-    current_message = run_messages[-1]
-    current_message.audio = media_inputs.audio
-    current_message.images = media_inputs.images
-    current_message.files = media_inputs.files
-    current_message.videos = media_inputs.videos
-    return run_messages
 
 
 class _SupportsQueuedMessageState(Protocol):
@@ -761,9 +729,7 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id)
-        if scope_context.session is not None:
-            scope_context.session.runs = runs_without(scope_context.session.runs, [run_id])
+        scope_context.storage.delete_run_subtrees([run_id], session_id=session_id, session=scope_context.session)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",
