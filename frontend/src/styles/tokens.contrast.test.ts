@@ -52,9 +52,7 @@ const TEXT_PAIRS: [string, string][] = [
   ["accent-foreground", "accent"],
   ["destructive-foreground", "destructive"],
   ["destructive", "card"],
-  ["rail-foreground", "rail"],
-  ["rail-muted", "rail"],
-  ["rail-accent", "rail"],
+  ["foreground", "active"],
 ];
 
 describe.each([":root", ".dark"])("%s theme tokens", (selector) => {

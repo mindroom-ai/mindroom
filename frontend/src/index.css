@@ -24,37 +24,31 @@
     --border: 251 22% 90%;
     --input: 251 18% 77%;
     --ring: 253 56% 55%;
-    --rail: 247 33% 16%;
-    --rail-foreground: 249 45% 94%;
-    --rail-muted: 248 25% 70%;
-    --rail-accent: 247 100% 87%;
+    --active: 250 20% 92%;
     --radius: 0.5rem;
   }
 
   .dark {
-    --background: 251 24% 9%;
-    --foreground: 251 35% 94%;
-    --card: 249 22% 13%;
-    --card-foreground: 251 35% 94%;
-    --popover: 248 19% 15%;
-    --popover-foreground: 251 35% 94%;
+    --background: 250 8% 8%;
+    --foreground: 250 20% 95%;
+    --card: 250 7% 11%;
+    --card-foreground: 250 20% 95%;
+    --popover: 250 7% 13%;
+    --popover-foreground: 250 20% 95%;
     --primary: 247 100% 83%;
-    --primary-foreground: 247 33% 16%;
-    --secondary: 250 20% 18%;
-    --secondary-foreground: 251 35% 94%;
-    --muted: 250 20% 18%;
-    --muted-foreground: 249 17% 70%;
-    --accent: 249 31% 22%;
+    --primary-foreground: 250 10% 10%;
+    --secondary: 250 6% 16%;
+    --secondary-foreground: 250 20% 95%;
+    --muted: 250 6% 16%;
+    --muted-foreground: 250 6% 68%;
+    --accent: 250 18% 19%;
     --accent-foreground: 247 100% 87%;
     --destructive: 3 84% 68%;
-    --destructive-foreground: 247 33% 16%;
-    --border: 249 20% 21%;
-    --input: 249 18% 30%;
+    --destructive-foreground: 250 10% 10%;
+    --border: 250 6% 19%;
+    --input: 250 6% 30%;
     --ring: 247 100% 83%;
-    --rail: 253 29% 6%;
-    --rail-foreground: 251 35% 94%;
-    --rail-muted: 248 18% 66%;
-    --rail-accent: 247 100% 87%;
+    --active: 250 6% 19%;
   }
 
   * {
@@ -122,17 +116,15 @@
     background: hsl(var(--background));
   }
 
-  /* Working surfaces and overlays are solid; the rail carries the brand color. */
+  /* Surfaces are solid and separated by a border; only overlays cast a shadow. */
   .glass-panel {
     border: 1px solid hsl(var(--border));
     background: hsl(var(--card));
-    box-shadow: 0 1px 2px hsl(var(--foreground) / 0.04);
   }
 
   /* A panel inside a panel is a section of it, not another raised card. */
   .glass-panel .glass-panel {
     background: transparent;
-    box-shadow: none;
   }
 
   .glass-control,

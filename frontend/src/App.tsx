@@ -317,24 +317,20 @@ function AppContent() {
                     <li>Request access from your administrator</li>
                     <li>Return to your dashboard</li>
                   </ul>
-                  <a
-                    href={`${getPlatformUrl()}/dashboard`}
-                    className="block w-full text-center px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-                  >
-                    Go to Dashboard
-                  </a>
+                  <Button asChild className="w-full">
+                    <a href={`${getPlatformUrl()}/dashboard`}>
+                      Go to Dashboard
+                    </a>
+                  </Button>
                 </>
               ) : (
                 <>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
                     Please log in to access this MindRoom instance.
                   </p>
-                  <a
-                    href={`${getPlatformUrl()}/auth/login`}
-                    className="block w-full text-center px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-                  >
-                    Log In
-                  </a>
+                  <Button asChild className="w-full">
+                    <a href={`${getPlatformUrl()}/auth/login`}>Log In</a>
+                  </Button>
                 </>
               )}
             </div>
@@ -342,12 +338,12 @@ function AppContent() {
 
           {!isAuthError && (
             <div className="space-y-3">
-              <button
+              <Button
+                className="w-full"
                 onClick={() => window.location.reload()}
-                className="w-full px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
               >
                 Retry
-              </button>
+              </Button>
               <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
                 If the problem persists, please contact support.
               </p>
@@ -369,7 +365,7 @@ function AppContent() {
       <Navigation mode="desktop" />
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="app-topbar flex h-14 shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-rail px-2 text-rail-foreground md:border-border md:bg-transparent md:px-6 md:text-foreground">
+        <header className="app-topbar flex h-14 shrink-0 items-center justify-between gap-3 border-b px-2 md:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <Navigation mode="mobile" />
             <img
@@ -377,7 +373,7 @@ function AppContent() {
               alt="MindRoom logo"
               className="h-7 w-7 shrink-0 md:hidden"
             />
-            <h1 className="truncate font-display text-xl font-semibold tracking-tight">
+            <h1 className="truncate text-xl font-semibold tracking-tight">
               {currentNavItem.label}
             </h1>
           </div>
@@ -389,9 +385,9 @@ function AppContent() {
                 Draft
               </span>
             )}
-            <SyncStatus status={syncStatus} compact className="md:hidden" />
-            <SyncStatus status={syncStatus} className="hidden md:flex" />
-            <ThemeToggle className="h-9 w-9 max-md:border-white/15 max-md:bg-white/5 max-md:text-rail-foreground max-md:hover:bg-white/10" />
+            <SyncStatus status={syncStatus} compact className="sm:hidden" />
+            <SyncStatus status={syncStatus} className="hidden sm:flex" />
+            <ThemeToggle />
           </div>
         </header>
 

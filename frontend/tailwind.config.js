@@ -13,12 +13,6 @@ export default {
           "Segoe UI",
           "sans-serif",
         ],
-        display: [
-          '"Bricolage Grotesque Variable"',
-          '"Hanken Grotesk Variable"',
-          "system-ui",
-          "sans-serif",
-        ],
         mono: [
           '"JetBrains Mono Variable"',
           "ui-monospace",
@@ -67,12 +61,7 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        rail: {
-          DEFAULT: "hsl(var(--rail))",
-          foreground: "hsl(var(--rail-foreground))",
-          muted: "hsl(var(--rail-muted))",
-          accent: "hsl(var(--rail-accent))",
-        },
+        active: "hsl(var(--active))",
       },
       animation: {
         "fade-in": "fadeIn 300ms ease-in-out",

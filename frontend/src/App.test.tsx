@@ -213,31 +213,5 @@ describe("App recovery mode", () => {
       screen.getByRole("heading", { name: "Access Required" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    // Dark primary is light violet, so its label must use the paired foreground.
-    const login = screen.getByRole("link", { name: "Log In" });
-    expect(login).toHaveClass("text-primary-foreground");
-    expect(login).not.toHaveClass("text-white");
-  });
-
-  it("shows the full sync status only where the top bar leaves the rail color", () => {
-    Object.assign(useConfigStore(), {
-      diagnostics: [],
-      recoveryConfigSource: null,
-      syncStatus: "synced",
-      agents: [],
-      rooms: [],
-      teams: [],
-    });
-    render(<App />);
-
-    const compact = screen.getByRole("status", { name: "Synced" });
-    const full = screen
-      .getAllByRole("status")
-      .find(
-        (status) =>
-          !status.hasAttribute("aria-label") && status.textContent === "Synced",
-      );
-    expect(compact).toHaveClass("md:hidden");
-    expect(full).toHaveClass("hidden", "md:flex");
   });
 });
