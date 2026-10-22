@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools.claude_agent import ClaudeAgentTools
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
@@ -455,6 +456,27 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
 
 def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> None:
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
+
+
+@pytest.mark.asyncio
+async def test_gateway_calls_share_one_session_of_a_session_keyed_tool(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway calls belong to no conversation, so ``claude_agent`` keeps one session across them, as before."""
+    claude = ClaudeAgentTools()
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[claude.claude_session_status]))
+
+    results = [
+        await gateway.invoke_tool(context, toolkit="calculator", function="claude_session_status", arguments={})
+        for _ in range(2)
+    ]
+
+    assert all("error" not in result for result in results)
+    first, second = (str(result["result"]) for result in results)
+    assert first == second
+    assert first.startswith("No active Claude session for `")
+    assert first.endswith(":default`.")
 
 
 @pytest.mark.asyncio
