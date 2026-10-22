@@ -13,7 +13,7 @@ import re
 from typing import Any, cast
 
 from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 
 __all__ = ["openai_native_tool_search_supported", "request_params_with_deferred_tool_search"]
 

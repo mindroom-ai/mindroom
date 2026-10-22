@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:

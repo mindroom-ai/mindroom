@@ -25,7 +25,7 @@ from mindroom.model_defaults import (
 from mindroom.prompts import CODEX_DEFAULT_INSTRUCTIONS
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire

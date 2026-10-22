@@ -1137,20 +1137,18 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials.manager",
     "mindroom.credentials.sync",
+    "mindroom.providers.names",
 ]
 visibility = [
     "mindroom.api.provider_setup",
-    "mindroom.budgets.pricing",
     "mindroom.cli.config",
     "mindroom.cli.doctor",
-    "mindroom.history.compaction",
-    "mindroom.providers.anthropic.messages",
-    "mindroom.providers.anthropic.prompt_cache",
-    "mindroom.providers.openai",
-    "mindroom.providers.pipeline",
     "mindroom.providers.registry",
-    "mindroom.tool_system.media_attachments",
 ]
+
+[[modules]]
+path = "mindroom.providers.names"
+depends_on = []
 
 [[modules]]
 path = "mindroom.metadata_merge"
@@ -1162,7 +1160,6 @@ depends_on = ["mindroom.startup_errors"]
 visibility = [
     "mindroom.cli.doctor",
     "mindroom.providers.anthropic.messages",
-    "mindroom.providers.model_loading",
 ]
 
 [[modules]]
@@ -2578,7 +2575,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.logging_config",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.providers.registry",
     "mindroom.timing",
     "mindroom.token_budget",
@@ -2671,7 +2668,7 @@ depends_on = [
     "mindroom.providers.anthropic.repairs",
     "mindroom.providers.cache_ladder",
     "mindroom.providers.claude_wire_blocks",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
 ]
 visibility = ["mindroom.history.mid_turn_compaction", "mindroom.providers.anthropic.messages"]
 
@@ -2697,7 +2694,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.google_adc",
     "mindroom.providers.model_http_client",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.dependencies",
 ]
@@ -5491,7 +5488,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
 depends_on = [
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.agno_toolkits",
 ]
@@ -5884,7 +5881,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.model_http_client",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
     "mindroom.providers.tool_policy",
     "mindroom.runtime_env_policy",
@@ -5898,7 +5895,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_usage",
     "mindroom.providers.gemini",
-    "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.usage.storage",
@@ -6299,7 +6296,7 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["canonical_provider", "dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential"]
+expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential"]
 from = ["mindroom.providers.model_loading"]
 
 [[interfaces]]
@@ -7812,6 +7809,7 @@ depends_on = [
     "mindroom.providers.anthropic.settings",
     "mindroom.providers.gemini",
     "mindroom.providers.model_loading",
+    "mindroom.providers.names",
     "mindroom.providers.ollama_adapter",
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",

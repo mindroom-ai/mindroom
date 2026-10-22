@@ -221,7 +221,8 @@ Matrix sync callback
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
-| `providers/model_loading.py` | Which key a configured model authenticates with: provider spelling, the dashboard key, and the missing-key checks the CLI and dashboard report |
+| `providers/model_loading.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
+| `providers/names.py` | `canonical_provider`, the one provider-name spelling model dispatch, pricing, and the wire adapters compare, in a module that imports nothing |
 | `providers/anthropic/messages.py` | The owned Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names; unknown keys fail at construction |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of owned messages and tools, inlining of URL-backed media, and parsing of the finished response into an assistant message |

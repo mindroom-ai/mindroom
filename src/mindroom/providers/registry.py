@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, get_args
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import build_provider as build_gemini_provider
-from mindroom.providers.model_loading import canonical_provider, dashboard_api_key
+from mindroom.providers.model_loading import dashboard_api_key
+from mindroom.providers.names import canonical_provider
 from mindroom.providers.ollama_adapter import build_provider as build_ollama_provider
 from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider

@@ -86,7 +86,7 @@ from mindroom.providers.assistant_turn import one_message_per_result, stamp_fini
 from mindroom.providers.errors import classify_provider_error, transport_error
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 

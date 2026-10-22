@@ -36,7 +36,7 @@ from mindroom.providers.claude_wire_blocks import (
     TOOL_SEARCH_TOOL_TYPE,
     as_dict,
 )
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

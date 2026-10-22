@@ -11,7 +11,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.providers.model_loading import canonical_provider
+from mindroom.providers.names import canonical_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
 from mindroom.providers.pipeline.media import media_fallback_stream

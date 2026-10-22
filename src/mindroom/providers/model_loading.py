@@ -1,4 +1,4 @@
-"""Which key a configured model authenticates with: provider spelling, the dashboard key, and missing-key checks.
+"""Which key a configured model authenticates with: the dashboard key and missing-key checks.
 
 The provider registry builds models with these rules; the CLI and the dashboard use them to report a model
 that has no key before any request fails.
@@ -11,13 +11,14 @@ from typing import TYPE_CHECKING
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_api_key_for_provider
+from mindroom.providers.names import canonical_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
 
-__all__ = ["canonical_provider", "dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential"]
+__all__ = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential"]
 
 # Settings the provider adapters accept in place of ``api_key``; Gemini with ``vertexai: true``
 # authenticates with Google Cloud credentials instead.
@@ -26,11 +27,6 @@ _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
     "azure": ("azure_ad_token", "azure_ad_token_provider"),
     "google": ("vertexai",),
 }
-
-
-def canonical_provider(provider: str) -> str:
-    """Return the normalized provider key used for model dispatch and identity checks."""
-    return provider.strip().lower().replace("-", "_")
 
 
 def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | None:
