@@ -7219,6 +7219,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.toolkit_connections",
 ]
 
 [[modules]]

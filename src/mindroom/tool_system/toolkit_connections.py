@@ -12,13 +12,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
     from agno.tools import Toolkit
     from agno.tools.mcp import MCPTools
@@ -41,7 +41,7 @@ def connects_per_run(toolkit: Toolkit) -> bool:
     return toolkit.requires_connect or _mcp_toolkit(toolkit) is not None
 
 
-def lists_functions_once_connected(toolkit: Toolkit) -> bool:
+def is_unconnected_mcp_toolkit(toolkit: Toolkit) -> bool:
     """Whether ``toolkit`` is an Agno MCP toolkit that is not connected yet, so it offers no functions until it is."""
     mcp = _mcp_toolkit(toolkit)
     return mcp is not None and not mcp.initialized
@@ -55,7 +55,7 @@ def register_mcp_functions(toolkit: Toolkit) -> None:
     loop of its own and closes that session once the functions are registered. Each run connects it again.
     Building such a toolkit on an event loop's thread raises ``RuntimeError``, since it cannot list there.
     """
-    if not lists_functions_once_connected(toolkit):
+    if not is_unconnected_mcp_toolkit(toolkit):
         return
     if _on_event_loop():
         msg = f"MCP toolkit {toolkit.name!r} must be built off the event loop, since it lists on a loop of its own"
@@ -111,17 +111,12 @@ async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
 
 
 async def _connect_on_thread(toolkit: Toolkit) -> None:
-    """Connect ``toolkit`` on a thread; a caller cancelled meanwhile stops waiting, and the connection closes once made.
+    """Connect ``toolkit`` on a thread; a caller cancelled meanwhile stops waiting, and the connection closes once made."""
 
-    A thread cannot be stopped, so, as the script broker and the MCP gateway do, the connect goes on after the
-    cancellation and a retained task closes what it opened.
-    """
-    connecting = asyncio.create_task(run_toolkit_lifecycle(toolkit.connect))
-    try:
-        await asyncio.shield(connecting)
-    except asyncio.CancelledError:
+    def close_once_connected(connecting: asyncio.Task[None]) -> None:
         create_background_task(_close_once_connected(toolkit, connecting), name="toolkit-connect-cleanup")
-        raise
+
+    await shielded_lifecycle(run_toolkit_lifecycle(toolkit.connect), retain=close_once_connected)
 
 
 async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]) -> None:
@@ -138,6 +133,20 @@ async def _close(toolkit: Toolkit) -> None:
         await run_toolkit_lifecycle(toolkit.close)
     except Exception as exc:
         logger.warning("toolkit_close_failed", toolkit=toolkit.name, error=str(exc))
+
+
+async def shielded_lifecycle[T](lifecycle: Coroutine[Any, Any, T], *, retain: Callable[[asyncio.Task[T]], object]) -> T:
+    """Run ``lifecycle`` in a task; a caller cancelled meanwhile stops waiting and hands the task to ``retain``.
+
+    A blocking connect or close holds its thread until it returns, so the task goes on after the cancellation, and
+    ``retain`` keeps it for whoever closes what it opened or counts it as work still owned.
+    """
+    task = asyncio.create_task(lifecycle, name="toolkit-lifecycle")
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        retain(task)
+        raise
 
 
 async def run_toolkit_lifecycle(operation: Callable[[], object]) -> None:

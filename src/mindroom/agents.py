@@ -80,7 +80,7 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from mindroom.tool_system.toolkit_connections import lists_functions_once_connected, run_connection
+from mindroom.tool_system.toolkit_connections import is_unconnected_mcp_toolkit, run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -1451,9 +1451,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 deferred_toolkits=tuple(deferred_toolkits),
                 list_mcp_functions=not routed,
             )
-        if routed and toolkit is not None and lists_functions_once_connected(toolkit):
+        if routed and toolkit is not None and is_unconnected_mcp_toolkit(toolkit):
             logger.warning(
-                "Skipping MCP toolkit routed through a worker because the primary lists only the MCP toolkits it runs",
+                "Skipping MCP toolkit routed through a worker because the primary lists only the MCP toolkits it "
+                "runs; remove the tool from worker_tools or have the plugin connect the toolkit when it builds it",
                 agent=agent_name,
                 tool=tool_name,
             )

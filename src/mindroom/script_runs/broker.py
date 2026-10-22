@@ -49,7 +49,7 @@ from mindroom.tool_system.tool_hooks import (
     build_tool_hook_middleware,
     track_sync_tool_completion,
 )
-from mindroom.tool_system.toolkit_connections import run_toolkit_lifecycle
+from mindroom.tool_system.toolkit_connections import run_toolkit_lifecycle, shielded_lifecycle
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -577,15 +577,10 @@ class ScriptToolBroker:
     async def _connect_toolkit(self, toolkit: Toolkit) -> None:
         if not toolkit.requires_connect:
             return
-        completion_task = asyncio.create_task(
+        await shielded_lifecycle(
             run_toolkit_lifecycle(toolkit.connect),
-            name="script-toolkit-connect",
+            retain=lambda connecting: self._retain_toolkit_cleanup(connecting, toolkit),
         )
-        try:
-            await asyncio.shield(completion_task)
-        except asyncio.CancelledError:
-            self._retain_toolkit_cleanup(completion_task, toolkit)
-            raise
 
     async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
         """Connect one toolkit and close it if normal connection fails."""
@@ -748,13 +743,12 @@ class ScriptToolBroker:
 
     async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
         """Close one toolkit or transfer its exact close task on cancellation."""
-        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError:
+
+        def retain(close_task: asyncio.Task[None]) -> None:
             if not close_task.done():
                 self._retain_cleanup_task(close_task)
-            raise
+
+        await shielded_lifecycle(_close_toolkit(toolkit), retain=retain)
 
     def _retain_toolkit_close(self, toolkit: Toolkit) -> None:
         close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")

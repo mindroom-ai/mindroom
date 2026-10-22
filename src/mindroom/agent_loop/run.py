@@ -415,7 +415,8 @@ async def drive_run[R: AnyRunRecord](
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
     else:
-        # Reported before the toolkits close, so a slow close, such as a stdio MCP server's exit, holds no consumer up.
+        # Reported before the toolkits close, as Agno did. A consumer that reads the end of the stream, such as a
+        # delegation's, still waits through a slow close, such as a stdio MCP server's exit.
         yield RunFinished(record)
     finally:
         await close_toolkits(closes)

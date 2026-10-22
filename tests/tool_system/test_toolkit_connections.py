@@ -31,7 +31,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.toolkit_connections import register_mcp_functions, run_connection
+from mindroom.tool_system.toolkit_connections import register_mcp_functions, run_connection, shielded_lifecycle
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -374,6 +374,33 @@ async def test_cancelling_a_blocking_connect_closes_the_connection_once_it_is_ma
     await asyncio.wait_for(cleanup[0], timeout=5)
 
     assert EVENTS == ["database connect", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_a_shielded_lifecycle_hands_its_task_to_retain_only_when_the_caller_is_cancelled() -> None:
+    """The caller gets the lifecycle's value; cancelled instead, it leaves the still-running task to ``retain``."""
+    retained: list[asyncio.Task[str]] = []
+
+    async def lifecycle(started: asyncio.Event, release: asyncio.Event) -> str:
+        started.set()
+        await release.wait()
+        return "connected"
+
+    released = asyncio.Event()
+    released.set()
+    assert await shielded_lifecycle(lifecycle(asyncio.Event(), released), retain=retained.append) == "connected"
+    assert retained == []
+
+    started, release = asyncio.Event(), asyncio.Event()
+    caller = asyncio.create_task(shielded_lifecycle(lifecycle(started, release), retain=retained.append))
+    await started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    [task] = retained
+    assert not task.done()
+    release.set()
+    assert await task == "connected"
 
 
 @pytest.mark.asyncio
