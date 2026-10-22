@@ -1,4 +1,4 @@
-"""The per-request logging context callers bind around one agent or team run, and the JSON view of arbitrary values.
+"""The per-request logging context callers bind around one model request, and the JSON view of arbitrary values.
 
 Request telemetry (``LLM usage`` lines, the opt-in request log) attributes each provider request to the agent,
 session, and correlation id bound here; the context travels with the task, so stages wrapped around the
