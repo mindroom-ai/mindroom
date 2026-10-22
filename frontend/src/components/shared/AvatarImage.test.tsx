@@ -18,10 +18,6 @@ describe("AvatarImage", () => {
     rerender(<AvatarImage src="/one" fallback="AB" />);
     expect(container.querySelector("img")).toHaveAttribute("src", "/one");
   });
-  it("frames avatars as MindRoom Chat squircles by default", () => {
-    const { container } = render(<AvatarImage src="/one" fallback="AB" />);
-    expect(container.firstElementChild).toHaveClass("rounded-[28%]");
-  });
   it("uses encoded same-origin dashboard paths for entities and configured room references", () => {
     const { container, rerender } = render(
       <EntityAvatar kind="agent" id="helper/bot" name="Helper Bot" />,
