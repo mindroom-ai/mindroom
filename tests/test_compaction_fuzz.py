@@ -48,7 +48,13 @@ if TYPE_CHECKING:
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _SESSION = "session"
-_SESSION_ROW = ConversationSession(kind="agent", session_id=_SESSION, owner_id="code")
+
+
+def _session_row() -> ConversationSession:
+    """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
+    return ConversationSession(kind="agent", session_id=_SESSION, owner_id="code")
+
+
 _LEGACY_RUNS = ("legacy-1", "legacy-2")
 
 
@@ -100,7 +106,7 @@ class _Runner:
         # Runs whose stored part a retirement may remove in the current step, because they folded mid-turn.
         self._retirable: set[str] = set()
         seeding = self._open()
-        seed_session(seeding, self._legacy_session() if legacy else _SESSION_ROW)
+        seed_session(seeding, self._legacy_session() if legacy else _session_row())
         if legacy:
             # Releases before the archive had no summary-row tables and replayed the session row's summary, so the
             # next open adopts the state.
@@ -184,12 +190,12 @@ class _Runner:
 
     def _add(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.save_run(_SESSION_ROW, self._new_run(run_id, RunStatus.completed), record_usage=True)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=True)
         self._created.append(run_id)
 
     def _pause(self, _action: Action) -> None:
         run_id = f"r{len(self._created)}"
-        self._storage.save_run(_SESSION_ROW, self._new_run(run_id, RunStatus.paused), record_usage=True)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.paused), record_usage=True)
         self._created.append(run_id)
         self._paused.append(run_id)
 
@@ -200,7 +206,7 @@ class _Runner:
             return
         run_id = waiting[action.index % len(waiting)]
         self._paused.remove(run_id)
-        self._storage.save_run(_SESSION_ROW, self._new_run(run_id, RunStatus.completed), record_usage=True)
+        self._storage.save_run(_session_row(), self._new_run(run_id, RunStatus.completed), record_usage=True)
         self._moved.add(run_id)
 
     def _chunk(self, count: int) -> tuple[ConversationSession, list[str], str] | None:
@@ -326,7 +332,7 @@ class _Runner:
             return
         status = (RunStatus.completed, RunStatus.cancelled, RunStatus.paused)[outcome]
         stored_paused = run_id in self._stored and run_id not in self._stored_visible()
-        self._storage.save_run(_SESSION_ROW, self._new_run(run_id, status), record_usage=True)
+        self._storage.save_run(_session_row(), self._new_run(run_id, status), record_usage=True)
         if status == RunStatus.paused:
             self._paused.append(run_id)
         elif status == RunStatus.completed and stored_paused:
@@ -374,7 +380,7 @@ class _Runner:
         copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id not in loaded]
         if copies:
             run = copies[action.index % len(copies)]
-            self._storage.save_run(_SESSION_ROW, run, record_usage=True)
+            self._storage.save_run(_session_row(), run, record_usage=True)
 
     def _redact(self, action: Action) -> None:
         events = [_event(run_id) for run_id in (*_LEGACY_RUNS, *self._created)]

@@ -129,39 +129,33 @@ def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> N
 def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="system", content="Current system prompt"),
-                    Message(role="developer", content="Current developer prompt"),
-                    Message(role="user", content="user request"),
-                    Message(role="assistant", content="assistant answer"),
-                    Message(role="tool", content="tool result"),
-                ],
-            ),
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="Current system prompt"),
+            Message(role="developer", content="Current developer prompt"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
         ],
     )
+    session = _session("session-1", runs=[run])
 
     seed_session(storage, session)
 
-    assert [(message.role, message.content) for message in session.runs[0].messages] == [
+    # The record handed to the store keeps its prompts; the row, and the session's copy of it, do not.
+    assert [(message.role, message.content) for message in run.messages] == [
         ("system", "Current system prompt"),
         ("developer", "Current developer prompt"),
         ("user", "user request"),
         ("assistant", "assistant answer"),
         ("tool", "tool result"),
     ]
-
     persisted = storage.load_session("session-1", "agent")
     assert persisted is not None
-    assert [(message.role, message.content) for message in persisted.runs[0].messages] == [
-        ("user", "user request"),
-        ("assistant", "assistant answer"),
-        ("tool", "tool result"),
-    ]
+    stored = [("user", "user request"), ("assistant", "assistant answer"), ("tool", "tool result")]
+    assert [(message.role, message.content) for message in persisted.runs[0].messages] == stored
+    assert [(message.role, message.content) for message in session.runs[0].messages] == stored
 
 
 def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Provider) -> None:

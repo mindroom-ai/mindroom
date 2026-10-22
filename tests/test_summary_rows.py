@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 
     from mindroom.session_storage.store import ConversationStore
 
-_SESSION_ROW = ConversationSession(kind="agent", session_id="s1", owner_id="code")
+
+def _session_row() -> ConversationSession:
+    """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
+    return ConversationSession(kind="agent", session_id="s1", owner_id="code")
 
 
 def _open(tmp_path: Path) -> ConversationStore:
@@ -31,7 +34,7 @@ def _open(tmp_path: Path) -> ConversationStore:
 
 
 def _save(storage: ConversationStore, run: RunRecord) -> None:
-    storage.save_run(_SESSION_ROW, run, record_usage=True)
+    storage.save_run(_session_row(), run, record_usage=True)
 
 
 def _db_path(tmp_path: Path) -> Path:
