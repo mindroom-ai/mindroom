@@ -24,7 +24,7 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted
+from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted, UsageReported
 from mindroom.providers import remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
@@ -1005,8 +1005,8 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_ollama_sends_the_api_key_as_a_bearer_token(tmp_path: Path) -> None:
-    """An API key authenticates against Ollama's hosted endpoint."""
+async def test_ollama_api_key_and_timeout_reach_the_http_client(tmp_path: Path) -> None:
+    """An API key authenticates against Ollama's hosted endpoint, and ``timeout`` bounds every HTTP phase."""
     seen: list[httpx.Request] = []
 
     def respond(http_request: httpx.Request) -> httpx.Response:
@@ -1014,13 +1014,19 @@ async def test_ollama_sends_the_api_key_as_a_bearer_token(tmp_path: Path) -> Non
         return ollama_ndjson(_ollama_done())
 
     config = ModelConfig(
-        **_config(OLLAMA, api_key="ollama-key", client_params={"transport": httpx.MockTransport(respond)}),
+        **_config(
+            OLLAMA,
+            api_key="ollama-key",
+            timeout=12.5,
+            client_params={"transport": httpx.MockTransport(respond)},
+        ),
     )
     provider = build_ollama_provider(config, runtime_paths_for(tmp_path))
 
     _completed([event async for event in provider.stream(_request())])
 
     assert seen[0].headers["authorization"] == "Bearer ollama-key"
+    assert seen[0].extensions["timeout"] == {"connect": 12.5, "read": 12.5, "write": 12.5, "pool": 12.5}
 
 
 @pytest.mark.asyncio
@@ -1132,6 +1138,28 @@ async def test_ollama_parses_text_tool_calls_usage_and_length_stops(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("chunks", "stop"),
+    [
+        ([_ollama_done(content="Hi")], "end"),
+        ([_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}])], "tool_use"),
+        ([_ollama_done("load")], "incomplete"),
+        (
+            [{"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}],
+            None,
+        ),
+    ],
+    ids=["stop", "stop-with-tool-calls", "load", "no-done-chunk"],
+)
+async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str | None, tmp_path: Path) -> None:
+    """Done reasons map to stop reasons; a stream that ends without its ``done`` chunk has neither one nor usage."""
+    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, ollama_ndjson(*chunks))
+
+    usage_reported = any(isinstance(event, UsageReported) for event in events)
+    assert (_completed(events).stop_reason, usage_reported) == (stop, stop is not None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("response", "error_type"),
     [
         (httpx.Response(404, json={"error": "model 'qwen' not found"}), InvalidRequest),
@@ -1171,6 +1199,23 @@ async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> 
     ]
     assert events[1] == TextDelta("Hi there")
     assert completed.message.metrics.input_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Path) -> None:
+    """A whole reply that only calls a tool yields the call and no empty text or reasoning delta."""
+    call = {"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}
+    reply = httpx.Response(200, json=_ollama_done(tool_calls=[call]))
+
+    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER], stream=False), tmp_path, reply)
+
+    assert [type(event).__name__ for event in events] == ["ToolCallReady", "UsageReported", "TurnCompleted"]
+    completed = _completed(events)
+    assert completed.message.content is None
+    assert [call["function"] for call in completed.message.tool_calls or []] == [
+        {"name": "get_weather", "arguments": '{"city": "Oslo"}'},
+    ]
+    assert completed.stop_reason == "tool_use"
 
 
 @pytest.mark.asyncio

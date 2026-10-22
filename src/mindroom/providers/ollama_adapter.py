@@ -177,8 +177,7 @@ class OllamaProvider:
             )
             if value is not None
         }
-        tools = [*_format_tools(request.tools), *request.native_tools]
-        if tools:
+        if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
         kwargs.update(settings.request_params or {})
         if provider_tools_disabled():
@@ -246,12 +245,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
         images = [data for image in message.images or () if (data := await _image_bytes(image, provider))]
         if images:
             formatted["images"] = images
-        if unsupported := [
-            kind
-            for kind, media in (("audio", message.audio), ("file", message.files), ("video", message.videos))
-            if media
-        ]:
-            logger.warning("ollama_media_unsupported", kinds=unsupported)
     return formatted
 
 
@@ -304,22 +297,17 @@ def _whole_reply_events(reply: _OllamaReply, response: ChatResponse) -> list[Str
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
     events: list[StreamEvent] = []
     message = chunk.message
-    if message is not None:
-        if message.content:
-            reply.content += message.content
-            events.append(TextDelta(message.content))
-        for tool_call in message.tool_calls or ():
-            arguments = tool_call.function.arguments
-            call = {
-                "id": str(uuid4()),
-                "type": "function",
-                "function": {
-                    "name": tool_call.function.name,
-                    "arguments": None if arguments is None else json.dumps(arguments),
-                },
-            }
-            reply.tool_calls.append(call)
-            events.append(ToolCallReady(call))
+    if message.content:
+        reply.content += message.content
+        events.append(TextDelta(message.content))
+    for tool_call in message.tool_calls or ():
+        call = {
+            "id": str(uuid4()),
+            "type": "function",
+            "function": {"name": tool_call.function.name, "arguments": json.dumps(tool_call.function.arguments)},
+        }
+        reply.tool_calls.append(call)
+        events.append(ToolCallReady(call))
     if chunk.done:
         reply.done = True
         reply.done_reason = chunk.done_reason
