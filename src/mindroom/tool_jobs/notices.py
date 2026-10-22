@@ -60,7 +60,7 @@ async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[Bac
     """Mark noticed cancelled jobs acknowledged: a cancellation has no result to collect.
 
     An acknowledgement can fail when the job expired or lost its access after it was listed, or when its save fails;
-    the reply carries on, and a later reply notices the unacknowledged cancellation again.
+    the reply carries on, and after a failed save a later reply notices the unacknowledged cancellation again.
     """
     for job in jobs:
         if job.status != "cancelled":
