@@ -132,8 +132,7 @@ def injected_parameter_names(entrypoint: Callable[..., Any]) -> frozenset[str]:
 # Reason: Agno injects its Agent or Team object into entrypoint parameters named ``agent`` or ``team``, or annotated
 # with those types, and the owned loop has no Agno agent to inject. Of the toolkits MindRoom registers, only
 # DaytonaTools reads the parameter, and it reads and writes ``agent.session_state``, as Agno's AntigravityTools and
-# SuperserveTools also do. MindRoom's own tools read their caller from the tool runtime context, except the
-# scheduler, whose scheduled-call lookup still reads the Agno agent's tools.
+# SuperserveTools also do. MindRoom's own tools read their caller from the tool runtime context.
 # Upstream issue: Tracking gap; Agno defines no contract for what a toolkit may read from the injected agent, so a
 # toolkit can depend on any Agent attribute.
 # Upstream PR: None identified.
