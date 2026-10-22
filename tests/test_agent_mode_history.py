@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import os
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -13,11 +11,13 @@ import pytest
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
+from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, scrub_provider_env
 from tests.providers.golden_support import Wire
-from tests.providers.test_provider_families import _PROVIDER_ENV_PREFIXES, FAMILIES
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
 
 _PIXEL_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
@@ -95,13 +95,8 @@ async def test_standard_minimal_standard_requests_keep_paired_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each mode offers one tool, yet every request carries both stored pairs and the image, and history is untouched."""
-    for name in list(os.environ):
-        if name.startswith(_PROVIDER_ENV_PREFIXES):
-            monkeypatch.delenv(name)
+    scrub_provider_env(monkeypatch)
     spec = FAMILIES[family]
-    if family == "anthropic":
-        # A current model id, so the SDK raises no deprecation warning.
-        spec = replace(spec, config={**spec.config, "id": "claude-sonnet-5-5"})
     wire = Wire(lambda _request: spec.reply())
     provider = spec.adapter(tmp_path, wire)
     image_path = tmp_path / "pixel.png"
