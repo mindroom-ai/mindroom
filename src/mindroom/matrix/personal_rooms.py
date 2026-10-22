@@ -82,6 +82,14 @@ class PersonalRoomRosterMismatchError(PersonalRoomValidationError):
         self.unexpected_user_ids = tuple(sorted(unexpected_user_ids))
 
 
+class _PersonalRoomWelcomeDeviceError(PersonalRoomValidationError):
+    """A pending welcome belongs to a Matrix device this agent no longer uses, so no retry may send it.
+
+    The welcome's transaction ID deduplicates only on its device, and the runtime never logs in to an earlier device
+    again, so only restoring that device's credentials and store would let it go out.
+    """
+
+
 @dataclass
 class PersonalRoomService:
     """Keep only personal-room lifecycle state; execution remains in the normal bot."""
@@ -617,7 +625,7 @@ class PersonalRoomService:
             return
         if record.welcome_device_id != client.device_id or not client.device_id:
             msg = "Personal-room pending welcome belongs to a different Matrix device"
-            raise RuntimeError(msg)
+            raise _PersonalRoomWelcomeDeviceError(msg)
         delivered = await send_message_result(
             client,
             record.room_id,
