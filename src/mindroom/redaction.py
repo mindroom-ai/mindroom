@@ -79,6 +79,7 @@ _TOKEN_LIKE_PATTERN = re.compile(
     r"|gh(?:p|o|u|s|r)_[A-Za-z0-9_]+"
     r"|github_pat_[A-Za-z0-9_]+"
     r"|AIza[0-9A-Za-z_-]+"
+    r"|mrb1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
     r"))(?![A-Za-z0-9])",
 )
 _TOKEN_LIKE_MARKERS = (
@@ -102,6 +103,7 @@ _TOKEN_LIKE_MARKERS = (
     "ghr_",
     "github_pat_",
     "AIza",
+    "mrb1.",
 )
 # Reviewer-facing copies hide only credentials in known token formats with realistic lengths, so hosts,
 # paths, and short names such as `sk-deploy.sh` stay visible; a token may end a sentence but not a file
@@ -502,8 +504,7 @@ def _redact_url(value: str) -> str:
         path = capability_path
         changed = True
     if "@" in netloc:
-        userinfo, host = netloc.rsplit("@", 1)
-        netloc = f"{userinfo.split(':', 1)[0]}:***@{host}" if ":" in userinfo else f"***@{host}"
+        netloc = f"***@{netloc.rsplit('@', 1)[1]}"
         changed = True
 
     if query:
