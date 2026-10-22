@@ -283,6 +283,7 @@ Sections inside section groups are not listed either.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
 Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
+Creating and appending also take the name of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_notebook`, so an approval card shows which notebook the write lands in, and fail with `target_mismatch`, naming the real notebook, when it differs.
 
 ## People
 
