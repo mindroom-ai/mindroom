@@ -7,6 +7,8 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
+import anthropic
+import boto3.session
 import google.auth
 import httpx
 import pytest
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
 )
+_GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 
 
 def _user(text: str = "Hello") -> list[Message]:
@@ -184,6 +187,22 @@ async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumul
         48000,
         800,
     )
+
+
+@pytest.mark.asyncio
+async def test_service_tier_and_server_tool_requests_are_kept_with_the_usage(tmp_path: Path) -> None:
+    """The direct API reports its service tier, and a web search its request count, beside the token counts."""
+    usage = {**CLAUDE_USAGE, "service_tier": "standard", "server_tool_use": {"web_search_requests": 2}}
+    wire = Wire(json_reply([{"type": "text", "text": "Sunny."}], usage=usage))
+    completed = await claude_turn(
+        route_provider("anthropic", tmp_path, wire),
+        ModelRequest(messages=_user(), stream=False),
+    )
+    assert completed.message.metrics.provider_metrics == {
+        "server_tool_use": {"web_fetch_requests": None, "web_search_requests": 2},
+        "service_tier": "standard",
+        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
+    }
 
 
 @pytest.mark.asyncio
@@ -360,6 +379,22 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
     assert [(block["type"], block["text"]) for block in turns[-2]["content"]] == [("text", "A"), ("text", "B")]
 
 
+@pytest.mark.asyncio
+async def test_an_assistant_turn_with_nothing_to_replay_is_left_out(tmp_path: Path) -> None:
+    """A stream cut off before any output stores an empty assistant turn; the user turns around it merge instead."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    provider = route_provider("anthropic", tmp_path, wire)
+    cut_off = Message(
+        role="assistant",
+        provider_data={"mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"}},
+    )
+    messages = [*_user("Summarize the report."), cut_off, Message(role="user", content="Try again.")]
+    await claude_turn(provider, ModelRequest(messages=messages))
+    turns = wire.body()["messages"]
+    assert [turn["role"] for turn in turns] == ["user"]
+    assert [block["text"] for block in turns[0]["content"]] == ["Summarize the report.", "Try again."]
+
+
 @pytest.mark.parametrize(
     ("model_id", "prefill"),
     [
@@ -406,9 +441,22 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
     assert body["tools"][0]["strict"] is True
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert body["output_config"]["format"]["schema"]["additionalProperties"] is False
-    # Document citations conflict with structured output, so none are requested with it.
     assert completed.message.content == '{"city": "Paris"}'
     assert completed.stop_reason == "end"
+
+
+@pytest.mark.asyncio
+async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_path: Path) -> None:
+    """``output_config`` and ``stop_sequences`` go out as authored; a structured answer adds its format beside them."""
+    wire = Wire(json_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
+    authored = {"output_config": {"effort": "low"}, "stop_sequences": ["</answer>"]}
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
+    await claude_turn(provider, ModelRequest(messages=_user(), response_format=_Answer, stream=False))
+    body = wire.body()
+    assert body["stop_sequences"] == ["</answer>"]
+    assert body["output_config"]["effort"] == "low"
+    assert body["output_config"]["format"]["type"] == "json_schema"
+    assert provider.settings.output_config == {"effort": "low"}, "the format never leaks into the authored setting"
 
 
 @pytest.mark.asyncio
@@ -630,6 +678,23 @@ def test_bedrock_replays_no_native_checkpoints_even_with_an_authored_compaction_
 
 
 @pytest.mark.asyncio
+async def test_an_authored_context_edit_records_what_the_response_applied(tmp_path: Path) -> None:
+    """A model authoring context editing keeps the edits each response applied with its message."""
+    applied = {
+        "applied_edits": [{"type": "clear_tool_uses_20250919", "cleared_tool_uses": 3, "cleared_input_tokens": 12000}],
+    }
+    wire = Wire(
+        httpx.Response(200, json=claude_message([{"type": "text", "text": "Ok."}]) | {"context_management": applied}),
+    )
+    authored = {"edits": [{"type": "clear_tool_uses_20250919"}]}
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
+    completed = await claude_turn(provider, ModelRequest(messages=_user(), stream=False))
+    assert str(wire.requests[0].url).endswith("?beta=true")
+    assert wire.body()["context_management"] == authored
+    assert (completed.message.provider_data or {})["context_management"] == applied
+
+
+@pytest.mark.asyncio
 async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: Path) -> None:
     """A stream that stopped mid-block leaves an unsigned thinking block, which the API rejects on replay."""
     signed = {"type": "thinking", "thinking": "", "signature": "complete"}
@@ -691,6 +756,53 @@ async def test_bedrock_session_credentials_are_resolved_for_every_request(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_bedrock_session_without_credentials_fails_the_request_with_the_fix(tmp_path: Path) -> None:
+    """A boto3 session that resolves no credentials stops the request and says where AWS looks for them."""
+
+    class _Session:
+        region_name = "eu-west-1"
+
+        def get_credentials(self) -> None:
+            return None
+
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    config = {
+        "provider": "bedrock_claude",
+        "id": "anthropic.claude-sonnet-5-5",
+        "extra_kwargs": {"session": _Session()},
+    }
+    provider = provider_for(config, tmp_path, wire.client)
+    with pytest.raises(ValueError, match=r"boto3 session has no credentials\. Check your AWS configuration"):
+        await claude_turn(provider, ModelRequest(messages=_user()))
+    assert wire.requests == []
+
+
+def test_bedrock_static_keys_win_over_a_profile_and_the_ambient_chain_needs_no_region(tmp_path: Path) -> None:
+    """Authored keys beat an authored profile; without keys or a region, a boto3 session resolves both itself."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    keys = {"aws_access_key": "AKIA-static", "aws_secret_key": "static-secret", "aws_profile": "dev"}
+    with isolated_provider_environment():
+        static = build_provider(
+            ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5", extra_kwargs=keys),
+            runtime_paths,
+        )
+        ambient = build_provider(
+            ModelConfig(provider="bedrock_claude", id="anthropic.claude-sonnet-5-5"),
+            runtime_paths,
+        )
+    assert (static.settings.aws_access_key, static.settings.aws_profile, static.settings.session) == (
+        "AKIA-static",
+        None,
+        None,
+    )
+    assert static.settings.aws_region is None
+    assert isinstance(ambient.settings.session, boto3.session.Session)
+    assert (ambient.settings.aws_access_key, ambient.settings.aws_region) == (None, None)
+
+
+@pytest.mark.asyncio
 async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tmp_path: Path) -> None:
     """Project, region, and AWS credentials come from the runtime env when the config leaves them out."""
     config_path = tmp_path / "config.yaml"
@@ -701,6 +813,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
         "AWS_ACCESS_KEY_ID": "env-access",
         "AWS_SECRET_ACCESS_KEY": "env-secret",
         "AWS_REGION": "us-west-2",
+        "ANTHROPIC_VERTEX_BASE_URL": "https://vertex-gateway.example/v1",
     }
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
@@ -729,6 +842,7 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             "europe-west1",
             None,
         )
+        assert vertex.settings.base_url == "https://vertex-gateway.example/v1"
         assert (
             provider_for(
                 {"provider": "vertexai_claude", "id": "claude-sonnet-5-5"},
@@ -785,6 +899,19 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     )
     await claude_turn(bedrock, ModelRequest(messages=_user()))
     assert wire.requests[-1].url.host == "bedrock-mantle.eu-central-1.api.aws"
+
+
+@pytest.mark.asyncio
+async def test_requests_get_an_hour_unless_the_model_authors_no_timeout(tmp_path: Path) -> None:
+    """The one-hour default lets long non-streamed answers finish; an authored null keeps the SDK's own limits."""
+    wire = Wire(json_reply([{"type": "text", "text": "Hi."}]))
+    request = ModelRequest(messages=_user(), stream=False)
+    await claude_turn(route_provider("anthropic", tmp_path, wire), request)
+    await claude_turn(route_provider("anthropic", tmp_path, wire, extra_kwargs={"timeout": None}), request)
+    assert [sent.extensions["timeout"] for sent in wire.requests] == [
+        httpx.Timeout(3600.0).as_dict(),
+        anthropic.DEFAULT_TIMEOUT.as_dict(),
+    ]
 
 
 @pytest.mark.asyncio
@@ -885,6 +1012,31 @@ async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_pa
     assert completed.message.content == "Ok."
     blocks = wire.body()["messages"][0]["content"]
     assert [(block["type"], block["text"]) for block in blocks] == [("text", "Look.")]
+
+
+@pytest.mark.asyncio
+async def test_url_images_are_inlined_in_every_user_turn_beside_inline_images(tmp_path: Path) -> None:
+    """Each user turn's URL images are fetched where they sat, and images already carried inline stay as they are."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host != "media.example":
+            return sse_reply([{"type": "text", "text": "Seen."}])
+        return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
+
+    wire = Wire(respond)
+    inline = Image(content=_GIF, mime_type="image/gif")
+    messages = [
+        Message(role="user", content="First.", images=[inline, Image(url="https://media.example/one")]),
+        Message(role="assistant", content="Seen."),
+        Message(role="user", content="Second.", images=[Image(url="https://media.example/two")]),
+    ]
+    await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=messages))
+    first, _, second = wire.body()["messages"]
+    gif = {"type": "base64", "media_type": "image/gif", "data": base64.b64encode(_GIF).decode()}
+    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
+    assert [block.get("source") for block in first["content"]] == [None, gif, png]
+    assert [block.get("source") for block in second["content"]] == [None, png]
+    assert [request.url.path for request in wire.requests[:-1]] == ["/one", "/two"]
 
 
 def _markers(payload: object) -> list[dict[str, Any]]:
