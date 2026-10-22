@@ -24,6 +24,7 @@ from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
 
 if TYPE_CHECKING:
@@ -70,9 +71,17 @@ def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:
 
 
 async def settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, object]:
-    """Poll the call's receipt until it is no longer queued, running, or waiting, as `mindroom-agent` waits for it."""
-    while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
-        await asyncio.sleep(0.001)
+    """Poll the call's receipt until it is no longer queued, running, or waiting, as `mindroom-agent` waits for it.
+
+    A call that never settles fails the test after ``SETTLE_TIMEOUT_SECONDS`` with its last receipt.
+    """
+    receipt: dict[str, object] = {}
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+    except TimeoutError:
+        pytest.fail(f"Call {call_id} did not settle within {SETTLE_TIMEOUT_SECONDS} s; last receipt: {receipt}")
     return receipt
 
 
