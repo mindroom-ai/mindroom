@@ -36,19 +36,10 @@ from tests.tool_job_helpers import JOB_TEST_TIMEOUT, saved_jobs, tool_job_runtim
 if TYPE_CHECKING:
     from pathlib import Path
 
-# A member's delegation approval card keeps a pending marker in the team slot after the resume finishes it.
-_TEAM_CARD_STAYS_PENDING = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "teams/envelope.py _continued_team_pause renders the member's member_id:call_id delegation card in the team "
-        "slot, and the resume completes the call only in the member's slot (owner: F10 or a post-parity fix)"
-    ),
-)
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initially_excluded", [False, True])
-@pytest.mark.parametrize("team", [False, pytest.param(True, marks=_TEAM_CARD_STAYS_PENDING)])
+@pytest.mark.parametrize("team", [False, True])
 async def test_delegate_policy_approval_follows_exclusions_current_at_resume(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

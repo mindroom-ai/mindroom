@@ -697,6 +697,46 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
 
 
 @pytest.mark.asyncio
+async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_shows_the_call_finished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card asking about a member's ``run_subagent`` shows that call once, pending; the resume finishes it."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[answer("Dug.")],
+        approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream()
+
+    paused = raised.value.paused
+    [tool] = paused.tools
+    assert (tool.tool_name, tool.tool_call_id) == ("run_subagent", "writer:call-sub")
+    assert [(entry.tool_name, entry.scope_key) for entry in paused.tool_trace] == [
+        ("run_subagent", "agent:writer"),
+        ("delegate_task_to_member", "team"),
+    ]
+    # The leader's delegation was answered with the member's pause; only the member's call still waits.
+    assert (paused.response_text.count("🔧"), paused.response_text.count("⏳")) == (2, 1)
+    _, _, state = _delegation_state(team)
+
+    result = await team.resume(paused, approved=True, approvals=_saved_approval_calls(state), show_tool_calls=True)
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == (
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
+    )
+    record, member, state = _delegation_state(team)
+    assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
+    assert [child.status for child in state.children] == ["completed"]
+
+
+@pytest.mark.asyncio
 async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

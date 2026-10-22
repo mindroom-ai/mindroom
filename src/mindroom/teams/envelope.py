@@ -1186,6 +1186,8 @@ class _TeamTurn:
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
         response_text = ""
+        # The "No team response generated." fallback is display chrome, not replayable assistant text.
+        replayable_text = header + canonical_text if has_visible_output else ""
         if blocking:
             consensus = attempt.canonical_consensus
             silent = (
@@ -1201,8 +1203,7 @@ class _TeamTurn:
         )
         return CompletedAttempt(
             response_text=response_text,
-            # The "No team response generated." fallback is display chrome, not replayable assistant text.
-            replayable_text=header + canonical_text if has_visible_output else "",
+            replayable_text=replayable_text,
             has_visible_content=has_visible_output,
             is_empty=record.status is RunStatus.completed and not tool_executions and not has_visible_output,
             session_id=record.session_id,
@@ -1295,8 +1296,14 @@ def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session
 
 
 def _continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
-    """Render the pending calls into their slots and freeze the document the pause shows."""
+    """Render the pending calls into their slots and freeze the document the pause shows.
+
+    A delegation call adds no marker: the member whose run issued it already shows it pending, and the driver's
+    approval card only asks about that call under the card's own id, so the resume completes the member's marker.
+    """
     for requirement in paused.requirements:
+        if requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES:
+            continue
         scope = (
             f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"
             if requirement.member_agent_id is not None
