@@ -46,23 +46,26 @@ from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
+    TEST_AGENT_SCOPE,
+    TOOL_RESULT,
     RecordingCompactionLifecycle,
+    SummaryCalls,
+    ToolLoopModel,
     _completed_team_run,
     _team_session,
     log_of,
+    seeded_storage,
     segments_of,
     summary_rows_of,
 )
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     SESSION_ID,
     TEAM_SCOPE,
     ProbeToolkit,
     TeamTurn,
     member_approval,
-    squad_probe,
     squad_turn,
 )
-from tests.test_mid_turn_compaction import _SCOPE, _TOOL_RESULT, _seeded_storage, _SummaryCalls, _ToolLoopModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -81,8 +84,8 @@ RESUME_PROBE_TOOL = "compaction_resume_probe"
 
 
 @pytest.fixture
-def summary_calls(monkeypatch: pytest.MonkeyPatch) -> _SummaryCalls:
-    calls = _SummaryCalls()
+def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
+    calls = SummaryCalls()
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
     monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summary_model())
     return calls
@@ -101,7 +104,7 @@ class _ResumeProbeToolkit(Toolkit):
 
     def probe(self) -> str:
         """Return one large tool result."""
-        return _TOOL_RESULT
+        return TOOL_RESULT
 
     def approve_me(self) -> str:
         """Return once the requester approved the call."""
@@ -133,7 +136,7 @@ def resume_probe() -> Iterator[None]:
         TOOL_METADATA.update(original_metadata)
 
 
-class _PausingLoop(_ToolLoopModel):
+class _PausingLoop(ToolLoopModel):
     """A tool loop whose fifth response calls ``approve_me``, which pauses the run for approval."""
 
     def respond(self, number: int, request: ModelRequest) -> Message:
@@ -152,7 +155,7 @@ class _Resumable:
     """
 
     build: AgentBuild
-    model: _ToolLoopModel
+    model: ToolLoopModel
     config: Config
     runtime_paths: RuntimePaths
     store: ConversationStore
@@ -171,7 +174,7 @@ class _Resumable:
             model_name="default",
             store=self.store,
             session=session,
-            scope=_SCOPE,
+            scope=TEST_AGENT_SCOPE,
             user_id=None,
         )
 
@@ -179,7 +182,7 @@ class _Resumable:
 def _resumable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    model: _ToolLoopModel,
+    model: ToolLoopModel,
     *,
     context_window: int | None = 4000,
     replays_history: bool = False,
@@ -199,7 +202,7 @@ def _resumable(
     config = bind_runtime_paths(Config.model_validate(authored), paths)
     monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: model)
     store = (
-        _seeded_storage(config, paths)
+        seeded_storage(config, paths)
         if replays_history
         else create_session_storage("test_agent", config, paths, execution_identity=None)
     )
@@ -225,7 +228,9 @@ async def _pause(agent: _Resumable) -> RunRecord:
     turn = TurnMessages(prompt=Message(role="user", content="Do the task"))
     plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
     history, summary = (
-        replayed_history(agent.session, _SCOPE, build.history_settings, plan) if agent.replays_history else ([], None)
+        replayed_history(agent.session, TEST_AGENT_SCOPE, build.history_settings, plan)
+        if agent.replays_history
+        else ([], None)
     )
     events = run_agent(
         replace(build.spec, system_message=prompt_for_turn(build)),
@@ -239,7 +244,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
                 model_name="default",
                 store=agent.store,
                 session=agent.session,
-                scope=_SCOPE,
+                scope=TEST_AGENT_SCOPE,
                 scoped=agent.replays_history,
                 native_compaction=None,
                 prompt_id=turn.prompt.id,
@@ -287,7 +292,7 @@ def _summaries(messages: Sequence[Message]) -> list[Message]:
 async def test_folded_request_usage_survives_approval_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     model = _PausingLoop(
         tool_rounds=9,
@@ -311,7 +316,7 @@ async def test_folded_request_usage_survives_approval_resume(
 async def test_resumed_run_does_not_anchor_on_its_paused_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """The response that paused reported a request near the window; the resume sizes its own request afresh."""
     model = _PausingLoop(
@@ -332,7 +337,7 @@ async def test_resumed_run_does_not_anchor_on_its_paused_response(
 async def test_run_local_summary_survives_approval_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     model = _PausingLoop(tool_rounds=6)
     agent = _resumable(tmp_path, monkeypatch, model)
@@ -353,7 +358,7 @@ async def test_run_local_summary_survives_approval_resume(
 async def test_scoped_compaction_after_resume_keeps_the_run_local_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """A run-local summary of the first leg is part of what the resume's scoped compaction summarizes."""
     model = _PausingLoop(tool_rounds=10)
@@ -368,7 +373,7 @@ async def test_scoped_compaction_after_resume_keeps_the_run_local_summary(
     assert len(summary_calls.inputs) > local_summaries
     assert f"SUMMARY-{local_summaries}" in summary_calls.inputs[local_summaries]
     # The first leg's folds were run-local; only the resume's folds reached the scope.
-    rows = summary_rows_of(agent.store, _SCOPE.key)
+    rows = summary_rows_of(agent.store, TEST_AGENT_SCOPE.key)
     assert [row.summary for row in rows] == [
         f"SUMMARY-{number}" for number in range(local_summaries + 1, len(summary_calls.inputs) + 1)
     ]
@@ -379,7 +384,7 @@ async def test_scoped_compaction_after_resume_keeps_the_run_local_summary(
 async def test_approval_resume_after_mid_turn_compaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """The resumed request carries the summary the paused request saw, once, behind the same prefix."""
     model = _PausingLoop(tool_rounds=6)
@@ -404,7 +409,7 @@ async def test_approval_resume_after_mid_turn_compaction(
 async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     model = _PausingLoop(tool_rounds=12)
     agent = _resumable(tmp_path, monkeypatch, model, replays_history=True)
@@ -415,12 +420,12 @@ async def test_compaction_after_an_approval_resume_reaches_the_stored_session(
 
     assert len(summary_calls.inputs) > compactions_before_resume
     stored = agent.store.load_session("session-1", "agent")
-    rows = summary_rows_of(agent.store, _SCOPE.key)
+    rows = summary_rows_of(agent.store, TEST_AGENT_SCOPE.key)
     assert stored is not None
     assert stored.summary is not None
     assert stored.summary.text == rows[-1].summary
     # The completed run sorts after every fold of both legs, and the next reply replays only it after the summary.
-    assert log_of(agent.store, _SCOPE.key) == [
+    assert log_of(agent.store, TEST_AGENT_SCOPE.key) == [
         "run:run-1",
         "run:run-2",
         *(f"row:{row.summary}" for row in rows),
@@ -441,7 +446,7 @@ def _seed_team_history(team: TeamTurn) -> None:
 
 def _big_answers(count: int) -> list[list[ScriptStep]]:
     """Return ``count`` member turns whose answers each fill a quarter of a 4,000-token window."""
-    return [answer(_TOOL_RESULT) for _ in range(count)]
+    return [answer(TOOL_RESULT) for _ in range(count)]
 
 
 def _delegation(call_id: str, member_id: str, task: str, metrics: MessageMetrics | None = None) -> list[ScriptStep]:
@@ -467,7 +472,7 @@ def _contents(request: ModelRequest) -> list[str]:
 async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     *,
     stream: bool,
 ) -> None:
@@ -519,7 +524,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
 async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """The team reply binds its compaction notices and recorder, and its metadata leaves out the earlier run's folds."""
     # Each response reports a request 1,200 tokens larger than the last, so the fourth request compacts.
@@ -557,7 +562,7 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
 async def test_team_approval_resume_after_mid_turn_compaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """A member's approval pauses the team after the leader compacted; the resumed leader request keeps that summary."""
     team = squad_turn(
@@ -605,7 +610,7 @@ async def test_team_approval_resume_after_mid_turn_compaction(
 async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """The configured team budget refuses the fifth request before compaction could size it."""
     # The fourth response reports a request far over the window, so only the fifth request would compact.
@@ -634,7 +639,7 @@ async def test_the_team_s_call_budget_caps_a_request_before_compacting_it(
 async def test_team_member_loop_compacts_run_locally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """A member's own tool loop compacts within its run; the summary is the run's own, not replayed history."""
     team = squad_turn(
@@ -658,20 +663,28 @@ async def test_team_member_loop_compacts_run_locally(
     assert member.status is RunStatus.completed
 
 
+@dataclass(frozen=True)
+class _Hold:
+    """Hold ``task``'s run before it answers its ``request``-th request, until ``release`` is set."""
+
+    task: str
+    request: int
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 @dataclass
 class _PerTaskLoop(ScriptedModel):
     """Script each delegated task's run on its own: ``dig`` for ``tool_rounds`` requests, then the task's answer.
 
     Concurrent runs of one member share this model and interleave their requests, so each request is answered from
-    the script of the task it carries; ``tasks`` names that task for each of ``requests``. When ``task_b_waits_for``
-    is given, Task B's run waits for it before answering its third request, so Task A's run outgrows its window
-    first.
+    the script of the task it carries; ``tasks`` names that task for each of ``requests``. A ``hold`` keeps one
+    task's run waiting, at most five seconds, before one of its requests is answered.
     """
 
     turns: list[Sequence[ScriptStep]] = field(default_factory=list)
     tool_rounds: int = 6
     tasks: list[str] = field(default_factory=list)
-    task_b_waits_for: asyncio.Event | None = None
+    hold: _Hold | None = None
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the next turn of the task ``request`` carries."""
@@ -683,17 +696,17 @@ class _PerTaskLoop(ScriptedModel):
             if number <= self.tool_rounds
             else answer(f"{task} done")
         )
-        event = self.task_b_waits_for
-        if event is not None and (task, number) == ("Task B", 3):
+        hold = self.hold
+        if hold is not None and (task, number) == (hold.task, hold.request):
 
             async def wait() -> None:
-                await asyncio.wait_for(event.wait(), timeout=5)
+                await asyncio.wait_for(hold.release.wait(), timeout=5)
 
             turn = [Await(wait), *turn]
         # The base model takes the queued turn at once, before another run's request can queue its own.
         self.turns.append(turn)
-        async for event in super().stream(request):
-            yield event
+        async for stream_event in super().stream(request):
+            yield stream_event
 
     def compacted_tasks(self) -> list[str]:
         """Return the tasks whose runs sent a request that carries a compaction summary."""
@@ -726,7 +739,7 @@ def _two_writer_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[T
 async def test_parallel_delegations_to_one_member_both_compact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """Two concurrent runs of one member each compact their own loop."""
     team, writer = _two_writer_runs(tmp_path, monkeypatch)
@@ -745,17 +758,19 @@ async def test_parallel_delegations_to_one_member_both_compact(
 async def test_a_member_run_whose_compaction_failed_leaves_its_sibling_run_compacting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """Each member run keeps its own compaction state: the run whose summary failed stops, its sibling still compacts."""
     team, writer = _two_writer_runs(tmp_path, monkeypatch)
     failed: list[str] = []
-    writer.task_b_waits_for = asyncio.Event()
+    # Task B's run waits before its third request is answered, so Task A's run outgrows its window first.
+    hold = _Hold("Task B", request=3)
+    writer.hold = hold
 
     async def fail_task_a(*, summary_input: str, **kwargs: Any) -> str:  # noqa: ANN401
         if "Task A" in summary_input:
             failed.append(summary_input)
-            writer.task_b_waits_for.set()
+            hold.release.set()
             msg = "summary model unavailable"
             raise RuntimeError(msg)
         return await summary_calls(summary_input=summary_input, **kwargs)

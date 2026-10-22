@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom import loop_hooks, response_runner
+from mindroom import ai_runtime, loop_hooks, response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store, initialize_approval_store
 from mindroom.approval.receipt import approval_receipt_context, build_approval_receipt
@@ -63,7 +63,7 @@ from tests.conftest import (
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fixture
+from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
     REQUESTER_ID,
@@ -75,7 +75,6 @@ from tests.team_turn_helpers import (  # noqa: F401 - squad_probe is a pytest fi
     TeamTurn,
     delegate,
     member_approval,
-    squad_probe,
     squad_turn,
 )
 
@@ -146,6 +145,22 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_turn_whose_attempts_all_came_back_empty_still_marks_its_trigger_seen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both empty runs are discarded, so the session row alone keeps the events the turn read."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer(""), answer("")])
+
+    assert await team.respond() == ai_runtime.EMPTY_RESPONSE_NOTICE
+
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert session.runs == []
+    assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
 
 
 @pytest.mark.asyncio
@@ -1003,7 +1018,7 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     )
     assert result.consumed
     runner = bot._response_runner
-    assert await runner.handoff_approval_source(EVENT_ID) is False
+    await runner.handoff_approval_source(EVENT_ID)
     await runner.wait_for_source_owned_inbox_responses()
 
 

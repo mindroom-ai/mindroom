@@ -1270,11 +1270,12 @@ async def test_an_ad_hoc_team_s_resume_logs_its_requests_under_the_label_its_tur
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("approvals", "error"),
+    ("approvals", "error_type", "error"),
     [
-        pytest.param((), "Decisions do not cover exactly the calls", id="approved-without-its-saved-call"),
+        pytest.param((), ValueError, "Decisions do not cover exactly the calls", id="approved-without-its-saved-call"),
         pytest.param(
             (_approval("call-touch", "dangerous"), _approval("call-extra", "dangerous")),
+            RuntimeError,
             "no longer match the pending requirements",
             id="an-extra-call",
         ),
@@ -1285,13 +1286,14 @@ async def test_a_resume_whose_decisions_do_not_match_the_pause_runs_nothing(
     monkeypatch: pytest.MonkeyPatch,
     probe: type[ProbeToolkit],
     approvals: tuple[ApprovalCall, ...],
+    error_type: type[Exception],
     error: str,
 ) -> None:
     team, paused = await _pause_on_general(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
     team.models["general-model"] = ScriptedModel([])
 
-    with pytest.raises((RuntimeError, ValueError), match=error):
+    with pytest.raises(error_type, match=error):
         await team.resume(
             paused,
             approved=True,

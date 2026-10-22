@@ -34,7 +34,6 @@ from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
     CompactionOutcome,
-    HistoryScope,
     HistoryScopeState,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, HookRegistry, hook
@@ -42,15 +41,9 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
-    Capabilities,
-    ModelIdentity,
     ModelRequest,
     NativeCompactionReplay,
-    TextDelta,
-    ToolCallReady,
     ToolSpec,
-    TurnCompleted,
-    UsageReported,
 )
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics
@@ -64,7 +57,12 @@ from mindroom.usage.storage import project_usage, quote_identifier
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
+    TEST_AGENT_SCOPE,
+    TOOL_RESULT,
     RecordingCompactionLifecycle,
+    SummaryCalls,
+    ToolLoopModel,
+    ToolLoopRequest,
     _completed_run,
     _hook_runtime_context,
     _make_config,
@@ -73,13 +71,14 @@ from tests.history_helpers import (
     folded_run_ids,
     log_of,
     seed_summary,
+    seeded_storage,
     segments_of,
     summary_rows_of,
 )
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
@@ -87,84 +86,12 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
-    from mindroom.llm.provider import StreamEvent
     from mindroom.session_storage.store import ConversationStore
-
-_TOOL_RESULT = "r" * 4000
-_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
-_TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
-
-
-@dataclass
-class _Request:
-    roles: list[str]
-    contents: list[str]
-    messages: list[Message]
-    request: ModelRequest
-
-
-class _ToolLoopModel:
-    """Call ``probe`` for ``tool_rounds`` requests, then answer; record every request."""
-
-    def __init__(
-        self,
-        *,
-        tool_rounds: int,
-        calls_per_round: int = 1,
-        usage: Callable[[int], MessageMetrics] | None = None,
-        reasoning: str | None = None,
-    ) -> None:
-        self.identity = _TEST_MODEL
-        self.capabilities = Capabilities()
-        self.native_history_route = None
-        self.replay_estimator = None
-        self.model_params: dict[str, Any] = {}
-        self.tool_rounds = tool_rounds
-        self.calls_per_round = calls_per_round
-        self.usage = usage
-        self.reasoning = reasoning
-        self.requests: list[_Request] = []
-
-    def respond(self, number: int, request: ModelRequest) -> Message:  # noqa: ARG002
-        metrics = self.usage(number) if self.usage is not None else MessageMetrics()
-        if number <= self.tool_rounds:
-            return Message(
-                role="assistant",
-                content=f"step {number}",
-                tool_calls=[
-                    {
-                        "id": f"call_{number}_{index}",
-                        "type": "function",
-                        "function": {"name": "probe", "arguments": "{}"},
-                    }
-                    for index in range(self.calls_per_round)
-                ],
-                reasoning_content=self.reasoning,
-                metrics=metrics,
-            )
-        return Message(role="assistant", content="done", metrics=metrics)
-
-    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        self.requests.append(
-            _Request(
-                roles=[message.role for message in request.messages],
-                contents=[str(message.content) for message in request.messages],
-                messages=list(request.messages),
-                request=request,
-            ),
-        )
-        message = self.respond(len(self.requests), request)
-        if message.content:
-            yield TextDelta(str(message.content))
-        for call in message.tool_calls or []:
-            yield ToolCallReady(call)
-        yield UsageReported(message.metrics)
-        yield TurnCompleted(message=message, stop_reason="tool_use" if message.tool_calls else "end")
 
 
 def probe() -> str:
     """Return one large tool result."""
-    return _TOOL_RESULT
+    return TOOL_RESULT
 
 
 class _CancelOnSuccess(RecordingCompactionLifecycle):
@@ -174,35 +101,9 @@ class _CancelOnSuccess(RecordingCompactionLifecycle):
         raise asyncio.CancelledError
 
 
-@dataclass
-class _SummaryCalls:
-    inputs: list[str] = field(default_factory=list)
-    fail: bool = False
-    cancel: bool = False
-
-    async def __call__(
-        self,
-        *,
-        model: object,  # noqa: ARG002
-        summary_input: str,
-        summary_prompt: str,  # noqa: ARG002
-        timeout_seconds: float,  # noqa: ARG002
-        on_usage: Callable[[MessageMetrics], Any] | None = None,
-    ) -> str:
-        self.inputs.append(summary_input)
-        if on_usage is not None:
-            await on_usage(MessageMetrics(input_tokens=7, output_tokens=3))
-        if self.cancel:
-            raise asyncio.CancelledError
-        if self.fail:
-            msg = "summary model unavailable"
-            raise RuntimeError(msg)
-        return f"SUMMARY-{len(self.inputs)}"
-
-
 @pytest.fixture
-def summary_calls(monkeypatch: pytest.MonkeyPatch) -> _SummaryCalls:
-    calls = _SummaryCalls()
+def summary_calls(monkeypatch: pytest.MonkeyPatch) -> SummaryCalls:
+    calls = SummaryCalls()
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", calls)
     monkeypatch.setattr("mindroom.history.compaction.build_model_provider", lambda *_args: summary_model())
     return calls
@@ -240,7 +141,7 @@ class _Agent:
     ``before_request`` hooks run ahead of the compaction hook; ``records`` keeps every run record a run stored.
     """
 
-    model: _ToolLoopModel
+    model: ToolLoopModel
     config: Config
     runtime_paths: RuntimePaths
     tools: list[Callable[..., object] | Function] = field(default_factory=lambda: [probe])
@@ -265,12 +166,12 @@ class _Agent:
         )
 
 
-def _agent(model: _ToolLoopModel, config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> _Agent:  # noqa: ANN401
+def _agent(model: ToolLoopModel, config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> _Agent:  # noqa: ANN401
     return _Agent(model, config, runtime_paths, **kwargs)
 
 
 def _scoped_agent(
-    model: _ToolLoopModel,
+    model: ToolLoopModel,
     config: Config,
     runtime_paths: RuntimePaths,
     storage: ConversationStore,
@@ -307,7 +208,7 @@ async def _run(
     history = (
         scope_history_messages(
             session.runs,
-            scope=_SCOPE,
+            scope=TEST_AGENT_SCOPE,
             num_history_runs=settings.policy.limit if settings.policy.mode == "runs" else None,
             num_history_messages=settings.policy.limit if settings.policy.mode == "messages" else None,
             max_tool_calls_from_history=settings.max_tool_calls_from_history,
@@ -326,7 +227,7 @@ async def _run(
         history_settings=settings,
         store=store,
         session=session if agent.folds_into_scope else None,
-        scope=_SCOPE if agent.folds_into_scope else None,
+        scope=TEST_AGENT_SCOPE if agent.folds_into_scope else None,
         native_compaction=agent.native_compaction,
         deferred_tool_names=frozenset(),
         prompt_id=turn.prompt.id,
@@ -369,34 +270,13 @@ def _before_each_request(prepare: Callable[[LoopState], None]) -> BeforeRequestH
     return before_request
 
 
-def _first_compacted(model: _ToolLoopModel) -> _Request:
+def _first_compacted(model: ToolLoopModel) -> ToolLoopRequest:
     return next(request for request in model.requests if any(is_compaction_summary(m) for m in request.messages))
 
 
-def _ends_with_prompt_then_summary(request: _Request, prompt: str = "Do the task") -> bool:
+def _ends_with_prompt_then_summary(request: ToolLoopRequest, prompt: str = "Do the task") -> bool:
     """Whether a compacted request ends with its prompt and then the summary of the work done on it."""
     return request.contents[-2] == prompt and is_compaction_summary(request.messages[-1])
-
-
-def _seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    seed_session(
-        storage,
-        _session(
-            "session-1",
-            runs=[
-                _completed_run(
-                    "run-1",
-                    messages=[Message(role="user", content="q1"), Message(role="assistant", content="a1")],
-                ),
-                _completed_run(
-                    "run-2",
-                    messages=[Message(role="user", content="q2"), Message(role="assistant", content="a2")],
-                ),
-            ],
-        ),
-    )
-    return storage
 
 
 def _usage_rows(storage: ConversationStore) -> list[tuple[str, dict[str, Any]]]:
@@ -424,7 +304,7 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
         scope_id="test_agent",
         is_team=False,
         model_name="default",
-        model=_ToolLoopModel(tool_rounds=0),
+        model=ToolLoopModel(tool_rounds=0),
         history_settings=config.resolve_entity("test_agent").history_settings,
         store=None,
         session=None,
@@ -441,12 +321,12 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
 @pytest.mark.parametrize("stream", [False, True])
 async def test_run_local_tool_loop_compacts_and_finishes(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     *,
     stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")], stream=stream)
 
@@ -467,12 +347,12 @@ async def test_run_local_tool_loop_compacts_and_finishes(
 @pytest.mark.parametrize("stream", [False, True])
 async def test_repeated_run_local_compaction_keeps_a_string_prompt(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     *,
     stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=12)
+    model = ToolLoopModel(tool_rounds=12)
 
     output = await _run(_agent(model, config, paths), "Do the task", stream=stream)
 
@@ -492,13 +372,13 @@ async def test_repeated_run_local_compaction_keeps_a_string_prompt(
 )
 async def test_mid_turn_compaction_skips_when_disabled_or_unavailable(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     *,
     enabled: bool,
     context_window: int | None,
 ) -> None:
     config, paths = _config(tmp_path, enabled=enabled, context_window=context_window)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_agent(model, config, paths), "Do the task")
 
@@ -510,11 +390,11 @@ async def test_mid_turn_compaction_skips_when_disabled_or_unavailable(
 @pytest.mark.asyncio
 async def test_failed_mid_turn_compaction_does_not_retry_in_the_same_run(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
     summary_calls.fail = True
-    model = _ToolLoopModel(tool_rounds=6)
+    model = ToolLoopModel(tool_rounds=6)
 
     output = await _run(_agent(model, config, paths), "Do the task")
 
@@ -526,11 +406,11 @@ async def test_failed_mid_turn_compaction_does_not_retry_in_the_same_run(
 @pytest.mark.asyncio
 async def test_failed_mid_turn_compaction_does_not_carry_into_the_next_run(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
     summary_calls.fail = True
-    model = _ToolLoopModel(tool_rounds=6)
+    model = ToolLoopModel(tool_rounds=6)
     agent = _agent(model, config, paths)
     await _run(agent, "Do the task")
     summary_calls.fail = False
@@ -545,9 +425,9 @@ async def test_failed_mid_turn_compaction_does_not_carry_into_the_next_run(
 
 
 @pytest.mark.asyncio
-async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = _ToolLoopModel(tool_rounds=2, usage=lambda number: MessageMetrics(input_tokens=999_000 * number))
+    model = ToolLoopModel(tool_rounds=2, usage=lambda number: MessageMetrics(input_tokens=999_000 * number))
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -561,11 +441,11 @@ async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, sum
 @pytest.mark.parametrize("input_tokens", [0, 10])
 async def test_request_sizing_counts_the_turns_thinking(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     input_tokens: int,
 ) -> None:
     config, paths = _config(tmp_path, context_window=20_000)
-    model = _ToolLoopModel(
+    model = ToolLoopModel(
         tool_rounds=2,
         usage=lambda _number: MessageMetrics(input_tokens=input_tokens),
         reasoning="t" * 100_000,
@@ -580,7 +460,7 @@ async def test_request_sizing_counts_the_turns_thinking(
 @pytest.mark.asyncio
 async def test_request_sizing_runs_off_the_event_loop(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,  # noqa: ARG001
+    summary_calls: SummaryCalls,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, paths = _config(tmp_path)
@@ -594,7 +474,7 @@ async def test_request_sizing_runs_off_the_event_loop(
 
     monkeypatch.setattr(mid_turn_compaction, "estimate_request_messages_tokens", recording)
 
-    await _run(_agent(_ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
+    await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
 
     assert sizing_threads
     assert loop_thread not in sizing_threads
@@ -701,9 +581,9 @@ def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_usage_less_server_never_anchors_sizing(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_usage_less_server_never_anchors_sizing(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5, usage=lambda _number: MessageMetrics())
+    model = ToolLoopModel(tool_rounds=5, usage=lambda _number: MessageMetrics())
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -714,10 +594,10 @@ async def test_usage_less_server_never_anchors_sizing(tmp_path: Path, summary_ca
 @pytest.mark.asyncio
 async def test_unseen_thread_context_is_folded_and_transient_context_kept(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=4)
+    model = ToolLoopModel(tool_rounds=4)
     unseen = Message(role="user", content="u" * 6000)
     transient = Message(role="user", content="transient turn context", add_to_agent_memory=False)
     prompt = Message(role="user", content="Do the task")
@@ -734,9 +614,9 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
 
 
 @pytest.mark.asyncio
-async def test_rewritten_request_carries_no_response_chain(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_rewritten_request_carries_no_response_chain(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     def chain(state: LoopState) -> None:
         for message in state.messages:
@@ -754,26 +634,26 @@ async def test_rewritten_request_carries_no_response_chain(tmp_path: Path, summa
 @pytest.mark.parametrize("limit", [0, 1])
 async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_limits(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     limit: int,
 ) -> None:
     config, paths = _config(tmp_path)
     config.agents["test_agent"].max_tool_calls_from_history = limit
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     await _run(_agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
-    assert summary_calls.inputs[0].count(_TOOL_RESULT[:200]) >= 2
+    assert summary_calls.inputs[0].count(TOOL_RESULT[:200]) >= 2
 
 
 @pytest.mark.asyncio
 async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
     agent = _agent(model, config, paths)
 
     with pytest.raises(
@@ -789,10 +669,10 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
 @pytest.mark.asyncio
 async def test_rewritten_request_within_the_model_window_is_sent(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
 
@@ -805,7 +685,7 @@ async def test_rewritten_request_within_the_model_window_is_sent(
 @pytest.mark.parametrize("stream", [False, True])
 async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
@@ -816,7 +696,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
         lambda *_args: summary_model(model_id="claude-haiku-5-5", claude=True),
     )
     config, paths = _config(tmp_path, context_window=20_000, summary_context_window=8_000)
-    model = _ToolLoopModel(tool_rounds=25)
+    model = ToolLoopModel(tool_rounds=25)
     facts = iter(range(100))
 
     def probe() -> str:
@@ -837,7 +717,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
     assert all(fact in summary_inputs for fact in seen)
 
 
-class _PathLoop(_ToolLoopModel):
+class _PathLoop(ToolLoopModel):
     """A tool loop whose calls each name their own file."""
 
     def respond(self, number: int, request: ModelRequest) -> Message:
@@ -850,7 +730,7 @@ class _PathLoop(_ToolLoopModel):
 @pytest.mark.asyncio
 async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without_truncation(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """A batch is kept whole in the request, but its results reach the summarizer across chunks, none cut short."""
     config, paths = _config(tmp_path, context_window=8_000, summary_context_window=6_000)
@@ -884,12 +764,12 @@ async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without
 @pytest.mark.parametrize("scoped", [False, True])
 async def test_a_prompt_larger_than_the_summary_input_keeps_the_first_exchange_in_the_summary(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     *,
     scoped: bool,
 ) -> None:
     config, paths = _config(tmp_path, context_window=60_000, summary_context_window=8_000)
-    model = _ToolLoopModel(tool_rounds=60)
+    model = ToolLoopModel(tool_rounds=60)
     facts = iter(range(100))
 
     def probe() -> str:
@@ -917,10 +797,10 @@ async def test_a_prompt_larger_than_the_summary_input_keeps_the_first_exchange_i
 @pytest.mark.asyncio
 async def test_an_exchange_larger_than_the_summary_input_still_folds(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=20_000, summary_context_window=6_000)
-    model = _ToolLoopModel(tool_rounds=8)
+    model = ToolLoopModel(tool_rounds=8)
     sizes = iter([4_000] * 6 + [72_000] + [4_000] * 10)
 
     def probe() -> str:
@@ -937,10 +817,10 @@ async def test_an_exchange_larger_than_the_summary_input_still_folds(
 @pytest.mark.asyncio
 async def test_request_sizing_counts_thinking_the_response_did_not_show(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=20_000)
-    model = _ToolLoopModel(tool_rounds=2, usage=lambda _number: MessageMetrics(input_tokens=10, output_tokens=30_000))
+    model = ToolLoopModel(tool_rounds=2, usage=lambda _number: MessageMetrics(input_tokens=10, output_tokens=30_000))
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -951,10 +831,10 @@ async def test_request_sizing_counts_thinking_the_response_did_not_show(
 @pytest.mark.asyncio
 async def test_folded_request_usage_stays_in_the_usage_projection(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(
+    model = ToolLoopModel(
         tool_rounds=8,
         usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
     )
@@ -973,8 +853,8 @@ async def test_folded_request_usage_stays_in_the_usage_projection(
 @pytest.mark.usefixtures("summary_calls")
 async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(
         tool_rounds=5,
         usage=lambda number: MessageMetrics(input_tokens=1001 * number, output_tokens=1),
     )
@@ -991,9 +871,9 @@ async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tm
 
 
 @pytest.mark.asyncio
-async def test_queued_notice_survives_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_queued_notice_survives_mid_turn_compaction(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
     notice = Message(role="user", content="A newer message is waiting.", provider_data={_NOTICE_KEY: True})
 
     def add_notice(state: LoopState) -> None:
@@ -1050,9 +930,9 @@ def test_tool_results_after_an_interleaved_receipt_fold_with_their_call() -> Non
 
 
 @pytest.mark.asyncio
-async def test_parallel_tool_batch_is_folded_whole(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_parallel_tool_batch_is_folded_whole(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=3, calls_per_round=2)
+    model = ToolLoopModel(tool_rounds=3, calls_per_round=2)
 
     await _run(_agent(model, config, paths), "Do the task")
 
@@ -1063,9 +943,9 @@ async def test_parallel_tool_batch_is_folded_whole(tmp_path: Path, summary_calls
 
 
 @pytest.mark.asyncio
-async def test_folded_tool_media_is_summarized_not_kept(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_folded_tool_media_is_summarized_not_kept(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
     media = Message(
         role="user",
         content="The tool call above generated the attached media.",
@@ -1087,10 +967,10 @@ async def test_folded_tool_media_is_summarized_not_kept(tmp_path: Path, summary_
 @pytest.mark.asyncio
 async def test_unscoped_first_request_without_foldable_messages_is_sent_as_is(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=0)
+    model = ToolLoopModel(tool_rounds=0)
 
     output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
 
@@ -1100,11 +980,11 @@ async def test_unscoped_first_request_without_foldable_messages_is_sent_as_is(
 
 
 @pytest.mark.asyncio
-async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    await _run(_agent(_ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
+    await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
 
     summaries = _summary_usage(storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
@@ -1114,12 +994,12 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
 @pytest.mark.asyncio
 async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
 
-    await _run(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+    await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
 
     assert len(_summary_usage(storage)) == len(summary_calls.inputs) >= 1
 
@@ -1127,7 +1007,7 @@ async def test_scoped_summary_usage_is_recorded_in_the_scope_storage(
 @pytest.mark.asyncio
 async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
     owner_storage = create_state_storage("owner", tmp_path, session_table="owner_sessions")
@@ -1139,7 +1019,7 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
     token = helper_usage._HELPER_USAGE_OWNER.set(owner)
     try:
         # A team member keeps no storage of its own; the reply's owner records its summary usage.
-        await _run(_agent(_ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
+        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
     finally:
         helper_usage._HELPER_USAGE_OWNER.reset(token)
 
@@ -1149,10 +1029,10 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
 
 
 @pytest.mark.asyncio
-async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path, context_window=12_000)
     # The fourth response reports a request far over the window, so only the fifth request would compact.
-    model = _ToolLoopModel(
+    model = ToolLoopModel(
         tool_rounds=8,
         usage=lambda number: MessageMetrics(input_tokens=1_000_000 if number == 4 else 10, output_tokens=1),
     )
@@ -1173,8 +1053,8 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     stream: bool,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(tool_rounds=5)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
     agent = _scoped_agent(model, config, paths, storage)
 
     output = await _run(agent, "Do the task", stream=stream)
@@ -1187,14 +1067,14 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
     assert _ends_with_prompt_then_summary(compacted)
     assert not {"q1", "a1", "q2", "a2"} & set(compacted.contents)
     # The fold's rows sort after the stored runs they cover, and the run after them.
-    rows = summary_rows_of(storage, _SCOPE.key)
-    assert log_of(storage, _SCOPE.key) == [
+    rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
+    assert log_of(storage, TEST_AGENT_SCOPE.key) == [
         "run:run-1",
         "run:run-2",
         *(f"row:{row.summary}" for row in rows),
         f"run:{output.run_id}",
     ]
-    assert [run_id for run_id, _segment in segments_of(storage, _SCOPE.key)] == [output.run_id] * len(rows)
+    assert [run_id for run_id, _segment in segments_of(storage, TEST_AGENT_SCOPE.key)] == [output.run_id] * len(rows)
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert stored.summary is not None
@@ -1205,14 +1085,14 @@ async def test_long_single_turn_compacts_mid_turn_and_continues(
 @pytest.mark.asyncio
 async def test_request_with_only_the_summary_to_fold_is_sent_as_is(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
     session = _session("session-1")
     seed_session(storage, session)
-    seed_summary(storage, session, _SCOPE, "EARLIER-WORK")
-    model = _ToolLoopModel(tool_rounds=0)
+    seed_summary(storage, session, TEST_AGENT_SCOPE, "EARLIER-WORK")
+    model = ToolLoopModel(tool_rounds=0)
 
     output = await _run(_scoped_agent(model, config, paths, storage), "p" * 16_000)
 
@@ -1224,31 +1104,31 @@ async def test_request_with_only_the_summary_to_fold_is_sent_as_is(
 @pytest.mark.asyncio
 async def test_a_first_turn_compacts_mid_turn_before_its_session_row_exists(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    output = await _run(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+    output = await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
 
     assert summary_calls.inputs
-    rows = summary_rows_of(storage, _SCOPE.key)
+    rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
     assert rows
-    assert log_of(storage, _SCOPE.key) == [*(f"row:{row.summary}" for row in rows), f"run:{output.run_id}"]
-    assert {run_id for run_id, _segment in segments_of(storage, _SCOPE.key)} == {output.run_id}
+    assert log_of(storage, TEST_AGENT_SCOPE.key) == [*(f"row:{row.summary}" for row in rows), f"run:{output.run_id}"]
+    assert {run_id for run_id, _segment in segments_of(storage, TEST_AGENT_SCOPE.key)} == {output.run_id}
 
 
 @pytest.mark.asyncio
-async def test_a_second_fold_of_the_turn_covers_no_run_twice(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_a_second_fold_of_the_turn_covers_no_run_twice(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
 
-    await _run(_scoped_agent(_ToolLoopModel(tool_rounds=12), config, paths, storage), "Do the task")
+    await _run(_scoped_agent(ToolLoopModel(tool_rounds=12), config, paths, storage), "Do the task")
 
-    rows = summary_rows_of(storage, _SCOPE.key)
+    rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
     assert len(rows) >= 2
     # Every later fold sorts with the first, after the stored runs, and covers none of them again.
-    assert log_of(storage, _SCOPE.key)[: 2 + len(rows)] == [
+    assert log_of(storage, TEST_AGENT_SCOPE.key)[: 2 + len(rows)] == [
         "run:run-1",
         "run:run-2",
         *(f"row:{row.summary}" for row in rows),
@@ -1260,11 +1140,11 @@ async def test_a_second_fold_of_the_turn_covers_no_run_twice(tmp_path: Path, sum
 @pytest.mark.asyncio
 async def test_the_turns_metadata_reaches_the_summary_once(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage)
+    storage = seeded_storage(config, paths)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage)
 
     await _run(agent, "Do the task", metadata={"matrix_seen_event_ids": ["$x"]})
 
@@ -1277,7 +1157,7 @@ async def test_the_turns_metadata_reaches_the_summary_once(
 @pytest.mark.parametrize("earlier_summary", [None, "OLD-SUMMARY"])
 async def test_first_request_over_the_limit_from_tools_compacts_history_before_dropping_it(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     earlier_summary: str | None,
 ) -> None:
     config, paths = _config(tmp_path)
@@ -1295,8 +1175,8 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     session = _session("session-1", runs=history)
     seed_session(storage, session)
     if earlier_summary is not None:
-        seed_summary(storage, session, _SCOPE, earlier_summary)
-    model = _ToolLoopModel(tool_rounds=0)
+        seed_summary(storage, session, TEST_AGENT_SCOPE, earlier_summary)
+    model = ToolLoopModel(tool_rounds=0)
     # Tool definitions alone push the first request, which has no exchanges of its own yet, over the limit.
     lookup = Function(name="lookup", description="d" * 10_000, entrypoint=lambda: "ok")
     agent = _scoped_agent(model, config, paths, storage, tools=[lookup])
@@ -1317,11 +1197,11 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
 @pytest.mark.asyncio
 async def test_run_local_compaction_summarizes_replayed_history_it_folds(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(tool_rounds=5)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
     # A request that replays history but cannot update its stored session compacts run-locally.
     agent = _scoped_agent(model, config, paths, storage, folds_into_scope=False)
 
@@ -1336,15 +1216,15 @@ async def test_run_local_compaction_summarizes_replayed_history_it_folds(
 @pytest.mark.asyncio
 async def test_a_replayed_run_local_fold_leaves_the_scope_summary_first(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     """Only a scoped fold moves the scope's summary after its prompt; a stored run-local fold keeps its own in place."""
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
     session = _session("session-1")
     seed_session(storage, session)
-    seed_summary(storage, session, _SCOPE, "EARLIER-WORK")
-    model = _ToolLoopModel(tool_rounds=5)
+    seed_summary(storage, session, TEST_AGENT_SCOPE, "EARLIER-WORK")
+    model = ToolLoopModel(tool_rounds=5)
     # A request that replays history but cannot update its stored session compacts run-locally.
     await _run(_scoped_agent(model, config, paths, storage, folds_into_scope=False), "Do the task")
     assert summary_calls.inputs
@@ -1360,10 +1240,10 @@ async def test_a_replayed_run_local_fold_leaves_the_scope_summary_first(
 
 
 @pytest.mark.asyncio
-async def test_next_turn_reuses_the_post_compaction_prefix(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_next_turn_reuses_the_post_compaction_prefix(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(tool_rounds=5)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
     agent = _scoped_agent(model, config, paths, storage)
     await _run(agent, "Do the task")
     last_request = model.requests[-1]
@@ -1384,7 +1264,7 @@ async def test_next_turn_reuses_the_post_compaction_prefix(tmp_path: Path, summa
 @pytest.mark.asyncio
 async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, paths = _config(tmp_path, summary_context_window=6_000)
@@ -1399,7 +1279,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
         return await summary_calls(**kwargs)
 
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_scoped_agent(model, config, paths, storage), "Do the task")
 
@@ -1407,7 +1287,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
     assert len(summary_calls.inputs) == 2
     # The second chunk failed, so nothing was written and the request kept every exchange unchanged.
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
-    assert summary_rows_of(storage, _SCOPE.key) == []
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
     assert stored.summary is None
@@ -1417,7 +1297,7 @@ async def test_failure_in_a_later_chunk_of_the_turn_commits_nothing(
 @pytest.mark.parametrize("stop", [RuntimeError, asyncio.CancelledError])
 async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
     monkeypatch: pytest.MonkeyPatch,
     stop: type[BaseException],
 ) -> None:
@@ -1431,7 +1311,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     async def counted_compaction(**kwargs: Any) -> object:  # noqa: ANN401
         attempts.append(0)
         if len(attempts) == 2:
-            rows = summary_rows_of(storage, _SCOPE.key)
+            rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
             first_summary.append(rows[-1].summary if rows else None)
         return await original_compact(**kwargs)
 
@@ -1445,7 +1325,7 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     monkeypatch.setattr(mid_turn_compaction, "compact_scope_mid_turn", counted_compaction)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", fail_second_chunk_of_second_attempt)
 
-    agent = _scoped_agent(_ToolLoopModel(tool_rounds=14), config, paths, storage)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=14), config, paths, storage)
     if stop is asyncio.CancelledError:
         with pytest.raises(asyncio.CancelledError):
             await _run(agent, "Do the task")
@@ -1455,34 +1335,34 @@ async def test_rolling_back_a_partial_compaction_keeps_an_earlier_one(
     assert len(attempts) >= 2
     assert attempts[1] == 2
     assert first_summary[0] is not None
-    assert [row.summary for row in summary_rows_of(storage, _SCOPE.key)] == [first_summary[0]]
+    assert [row.summary for row in summary_rows_of(storage, TEST_AGENT_SCOPE.key)] == [first_summary[0]]
 
 
 @pytest.mark.asyncio
-async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     stored = storage.load_session("session-1", "agent")
     assert stored is not None
-    set_force_compaction_state(stored, _SCOPE, HistoryScopeState(), force=True)
+    set_force_compaction_state(stored, TEST_AGENT_SCOPE, HistoryScopeState(), force=True)
     storage.save_session_fields(stored, "metadata")
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     await _run(_scoped_agent(model, config, paths, storage), "Do the task")
 
     assert summary_calls.inputs
     after = storage.load_session("session-1", "agent")
     assert after is not None
-    assert read_scope_state(after, _SCOPE).force_compact_before_next_run is True
+    assert read_scope_state(after, TEST_AGENT_SCOPE).force_compact_before_next_run is True
 
 
 @pytest.mark.asyncio
-async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
 
-    await _run(_scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle), "Do the task")
+    await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle), "Do the task")
 
     assert summary_calls.inputs
     kinds = [type(event).__name__ for event in lifecycle.events]
@@ -1497,7 +1377,7 @@ async def test_mid_turn_compaction_posts_notices(tmp_path: Path, summary_calls: 
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     observed: list[CompactionHookContext] = []
 
     @hook(EVENT_COMPACTION_BEFORE)
@@ -1513,7 +1393,7 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
 
     with tool_runtime_context(hook_context):
         await _run(
-            _scoped_agent(_ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
+            _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
             "Do the task",
         )
 
@@ -1529,19 +1409,19 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_cancellation_during_the_summary_call_writes_nothing_and_propagates(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
-    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
     summary_calls.cancel = True
 
     with pytest.raises(asyncio.CancelledError):
         await _run(agent, "Do the task")
 
     assert summary_calls.inputs
-    assert summary_rows_of(storage, _SCOPE.key) == []
+    assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
     assert [type(event).__name__ for event in lifecycle.events] == [
         "CompactionLifecycleStart",
         "CompactionLifecycleFailure",
@@ -1552,7 +1432,7 @@ async def test_cancellation_during_the_summary_call_writes_nothing_and_propagate
 @pytest.mark.usefixtures("summary_calls")
 async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_path: Path) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     live_lists: list[list[Message]] = []
     run_ids: list[str] = []
 
@@ -1561,7 +1441,7 @@ async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_
         run_ids.append(state.record.run_id)
 
     agent = _scoped_agent(
-        _ToolLoopModel(tool_rounds=5),
+        ToolLoopModel(tool_rounds=5),
         config,
         paths,
         storage,
@@ -1577,7 +1457,7 @@ async def test_cancellation_after_the_commit_keeps_the_fold_and_its_effects(tmp_
     assert any(is_compaction_summary(message) for message in request)
     assert not any(message.role == "tool" for message in request)
     # The fold stays: a restarted attempt replays its summary instead of the runs it covered.
-    assert [run_id for run_id, _segment in segments_of(storage, _SCOPE.key)] == [run_ids[-1]]
+    assert [run_id for run_id, _segment in segments_of(storage, TEST_AGENT_SCOPE.key)] == [run_ids[-1]]
     assert folded_run_ids(storage) == ["run-1", "run-2"]
 
 
@@ -1599,9 +1479,9 @@ class _HeldSuccess(RecordingCompactionLifecycle):
 async def test_stopping_the_turn_after_the_commit_still_reports_success(tmp_path: Path) -> None:
     """A stopped turn finishes reporting a stored fold, so its notice never claims the compaction failed."""
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     lifecycle = _HeldSuccess()
-    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
 
     task = asyncio.create_task(_run(agent, "Do the task"))
     await asyncio.wait_for(lifecycle.entered.wait(), timeout=5)
@@ -1622,9 +1502,9 @@ async def test_stopping_the_turn_while_the_fold_is_stored_still_reports_success(
 ) -> None:
     """A stop that lands while the row is being written still lets the stored fold apply and report success."""
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
+    storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
-    agent = _scoped_agent(_ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, lifecycle=lifecycle)
     loop = asyncio.get_running_loop()
     appending = asyncio.Event()
     release = threading.Event()
@@ -1645,7 +1525,7 @@ async def test_stopping_the_turn_while_the_fold_is_stored_still_reports_success(
         await task
 
     assert [type(event) for event in lifecycle.events] == [CompactionLifecycleStart, CompactionOutcome]
-    assert len(segments_of(storage, _SCOPE.key)) == 1
+    assert len(segments_of(storage, TEST_AGENT_SCOPE.key)) == 1
 
 
 @pytest.mark.asyncio
@@ -1656,8 +1536,8 @@ async def test_a_fold_that_loses_its_append_reports_the_change_and_keeps_the_req
 ) -> None:
     """A fold another writer outran stores nothing, leaves the request whole, and says the conversation changed."""
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(tool_rounds=5)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
     lifecycle = RecordingCompactionLifecycle()
     monkeypatch.setattr(compaction, "append_fold", lambda *_args, **_kwargs: False)
 
@@ -1667,7 +1547,7 @@ async def test_a_fold_that_loses_its_append_reports_the_change_and_keeps_the_req
     assert isinstance(lifecycle.events[1], CompactionLifecycleFailure)
     assert lifecycle.events[1].failure_reason == "The conversation changed during compaction."
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
-    assert segments_of(storage, _SCOPE.key) == []
+    assert segments_of(storage, TEST_AGENT_SCOPE.key) == []
 
 
 def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
@@ -1704,10 +1584,10 @@ def _native(threshold: int) -> NativeCompactionReplay:
 @pytest.mark.asyncio
 async def test_native_request_under_the_limit_never_text_compacts(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=1_000_000)
-    model = _ToolLoopModel(tool_rounds=4, usage=lambda number: MessageMetrics(input_tokens=999_900 * number))
+    model = ToolLoopModel(tool_rounds=4, usage=lambda number: MessageMetrics(input_tokens=999_900 * number))
 
     await _run(_agent(model, config, paths, native_compaction=_native(500_000)), "Do the task")
 
@@ -1718,10 +1598,10 @@ async def test_native_request_under_the_limit_never_text_compacts(
 @pytest.mark.asyncio
 async def test_oversized_native_request_turns_native_off_and_compacts_as_text(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     await _run(_agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
 
@@ -1735,18 +1615,18 @@ async def test_oversized_native_request_turns_native_off_and_compacts_as_text(
 @pytest.mark.asyncio
 async def test_oversized_native_request_in_a_stored_conversation_covers_the_turn(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path)
-    storage = _seeded_storage(config, paths)
-    model = _ToolLoopModel(tool_rounds=5)
+    storage = seeded_storage(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
 
     output = await _run(_scoped_agent(model, config, paths, storage, native_compaction=_native(2000)), "Do the task")
 
     assert summary_calls.inputs
     assert model.requests[-1].request.native_compaction is None
-    rows = summary_rows_of(storage, _SCOPE.key)
-    assert log_of(storage, _SCOPE.key) == [
+    rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
+    assert log_of(storage, TEST_AGENT_SCOPE.key) == [
         "run:run-1",
         "run:run-2",
         *(f"row:{row.summary}" for row in rows),
@@ -1759,10 +1639,10 @@ async def test_oversized_native_request_in_a_stored_conversation_covers_the_turn
 
 
 @pytest.mark.asyncio
-async def test_failed_text_fallback_keeps_native_compaction(tmp_path: Path, summary_calls: _SummaryCalls) -> None:
+async def test_failed_text_fallback_keeps_native_compaction(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     summary_calls.fail = True
-    model = _ToolLoopModel(tool_rounds=5)
+    model = ToolLoopModel(tool_rounds=5)
 
     await _run(_agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
 
@@ -1770,7 +1650,7 @@ async def test_failed_text_fallback_keeps_native_compaction(tmp_path: Path, summ
     assert model.requests[-1].request.native_compaction == _native(2000)
 
 
-class _CheckpointingLoop(_ToolLoopModel):
+class _CheckpointingLoop(ToolLoopModel):
     """A tool loop on a native route whose provider compacts on its third request."""
 
     def respond(self, number: int, request: ModelRequest) -> Message:
@@ -1784,7 +1664,7 @@ class _CheckpointingLoop(_ToolLoopModel):
 @pytest.mark.asyncio
 async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compaction(
     tmp_path: Path,
-    summary_calls: _SummaryCalls,
+    summary_calls: SummaryCalls,
 ) -> None:
     config, paths = _config(tmp_path, context_window=40_000)
     model = _CheckpointingLoop(
