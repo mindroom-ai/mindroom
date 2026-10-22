@@ -15,17 +15,20 @@ from agno.tools.function import Function
 import mindroom.tool_system.tool_hooks  # noqa: F401
 
 LITERAL_WORDS = ("none", "None", "null", "NULL", "true", "True", "false", " FALSE ")
+BOOLEAN_WORDS = ("true", "True", "false", " FALSE ")
+NULL_WORDS = ("none", "None", "null", "NULL", " none ")
 
 
 def note(
     text: str,
     mode: Literal["none", "all"] = "all",
     title: str | None = None,
+    scope: Literal["none", "all"] | None = None,
     pinned: bool = False,
     count: int | None = None,
 ) -> str:
     """Record a note."""
-    return f"{title or mode}: {text} ({pinned}, {count})"
+    return f"{title or mode}: {text} ({scope}, {pinned}, {count})"
 
 
 def _model() -> OpenAIChat:
@@ -45,15 +48,51 @@ def _parsed(function: Function, arguments: str) -> dict[str, Any] | None:
 
 
 @pytest.mark.parametrize("word", LITERAL_WORDS)
-def test_string_parameters_receive_literal_words_unchanged(word: str) -> None:
-    """Free text, a string choice, and an optional string each receive the word the model sent."""
-    arguments = {"text": word, "mode": "none", "title": word}
-
-    assert _parsed(Function.from_callable(note), json.dumps(arguments)) == arguments
+def test_a_required_string_receives_literal_words_unchanged(word: str) -> None:
+    """A string parameter that cannot be left out receives the word the model sent."""
+    assert _parsed(Function.from_callable(note), json.dumps({"text": word})) == {"text": word}
 
 
-def test_a_json_null_still_reaches_a_nullable_string_parameter_as_none() -> None:
-    """Only the model's own null clears an optional string."""
+@pytest.mark.parametrize("parameter", ["mode", "scope"])
+def test_a_choice_receives_its_exact_value_unchanged(parameter: str) -> None:
+    """A choice named none reaches the tool, whether or not the parameter is optional."""
+    assert _parsed(Function.from_callable(note), json.dumps({"text": "hi", parameter: "none"})) == {
+        "text": "hi",
+        parameter: "none",
+    }
+
+
+@pytest.mark.parametrize("word", ["None", "null", " NONE "])
+def test_an_optional_choice_reads_other_null_words_as_left_out(word: str) -> None:
+    """Only the exact choice is kept; other null words leave an optional choice out, as before."""
+    assert _parsed(Function.from_callable(note), json.dumps({"text": "hi", "scope": word})) == {
+        "text": "hi",
+        "scope": None,
+    }
+
+
+@pytest.mark.parametrize("word", BOOLEAN_WORDS)
+def test_an_optional_string_receives_boolean_words_unchanged(word: str) -> None:
+    """An optional string's title of true or false reaches the tool as text."""
+    assert _parsed(Function.from_callable(note), json.dumps({"text": "hi", "title": word})) == {
+        "text": "hi",
+        "title": word,
+    }
+
+
+@pytest.mark.parametrize("word", NULL_WORDS)
+def test_an_optional_string_reads_null_words_as_left_out(word: str) -> None:
+    """Models send "None" or "null" to leave an optional string, such as a page token, out."""
+
+    def list_page(page_token: str | None = None) -> str:
+        """List one page."""
+        return page_token or "first"
+
+    assert _parsed(Function.from_callable(list_page), json.dumps({"page_token": word})) == {"page_token": None}
+
+
+def test_a_json_null_still_reaches_an_optional_string_as_none() -> None:
+    """The model's own null leaves an optional string out."""
     assert _parsed(Function.from_callable(note), json.dumps({"text": "hi", "title": None})) == {
         "text": "hi",
         "title": None,
@@ -73,16 +112,13 @@ def test_other_parameters_keep_agnos_conversion_of_literal_words() -> None:
 
 
 def test_strict_schemas_keep_string_arguments() -> None:
-    """Strict schemas, which make optional parameters nullable unions, keep string arguments."""
+    """Strict schemas, which make every parameter required, keep string arguments by the same rule."""
     function = Function.from_callable(note, strict=True)
     function.process_entrypoint(strict=True)
+    arguments = {"text": "null", "mode": "none", "title": "true", "scope": "none", "pinned": "true", "count": "null"}
 
-    assert _parsed(function, json.dumps({"text": "null", "mode": "none", "title": "None", "pinned": "true"})) == {
-        "text": "null",
-        "mode": "none",
-        "title": "None",
-        "pinned": True,
-    }
+    assert _parsed(function, json.dumps(arguments)) == {**arguments, "pinned": True, "count": None}
+    assert _parsed(function, json.dumps({"text": "hi", "title": "None"})) == {"text": "hi", "title": None}
 
 
 def test_python_literal_arguments_keep_string_arguments() -> None:
@@ -94,7 +130,7 @@ def test_python_literal_arguments_keep_string_arguments() -> None:
 
 
 def test_hand_written_schemas_keep_string_arguments() -> None:
-    """Schemas written by hand, as MCP servers send them, keep string arguments wherever they admit a string."""
+    """Schemas written by hand, as MCP servers send them, follow the same rule."""
     function = Function(
         name="lookup",
         parameters={
@@ -102,10 +138,12 @@ def test_hand_written_schemas_keep_string_arguments() -> None:
             "properties": {
                 "kind": {"$ref": "#/$defs/Kind"},
                 "label": {"type": ["string", "null"]},
-                "choice": {"enum": ["none", "some"]},
+                "cursor": {"type": ["string", "null"]},
+                "choice": {"enum": ["none", "some", None]},
                 "either": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
                 "flag": {"type": "boolean"},
                 "untyped": {},
+                "malformed": {"type": {"not": "a type"}, "enum": 5, "anyOf": "string"},
             },
             "$defs": {"Kind": {"type": "string", "enum": ["null", "all"]}},
         },
@@ -115,27 +153,35 @@ def test_hand_written_schemas_keep_string_arguments() -> None:
     arguments = {
         "kind": "null",
         "label": "false",
+        "cursor": "null",
         "choice": "none",
         "either": "true",
         "flag": "true",
         "untyped": "None",
+        "malformed": "None",
     }
 
     assert _parsed(function, json.dumps(arguments)) == {
         "kind": "null",
         "label": "false",
+        "cursor": None,
         "choice": "none",
         "either": "true",
         "flag": True,
         "untyped": None,
+        "malformed": None,
     }
 
 
 def test_a_resumed_call_keeps_string_arguments() -> None:
     """Agno parses a paused call's stored arguments again when an approval resumes it."""
     function = Function.from_callable(note)
-    paused = ToolExecution(tool_call_id="call-1", tool_name="note", tool_args={"text": "None", "pinned": "true"})
+    paused = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="note",
+        tool_args={"text": "None", "scope": "none", "title": "null", "pinned": "true"},
+    )
 
     call = _model().get_function_call_to_run_from_tool_execution(paused, {"note": function})
 
-    assert call.arguments == {"text": "None", "pinned": True}
+    assert call.arguments == {"text": "None", "scope": "none", "title": None, "pinned": True}

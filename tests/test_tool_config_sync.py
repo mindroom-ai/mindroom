@@ -53,8 +53,10 @@ IGNORED_AGNO_PARAMS = {
     # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
     "newspaper": {"include_summary"},
 }
-# Words Agno's argument parsing turns into None or a boolean unless the parameter takes a string.
-LITERAL_WORDS = ("None", "null", "true", "False", " NULL ")
+# Words Agno's argument parsing turns into None or a boolean; a string parameter keeps them, except that an optional
+# one still reads the null words as left out.
+BOOLEAN_WORDS = ("true", "False")
+NULL_WORDS = ("None", "null", " NULL ")
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
     "docker": {"include_tools"},
@@ -364,12 +366,14 @@ def test_registered_tool_contract(tool_name: str) -> None:
         verify_tool_configfields(tool_name, tool_class, init_signature)
 
 
-def _string_choices(schema: dict[str, Any]) -> list[str] | None:
-    """Return a string parameter's choices, an empty list for free text, or None when it takes no string."""
-    strings = [option for option in (schema, *schema.get("anyOf", ())) if option.get("type") == "string"]
+def _string_parameter(schema: dict[str, Any]) -> tuple[list[str], bool] | None:
+    """Return a string parameter's choices (empty for free text) and whether it is optional, or None for no string."""
+    options = (schema, *schema.get("anyOf", ()))
+    strings = [option for option in options if option.get("type") == "string"]
     if not strings:
         return None
-    return [value for option in strings for value in option.get("enum", ())]
+    choices = [value for option in strings for value in option.get("enum", ())]
+    return choices, any(option.get("type") == "null" for option in options)
 
 
 def _parsed_arguments(function: Function, arguments: dict[str, str]) -> dict[str, Any] | None:
@@ -395,23 +399,25 @@ def _parsed_arguments(function: Function, arguments: dict[str, str]) -> dict[str
 
 
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
-    """Verify every string parameter receives each of its choices, and free text the literal words, unchanged."""
+    """Verify every string parameter receives each of its choices, and free text the literal words, as intended."""
     for function_name in TOOL_METADATA[tool_name].function_names:
         method = getattr(tool_class, function_name, None)
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
         function = Function.from_callable(method)
-        choices = {
-            parameter: string_choices
-            for parameter, schema in function.parameters["properties"].items()
-            if (string_choices := _string_choices(schema)) is not None
+        parameters = {
+            name: string_parameter
+            for name, schema in function.parameters["properties"].items()
+            if (string_parameter := _string_parameter(schema)) is not None
         }
-        free_text = [parameter for parameter, values in choices.items() if not values]
-        calls = [dict.fromkeys(free_text, word) for word in LITERAL_WORDS] if free_text else []
-        calls += [{parameter: value} for parameter, values in choices.items() for value in values]
-        for arguments in calls:
-            assert _parsed_arguments(function, arguments) == arguments, (tool_name, function_name)
+        free_text = {name: optional for name, (choices, optional) in parameters.items() if not choices}
+        for word in (*BOOLEAN_WORDS, *NULL_WORDS) if free_text else ():
+            expected = {name: None if optional and word in NULL_WORDS else word for name, optional in free_text.items()}
+            assert _parsed_arguments(function, dict.fromkeys(free_text, word)) == expected, (tool_name, function_name)
+        for name, (choices, _optional) in parameters.items():
+            for choice in choices:
+                assert _parsed_arguments(function, {name: choice}) == {name: choice}, (tool_name, function_name)
 
 
 def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:
