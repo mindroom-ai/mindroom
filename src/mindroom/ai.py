@@ -56,12 +56,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -88,12 +83,14 @@ from mindroom.response_turn import (
     TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
+    build_llm_request_log_context,
     build_matrix_run_metadata,
     pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     skip_unapproved_attempt,
     stream_response_turn,
+    stream_with_llm_request_log_context,
 )
 from mindroom.session_storage.store import persist_to
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
@@ -265,6 +262,11 @@ class _TerminalRecord:
     """The terminal record a run handed to its persist callback, however the run ended."""
 
     record: AnyRunRecord | None = None
+
+
+def _without_terminal_record(run_id: str) -> RuntimeError:
+    """Return the error for an agent run that finished without handing over the record it ended with."""
+    return RuntimeError(f"agent run {run_id!r} ended without its terminal record")
 
 
 @dataclass(frozen=True)
@@ -917,8 +919,7 @@ async def _run_cached_agent_attempt(
             if isinstance(event, RunFinished):
                 record = event.record
     if record is None:
-        msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-        raise RuntimeError(msg)
+        raise _without_terminal_record(attempt.run_id)
     return record
 
 
@@ -1779,8 +1780,7 @@ async def ai_response(  # noqa: C901
                 metadata_content=_blocking_metadata(prepared_run, record, RunStatus.error, run_id=attempt.run_id),
             )
         if record is None:
-            msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-            raise RuntimeError(msg)
+            raise _without_terminal_record(attempt.run_id)
         if record.status is RunStatus.completed and (
             skipped := skip_unapproved_attempt(
                 ctx.participation,
@@ -2257,8 +2257,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 )
             return
         if record is None or not state.finished:
-            msg = f"agent run {attempt.run_id!r} ended without its terminal record"
-            raise RuntimeError(msg)
+            raise _without_terminal_record(attempt.run_id)
 
         if skipped := skip_unapproved_attempt(
             ctx.participation,

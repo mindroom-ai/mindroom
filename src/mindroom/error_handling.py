@@ -32,7 +32,7 @@ _TRANSIENT_PROVIDER_STATUS_CODES = frozenset({200, 408, 409, 429, 500, 502, 503,
 
 # Errors raised before any provider request when a model has no API key at all.
 _MISSING_PROVIDER_KEY_PATTERN = re.compile(
-    r"_api_key (?:or \w+ )?not set"  # OpenAI-family routes' missing_api_key_error, e.g. "OPENROUTER_API_KEY not set."
+    r"_api_key not set"  # OpenAI-family routes' missing_api_key_error, e.g. "OPENROUTER_API_KEY not set."
     r"|the api_key client option must be set"  # OpenAI SDK
     r"|missing credentials\. please pass an `api_key`"  # Newer OpenAI SDK
     r"|could not resolve authentication method",  # Anthropic SDK

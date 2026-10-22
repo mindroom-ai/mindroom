@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import canonical_provider
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
@@ -136,16 +139,21 @@ def _warn_retired_field(field: str, reason: str) -> None:
     logger.warning("Ignoring a retired config field; remove it from the config", field=field, reason=reason)
 
 
+def _drop_retired[T](value: dict[str, T], reasons: Mapping[str, str], prefix: str = "") -> dict[str, T]:
+    """Return ``value`` without the keys ``reasons`` retires, warning once per field it names under ``prefix``."""
+    retired = reasons.keys() & value.keys()
+    if not retired:
+        return value
+    for field in sorted(retired):
+        _warn_retired_field(f"{prefix}{field}", reasons[field])
+    return {key: item for key, item in value.items() if key not in retired}
+
+
 def drop_retired_fields(value: object) -> object:
     """Drop retired agent and default fields that older configs still set, warning once per field."""
     if not isinstance(value, dict):
         return value
-    retired = _RETIRED_FIELD_REASONS.keys() & value.keys()
-    if not retired:
-        return value
-    for field in sorted(retired):
-        _warn_retired_field(field, _RETIRED_FIELD_REASONS[field])
-    return {key: item for key, item in value.items() if key not in retired}
+    return _drop_retired(cast("dict[str, object]", value), _RETIRED_FIELD_REASONS)
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,7 @@ _OPENAI_CHAT_PROVIDERS = frozenset(
     {"openai", "azure", "openrouter", "deepseek", "llama_cpp", "zai", "kimi", "kimi_code"},
 )
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "vertexai_claude", "bedrock_claude"})
+_GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 
 # LEGACY_COMPAT: Agno model fields in models.<name>.extra_kwargs.
 # Legacy format: extra_kwargs went to the provider's Agno model class as keyword arguments, so every Agno model field
@@ -202,9 +211,14 @@ _RETIRED_MODEL_SETTINGS = (
         reason="MindRoom's provider adapters replaced Agno's model classes and do not read Agno's base model settings",
     ),
     _RetiredModelSettings(
-        fields=frozenset({"audio", "modalities", "collect_metrics_on_completion"}),
+        fields=frozenset({"audio", "modalities"}),
         providers=_OPENAI_CHAT_PROVIDERS,
-        reason="Audio replies and Agno's metrics switch were retired with Agno's OpenAI Chat model",
+        reason="Audio replies were retired with Agno's OpenAI Chat model",
+    ),
+    _RetiredModelSettings(
+        fields=frozenset({"collect_metrics_on_completion"}),
+        providers=_OPENAI_CHAT_PROVIDERS | _GEMINI_PROVIDERS,
+        reason="Agno's metrics switch was retired with Agno's OpenAI Chat and Gemini models",
     ),
     _RetiredModelSettings(
         fields=frozenset({"background", "background_poll_interval", "background_max_wait", "vector_store_name"}),
@@ -246,12 +260,11 @@ _RETIRED_MODEL_SETTINGS = (
                 "file_search_metadata_filter",
                 "request_params",
                 "function_declarations",
-                "collect_metrics_on_completion",
             },
         ),
-        providers=frozenset({"google", "gemini"}),
-        reason="Gemini built-in tools other than search, request overrides, function declarations, and the metrics "
-        "switch were retired with Agno's Gemini model",
+        providers=_GEMINI_PROVIDERS,
+        reason="Gemini built-in tools other than search, request overrides, and function declarations were retired "
+        "with Agno's Gemini model",
     ),
 )
 
@@ -263,13 +276,9 @@ def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> 
         field: retired.reason
         for retired in _RETIRED_MODEL_SETTINGS
         if retired.providers is None or canonical in retired.providers
-        for field in retired.fields & extra_kwargs.keys()
+        for field in retired.fields
     }
-    if not reasons:
-        return extra_kwargs
-    for field in sorted(reasons):
-        _warn_retired_field(f"extra_kwargs.{field}", reasons[field])
-    return {key: item for key, item in extra_kwargs.items() if key not in reasons}
+    return _drop_retired(extra_kwargs, reasons, "extra_kwargs.")
 
 
 # LEGACY_COMPAT: Retired website tool knowledge option.
@@ -285,10 +294,4 @@ _RETIRED_TOOL_OVERRIDE_REASONS = {
 
 def drop_retired_tool_overrides(tool_name: str, overrides: dict[str, object]) -> dict[str, object]:
     """Drop retired overrides that an older entry for ``tool_name`` still sets, warning once per field."""
-    reasons = _RETIRED_TOOL_OVERRIDE_REASONS.get(tool_name, {})
-    retired = reasons.keys() & overrides.keys()
-    if not retired:
-        return overrides
-    for field in sorted(retired):
-        _warn_retired_field(f"tools.{tool_name}.{field}", reasons[field])
-    return {key: item for key, item in overrides.items() if key not in retired}
+    return _drop_retired(overrides, _RETIRED_TOOL_OVERRIDE_REASONS.get(tool_name, {}), f"tools.{tool_name}.")

@@ -64,6 +64,13 @@ class TeamRunRecords:
             return True
         return False
 
+    def terminal(self) -> TeamRunRecord:
+        """Return the team record the run ended with, which a run that finished without raising always handed over."""
+        if self.record is None:
+            msg = "The team run ended without its terminal record"
+            raise RuntimeError(msg)
+        return self.record
+
 
 def scope_storage(scope_context: ScopeSessionContext, *, session_id: str) -> TeamStorage:
     """Return where a team run in ``scope_context`` is stored, giving a scope without a stored session its first one."""
@@ -108,7 +115,7 @@ def team_history_settings(config: Config, team_name: str | None) -> ResolvedHist
 def register_team_notice_storage(
     *,
     scope_context: ScopeSessionContext | None,
-    session_id: str | None,
+    session_id: str,
     entity_name: str,
 ) -> None:
     """Register team storage for response-boundary notice finalization."""

@@ -7,12 +7,8 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    build_llm_request_log_context,
-    current_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, current_llm_request_log_context
+from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 
 
 def test_debug_config_parses() -> None:

@@ -213,7 +213,7 @@ async def test_result_media_comes_back_owned() -> None:
 
 @pytest.mark.asyncio
 async def test_without_media_the_media_parameters_receive_none() -> None:
-    """Agno injects None for a media parameter when the run has no such media."""
+    """A declared media parameter receives None, as Agno passed it for a run without media."""
     received: list[object] = ["unset"]
 
     def tool(videos: list[object] | None, audios: list[object] | None) -> str:

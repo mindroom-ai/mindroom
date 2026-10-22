@@ -83,7 +83,7 @@ async def test_team_approval_closes_scope_after_consumption_finalization_error(t
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):
         await continue_paused_team_run(
-            member_names=(),
+            member_names=("general",),
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=paths,

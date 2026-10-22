@@ -335,15 +335,13 @@ async def test_gemini_decision_requests_fail_on_tools_they_cannot_inspect(
 async def test_gemini_decision_requests_fail_on_client_body_overrides(tmp_path: Path) -> None:
     """Body overrides authored on the SDK client can carry native tools too, so a decision refuses to send them."""
     sent: list[httpx.Request] = []
-    http_options = {
-        "extra_body": {"tools": [{"googleSearch": {}}]},
-        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(sent.append)),
-    }
-    config = _config(GEMINI, client_params={"http_options": http_options})
-    adapter = gemini_adapter.build_provider(ModelConfig(**config), runtime_paths_for(tmp_path))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(sent.append)) as client:
+        http_options = {"extra_body": {"tools": [{"googleSearch": {}}]}, "httpx_async_client": client}
+        config = _config(GEMINI, client_params={"http_options": http_options})
+        adapter = gemini_adapter.build_provider(ModelConfig(**config), runtime_paths_for(tmp_path))
 
-    with without_provider_tools(), pytest.raises(ValueError, match="body overrides"):
-        [event async for event in adapter.stream(_request(tools=[WEATHER], tool_choice="none"))]
+        with without_provider_tools(), pytest.raises(ValueError, match="body overrides"):
+            [event async for event in adapter.stream(_request(tools=[WEATHER], tool_choice="none"))]
 
     assert sent == []
 
@@ -929,21 +927,22 @@ async def test_gemini_files_api_failures_are_provider_errors(
     audio_path = tmp_path / "voice.ogg"
     audio_path.write_bytes(b"OggS-voice")
     message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
-    failing_url = {
-        "lookup": f"{_GEMINI_API}v1beta/{_upload_name('audio/ogg', b'OggS-voice')}",
-        "upload": f"{_GEMINI_API}upload/v1beta/files",
-    }[failing]
+    files_api = {
+        "lookup": ("GET", f"{_GEMINI_API}v1beta/{_upload_name('audio/ogg', b'OggS-voice')}"),
+        "upload": ("POST", f"{_GEMINI_API}upload/v1beta/files"),
+    }
     error = {"code": status, "message": "The Files API request failed.", "status": state}
     # The server answers a URL in ``remote`` before routing it, so this Files API call fails.
-    server = _MediaServer(remote={failing_url: httpx.Response(status, json={"error": error})})
+    server = _MediaServer(remote={files_api[failing][1]: httpx.Response(status, json={"error": error})})
 
     with pytest.raises(error_type) as raised:
         await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
 
     assert raised.value.retryable
     assert raised.value.status_code == status
-    assert server.uploads == []
-    assert server.model_requests() == []
+    # The request stops at the failing call: a failed lookup starts no upload, and no model request follows either.
+    expected = {"lookup": [files_api["lookup"]], "upload": [files_api["lookup"], files_api["upload"]]}[failing]
+    assert [(request.method, str(request.url)) for request in server.requests] == expected
 
 
 @pytest.mark.asyncio
@@ -1482,8 +1481,9 @@ async def test_ollama_stop_reasons(chunks: list[dict[str, Any]], stop: str | Non
     """Done reasons map to stop reasons; a stream that ends without its ``done`` chunk has neither one nor usage."""
     _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, ollama_ndjson(*chunks))
 
-    usage_reported = any(isinstance(event, UsageReported) for event in events)
-    assert (_completed(events).stop_reason, usage_reported) == (stop, stop is not None)
+    assert _completed(events).stop_reason == stop
+    # Usage comes with the done chunk only.
+    assert any(isinstance(event, UsageReported) for event in events) == (stop is not None)
 
 
 @pytest.mark.asyncio

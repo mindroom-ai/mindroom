@@ -115,7 +115,7 @@ class MidTurnGate:
         try:
             finish = await self._should_finish(pending)
         except Exception:
-            # Callers hand off as on a failed judgment; Agno logs and ignores post-tool callback failures.
+            # Callers hand off as on a failed judgment, so a judgment that raises never costs the active reply.
             finish = False
         if not finish:
             return False

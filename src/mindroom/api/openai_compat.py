@@ -81,16 +81,12 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
+from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
@@ -1233,11 +1229,7 @@ async def _non_stream_team_completion(
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
-        record = completion.records.record
-        if record is None:
-            # A run that did not raise ended its stream with ``RunFinished``, which carries the record.
-            msg = f"team {team_name!r} run ended without its terminal record"
-            raise RuntimeError(msg)
+        record = completion.records.terminal()
         response_text = completion.text() or str(record.content or "")
 
         if _is_error_response(response_text):

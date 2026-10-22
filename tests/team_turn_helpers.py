@@ -231,11 +231,18 @@ class TeamTurn:
         *,
         run_id: str | None = None,
     ) -> tuple[TeamRunRecord, list[RunRecord]]:
-        """Return the session's one team row, or its row of ``run_id``, and that row's member rows."""
+        """Return the session's one team row and every member row, or the row of ``run_id`` and its member rows.
+
+        Without ``run_id`` no member row is filtered out, so a stray row is still visible to negative checks.
+        """
         session = self.storage.load_session(session_id, "team")
         assert session is not None
         [record] = [run for run in session.runs if isinstance(run, TeamRunRecord) and run_id in (None, run.run_id)]
-        members = [run for run in session.runs if isinstance(run, RunRecord) and run.parent_run_id == record.run_id]
+        members = [
+            run
+            for run in session.runs
+            if isinstance(run, RunRecord) and (run_id is None or run.parent_run_id == record.run_id)
+        ]
         return record, members
 
     async def stream(

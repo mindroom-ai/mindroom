@@ -469,9 +469,10 @@ async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> N
 
 
 def paused_content(tools: Sequence[ToolExecution]) -> str:
-    """Return Agno's text for a paused run that produced none of its own.
+    """Return the text of a paused run that produced none of its own: Agno's text while a call waits for confirmation.
 
-    Only a call waiting for confirmation has one; the only externally executed calls, delegations, pause silently.
+    The only externally executed calls, delegations, pause silently and never wait for confirmation, so none of Agno's
+    other paused texts applies.
     """
     if any(tool.requires_confirmation is True and not tool.confirmed for tool in tools):
         return "I have tools to execute, but I need confirmation."

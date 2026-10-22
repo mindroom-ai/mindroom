@@ -75,6 +75,7 @@ def open_conversation_store(
                         connection.execute(statement)
                     move_blob_runs_to_rows(connection, names)
             except BaseException:
+                # Release the write lock now: a cursor still alive keeps the connection open past its close.
                 connection.rollback()
                 raise
             connection.commit()

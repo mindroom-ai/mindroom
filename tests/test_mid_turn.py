@@ -837,6 +837,7 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
     """
     state = _QueuedMessageState()
     reactions: list[str] = []
+    judgments: list[JudgmentRequest] = []
 
     def work() -> str:
         """Do the work."""
@@ -847,7 +848,8 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
         """Hand the subtask to a child."""
         return "Child result"
 
-    async def evaluate(_request: JudgmentRequest) -> bool | None:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        judgments.append(request)
         if failure == "judge":
             msg = "judgment backend unavailable"
             raise RuntimeError(msg)
@@ -869,6 +871,7 @@ async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str,
             record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"}, stream=False)
     assert record.status == RunStatus.completed
     assert record.content == "Done"
+    assert len(judgments) == 1
     assert reactions == ([] if failure == "judge" else ["$new"])
     # A failed judgment wraps the turn up; a decision to finish stands when only its reaction failed.
     assert _has_notice(model.requests[-1].messages) is (failure == "judge")

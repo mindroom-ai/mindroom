@@ -862,6 +862,20 @@ def test_retired_agno_fields_load_with_one_warning_on_the_providers_that_took_th
     assert config.models["default"].extra_kwargs == {"other": 1}
 
 
+def test_a_retired_field_that_two_providers_took_warns_once() -> None:
+    """Agno's OpenAI Chat and Gemini models both took the metrics switch, so setting it on each still warns once."""
+    switch = {"collect_metrics_on_completion": True}
+    config, warned = _load_with_retired_field_warnings(
+        {
+            "default": {"provider": "openai", "id": "gpt-6-luna", "extra_kwargs": switch},
+            "gemini": {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": switch},
+        },
+    )
+
+    assert warned == ["extra_kwargs.collect_metrics_on_completion"]
+    assert (config.models["default"].extra_kwargs, config.models["gemini"].extra_kwargs) == ({}, {})
+
+
 @pytest.mark.parametrize(
     ("provider", "field"),
     [("openai", "retriez"), ("openai", "skills"), ("groq", "audio"), ("anthropic", "url_context")],

@@ -12,6 +12,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
@@ -553,12 +554,6 @@ class ToolJobRuntime:
                 await self._publish(entry, _updated(entry.job, status=status))
 
     async def _run(self, entry: _Entry, operation: _Operation) -> None:
-        # The notice implementation imports Agno/storage; keep the job/control import surface light.
-        from mindroom.ai_runtime import (  # noqa: PLC0415
-            finalize_queued_notice_response_turn_async,
-            queued_message_signal_context,
-        )
-
         outcome = None
         returned = False
         loop = asyncio.get_running_loop()
@@ -868,8 +863,8 @@ class ToolJobRuntime:
     ) -> list[BackgroundJob]:
         """Delete old ended jobs, read or not, whose originating turn has finished, which never lets their call run again.
 
-        A finished turn saved a non-`None` result for the call, its outcome or the job's handle, Agno runs a call again
-        only when its saved result is `None`, and `source_finished` refuses while the job's session has an open approval
+        A finished turn saved the call's outcome or the job's handle as its result, only a paused run resumes and then
+        runs just the calls it waits for, and `source_finished` refuses while the job's session has an open approval
         continuation. An unread result this old is not worth reporting any more.
         Returns the deleted jobs.
         """

@@ -133,7 +133,7 @@ class TeamAttempt:
             presentation_state=self.presentation.to_state(),
         )
 
-    def metadata_content(self, config: Config, *, session_id: str | None, status: RunStatus) -> dict[str, Any]:
+    def metadata_content(self, config: Config, *, session_id: str, status: RunStatus) -> dict[str, Any]:
         """Return the run metadata payload: the leader's identity, the team's usage, and the prepared history."""
         record = self.records.record
         prepared_history = self.prepared_history

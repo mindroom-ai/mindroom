@@ -1579,7 +1579,7 @@ class ResponseRunner:
         team_member_names: tuple[str, ...] = (),
         team_mode: str | None = None,
     ) -> FinalDeliveryOutcome:
-        """Persist a paused Agno run, expose its cards, and leave the response lock."""
+        """Persist a paused run, expose its cards, and leave the response lock."""
         requester_id = request.user_id or execution_identity.requester_id
         if requester_id is None:
             msg = "Approval continuation requires the original requester identity"
@@ -2275,7 +2275,7 @@ class ResponseRunner:
         *,
         target: MessageTarget,
     ) -> str | None:
-        """Recover frozen FINAL debt without invoking Agno a second time."""
+        """Recover frozen FINAL debt without resuming the run a second time."""
         owns_final, event_id = await self._recover_frozen_approval_final(claimed, target=target)
         if owns_final:
             return event_id
@@ -5155,7 +5155,7 @@ class ResponseRunner:
 
     @staticmethod
     def _note_run_id(run_id: str | None) -> None:
-        """Tell the span registry which Agno run the current span's attempt is on, so a Stop cancels it too."""
+        """Tell the span registry which run the current span's attempt is on, so a Stop cancels it too."""
         handle = current_span()
         assert handle is not None, "every response attempt runs in a reply span"
         handle.runtime.spans.update_run_id(handle.span_id, run_id)

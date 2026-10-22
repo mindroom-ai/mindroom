@@ -36,12 +36,7 @@ from mindroom.history.storage import new_scope_session, update_scope_seen_event_
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -60,11 +55,13 @@ from mindroom.response_turn import (
     TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
+    build_llm_request_log_context,
     build_matrix_run_metadata,
     pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
+    stream_with_llm_request_log_context,
 )
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.members import (
@@ -455,7 +452,7 @@ def _persist_bound_seen_event_ids(
     The row is re-read and only then written, so the seen ids land without putting the loaded snapshot's fields
     back over what the run stored.
     """
-    if not event_ids or scope_context is None:
+    if scope_context is None:
         return
     session = scope_context.storage.load_session(session_id, "team")
     if session is None:
@@ -717,7 +714,7 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )
-        record = self.terminal_record(attempt)
+        record = attempt.records.terminal()
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record)
         return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
@@ -746,7 +743,7 @@ class _TeamTurn:
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
             return
-        record = self.terminal_record(attempt)
+        record = attempt.records.terminal()
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:
@@ -760,12 +757,6 @@ class _TeamTurn:
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output))
-
-    def terminal_record(self, attempt: TeamAttempt) -> TeamRunRecord:
-        """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
-        record = attempt.records.record
-        assert record is not None
-        return record
 
     def failure_metadata(self, attempt: TeamAttempt) -> dict[str, Any] | None:
         """Return the run metadata of a failed attempt when the caller collects metadata and the run was stored."""
@@ -794,7 +785,7 @@ class _TeamTurn:
         """Return the pause the lifecycle owner asks the requester about, rendered into the attempt's document."""
         paused = paused_attempt_from_response(
             record,
-            fallback_session_id=self.ctx.session_id,
+            fallback_session_id=self.session_id,
             fallback_run_id=attempt.run_id,
             toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
         )
@@ -852,7 +843,7 @@ class _TeamTurn:
                 # A quiet scheduled reply records the bare token, as it delivers it, not the team document.
                 replayable_text = response_text
         metadata_content = (
-            attempt.metadata_content(self.config, session_id=self.ctx.session_id, status=record.status)
+            attempt.metadata_content(self.config, session_id=self.session_id, status=record.status)
             if self.run_metadata_collector is not None
             else None
         )
@@ -877,7 +868,7 @@ class _TeamTurn:
     def register_notice_storage(self, scope_context: ScopeSessionContext | None) -> None:
         register_team_notice_storage(
             scope_context=scope_context,
-            session_id=self.ctx.session_id,
+            session_id=self.session_id,
             entity_name=self.entity_name,
         )
 
@@ -893,7 +884,7 @@ class _TeamTurn:
     def open_scope(self) -> AbstractContextManager[ScopeSessionContext | None]:
         return open_bound_scope_session_context(
             member_names=self.requested_agent_names,
-            session_id=self.ctx.session_id,
+            session_id=self.session_id,
             runtime_paths=self.runtime_paths,
             config=self.config,
             execution_identity=self.execution_identity,

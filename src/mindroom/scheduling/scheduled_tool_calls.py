@@ -50,7 +50,9 @@ __all__ = [
 _SCHEDULER_TOOLKIT = "scheduler"
 # The scheduler's functions that read the run's live functions: one stores a call to one, one runs it.
 _LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
-# Parameters through which an entrypoint takes the run's media, which a scheduled call does not carry.
+# Parameters through which an entrypoint takes the run's media, as Agno's MEDIA_INJECTED_PARAMS names them. A live
+# call gets None for them too, since no run passes a tool media, but scheduling such a call stays refused, as it
+# was when live runs carried media that a stored call lacked.
 _MEDIA_PARAMETERS = frozenset({"images", "videos", "audios", "files"})
 
 _REFUSALS: dict[ScheduledCallRefusal, str] = {
@@ -149,13 +151,10 @@ def _resolve_live_function(
     """Find the function a scheduled call can run, the one the run offers by that name, or return why it cannot."""
     function = None if live is None else live.functions.get(tool_name)
     owner = None if live is None else live.owners.get(tool_name)
-    if (
-        function is None
-        or owner is None
-        or owner == _SCHEDULER_TOOLKIT
-        or (toolkit_name is not None and owner != toolkit_name)
-    ):
+    if function is None or owner is None or owner == _SCHEDULER_TOOLKIT:
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
+    if toolkit_name is not None and owner != toolkit_name:
+        return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
     if function.external_execution or function.stop_after_tool_call or function.injected_params & _MEDIA_PARAMETERS:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(

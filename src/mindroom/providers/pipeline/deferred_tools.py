@@ -27,6 +27,7 @@ __all__ = ["portable_tool_search_stream"]
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
     function = call.get("function")
+    # A persisted id-only OpenAI placeholder has no function; ``providers/openai/legacy_replay.py`` drops it later.
     if not isinstance(function, dict) or function.get("name") not in deferred:
         return call
     arguments = arguments_object(function.get("arguments")) or {}

@@ -200,8 +200,7 @@ async def test_workspace_files_are_read_without_following_links(tmp_path: Path) 
     (references / "planted.md").symlink_to(secret)
     os.mkfifo(references / "pipe.md")
     toolkit = _build(tmp_path)
-    skill = toolkit.get_skill("docs")
-    assert skill is not None
+    [skill] = [skill for skill in toolkit.skills if skill.name == "docs"]
     assert skill.references == ("guide.md", "swapped.md")
     (references / "swapped.md").unlink()
     (references / "swapped.md").symlink_to(secret)
@@ -343,6 +342,5 @@ def test_skills_from_later_sources_win_a_name(tmp_path: Path) -> None:
 
     toolkit = _build(tmp_path, configured=["alpha"])
 
-    skill = toolkit.get_skill("alpha")
-    assert skill is not None
+    [skill] = [skill for skill in toolkit.skills if skill.name == "alpha"]
     assert (skill.description, skill.source_path) == ("Explicit alpha", (tmp_path / "global" / "alpha").resolve())

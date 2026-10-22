@@ -4170,7 +4170,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
-    """An attempted FINAL is recovered and completed without invoking Agno twice."""
+    """An attempted FINAL is recovered and completed without resuming the run twice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -4737,7 +4737,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
 
 @pytest.mark.asyncio
 async def test_suspension_rejects_missing_requester_before_persistence(tmp_path: Path) -> None:
-    """A continuation without the original session user cannot be resumed against the same Agno run."""
+    """A continuation without the original session user cannot be resumed against the same run."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = replace(_plain_request(_target()), user_id=None)
     paused = PausedAttempt(
@@ -5797,7 +5797,7 @@ async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) 
 @pytest.mark.parametrize("is_team", [False, True])
 @pytest.mark.asyncio
 async def test_suspended_turn_is_never_persisted_as_failed(tmp_path: Path, *, is_team: bool) -> None:
-    """Failure cleanup must not overwrite the Agno run that owns a native pause."""
+    """Failure cleanup must not overwrite the run that owns a native pause."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     recorder = TurnRecorder(user_message="Run it")
     recorder.mark_suspended()

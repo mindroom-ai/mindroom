@@ -178,7 +178,7 @@ class DelegationState:
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> DelegationState:
-        """Read the driver-owned snapshot attached to an Agno run."""
+        """Read the driver-owned snapshot attached to a run's metadata."""
         stored = (metadata or {}).get(DELEGATION_STATE_KEY)
         if stored is None:
             return cls()

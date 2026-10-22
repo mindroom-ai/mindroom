@@ -1851,7 +1851,7 @@ def _agent_toolkits(
     skills: SkillsToolkit | None,
     generated_visible: Callable[[Function], bool],
 ) -> tuple[AdaptedToolkit, ...]:
-    """Return the agent's tools in the order Agno offered them: configured toolkits, the knowledge search, skills.
+    """Return the agent's tools in the order the model is offered them: configured toolkits, knowledge search, skills.
 
     The knowledge search and skill functions are generated beside the configured toolkits, so they get the
     approval and persona policy here that configured functions got while their toolkits were built.

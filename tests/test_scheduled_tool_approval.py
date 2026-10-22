@@ -74,6 +74,7 @@ from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 from tests.scheduling_helpers import joined_member_state
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.tool_approval_helpers import gated_functions
 
@@ -1107,10 +1108,14 @@ def _live_agent(
 ) -> _LiveRun:
     """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
 
-    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given.
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given, which they
+    would not reach, so passing them with ``toolkit`` is refused.
     """
     if toolkit is None:
         toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    else:
+        assert runs is None, "runs records only the default toolkit's calls"
+        assert outcome == "sent", "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = toolkit_name
         if authored_confirmation:
@@ -2159,13 +2164,28 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
 
 
 @pytest.mark.asyncio
-@_SHARED_NAME_ORDERS
+@pytest.mark.parametrize(
+    ("configured", "expected", "stored_toolkit_runs", "outcome"),
+    [
+        ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
+        (
+            (_MIRRORED_TOOLKIT, _TOOLKIT),
+            "now comes from another toolkit than the one the call was stored for",
+            [],
+            None,
+        ),
+    ],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
 async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_name(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     configured_slack_pair: dict[str, list[dict[str, object]]],
     configured: tuple[str, str],
+    expected: str,
+    stored_toolkit_runs: list[dict[str, object]],
+    outcome: str | None,
 ) -> None:
     """A stored call runs the function the model's own call of its name runs, and only when its toolkit offers it.
 
@@ -2176,21 +2196,16 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
     config = _code_config()
     config.agents[_AGENT].tools = list(configured)
     build = _agent_build(config, monkeypatch)
-    stored_toolkit_offered = configured[0] == _TOOLKIT
     try:
         await _armed(manager)
 
         result = await _run_in_build(manager, build, config)
 
-        if stored_toolkit_offered:
-            assert result == "sent"
-            assert configured_slack_pair == {_TOOLKIT: [_ARGUMENTS], _MIRRORED_TOOLKIT: []}
-            assert await _binding_column(journal, "outcome") == "completed"
-        else:
-            assert isinstance(result, str)
-            assert "not one of this agent's tools" in result
-            assert configured_slack_pair == {_TOOLKIT: [], _MIRRORED_TOOLKIT: []}
-            assert await _binding_column(journal, "consumed_at_ns") is None
+        assert isinstance(result, str)
+        assert expected in result
+        assert configured_slack_pair == {_TOOLKIT: stored_toolkit_runs, _MIRRORED_TOOLKIT: []}
+        assert await _binding_column(journal, "outcome") == outcome
+        assert (await _binding_column(journal, "consumed_at_ns") is None) == (outcome is None)
 
         # The model's own call of the name runs the first configured toolkit's function.
         with tool_runtime_context(_turn_context(config)):
@@ -2276,7 +2291,7 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
         ("none", _THREAD, "own conversation turn"),
         ("live", "$other-thread", "another agent, conversation, or requester"),
         ("without-tool", _THREAD, "not one of this agent's tools"),
-        ("other-toolkit", _THREAD, "not one of this agent's tools"),
+        ("other-toolkit", _THREAD, "now comes from another toolkit than the one the call was stored for"),
     ],
     ids=["no-live-agent", "other-thread", "tool-gone", "same-name-other-toolkit"],
 )
@@ -2550,7 +2565,6 @@ class _AsyncStreamingSlackTools(Toolkit):
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("configured_slack")
 @pytest.mark.parametrize(
     "toolkit_class",
     [_StreamingSlackTools, _AsyncStreamingSlackTools],
@@ -2568,25 +2582,25 @@ async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
 
     An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
     """
-    _register_toolkit(_TOOLKIT, toolkit_class)
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
     if workspace:
         config.agents[_AGENT].memory_backend = "file"
-    build = _agent_build(config, monkeypatch)
-    parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
-    assert ("mindroom_output_path" in parameters["properties"]) is workspace
-    try:
-        await _armed(manager)
+    with registered_toolkit(_TOOLKIT, toolkit_class):
+        build = _agent_build(config, monkeypatch)
+        parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
+        assert ("mindroom_output_path" in parameters["properties"]) is workspace
+        try:
+            await _armed(manager)
 
-        result = await _run_in_build(manager, build, config)
+            result = await _run_in_build(manager, build, config)
 
-        assert result == "U123: Good morning!"
-        assert await _binding_column(journal, "outcome") == "completed"
-    finally:
-        await manager.shutdown()
+            assert result == "U123: Good morning!"
+            assert await _binding_column(journal, "outcome") == "completed"
+        finally:
+            await manager.shutdown()
 
 
 @pytest.mark.asyncio

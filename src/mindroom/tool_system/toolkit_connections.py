@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
@@ -20,19 +20,31 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from agno.tools import Toolkit
-    from agno.tools.mcp import MCPTools
-
+    from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
 
 logger = get_logger(__name__)
 
 
-def _mcp_toolkit(toolkit: Toolkit) -> MCPTools | None:
+class _McpToolkit(Protocol):
+    """The members of Agno's ``MCPTools`` that connecting and listing use, typed without importing the MCP SDK."""
+
+    @property
+    def initialized(self) -> bool:
+        """Whether the toolkit's session is connected and its functions are registered."""
+
+    async def connect(self) -> None:
+        """Connect the session and register the functions the server lists."""
+
+    async def close(self) -> None:
+        """Close the session."""
+
+
+def _mcp_toolkit(toolkit: Toolkit) -> _McpToolkit | None:
     """Return ``toolkit`` as an Agno MCP toolkit, or None for any other toolkit."""
     # Agno recognizes its MCP toolkits by class name so the optional MCP SDK is never imported.
     if any(base.__name__ == "MCPTools" for base in type(toolkit).__mro__):
-        return cast("MCPTools", toolkit)
+        return cast("_McpToolkit", toolkit)
     return None
 
 
@@ -60,7 +72,7 @@ def register_mcp_functions(toolkit: Toolkit) -> None:
     if _on_event_loop():
         msg = f"MCP toolkit {toolkit.name!r} must be built off the event loop, since it lists on a loop of its own"
         raise RuntimeError(msg)
-    mcp = cast("MCPTools", toolkit)
+    mcp = cast("_McpToolkit", toolkit)
 
     async def list_functions() -> None:
         await mcp.connect()
@@ -82,17 +94,16 @@ def _on_event_loop() -> bool:
 
 def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
     """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
-    mcp = _mcp_toolkit(toolkit)
-    if mcp is not None:
-        return partial(_connect_mcp, mcp)
+    if _mcp_toolkit(toolkit) is not None:
+        return partial(_connect_mcp, toolkit)
     if toolkit.requires_connect:
         return partial(_connect, toolkit)
     return None
 
 
-async def _connect_mcp(toolkit: MCPTools) -> ToolkitClose | None:
+async def _connect_mcp(toolkit: Toolkit) -> ToolkitClose | None:
     # A session connected before the run belongs to whoever connected it, so the run leaves it open.
-    if toolkit.initialized:
+    if not is_unconnected_mcp_toolkit(toolkit):
         return None
     return await _connect(toolkit)
 

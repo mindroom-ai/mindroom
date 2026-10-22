@@ -6642,7 +6642,7 @@ class TestOutbox:
 
 
 class TestApprovalContinuations:
-    """A paused Agno run remains owned by its original journal sources."""
+    """A paused run remains owned by its original journal sources."""
 
     @pytest.mark.parametrize("next_count", [None, 3])
     async def test_continuation_count_survives_reopen_and_advance(
@@ -6979,7 +6979,7 @@ class TestApprovalContinuations:
         assert {"response_text", "response_tool_trace", "response_presentation_state"}.isdisjoint(stored)
 
     async def test_ready_continuation_has_one_claim_winner(self, alice: PrincipalStore) -> None:
-        """Only one response lifecycle may continue the exact persisted Agno run."""
+        """Only one response lifecycle may continue the exact persisted run."""
         await self.admit_sources(alice)
         await paused_for_approval(alice, self.continuation())
 

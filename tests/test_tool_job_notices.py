@@ -327,22 +327,24 @@ async def test_a_noticed_cancellation_needs_no_collect(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["wait", "acknowledge_wait"], ids=["claim", "save"])
 async def test_a_cancellation_whose_acknowledgement_fails_is_noticed_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failing: str,
 ) -> None:
-    """A failed save of a noticed cancellation neither breaks the reply nor keeps the job claimed."""
+    """A failed claim or save of a noticed cancellation neither breaks the reply nor keeps the job claimed."""
     conversation = await _conversation(tmp_path)
     try:
         await conversation.start("cancelled")
         await conversation.cancel("cancelled")
 
-        async def fail(*_args: object) -> None:
+        async def fail(*_args: object, **_kwargs: object) -> None:
             msg = "store unavailable"
             raise RuntimeError(msg)
 
         with monkeypatch.context() as patched:
-            patched.setattr(conversation.runtime, "acknowledge_wait", fail)
+            patched.setattr(conversation.runtime, failing, fail)
             with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
                 assert "`cancelled`" in str(await _turn_start_job_note())
         with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):

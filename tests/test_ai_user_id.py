@@ -64,7 +64,6 @@ from mindroom.llm.events import ContentDelta, ToolStarted
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.request_context import stream_with_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
 from mindroom.media_inputs import MediaInputs
@@ -77,7 +76,12 @@ from mindroom.response_runner import (
     _paused_with_committed_presentation,
     _prepare_memory_and_model_context,
 )
-from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    CompletedAttempt,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    stream_with_llm_request_log_context,
+)
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import CollectedStreamPresentation

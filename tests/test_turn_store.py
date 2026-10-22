@@ -2418,7 +2418,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
     tmp_path: Path,
     journal_store: EventJournalStore,
 ) -> None:
-    """Router relay turns have durable ledger state but no Agno run storage."""
+    """Router relay turns have durable ledger state but no run storage."""
 
     async def router_store() -> TurnStore:
         config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))

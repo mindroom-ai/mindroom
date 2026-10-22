@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import stat
@@ -15,14 +14,10 @@ import httpx
 import pytest
 
 from mindroom.providers.openai import codex_auth, kimi_auth
+from tests.providers.openai_family_support import unsigned_jwt
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-
-def _jwt_with_exp(exp: int) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
-    return f"header.{payload}.signature"
 
 
 def _write_codex_auth(codex_home: Path, access_token: str, refresh_value: str) -> None:
@@ -62,6 +57,7 @@ _FAILED_REFRESHES = [
     pytest.param(httpx.Response(500, text="upstream down"), r"refresh failed \(HTTP 500\): upstream down", id="status"),
     pytest.param(httpx.Response(200, text="<html>"), "refresh returned invalid JSON", id="invalid-json"),
     pytest.param(httpx.Response(200, json={"token_type": "Bearer"}), "did not include an access token", id="no-token"),
+    pytest.param(httpx.Response(200, json=["new-access"]), "refresh returned an unexpected payload", id="list"),
 ]
 
 
@@ -138,7 +134,7 @@ def test_codex_home_expands_an_explicit_tilde(tmp_path: Path, monkeypatch: pytes
 
 def test_a_valid_codex_token_is_reused(tmp_path: Path) -> None:
     """An unexpired ChatGPT access token is borrowed as it is, with its account id."""
-    access_token = _jwt_with_exp(int(time.time()) + 3600)
+    access_token = unsigned_jwt({"exp": int(time.time()) + 3600})
     codex_home = tmp_path / ".codex"
     _write_codex_auth(codex_home, access_token, "refresh-value")
 
@@ -148,8 +144,8 @@ def test_a_valid_codex_token_is_reused(tmp_path: Path) -> None:
 def test_an_expired_codex_token_is_refreshed_and_saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The refreshed tokens are written back, so the Codex CLI keeps working with the rotated refresh token."""
     codex_home = tmp_path / ".codex"
-    _write_codex_auth(codex_home, _jwt_with_exp(int(time.time()) - 60), "refresh-value")
-    refreshed_token = _jwt_with_exp(int(time.time()) + 7200)
+    _write_codex_auth(codex_home, unsigned_jwt({"exp": int(time.time()) - 60}), "refresh-value")
+    refreshed_token = unsigned_jwt({"exp": int(time.time()) + 7200})
     new_id, new_refresh = "new-id-value", "new-refresh-value"
     refreshed = {"access_token": refreshed_token, "id_token": new_id, "refresh_token": new_refresh}
     monkeypatch.setattr(codex_auth, "_refresh_codex_tokens", lambda _refresh: refreshed)
@@ -182,8 +178,8 @@ def test_refreshed_codex_tokens_are_never_world_readable(tmp_path: Path, monkeyp
 def test_concurrent_codex_borrowers_share_one_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second borrower waits for the first one's refresh instead of racing the refresh-token rotation."""
     codex_home = tmp_path / ".codex"
-    _write_codex_auth(codex_home, _jwt_with_exp(int(time.time()) - 60), "refresh-value")
-    refreshed_token = _jwt_with_exp(int(time.time()) + 7200)
+    _write_codex_auth(codex_home, unsigned_jwt({"exp": int(time.time()) - 60}), "refresh-value")
+    refreshed_token = unsigned_jwt({"exp": int(time.time()) + 7200})
     refresh_started = threading.Event()
     release_refresh = threading.Event()
     refreshes: list[str] = []
@@ -210,7 +206,7 @@ def test_a_codex_token_that_is_not_a_jwt_is_refreshed(tmp_path: Path, monkeypatc
     """A token whose expiry cannot be read counts as expired, so the login refreshes instead of failing later."""
     codex_home = tmp_path / ".codex"
     _write_codex_auth(codex_home, "opaque-token", "refresh-value")
-    refreshed_token = _jwt_with_exp(int(time.time()) + 7200)
+    refreshed_token = unsigned_jwt({"exp": int(time.time()) + 7200})
     _answer_refresh(monkeypatch, httpx.Response(200, json={"access_token": refreshed_token}))
 
     assert codex_auth.borrow_codex_key(codex_home=codex_home) == (refreshed_token, "acct_123")
@@ -223,7 +219,7 @@ def test_a_codex_token_that_is_not_a_jwt_is_refreshed(tmp_path: Path, monkeypatc
         ({"auth_mode": "apikey", "OPENAI_API_KEY": "key-value"}, "must use ChatGPT OAuth auth_mode"),
         ({"auth_mode": "chatgpt", "tokens": {"refresh_token": "refresh-value"}}, "No ChatGPT access token"),
         (
-            {"auth_mode": "chatgpt", "tokens": {"access_token": _jwt_with_exp(int(time.time()) - 60)}},
+            {"auth_mode": "chatgpt", "tokens": {"access_token": unsigned_jwt({"exp": int(time.time()) - 60})}},
             "No Codex refresh token",
         ),
     ],
@@ -256,6 +252,11 @@ def test_an_unusable_codex_login_tells_the_user_to_log_in(
             )
             for code in ("refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated")
         ),
+        pytest.param(
+            httpx.Response(401, json=["refresh_token_expired"]),
+            r"refresh failed \(HTTP 401\)",
+            id="error-list",
+        ),
     ],
 )
 def test_a_failed_codex_refresh_keeps_the_saved_login(
@@ -266,7 +267,7 @@ def test_a_failed_codex_refresh_keeps_the_saved_login(
 ) -> None:
     """Nothing is written when the refresh fails, so a later ``codex login`` or retry starts from the same file."""
     codex_home = tmp_path / ".codex"
-    _write_codex_auth(codex_home, _jwt_with_exp(int(time.time()) - 60), "refresh-value")
+    _write_codex_auth(codex_home, unsigned_jwt({"exp": int(time.time()) - 60}), "refresh-value")
     saved = (codex_home / "auth.json").read_text(encoding="utf-8")
     _answer_refresh(monkeypatch, reply)
 
@@ -401,10 +402,7 @@ def test_an_unusable_kimi_login_tells_the_user_to_log_in(
 
 @pytest.mark.parametrize(
     ("reply", "error"),
-    [
-        *_FAILED_REFRESHES,
-        pytest.param(httpx.Response(200, json=["new-access"]), "refresh returned an unexpected payload", id="list"),
-    ],
+    _FAILED_REFRESHES,
 )
 def test_a_failed_kimi_refresh_keeps_the_saved_login(
     tmp_path: Path,

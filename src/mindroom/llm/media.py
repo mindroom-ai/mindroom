@@ -281,7 +281,7 @@ class File:
         return base64.b64encode(self.content).decode("utf-8")
 
     def to_dict(self, *, include_content: bool = True) -> dict[str, Any]:
-        """Return the stored dict shape; ``text/*`` bytes become UTF-8 text, other bytes base64 text."""
+        """Return the stored dict shape; ``text/*`` bytes that are UTF-8 become text, other bytes base64 text."""
         scalars = {
             "id": self.id,
             "url": self.url,
