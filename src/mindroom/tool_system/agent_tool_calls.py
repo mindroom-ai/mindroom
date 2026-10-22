@@ -25,6 +25,7 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolDescriptor, ToolKey, UnknownToolError, validate_tool_arguments
+from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.worker_routing import tool_execution_identity
 
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose, ToolValue
 
 _INNER: ContextVar[bool] = ContextVar("cli_inner_dispatch", default=False)
 
@@ -97,7 +98,8 @@ class PreparedAgentToolCatalog:
     ``run`` is the turn's run identity and the session state its calls share; ``session`` and ``store`` are where
     that run is stored, and ``record`` is the run itself once known: the live run after its first tool batch is
     planned, or the stored run a recovery continues. ``middleware`` is the build's tool-call policy, which every
-    call runs through, and ``tool_call_limit`` bounds the calls of one turn.
+    call runs through, and ``tool_call_limit`` bounds the calls of one turn. The toolkits it connects, the ones a
+    run reaches only through it and every deferred toolkit it materializes, stay connected until it closes.
     """
 
     agent_name: str
@@ -114,6 +116,7 @@ class PreparedAgentToolCatalog:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _call_count: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
+    _closes: list[ToolkitClose] = field(default_factory=list, init=False)
 
     @contextmanager
     def execution_context(self) -> Iterator[None]:
@@ -187,6 +190,15 @@ class PreparedAgentToolCatalog:
                         functions.append(function)
                 self._prepare(toolkit, functions, owners)
 
+    async def connect(self, toolkits: Sequence[AdaptedToolkit]) -> None:
+        """Connect the toolkits among ``toolkits`` that hold a connection for one run, until the catalog closes.
+
+        A run that offers only Bash reaches its agent's toolkits through this catalog, so the catalog connects them.
+        """
+        async with self._lock:
+            self._check_open()
+            await connect_toolkits(toolkits, self._closes)
+
     def _prepare(
         self,
         toolkit: AdaptedToolkit,
@@ -252,6 +264,7 @@ class PreparedAgentToolCatalog:
             if deferred is not None:
                 with self.execution_context():
                     toolkit = await deferred.materialize()
+                await connect_toolkits((toolkit,), self._closes)
                 self._prepare(replace(toolkit, name=deferred.name), toolkit.functions)
                 del self._deferred[key.toolkit]
             binding = self._bindings.get(key)
@@ -280,10 +293,10 @@ class PreparedAgentToolCatalog:
         )
 
     async def close(self) -> None:
-        """Refuse new work, then wait for the operation that currently holds the catalog."""
+        """Refuse new work, wait for the operation that currently holds the catalog, then close what it connected."""
         self._closed = True
         async with self._lock:
-            pass
+            await close_toolkits(self._closes)
 
 
 def _failure(

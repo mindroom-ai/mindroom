@@ -15,16 +15,23 @@ from agno.tools import Toolkit
 from agno.tools.mcp import MCPTools
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
+from mindroom.agent_cli.minimal_agent import prepare_minimal_catalog
+from mindroom.agent_loop.spec import RunContext
 from mindroom.agents import create_agent
 from mindroom.ai import stream_agent_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_access import ToolKey
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.scripted_agent_helpers import install_agent_model, raising, registered_toolkit, streamed_text
+from tests.test_agent_cli_authority import _runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -217,6 +224,49 @@ async def test_a_session_connected_before_the_run_is_left_to_its_owner(
 
     assert model.requests[1].messages[-1].content == "lookup found mindroom"
     assert EVENTS == ["database connect", "request", "request", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tmp_path: Path) -> None:
+    """A minimal turn offers only Bash, so its catalog connects the eager toolkits and each deferred one it builds."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.agents["helper"] = AgentConfig(
+        display_name="Helper",
+        tools=["shell", "database", {"mcp_server": {"defer": True}}],
+    )
+    with _registered(_ServerTools):
+        build = create_agent(
+            "helper",
+            runtime.config,
+            runtime.runtime_paths,
+            build_execution_identity_from_runtime_context(runtime),
+            agent_mode="minimal",
+        )
+        with tool_runtime_context(runtime):
+            catalog = await prepare_minimal_catalog(
+                build,
+                run=RunContext(run_id="run", session_id=runtime.session_id, user_id=runtime.requester_id),
+                session=ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper"),
+                store=None,
+                delegation_depth=0,
+            )
+            try:
+                assert EVENTS == ["database connect"]
+                binding = await catalog.bind(ToolKey("mcp_server", "lookup"))
+                events = [event async for event in execute_agent_tool_call(binding, "call_lookup", {"term": "x"})]
+                assert events[-1].execution is not None
+                assert events[-1].execution.result == "lookup found x"
+            finally:
+                await catalog.close()
+
+    assert EVENTS == [
+        "database connect",
+        "server connect",
+        "server close",
+        "server connect",
+        "server close",
+        "database close",
+    ]
 
 
 def test_the_primary_neither_lists_nor_connects_a_toolkit_a_worker_runs(tmp_path: Path) -> None:

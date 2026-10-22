@@ -184,6 +184,7 @@ async def prepare_minimal_catalog(
     )
     try:
         await catalog.prepare(build.spec.toolkits, build.tool_owners)
+        await catalog.connect(build.spec.toolkits)
         _check_handlers((binding.key.toolkit, binding.function) for binding in catalog.bindings())
         loaded = {item["toolkit"] for item in catalog.metadata()}
         for deferred in build.surface.deferred:
