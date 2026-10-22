@@ -101,7 +101,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 - MindRoom owns its run loop, providers, storage, teams, and history; Agno stays only as the tool library and the knowledge reader layer.
   What stays Agno: the `Toolkit`, `Function`, `@tool`, and `ToolResult` authoring API for MindRoom, plugin, and vendor tools, Agno's tool schema generation and argument coercion, the vendor toolkits with MindRoom's per-toolkit overrides, and the knowledge readers and chunkers in `knowledge/readers.py`.
 - The owned loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `adapt_function` in `tool_system/agno_toolkits.py`.
-  Only the modules `tests/test_agno_boundary.py` allows import Agno; every other module takes Agno's tool types from `tool_system/agno_toolkits.py`, and none uses Agno's agent, team, model, run, storage, or learning layers.
+  Only the modules `tests/test_agno_boundary.py` allows may import Agno; every other module must take Agno's tool types from `tool_system/agno_toolkits.py` and must not use Agno's agent, team, model, run, storage, or learning layers.
 - The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
   Isolate substantive workarounds in `agno_compat_<subject>.py` beside their owning module; a tiny override may stay in a cohesive adapter.
 - Mark each independently removable workaround with a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap.

@@ -16,7 +16,7 @@ Issue and PR states were checked on September 24, 2026, unless a row gives anoth
 | Agno weakness | Upstream issue / PR | Boundary |
 | --- | --- | --- |
 | Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 21, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`), `custom_tools/microsoft_sharepoint.py` (`microsoft_sharepoint_create_item`, `microsoft_sharepoint_update_item`) |
-| Library loggers install their own stdout handler at INFO with propagation disabled, and every run resets their levels, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
+| Library loggers install their own stdout handler at INFO with propagation disabled, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
 
 ### Tracking gaps
 
