@@ -17,7 +17,6 @@ from pydantic import BaseModel
 from mindroom.llm.errors import INCOMPLETE_STREAM, ProviderError, ProviderUnavailable
 from mindroom.llm.provider import ReasoningDelta, StopReason, TextDelta, ToolCallReady
 from mindroom.llm.usage import MessageMetrics
-from mindroom.logging_config import get_logger
 from mindroom.native_compaction import native_replay_messages, record_native_checkpoint
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
@@ -36,7 +35,7 @@ from mindroom.providers.openai.tool_search import request_params_with_deferred_t
 from mindroom.providers.tool_policy import disable_tool_selection
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from openai.types.responses import Response, ResponseStreamEvent, ResponseUsage
 
@@ -54,8 +53,6 @@ __all__ = [
     "responses_request_kwargs",
     "responses_stop_reason",
 ]
-
-logger = get_logger(__name__)
 
 _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
@@ -115,8 +112,6 @@ def _prompt_item(message: Message) -> dict[str, Any]:
             {"type": "input_text", "text": message.content},
             *(part for image in message.images if (part := responses_image_part(image)) is not None),
         ]
-    if message.audio or message.videos:
-        logger.warning("Responses input does not support audio or video; the media is omitted")
     if message.files:
         content = item.get("content")
         parts: list[Any] = content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
@@ -220,7 +215,7 @@ def responses_input(
 # --- Request --------------------------------------------------------------------------------------------------
 
 
-def _tool_dicts(tools: Sequence[ToolSpec], native_tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     """Return tools sorted by name with function definitions flattened as Responses expects."""
     functions: list[dict[str, Any]] = []
     for tool in tools:
@@ -229,28 +224,16 @@ def _tool_dicts(tools: Sequence[ToolSpec], native_tools: Sequence[Mapping[str, A
             if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
                 property_schema["type"] = property_schema["type"][0]
         functions.append(definition)
-    combined = [*(dict(tool) for tool in native_tools), *functions]
-    return sorted(combined, key=lambda tool: str(tool.get("name", "")))
+    return sorted(functions, key=lambda tool: tool["name"])
 
 
-def _text_format(response_format: type[BaseModel] | Mapping[str, Any], *, strict: bool) -> Any:  # noqa: ANN401 - authored format passes through
-    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
-        return {
-            "type": "json_schema",
-            "name": response_format.__name__,
-            "schema": strict_response_schema(response_format),
-            "strict": strict,
-        }
-    json_schema = response_format.get("json_schema")
-    if response_format.get("type") == "json_schema" and isinstance(json_schema, dict):
-        # The Chat Completions shape nests the schema; Responses wants it flat, strict only when asked.
-        return {
-            "type": "json_schema",
-            "name": json_schema.get("name", "output"),
-            "schema": json_schema.get("schema", {}),
-            "strict": json_schema.get("strict", False),
-        }
-    return dict(response_format)
+def _text_format(response_format: type[BaseModel], *, strict: bool) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "name": response_format.__name__,
+        "schema": strict_response_schema(response_format),
+        "strict": strict,
+    }
 
 
 def _with_encrypted_reasoning(params: dict[str, Any]) -> None:
@@ -291,8 +274,10 @@ def _base_params(settings: ResponsesSettings, request: ModelRequest, store: bool
     text: dict[str, Any] = {}
     if settings.verbosity is not None:
         text["verbosity"] = settings.verbosity
-    if request.response_format is not None:
-        text["format"] = _text_format(request.response_format, strict=settings.strict_output)
+    # Responses takes native structured output, so a request's format is always its output model class.
+    response_format = request.response_format
+    if isinstance(response_format, type) and issubclass(response_format, BaseModel):
+        text["format"] = _text_format(response_format, strict=settings.strict_output)
     params = {
         "include": copy.deepcopy(settings.include),
         "max_output_tokens": settings.max_output_tokens,
@@ -351,7 +336,7 @@ def responses_request_kwargs(
     """
     store = request_store(wire, request)
     params = _base_params(settings, request, store)
-    if tools := _tool_dicts(request.tools, request.native_tools):
+    if tools := _tool_dicts(request.tools):
         params["tools"] = tools
     if request.tool_choice is not None:
         params["tool_choice"] = request.tool_choice

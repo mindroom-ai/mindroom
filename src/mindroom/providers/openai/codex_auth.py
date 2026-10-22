@@ -52,23 +52,13 @@ def normalize_codex_model_id(model_id: str) -> str:
 def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str | None]:
     """Return a valid Codex CLI ChatGPT access token and optional account id."""
     auth_path = _codex_auth_path(codex_home=codex_home)
-    auth = _read_codex_auth(auth_path)
-    tokens = auth.get("tokens")
-    if not isinstance(tokens, dict) or not tokens.get("access_token"):
-        msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
-        raise CodexAuthError(msg)
-
+    _, tokens = _read_codex_auth(auth_path)
     usable_token = _usable_access_token(tokens)
     if usable_token is not None:
         return usable_token
 
     with advisory_file_lock(auth_path.with_name(f"{auth_path.name}.lock")):
-        auth = _read_codex_auth(auth_path)
-        tokens = auth.get("tokens")
-        if not isinstance(tokens, dict) or not tokens.get("access_token"):
-            msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
-            raise CodexAuthError(msg)
-
+        auth, tokens = _read_codex_auth(auth_path)
         usable_token = _usable_access_token(tokens)
         if usable_token is not None:
             return usable_token
@@ -85,7 +75,6 @@ def borrow_codex_key(*, codex_home: str | Path | None = None) -> tuple[str, str 
             raise CodexAuthError(msg)
 
         _update_tokens(tokens, refreshed)
-        auth["tokens"] = tokens
         auth["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
         _write_codex_auth(auth_path, auth)
         return str(tokens["access_token"]), account_id
@@ -105,13 +94,18 @@ def _codex_home_path(*, codex_home: str | Path | None) -> Path:
     return Path(configured_home).expanduser()
 
 
-def _read_codex_auth(auth_path: Path) -> dict[str, Any]:
+def _read_codex_auth(auth_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the ChatGPT login in ``auth.json`` and its tokens, which hold at least an access token."""
     with auth_path.open(encoding="utf-8") as auth_file:
         auth = json.load(auth_file)
     if auth.get("auth_mode") != "chatgpt":
         msg = "Codex auth.json must use ChatGPT OAuth auth_mode. Run `codex login` first."
         raise CodexAuthError(msg)
-    return auth
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        msg = "No ChatGPT access token found in Codex auth.json. Run `codex login` first."
+        raise CodexAuthError(msg)
+    return auth, tokens
 
 
 def _usable_access_token(tokens: dict[str, Any]) -> tuple[str, str | None] | None:

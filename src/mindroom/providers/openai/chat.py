@@ -67,7 +67,6 @@ class ChatAdapter:
             model_id=self.identity.id,
             messages=request.messages,
             tools=request.tools,
-            native_tools=request.native_tools,
             tool_choice=request.tool_choice,
             response_format=request.response_format,
             stream=request.stream,
