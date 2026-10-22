@@ -587,13 +587,26 @@ def test_chat_send_reaching_a_member_not_in_recipients_is_refused(
     assert [request.method for request in graph.requests] == ["GET"]
 
 
-def test_chat_send_with_a_paged_member_list_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    page = {"value": MEMBERS, "@odata.nextLink": f"{GRAPH}/chats/{CHAT}/members?$skiptoken=members2"}
+@pytest.mark.parametrize(
+    ("page", "read"),
+    [
+        ({"value": MEMBERS, "@odata.nextLink": f"{GRAPH}/chats/{CHAT}/members?$skiptoken=members2"}, 2),
+        ({"value": []}, 0),
+        ({}, 0),
+    ],
+    ids=["next-link", "empty", "missing"],
+)
+def test_chat_send_with_an_incomplete_member_list_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page: dict[str, object],
+    read: int,
+) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(page))
 
     result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, "hi"))
 
-    assert (result["code"], len(result["members"])) == ("recipients_mismatch", 2)
+    assert (result["code"], len(result["members"])) == ("recipients_mismatch", read)
     assert [request.method for request in graph.requests] == ["GET"]
 
 
