@@ -13,17 +13,15 @@ from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import UsageReported
 from mindroom.logging_config import get_logger
 from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
-from mindroom.providers.pipeline.wrapped import add_usage, is_visible_output, with_carried_usage
+from mindroom.providers.pipeline.wrapped import AttemptUsage, is_visible_output, with_carried_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
-    from mindroom.llm.usage import MessageMetrics
 
 __all__ = ["guidance_retry_stream"]
 
@@ -33,13 +31,12 @@ logger = get_logger(__name__)
 async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, resending it once with the malformed-call guidance after a malformed tool call."""
     visible = False
-    attempt_usage: MessageMetrics | None = None
+    usage = AttemptUsage()
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
             async for event in events:
-                if isinstance(event, UsageReported) and event.final:
-                    attempt_usage = add_usage(attempt_usage, event.usage)
+                usage.observe(event)
                 visible = visible or is_visible_output(event)
                 yield event
     except ProviderError as error:
@@ -53,8 +50,10 @@ async def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> 
         provider=identity.provider,
         model_id=identity.id,
     )
+    if (report := usage.settle()) is not None:
+        yield report
     guidance = Message(role="user", content=MALFORMED_FUNCTION_CALL_GUIDANCE, temporary=True)
     events = inner.stream(replace(request, messages=(*request.messages, guidance)))
     async with closing_async_stream(events):
         async for event in events:
-            yield with_carried_usage(event, attempt_usage)
+            yield with_carried_usage(event, usage.settled)

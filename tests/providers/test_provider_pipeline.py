@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.errors import (
@@ -38,6 +40,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.request_context import bind_llm_request_log_context
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.providers.errors import classify_provider_error
@@ -872,3 +875,90 @@ async def test_reported_usage_always_sums_to_the_finished_turn(rejection: Provid
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
     assert reported == finished.message.metrics.input_tokens == 22
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _transient(),
+        InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400),
+        _malformed(),
+    ],
+    ids=["stream-retry", "media-retry", "guidance-retry"],
+)
+async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_turn(failure: ProviderError) -> None:
+    """Usage an attempt reported only partially before it failed is settled as final once, then carried over.
+
+    Claude reports a request's input and cache usage when its message starts and its full usage when it stops, so an
+    attempt that fails in between was billed for what its partial report says.
+    """
+    started = MessageMetrics(
+        input_tokens=12,
+        output_tokens=1,
+        total_tokens=13,
+        cache_read_tokens=900,
+        cache_write_tokens=40,
+    )
+    restarted = MessageMetrics(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940)
+    final = MessageMetrics(input_tokens=12, output_tokens=30, total_tokens=42, cache_read_tokens=940)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), StreamProgress(), failure],
+            [UsageReported(restarted, final=False), TextDelta("done"), UsageReported(final), _turn(usage=final)],
+        ],
+    )
+    provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
+
+    events = await _drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    reports = [(event.usage, event.final) for event in events if isinstance(event, UsageReported)]
+    assert reports == [(started, False), (started, True), (restarted, False), (final, True)]
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {
+        "input_tokens": 24,
+        "output_tokens": 31,
+        "total_tokens": 55,
+        "cache_read_tokens": 1840,
+        "cache_write_tokens": 40,
+    }
+    assert finished.message.provider_data[AGGREGATE_USAGE_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_partial_usage_once() -> None:
+    """The run's error record counts the settled partial usage of the failed attempt beside the retry's own."""
+    saved: list[RunRecord] = []
+
+    async def persist(record: RunRecord) -> None:
+        saved.append(record)
+
+    rejection = InvalidRequest("The request was rejected", provider="Scripted Chat", status_code=400)
+    inner = _ScriptedProvider(
+        [
+            [
+                UsageReported(MessageMetrics(input_tokens=5, total_tokens=5, cache_read_tokens=40), final=False),
+                _transient(),
+            ],
+            [
+                UsageReported(MessageMetrics(input_tokens=6, total_tokens=6, cache_read_tokens=40), final=False),
+                rejection,
+            ],
+        ],
+    )
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
+        system_message=None,
+    )
+
+    with pytest.raises(InvalidRequest, match="rejected"):
+        async for _ in run_agent(spec, [_user()], ctx=RunContext(run_id="run", session_id="session"), persist=persist):
+            pass
+
+    [record] = saved
+    assert record.status is RunStatus.error
+    assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
+    assert (record.metrics.input_tokens, record.metrics.cache_read_tokens) == (11, 80)
