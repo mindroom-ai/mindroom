@@ -46,6 +46,7 @@ defaults:
 
 agents:
   code:
+    memory_backend: file                 # gives the agent a workspace for file paths
     tools:
       - file                               # no inline settings
       - shell:                             # this agent only
