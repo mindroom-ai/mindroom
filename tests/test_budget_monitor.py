@@ -422,6 +422,36 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scan holds the GIL the event loop needs, so a slow scan must not restart right after it ends."""
+    scans = _Scans(monkeypatch, {})
+    started: list[float] = []
+    collect = monitor_module.collect_monthly_spend
+
+    def slow(*args: object) -> SpendSnapshot:
+        started.append(time.monotonic())
+        time.sleep(0.1)
+        return collect(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(monitor_module, "collect_monthly_spend", slow)
+    monitor = BudgetMonitor(
+        runtime_paths=_paths(tmp_path),
+        config_provider=_config,
+        clock=_Clock(),
+        min_scan_interval_seconds=0,
+        scan_spacing_factor=5,
+    )
+    monitor.sync()
+    await _until(lambda: scans.calls == 1)
+    monitor.response_finished()
+    await _until(lambda: scans.calls == 2)
+
+    # Five 0.1 s scan durations separate the two starts; allow slack for worker dispatch.
+    assert started[1] - started[0] >= 0.4
+    await monitor.stop()
+
+
+@pytest.mark.asyncio
 async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Voice calls and helpers add spend without a finished reply, so the tick rescans on its own."""
     scans = _Scans(monkeypatch, {ALICE: 12.0})

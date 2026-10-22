@@ -445,6 +445,26 @@ describe("WorkspaceDirectory", () => {
     ).toBeVisible();
   });
 
+  it("shows the default mode for a team that omits it", async () => {
+    const { mode: _mode, ...teamWithoutMode } = config.teams!.builders;
+    (global.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...config, teams: { builders: teamWithoutMode } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ agent_policies: {} }),
+      });
+    await useConfigStore.getState().loadConfig();
+    renderWorkspaceDirectory();
+
+    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
+    expect(
+      within(screen.getByRole("complementary")).getByText("coordinate"),
+    ).toBeVisible();
+  });
+
   it("filters the directory by type and includes teams", () => {
     seedWorkspaceDirectory();
     renderWorkspaceDirectory();

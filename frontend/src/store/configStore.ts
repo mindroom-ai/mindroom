@@ -2,8 +2,10 @@ import { create } from "zustand";
 import {
   Config,
   Agent,
+  AgentConfig,
   AgentPoliciesByAgent,
   Team,
+  TeamConfig,
   Room,
   RoomConfig,
   KnowledgeBaseConfig,
@@ -266,50 +268,93 @@ function deriveRooms(
   });
 }
 
+// Authored agents and teams may omit these fields; for example, an agent
+// reached only through personal rooms or invitations lists no rooms. Loading
+// fills them in, and saving drops each filled-in field that no edit has
+// touched, so config.yaml keeps its authored shape.
+function agentFieldDefaults() {
+  return {
+    tools: [] as string[],
+    skills: [] as string[],
+    instructions: [] as string[],
+    rooms: [] as string[],
+    knowledge_bases: [] as string[],
+    delegate_to: [] as string[],
+    context_files: [] as string[],
+  };
+}
+
+function teamFieldDefaults() {
+  return { rooms: [] as string[], mode: "coordinate" as Team["mode"] };
+}
+
+// For each agent or team object, the fields loading filled in that no edit
+// has touched since.
+const untouchedFilledFields = new WeakMap<object, ReadonlySet<string>>();
+
+function withFieldDefaults<T extends object, D extends object>(
+  entity: T,
+  defaults: D,
+): T & D {
+  const filled = { ...entity } as Record<string, unknown>;
+  const filledFields = new Set<string>();
+  for (const [field, value] of Object.entries(defaults)) {
+    if (filled[field] == null) {
+      filled[field] = value;
+      filledFields.add(field);
+    }
+  }
+  untouchedFilledFields.set(filled, filledFields);
+  return filled as T & D;
+}
+
+// An edit makes a field authored, whatever its new value.
+function withEdits<T extends object>(entity: T, edits: Partial<T>): T {
+  const edited = { ...entity, ...edits };
+  const filledFields = untouchedFilledFields.get(entity);
+  if (filledFields) {
+    untouchedFilledFields.set(
+      edited,
+      new Set(
+        [...filledFields].filter(
+          (field) => !Object.prototype.hasOwnProperty.call(edits, field),
+        ),
+      ),
+    );
+  }
+  return edited;
+}
+
+function authoredFields<C>(entity: Agent | Team): C {
+  const fields = { ...entity } as Record<string, unknown>;
+  delete fields.id;
+  for (const field of untouchedFilledFields.get(entity) ?? []) {
+    delete fields[field];
+  }
+  return fields as C;
+}
+
 function deriveConfigCollections(
   config: Config,
 ): Pick<ConfigState, "agents" | "teams" | "rooms"> {
-  const agents = Object.entries(config.agents).map(([id, agent]) => ({
-    id,
-    ...agent,
-    skills: agent.skills ?? [],
-    rooms: agent.rooms ?? [],
-    knowledge_bases: agent.knowledge_bases || [],
-    delegate_to: agent.delegate_to || [],
-    context_files: agent.context_files ?? [],
-  }));
-  const teams = config.teams
-    ? Object.entries(config.teams).map(([id, team]) => ({
-        id,
-        ...team,
-        rooms: team.rooms ?? [],
-      }))
-    : [];
+  const agents = Object.entries(config.agents).map(([id, agent]) =>
+    withFieldDefaults({ id, ...agent }, agentFieldDefaults()),
+  );
+  const teams = Object.entries(config.teams ?? {}).map(([id, team]) =>
+    withFieldDefaults({ id, ...team }, teamFieldDefaults()),
+  );
   const rooms = deriveRooms(config, agents, teams);
 
   return { agents, teams, rooms };
 }
 
-// Agents and teams reached only through personal rooms or invitations omit
-// `rooms`. Saving drops the `[]` that loading filled in so their config keeps
-// its authored shape.
-function withAuthoredRooms<T extends { rooms: string[] }>(
-  entity: T,
-  authored: { rooms?: string[] } | undefined,
-): Omit<T, "rooms"> & { rooms?: string[] } {
-  if (entity.rooms.length > 0 || authored?.rooms !== undefined) {
-    return entity;
-  }
-  const { rooms: _rooms, ...rest } = entity;
-  return rest;
-}
-
 function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
   const knownAgents = new Set(agents.map((agent) => agent.id));
-  return teams.map((team) => ({
-    ...team,
-    agents: team.agents.filter((agentId) => knownAgents.has(agentId)),
-  }));
+  return teams.map((team) =>
+    withEdits(team, {
+      agents: team.agents.filter((agentId) => knownAgents.has(agentId)),
+    }),
+  );
 }
 
 function defaultRoomDisplayName(roomId: string): string {
@@ -547,6 +592,16 @@ function setRememberedRawToolEntries(
   rawToolEntriesByConfig.set(config, nextEntriesByAgent);
 }
 
+// Agents that omit `tools` keep omitting them in the saved config.
+function withRawToolEntries(
+  agentConfig: AgentConfig,
+  rawEntries: ToolEntry[] | undefined,
+): configService.RawAgentConfig {
+  return agentConfig.tools === undefined
+    ? agentConfig
+    : { ...agentConfig, tools: rawEntries ?? agentConfig.tools };
+}
+
 function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
   normalizedConfig: Config;
   rawEntriesByAgent: Map<string, ToolEntry[]>;
@@ -568,10 +623,9 @@ function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
       rawEntriesByAgent.set(agentId, rawEntries);
       return [
         agentId,
-        {
-          ...agentConfig,
-          tools: normalizeToolEntries(rawEntries),
-        },
+        agentConfig.tools === undefined
+          ? agentConfig
+          : { ...agentConfig, tools: normalizeToolEntries(rawEntries) },
       ];
     }),
   );
@@ -1086,8 +1140,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const currentAgentsObject = agents.reduce(
         (acc, agent) => {
-          const { id, ...rest } = agent;
-          acc[id] = withAuthoredRooms(rest, baseConfig.agents[id]);
+          acc[agent.id] = authoredFields<AgentConfig>(agent);
           return acc;
         },
         {} as Config["agents"],
@@ -1095,17 +1148,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const payloadAgentsObjectFromAgents = Object.fromEntries(
         Object.entries(currentAgentsObject).map(([id, agentConfig]) => [
           id,
-          {
-            ...agentConfig,
-            tools: currentRawEntriesByAgent.get(id) ?? agentConfig.tools,
-          },
+          withRawToolEntries(agentConfig, currentRawEntriesByAgent.get(id)),
         ]),
       );
 
       const currentTeamsObject = teams.reduce(
         (acc, team) => {
-          const { id, ...rest } = team;
-          acc[id] = withAuthoredRooms(rest, baseConfig.teams?.[id]);
+          acc[team.id] = authoredFields<TeamConfig>(team);
           return acc;
         },
         {} as NonNullable<Config["teams"]>,
@@ -1131,12 +1180,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         : Object.fromEntries(
             Object.entries(baseConfig.agents).map(([agentId, agentConfig]) => [
               agentId,
-              {
-                ...agentConfig,
-                tools:
-                  getRememberedRawToolEntries(baseConfig, agentId) ??
-                  agentConfig.tools,
-              },
+              withRawToolEntries(
+                agentConfig,
+                getRememberedRawToolEntries(baseConfig, agentId),
+              ),
             ]),
           );
       const defaultTools = updatedConfig.defaults?.tools;
@@ -1496,7 +1543,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         (key) => ["agents", agentId, key] as ConfigDiagnosticPath,
       );
       nextAgents = state.agents.map((agent) =>
-        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent,
+        agent.id === agentId ? withEdits(agent, normalizedUpdates) : agent,
       );
       const nextAgent =
         nextAgents.find((agent) => agent.id === agentId) ?? currentAgent;
@@ -1551,7 +1598,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         (key) => ["agents", agentId, key] as ConfigDiagnosticPath,
       );
       nextAgents = state.agents.map((agent) =>
-        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent,
+        agent.id === agentId ? withEdits(agent, normalizedUpdates) : agent,
       );
       const nextAgent =
         nextAgents.find((agent) => agent.id === agentId) ?? currentAgent;
@@ -1577,12 +1624,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Create a new agent
   createAgent: (agentData) => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, "_");
-    const newAgent: Agent = {
-      id,
-      ...agentData,
-      knowledge_bases: agentData.knowledge_bases ?? [],
-      delegate_to: agentData.delegate_to ?? [],
-    };
+    const newAgent: Agent = withFieldDefaults(
+      { id, ...agentData },
+      agentFieldDefaults(),
+    );
     set((state) => ({
       agents: [...state.agents, newAgent],
       rooms: roomsFromDraft(
@@ -1609,10 +1654,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         if (!agent.delegate_to?.includes(agentId)) {
           return agent;
         }
-        return {
-          ...agent,
+        return withEdits(agent, {
           delegate_to: agent.delegate_to.filter((id) => id !== agentId),
-        };
+        });
       });
     const nextAgentPoliciesByAgent = Object.fromEntries(
       Object.entries(state.agentPoliciesByAgent).filter(
@@ -1655,7 +1699,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         (key) => ["teams", teamId, key] as ConfigDiagnosticPath,
       );
       const nextTeams = state.teams.map((team) =>
-        team.id === teamId ? { ...team, ...normalizedUpdates } : team,
+        team.id === teamId ? withEdits(team, normalizedUpdates) : team,
       );
       return {
         teams: nextTeams,
@@ -1786,10 +1830,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
         const updatedAgents = state.agents.map((agent) => {
           if (removedAgents.includes(agent.id)) {
-            return { ...agent, rooms: agent.rooms.filter((r) => r !== roomId) };
+            return withEdits(agent, {
+              rooms: agent.rooms.filter((r) => r !== roomId),
+            });
           }
           if (addedAgents.includes(agent.id) && !agent.rooms.includes(roomId)) {
-            return { ...agent, rooms: [...agent.rooms, roomId] };
+            return withEdits(agent, { rooms: [...agent.rooms, roomId] });
           }
           return agent;
         });
@@ -1855,7 +1901,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       // Add room to selected agents
       const updatedAgents = state.agents.map((agent) => {
         if (roomData.agents.includes(agent.id) && !agent.rooms.includes(id)) {
-          return { ...agent, rooms: [...agent.rooms, id] };
+          return withEdits(agent, { rooms: [...agent.rooms, id] });
         }
         return agent;
       });
@@ -1911,20 +1957,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         team.rooms.includes(roomId),
       );
 
-      // Remove room from all agents
+      // Remove room from the agents and teams that list it
       const updatedAgents = agentsReferenceRoom
-        ? state.agents.map((agent) => ({
-            ...agent,
-            rooms: agent.rooms.filter((r) => r !== roomId),
-          }))
+        ? state.agents.map((agent) =>
+            agent.rooms.includes(roomId)
+              ? withEdits(agent, {
+                  rooms: agent.rooms.filter((r) => r !== roomId),
+                })
+              : agent,
+          )
         : state.agents;
-
-      // Remove room from teams
       const updatedTeams = teamsReferenceRoom
-        ? state.teams.map((team) => ({
-            ...team,
-            rooms: team.rooms.filter((r) => r !== roomId),
-          }))
+        ? state.teams.map((team) =>
+            team.rooms.includes(roomId)
+              ? withEdits(team, {
+                  rooms: team.rooms.filter((r) => r !== roomId),
+                })
+              : team,
+          )
         : state.teams;
 
       // Remove from room_models if it exists
@@ -1981,7 +2031,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const updatedAgents = state.agents.map((agent) => {
         if (agent.id === agentId && !agent.rooms.includes(roomId)) {
-          return { ...agent, rooms: [...agent.rooms, roomId] };
+          return withEdits(agent, { rooms: [...agent.rooms, roomId] });
         }
         return agent;
       });
@@ -2014,7 +2064,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
       const updatedAgents = state.agents.map((agent) => {
         if (agent.id === agentId) {
-          return { ...agent, rooms: agent.rooms.filter((r) => r !== roomId) };
+          return withEdits(agent, {
+            rooms: agent.rooms.filter((r) => r !== roomId),
+          });
         }
         return agent;
       });
@@ -2093,12 +2145,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const knowledgeBases = { ...(state.config.knowledge_bases || {}) };
       delete knowledgeBases[baseName];
 
-      const agents = state.agents.map((agent) => ({
-        ...agent,
-        knowledge_bases: (agent.knowledge_bases || []).filter(
-          (base) => base !== baseName,
-        ),
-      }));
+      const agents = state.agents.map((agent) =>
+        agent.knowledge_bases?.includes(baseName)
+          ? withEdits(agent, {
+              knowledge_bases: agent.knowledge_bases.filter(
+                (base) => base !== baseName,
+              ),
+            })
+          : agent,
+      );
       const configAgents = Object.fromEntries(
         Object.entries(state.config.agents).map(([agentId, agentConfig]) => [
           agentId,

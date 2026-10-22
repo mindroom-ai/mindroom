@@ -152,7 +152,7 @@ async def test_publish_failures_never_stop_room_setup(monkeypatch: pytest.Monkey
     """A homeserver that refuses, fails, or never answers the write only leaves Chat without the address."""
     content = {"api_origin": "http://localhost:8765", "computer": False}
     refused = _client(_NOT_FOUND)
-    refused.room_put_state.return_value = nio.RoomPutStateError("Forbidden", status_code="M_FORBIDDEN")
+    refused.room_put_state.return_value = nio.RoomPutStateError("Too many requests", status_code="M_LIMIT_EXCEEDED")
     failing = _client(_NOT_FOUND)
     failing.room_get_state_event.side_effect = ConnectionError
     # nio retries an unreachable homeserver without limit, so the write gives up instead of holding the join.
@@ -171,6 +171,21 @@ async def test_publish_failures_never_stop_room_setup(monkeypatch: pytest.Monkey
         "MindRoom server state was refused",
         "Publishing the MindRoom server state failed",
         "Publishing the MindRoom server state failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_room_without_state_rights_is_not_a_warning() -> None:
+    """A room a person created gives an invited agent no state rights, so every restart is refused the same way."""
+    client = _client(_NOT_FOUND)
+    client.room_put_state.return_value = nio.RoomPutStateError(
+        "Auth check failed: sender does not have enough power",
+        status_code="M_FORBIDDEN",
+    )
+    with capture_logs() as logs:
+        await publish_server_state(client, ROOM, {"api_origin": "http://localhost:8765", "computer": False})
+    assert [(log["event"], log["log_level"]) for log in logs] == [
+        ("MindRoom server state is not permitted in this room", "debug"),
     ]
 
 

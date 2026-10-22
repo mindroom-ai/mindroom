@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { AgentEditor } from "./AgentEditor";
 import { useConfigStore } from "@/store/configStore";
 import {
@@ -817,6 +817,38 @@ describe("AgentEditor", () => {
         instructions: ["Test instruction", ""],
       }),
     );
+  });
+
+  it("adds an instruction to an agent loaded without instructions", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => ({
+        ok: true,
+        json: async () =>
+          url === "/api/config/load"
+            ? {
+                ...mockConfig,
+                agents: { test_agent: { display_name: "Bare" } },
+              }
+            : { agent_policies: makeAgentPolicies() },
+      })),
+    );
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    await actual.useConfigStore.getState().loadConfig();
+    actual.useConfigStore.getState().selectAgent("test_agent");
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+
+    render(<AgentEditor />);
+    fireEvent.click(screen.getByTestId("add-instruction-button"));
+
+    expect(actual.useConfigStore.getState().agents[0].instructions).toEqual([
+      "",
+    ]);
   });
 
   it("adds and removes rooms", () => {

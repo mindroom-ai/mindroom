@@ -8,7 +8,7 @@ import { ConfigValidationIssue } from "@/lib/configValidation";
 import type { ToolEntry } from "@/lib/toolEntry";
 
 export type RawAgentConfig = Omit<AgentConfig, "tools"> & {
-  tools: ToolEntry[];
+  tools?: ToolEntry[];
 };
 
 export type RawDefaultsConfig = Omit<
