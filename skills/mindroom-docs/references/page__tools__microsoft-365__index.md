@@ -204,6 +204,7 @@ Each occurrence of a recurring meeting has its own ID, and changing or deleting 
 Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
 Changing or deleting the series master changes or deletes every occurrence.
 Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
+Responding to a meeting also takes the organizer's email from the event as `expected_organizer`, so an approval card shows who receives the response, and fails with `target_mismatch`, naming the real organizer, when it differs.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
 
