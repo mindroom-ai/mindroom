@@ -59,6 +59,11 @@ async def publish_server_state(client: nio.AsyncClient, room_id: str, content: d
     except Exception:
         logger.warning("Publishing the MindRoom server state failed", room_id=room_id, exc_info=True)
         return
-    if not isinstance(response, nio.RoomPutStateResponse):
-        # Rooms MindRoom does not manage may not let the entity write this state.
-        logger.warning("MindRoom server state was refused", room_id=room_id, response=str(response))
+    if isinstance(response, nio.RoomPutStateResponse):
+        return
+    if isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
+        # Rooms MindRoom does not manage, such as rooms people create and invite agents to, keep the default state
+        # power level for this type, so an entity without state rights is refused on every join and restart.
+        logger.debug("MindRoom server state is not permitted in this room", room_id=room_id)
+        return
+    logger.warning("MindRoom server state was refused", room_id=room_id, response=str(response))
