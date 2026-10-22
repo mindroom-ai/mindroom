@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY
 from mindroom.matrix.message_builder import opens_with_markdown_block
-from mindroom.providers.assistant_turn import MODEL_PROVENANCE_KEY
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
     StreamingToolTracker,

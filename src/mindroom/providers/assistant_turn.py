@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady
 
 if TYPE_CHECKING:
@@ -20,14 +20,11 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = [
-    "MODEL_PROVENANCE_KEY",
     "finished_assistant_message",
     "split_thinking",
     "stamp_finished_turn",
     "whole_turn_deltas",
 ]
-
-MODEL_PROVENANCE_KEY = "mindroom_model"
 
 
 def stamp_finished_turn(

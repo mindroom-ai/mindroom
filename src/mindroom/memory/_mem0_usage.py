@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 
@@ -80,7 +80,7 @@ def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401
             response = call(*args, **kwargs)
             calls = _calls.get()
             if calls is not None and (metrics := read(response)).total_tokens:
-                calls.append(Message(role="assistant", metrics=metrics, provider_data={"mindroom_model": model}))
+                calls.append(Message(role="assistant", metrics=metrics, provider_data={MODEL_PROVENANCE_KEY: model}))
             return response
 
         return counted_call
@@ -110,7 +110,7 @@ def mem0_usage_run(calls: list[Message]) -> RunRecord | None:
     if not calls:
         return None
     # One memory write runs every call on the configured memory model.
-    model = cast("dict[str, dict[str, str]]", calls[0].provider_data)["mindroom_model"]
+    model = cast("dict[str, dict[str, str]]", calls[0].provider_data)[MODEL_PROVENANCE_KEY]
     metrics = RunMetrics()
     for call in calls:
         metrics.add(call.metrics, model_id=model["id"], provider=model["provider"])

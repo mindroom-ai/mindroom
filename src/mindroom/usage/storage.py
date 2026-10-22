@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -164,7 +166,7 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
         provider_data = message.get("provider_data")
         if (
             isinstance(provider_data, dict)
-            and cast("dict[str, object]", provider_data).get("mindroom_aggregate_usage") is True
+            and cast("dict[str, object]", provider_data).get(AGGREGATE_USAGE_KEY) is True
         ):
             # Retried attempts have aggregate counters, not one request's price or timestamp.
             continue
@@ -178,8 +180,8 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
                 "created_at": created_at if isinstance(created_at, (int, float)) else None,
                 "metrics": request_metrics,
             }
-            if isinstance(provider_data, dict) and "mindroom_model" in provider_data:
-                model = cast("dict[str, object]", provider_data)["mindroom_model"]
+            if isinstance(provider_data, dict) and MODEL_PROVENANCE_KEY in provider_data:
+                model = cast("dict[str, object]", provider_data)[MODEL_PROVENANCE_KEY]
                 for source, target in (("id", "model"), ("provider", "model_provider")):
                     value = cast("dict[str, object]", model).get(source) if isinstance(model, dict) else None
                     request[target] = value if isinstance(value, str) else False
