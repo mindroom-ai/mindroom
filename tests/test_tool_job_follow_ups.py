@@ -468,6 +468,50 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         await runtime.shutdown()
 
 
+async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path) -> None:
+    """A follow-up posts nothing while a message waits for its conversation, whose reply reports the jobs instead."""
+    bot = _bot(tmp_path)
+    await bot._reply_runtime.start()
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner._lifecycle_coordinator
+    key = _runner_key(bot)
+    owner = _runner_owner(key)
+    runtime = await _runner_runtime(bot, tmp_path)
+    prompts: list[str] = []
+
+    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        prompts.append(str(kwargs["prompt"]))
+        yield "The job finished."
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
+        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        # The message arrived while a reply ran, which has ended since; the message waits for the next turn.
+        target = _target(thread_id=key.thread_id, reply_to_event_id="$waiting")
+        signal = lifecycle._get_or_create_queued_signal(target)
+        signal.begin_response_turn()
+        waiting = lifecycle.reserve_waiting_human_message(
+            target=target,
+            response_envelope=_envelope(target, source_event_id="$waiting"),
+        )
+        assert waiting is not None
+        signal.finish_response_turn()
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner._run_job_follow_up(event)
+        assert prompts == []
+        assert await bot._reply_runtime.store.replies.for_sources(("job-follow-up:1",)) is None
+        assert not await bot.journal_principal().is_pending("job-follow-up:1")
+        # The jobs wait for the waiting message's reply to collect them.
+        assert [job.job_id for job in await runtime.ended_jobs(key)] == ["work"]
+    finally:
+        await runtime.shutdown()
+
+
 async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) -> None:
     """Under the lock, a follow-up whose own job was collected does not report jobs the limit holds back."""
     bot = _bot(tmp_path)

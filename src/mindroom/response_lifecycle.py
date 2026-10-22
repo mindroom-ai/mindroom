@@ -298,6 +298,11 @@ class ResponseLifecycleCoordinator:
         """Return whether one canonical conversation target already has an active turn."""
         return self._has_active_response_for_thread_key(target.lifecycle_key)
 
+    def has_waiting_human_messages(self, target: MessageTarget) -> bool:
+        """Return whether human messages wait for one canonical conversation's next turn."""
+        queued_signal = self._thread_queued_signals.get(target.lifecycle_key)
+        return queued_signal is not None and queued_signal.has_pending_human_messages()
+
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
         known_lifecycle_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
