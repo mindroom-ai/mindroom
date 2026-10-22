@@ -6,6 +6,11 @@ approval receipt, the wait budget of managed tool-job calls, the output-limit an
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
 and ``HookTurn`` holds what every run takes from its turn.
+
+The loop lets a hook's exception fail the run, so a mistake in a hook the run depends on surfaces. A hook whose
+work a reply can do without catches and logs that work's failures itself: mid-turn compaction sends the request
+uncompacted when its summary or storage fails, and the queued-message and job notices carry on without a judgment,
+a Matrix reaction, or a job acknowledgement that failed.
 """
 
 from __future__ import annotations

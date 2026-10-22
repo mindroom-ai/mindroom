@@ -827,6 +827,54 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, stream: bool
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["judge", "defer_reaction"])
+@pytest.mark.parametrize("resumed", [False, True])
+async def test_a_failing_judge_or_defer_reaction_costs_no_reply(*, failure: str, resumed: bool) -> None:
+    """A judge that errors wraps the turn up and a defer reaction Matrix refuses is skipped; the reply finishes.
+
+    The judgment runs after a completed tool batch, or, when the batch paused for a delegation, once the resume
+    completes it.
+    """
+    state = _QueuedMessageState()
+    reactions: list[str] = []
+
+    def work() -> str:
+        """Do the work."""
+        state.add_waiting_human_message("$new", text="Thanks")
+        return "Completed action"
+
+    def delegate() -> str:
+        """Hand the subtask to a child."""
+        return "Child result"
+
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        if failure == "judge":
+            msg = "judgment backend unavailable"
+            raise RuntimeError(msg)
+        return True
+
+    async def react(event_id: str) -> None:
+        reactions.append(event_id)
+        msg = "Matrix unavailable"
+        raise RuntimeError(msg)
+
+    tools = (toolkit(work), external(delegate))
+    batch = (tool_call("work", "work"), *((tool_call("delegate", "child"),) if resumed else ()))
+    model = ScriptedModel([calls(*batch), answer("Done")])
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=react)
+    with queued_message_signal_context(state, mid_turn_gate=gate):
+        record = await _run_turn(model, *tools, stream=False)
+        if resumed:
+            assert record.status == RunStatus.paused
+            record = await _resume_turn(model, record, *tools, external_results={"child": "Child result"}, stream=False)
+    assert record.status == RunStatus.completed
+    assert record.content == "Done"
+    assert reactions == ([] if failure == "judge" else ["$new"])
+    # A failed judgment wraps the turn up; a decision to finish stands when only its reaction failed.
+    assert _has_notice(model.requests[-1].messages) is (failure == "judge")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("probability", "threshold", "finish"),
     [
