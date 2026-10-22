@@ -561,6 +561,7 @@ async def test_requests_are_logged_under_the_storage_root_with_the_model_setting
         "message_count",
         "tools",
         "tool_count",
+        "deferred_tool_names",
         "model_params",
     }
     assert (request_record["agent_id"], request_record["model_id"]) == ("default", "gpt-6-astra")

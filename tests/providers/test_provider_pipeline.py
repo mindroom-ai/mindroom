@@ -644,6 +644,33 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deferred", "expected"),
+    [(frozenset({"lookup_order", "archive_order"}), ["archive_order", "lookup_order"]), (frozenset(), [])],
+    ids=["deferred", "none"],
+)
+async def test_request_log_names_the_deferred_tools(
+    tmp_path: Path,
+    deferred: frozenset[str],
+    expected: list[str],
+) -> None:
+    """A route that searches tools natively receives only the deferred names, so the record carries them too."""
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[_user()],
+        tools=[_tool("search"), _tool("lookup_order"), _tool("archive_order")],
+        deferred_tool_names=deferred,
+    )
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert record["deferred_tool_names"] == expected
+    assert [tool["name"] for tool in record["tools"]] == ["search", "lookup_order", "archive_order"]
+    assert record["tool_count"] == 3
+
+
+@pytest.mark.asyncio
 async def test_request_log_builds_the_record_off_the_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
