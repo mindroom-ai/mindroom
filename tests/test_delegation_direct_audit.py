@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
 
+from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.ai import run_delegated_child_response
@@ -27,8 +25,8 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.tool_system.agno_toolkits import adapt_function
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -37,37 +35,17 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.access_schema_support import with_responder_access
-from tests.agent_loop.helpers import toolkit
+from tests.agent_loop.helpers import collect, toolkit
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
-from tests.fakes.scripted_model import Await, ScriptedModel, calls
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
 from tests.fakes.scripted_model import tool_call as scripted_call
-from tests.history_helpers import RecordingModel
 from tests.test_delegate_tools import _make_config
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.response_turn import ResponseTurnContext
-
-
-@dataclass
-class _ToolThenErrorModel(RecordingModel):
-    """Run one real tool request, then surface a provider failure through Agno."""
-
-    responses: list[ModelResponse] = field(default_factory=list)
-
-    async def ainvoke(self, *_args: object, **kwargs: object) -> ModelResponse:
-        messages = kwargs.get("messages")
-        if isinstance(messages, list):
-            self.seen_messages = list(messages)
-        if self.responses:
-            return self.responses.pop(0)
-        msg = "provider failed after tool"
-        raise RuntimeError(msg)
-
-    async def ainvoke_stream(self, *_args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield await self.ainvoke(*_args, **kwargs)
 
 
 def _identity() -> ToolExecutionIdentity:
@@ -110,14 +88,6 @@ def _only_run(tmp_path: Path) -> dict[str, object]:
     value = json.loads(paths[0].read_text(encoding="utf-8"))
     assert isinstance(value, dict)
     return value
-
-
-def _tool_call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {
-        "id": call_id,
-        "type": "function",
-        "function": {"name": name, "arguments": json.dumps(arguments)},
-    }
 
 
 @pytest.mark.asyncio
@@ -263,36 +233,36 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
 
 @pytest.mark.asyncio
 async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> None:
-    """A hook that skips the tool body must not leak its parent IDs into a later direct call."""
+    """A tool middleware that skips the tool body must not leak its parent IDs into a later direct call."""
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def deny_call() -> str:
+    async def deny_call(_call: ToolCall, _call_next: ToolNext) -> str:
         return "denied before delegation"
 
-    tools.async_functions["run_subagent"].tool_hooks = [deny_call]
-    parent = Agent(
-        name="leader",
-        model=_ToolThenErrorModel(
-            id="parent-model",
-            responses=[
-                ModelResponse(
-                    tool_calls=[_tool_call("run_subagent", "denied-call", agent_name="child", task="Skip")],
-                ),
-                ModelResponse(content="parent complete"),
-            ],
-        ),
-        tools=[tools],
+    parent = ScriptedModel(
+        [
+            calls(scripted_call("run_subagent", "denied-call", agent_name="child", task="Skip")),
+            answer("parent complete"),
+        ],
     )
+    spec = AgentSpec(id="leader", name="leader", model=parent, system_message=None, toolkits=(adapt_toolkit(tools),))
     with tool_runtime_context(context):
-        response = await parent.arun(
-            "delegate",
-            session_id="denied-parent-session",
-            run_id="denied-parent-run",
-            user_id=_identity().requester_id,
+        _events, record = await collect(
+            run_agent(
+                spec,
+                [Message(role="user", content="delegate")],
+                ctx=RunContext(
+                    run_id="denied-parent-run",
+                    session_id="denied-parent-session",
+                    user_id=_identity().requester_id,
+                ),
+                hooks=LoopHooks(tool_middleware=(deny_call,)),
+            ),
         )
-    assert response.status == RunStatus.completed
+    assert record.status is RunStatus.completed
+    assert parent.requests[-1].messages[-1].content == "denied before delegation"
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
     async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
