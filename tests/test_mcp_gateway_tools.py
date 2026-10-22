@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
+from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from mcp.types import CallToolResult, TextContent
@@ -21,7 +22,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.custom_tools.claude_agent import ClaudeAgentTools
 from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
@@ -34,6 +34,7 @@ from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -459,24 +460,23 @@ def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> No
 
 
 @pytest.mark.asyncio
-async def test_gateway_calls_share_one_session_of_a_session_keyed_tool(
+async def test_gateway_calls_share_the_detached_session(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Gateway calls belong to no conversation, so ``claude_agent`` keeps one session across them, as before."""
-    claude = ClaudeAgentTools()
-    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[claude.claude_session_status]))
+    """Gateway calls belong to no conversation, so a tool that keys state by session sees one session across them."""
+
+    def session(run_context: RunContext | None = None) -> str:
+        """Return the session the call runs under."""
+        return "no run context" if run_context is None else run_context.session_id
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[session]))
 
     results = [
-        await gateway.invoke_tool(context, toolkit="calculator", function="claude_session_status", arguments={})
-        for _ in range(2)
+        await gateway.invoke_tool(context, toolkit="calculator", function="session", arguments={}) for _ in range(2)
     ]
 
-    assert all("error" not in result for result in results)
-    first, second = (str(result["result"]) for result in results)
-    assert first == second
-    assert first.startswith("No active Claude session for `")
-    assert first.endswith(":default`.")
+    assert results == [{"result": DETACHED_SESSION_ID}, {"result": DETACHED_SESSION_ID}]
 
 
 @pytest.mark.asyncio
