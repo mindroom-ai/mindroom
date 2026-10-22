@@ -357,12 +357,24 @@ async def test_a_member_pause_shows_the_member_s_text_and_pending_call_beside_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_a_member_s_pending_call_without_text_gets_its_own_line_under_the_member_s_name(
+@pytest.mark.parametrize(
+    ("stream", "member_slot"),
+    [
+        # A blocking pause renders the member's run, whose text is Agno's paused notice.
+        pytest.param(
+            False,
+            "**GeneralAgent**: I have tools to execute, but I need confirmation.\n\n🔧 `touch` [1] ⏳",
+            id="blocking",
+        ),
+        pytest.param(True, "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳", id="streamed"),
+    ],
+)
+async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
+    member_slot: str,
 ) -> None:
     team = _team(
         tmp_path,
@@ -374,7 +386,7 @@ async def test_a_member_s_pending_call_without_text_gets_its_own_line_under_the_
 
     paused = await _paused(team, stream=stream)
 
-    assert "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳" in paused.response_text
+    assert member_slot in paused.response_text
     require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
@@ -1046,12 +1058,20 @@ async def test_a_stop_during_a_member_s_call_records_the_call_as_still_running(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-async def test_a_stop_before_any_call_records_the_text_so_far(
+@pytest.mark.parametrize(
+    ("stream", "recorded"),
+    [
+        # A blocking turn records the stopped run's records, which hold no text of a request still running.
+        pytest.param(False, "(turn stopped before completion)", id="blocking"),
+        pytest.param(True, "**Team Consensus**:\n\nHalf done\n\n(turn stopped before completion)", id="streamed"),
+    ],
+)
+async def test_a_stop_before_any_call_records_the_streamed_text_so_far(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
+    recorded: str,
 ) -> None:
     ready = asyncio.Event()
     team = _team(tmp_path, monkeypatch, leader=[[TextDelta("Half done"), _waits(ready)]])
@@ -1059,9 +1079,7 @@ async def test_a_stop_before_any_call_records_the_text_so_far(
     await _stopped(team, ready, stream=stream)
 
     snapshot = team.recorder.interrupted_snapshot()
-    assert _render_interrupted_replay_content(snapshot) == (
-        "**Team Consensus**:\n\nHalf done\n\n(turn stopped before completion)"
-    )
+    assert _render_interrupted_replay_content(snapshot) == recorded
 
 
 @pytest.mark.asyncio

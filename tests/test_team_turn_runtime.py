@@ -43,9 +43,8 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
-from mindroom.teams.runtime import MemberRunEnded
 from mindroom.teams.spec import TeamMode
-from mindroom.teams.storage import TeamRunRecords, under_team_scope
+from mindroom.teams.storage import under_team_scope
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -624,6 +623,71 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert team.recorder.outcome == "suspended"
 
 
+_CHECKER_PAUSED = "I have tools to execute, but I need confirmation."
+_TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("show_tool_calls", "text", "checker_slot", "consensus_slot", "separators"),
+    [
+        pytest.param(
+            True,
+            f"{HEADER}**Checker**: {_CHECKER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n\n"
+            f"**Team Consensus**:\n\n{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]",
+            f"{_CHECKER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n",
+            f"{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]\n\n",
+            None,
+            id="tool-calls-shown",
+        ),
+        pytest.param(
+            False,
+            f"{HEADER}**Checker**: {_CHECKER_PAUSED}\n\n\n**Team Consensus**:\n\n{_TEAM_PAUSED}",
+            _CHECKER_PAUSED,
+            _TEAM_PAUSED,
+            ["agent:checker", "team"],
+            id="tool-calls-hidden",
+        ),
+    ],
+)
+async def test_a_blocking_team_pause_shows_its_runs_records_with_agno_s_paused_notices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+    text: str,
+    checker_slot: str,
+    consensus_slot: str,
+    separators: list[str] | None,
+) -> None:
+    """A blocking pause renders its runs' records, as the Agno-backed blocking pause did, not its events' document.
+
+    Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
+    tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.respond(show_tool_calls=show_tool_calls)
+
+    paused = raised.value.paused
+    assert paused.response_text == text
+    assert [(entry.tool_name, entry.scope_key, entry.type) for entry in paused.tool_trace] == [
+        ("touch", "agent:checker", "tool_call_started"),
+        ("delegate_task_to_member", "team", "tool_call_completed"),
+    ]
+    state = paused.response_presentation_state
+    assert [member["content"] for member in state["members"]] == ["", checker_slot]
+    assert state["consensus"] == consensus_slot
+    assert state.get("separate_next_scopes") == separators
+    assert team.recorder.outcome == "suspended"
+
+
 @pytest.mark.asyncio
 async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_the_reply(
     tmp_path: Path,
@@ -737,6 +801,52 @@ async def test_a_denied_member_call_never_runs_and_the_member_answers_the_denial
     assert (member.tools[0].confirmed, member.tools[0].tool_call_error) == (False, True)
 
 
+async def _writer_unavailable() -> None:
+    msg = "Writer unavailable"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "writer", "body"),
+    [
+        pytest.param(
+            [delegate("call-write", "writer", "Write it up"), answer("")],
+            [[Await(_writer_unavailable)]],
+            "**Writer**: Writer unavailable\n\n\n*No team consensus - showing individual responses only*",
+            id="member-failed-before-text",
+        ),
+        pytest.param([answer("\n")], [], "\n", id="blank-leader-text"),
+    ],
+)
+async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    writer: list[list[ScriptStep]],
+    body: str,
+) -> None:
+    """A resume whose document stays empty renders its runs' records, as the Agno-backed resume did.
+
+    The approved checker says nothing. A member the resumed leader hands a task and that fails before any text shows
+    its error; without member text the leader's own text stands.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel(leader)
+    team.models["checker-model"] = ScriptedModel([answer("")])
+    team.models["writer-model"] = ScriptedModel(writer)
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous"]
+    assert result.response_text == HEADER + body
+
+
 @pytest.mark.asyncio
 async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_approved_tool_once(
     tmp_path: Path,
@@ -788,6 +898,48 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
     payload = metadata[AI_RUN_METADATA_KEY]
     assert (record.status, payload["run_id"], payload["status"]) == (RunStatus.error, record.run_id, "error")
     assert payload["tools"] == {"count": 1}
+
+
+async def _lose_the_provider() -> None:
+    msg = "provider connection lost"
+    raise ProviderError(msg, provider="Synthetic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("leader", "recorded"),
+    [
+        pytest.param(
+            [delegate("call-check", "checker", "Check"), [Await(_lose_the_provider)]],
+            "**Checker**: Checker overloaded\n\n\n**Team Consensus**:\n\nprovider connection lost",
+            id="after-a-member-failed",
+        ),
+        pytest.param(
+            [[Await(_lose_the_provider)]],
+            "**Team Consensus**:\n\nprovider connection lost",
+            id="on-the-first-request",
+        ),
+    ],
+)
+async def test_a_failed_blocking_team_turn_records_the_failed_run_s_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    leader: list[list[ScriptStep]],
+    recorded: str,
+) -> None:
+    """A blocking turn whose leader request fails records the stored team run's records, as the Agno-backed turn did.
+
+    A member that failed before any text shows its error; the leader said nothing, so the failed run's error text
+    stands as its consensus.
+    """
+    team = squad_turn(tmp_path, monkeypatch, leader=leader, checker=[[Await(_checker_overloaded)]])
+
+    await team.respond(show_tool_calls=False)
+
+    record, _ = team.stored_runs()
+    assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == recorded
 
 
 @pytest.mark.asyncio
@@ -1008,20 +1160,6 @@ async def test_a_blocking_team_reply_without_content_shows_what_the_leader_wrote
     assert record.content is None
 
 
-def test_a_member_resumed_within_the_run_keeps_the_place_where_its_run_first_ended() -> None:
-    """The resumed record replaces the paused one where it stood, so a blocking reply lists the member there."""
-    records = TeamRunRecords()
-    paused = RunRecord(run_id="writer-run", agent_id="writer", agent_name="Writer", status=RunStatus.paused)
-    checked = RunRecord(run_id="checker-run", agent_id="checker", agent_name="Checker", status=RunStatus.completed)
-    resumed = replace(paused, status=RunStatus.completed, content="Written.")
-
-    for member_id, name, record in (("writer", "Writer", paused), ("checker", "Checker", checked)):
-        assert records.collect(MemberRunEnded(member_id, name, record))
-    assert records.collect(MemberRunEnded("writer", "Writer", resumed))
-
-    assert records.members == [resumed, checked]
-
-
 @pytest.mark.asyncio
 async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegation_driver(
     tmp_path: Path,
@@ -1137,6 +1275,81 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     assert (
         team.recorder.assistant_text == "**Writer**: Dra\n\n\n*No team consensus - showing individual responses only*"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order_they_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop of a blocking turn records the stopped team run's records, as the Agno-backed blocking turn did.
+
+    The members are listed as their runs ended: the checker failed before any text and shows its error, then the
+    writer, stopped while its call ran, shows what it wrote before.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Write")],
+        checker=[[Await(_checker_overloaded)]],
+        writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
+    )
+    task = asyncio.create_task(team.respond(show_tool_calls=False))
+    await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record, members = team.stored_runs()
+    assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == (
+        "**Checker**: Checker overloaded\n\n**Writer**: Drafting.\n\n\n"
+        "*No team consensus - showing individual responses only*"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_blocking_team_turn_whose_leader_has_no_content_records_no_leader_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leader stopped after its member's delegation has no content, so the turn records none of the leader's text.
+
+    The leader's continuation starts its content afresh and its member said nothing after the delegation. Agno's
+    stopped run then held only its cancellation notice, which the Agno-backed turn dropped, so the text the leader
+    wrote before the delegation is not recorded either.
+    """
+    working = asyncio.Event()
+
+    async def wait_to_be_cancelled() -> None:
+        working.set()
+        await asyncio.Event().wait()
+
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Research it"),
+                content="Asking the writer.",
+                metrics=usage(40, 4),
+            ),
+            [Await(wait_to_be_cancelled)],
+        ],
+        writer=[_delegate_to_helper("Dig"), answer("")],
+        helper=[answer("Helper found it.")],
+    )
+    task = asyncio.create_task(team.respond(show_tool_calls=False))
+    await asyncio.wait_for(working.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record, _, _ = _delegation_state(team)
+    assert (record.status, record.content) == (RunStatus.cancelled, None)
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == ""
 
 
 def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:

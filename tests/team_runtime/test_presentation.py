@@ -1,7 +1,12 @@
-"""The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs."""
+"""The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs.
+
+The finished runs are the records a team run hands over, in the order a blocking reply lists them.
+"""
 # ruff: noqa: D103
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 from agno.utils.string import url_safe_string
@@ -9,7 +14,7 @@ from agno.utils.string import url_safe_string
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
@@ -21,7 +26,8 @@ from mindroom.teams.presentation import (
     strip_team_display,
     url_safe_member_id,
 )
-from mindroom.teams.runtime import MemberEvent
+from mindroom.teams.runtime import MemberEvent, MemberRunEnded
+from mindroom.teams.storage import TeamRunRecords
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
@@ -113,18 +119,24 @@ def test_members_without_a_consensus_get_the_no_consensus_note_and_a_lone_consen
     assert format_team_header(["Ledger", "Scout"]) == "🤝 **Team Response** (Ledger, Scout):\n\n"
 
 
-def test_a_finished_run_without_content_reads_as_its_assistant_messages() -> None:
-    """A run whose content is empty shows the text of its own assistant messages, as Agno's blocking reply read it."""
+def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> None:
+    """A run whose content is empty shows the text its own model requests wrote, as Agno's blocking reply read it.
+
+    An earlier reply in the thread reaches the run's input as an assistant message no model answered, so it is not
+    the run's text.
+    """
+    answered = {"mindroom_model": {"id": "scout-model", "provider": "Synthetic"}}
     scout = RunRecord(
         run_id="scout-run",
         agent_id="scout",
         agent_name="Scout",
         messages=[
+            Message(role="assistant", content="\n\nAn earlier reply."),
             Message(role="user", content="Find vendors."),
-            Message(role="assistant", content="Three vendors."),
-            Message(role="assistant", tool_calls=[{"id": "call-1"}]),
+            Message(role="assistant", content="Three vendors.", provider_data=answered),
+            Message(role="assistant", tool_calls=[{"id": "call-1"}], provider_data=answered),
             Message(role="tool", content="two more", tool_call_id="call-1"),
-            Message(role="assistant", content="Two more."),
+            Message(role="assistant", content="Two more.", provider_data=answered),
         ],
     )
 
@@ -132,6 +144,20 @@ def test_a_finished_run_without_content_reads_as_its_assistant_messages() -> Non
     assert format_team_response(TeamRunRecord(run_id="team-run", content="Five in all."), [scout]) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
+
+
+def test_a_member_resumed_within_the_run_keeps_the_place_where_its_run_first_ended() -> None:
+    """The resumed record replaces the paused one where it stood, so a blocking reply lists the member there."""
+    records = TeamRunRecords()
+    paused = RunRecord(run_id="writer-run", agent_id="writer", agent_name="Writer", status=RunStatus.paused)
+    checked = RunRecord(run_id="checker-run", agent_id="checker", agent_name="Checker", status=RunStatus.completed)
+    resumed = replace(paused, status=RunStatus.completed, content="Written.")
+
+    for member_id, name, record in (("writer", "Writer", paused), ("checker", "Checker", checked)):
+        assert records.collect(MemberRunEnded(member_id, name, record))
+    assert records.collect(MemberRunEnded("writer", "Writer", resumed))
+
+    assert records.members == [resumed, checked]
 
 
 def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_snapshot() -> None:

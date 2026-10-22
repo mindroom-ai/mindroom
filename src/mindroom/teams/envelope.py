@@ -3,9 +3,9 @@
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
 no tool trace and renders from the finished run's records, as Agno's blocking team reply did: each member run's text
-in the order the runs ended, then the consensus. The streamed reply shows its trace through its chunks and keeps the
-configured order. ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and
-storage.
+in the order the runs ended, then the consensus. Its pause and the text a stopped or failed blocking turn records
+render from the records too. The streamed reply shows its trace through its chunks and keeps the configured order.
+``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ from mindroom.teams.presentation import (
     format_team_header,
     format_team_response,
 )
-from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
+from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs, run_team
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import (
@@ -708,13 +708,17 @@ class _TeamTurn:
                 async for event in events:
                     if attempt.apply(event):
                         self.sync_live_turn_recorder(run, attempt)
+        except asyncio.CancelledError:
+            # The run stored its stopped record before the stop reached here, so the interrupted turn records it.
+            self.sync_live_turn_recorder(run, attempt, assistant_text=attempt.interrupted_text())
+            raise
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             return ExcludedAttempt(
                 original_status=RunStatus.error,
                 response_text=self.error_text(error),
                 reason=str(error),
-                partial_text=attempt.reply.canonical_text(),
+                partial_text=attempt.interrupted_text(),
                 completed_tools=tuple(attempt.tool_tracker.completed_tools),
                 interrupted_tools=tuple(pending.trace_entry for pending in attempt.tool_tracker.pending_tools),
                 session_id=self.session_id,
@@ -723,7 +727,7 @@ class _TeamTurn:
             )
         record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
-            return self.resolve_paused(attempt, record)
+            return self.resolve_paused(attempt, record, blocking=True)
         return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
@@ -752,7 +756,7 @@ class _TeamTurn:
             return
         record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
-            paused = self.resolve_paused(attempt, record)
+            paused = self.resolve_paused(attempt, record, blocking=False)
             if paused.response_text:
                 yield StructuredStreamChunk(
                     content=paused.response_text,
@@ -778,18 +782,31 @@ class _TeamTurn:
         self.holder.attempt_started = False
         self.register_notice_storage(scope_context)
 
-    def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
-        """Refresh the live turn state from the attempt's document, so an interruption records what was shown."""
+    def sync_live_turn_recorder(
+        self,
+        run: TurnRunState,
+        attempt: TeamAttempt,
+        *,
+        assistant_text: str | None = None,
+    ) -> None:
+        """Refresh the live turn state from the attempt's document, so an interruption records what was shown.
+
+        ``assistant_text`` replaces the document's text, for a blocking turn that stopped.
+        """
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=attempt.reply.canonical_text(),
+            assistant_text=attempt.reply.canonical_text() if assistant_text is None else assistant_text,
             completed_tools=attempt.tool_tracker.completed_tools,
             interrupted_tools=[pending.trace_entry for pending in attempt.tool_tracker.pending_tools],
         )
 
-    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
-        """Return the pause the lifecycle owner asks the requester about, rendered into the attempt's document."""
+    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
+        """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
+
+        A blocking pause renders its runs' records, as Agno's blocking team pause did; a streamed one freezes the
+        document its events built.
+        """
         paused = paused_attempt_from_response(
             record,
             fallback_session_id=self.session_id,
@@ -798,8 +815,20 @@ class _TeamTurn:
         )
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
+        presented = (
+            blocking_team_pause(
+                paused,
+                record,
+                attempt.records.members,
+                config_names=attempt.members.requested_agent_names,
+                display_names=attempt.members.display_names,
+                show_tool_calls=attempt.show_tool_calls,
+            )
+            if blocking
+            else continued_team_pause(attempt.presentation, paused)
+        )
         return replace(
-            continued_team_pause(attempt.presentation, paused),
+            presented,
             runtime_model_name=attempt.runtime_model_name,
             team_member_model_names=tuple(sorted(self.holder.member_model_names.items())),
         )
