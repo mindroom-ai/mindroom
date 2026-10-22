@@ -9,8 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.legacy_agno2_runs import number_unindexed_runs
+from mindroom.session_storage import store as store_module
+from mindroom.session_storage.legacy_agno2_runs import move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.schema import TableNames, run_log_sql
 from mindroom.session_storage.store import open_conversation_store
 from mindroom.session_storage.types import ConversationSession
@@ -158,6 +161,32 @@ def test_owners_opening_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
         list(pool.map(open_store, range(4)))
 
     assert [(run_id, index) for run_id, index, _ in _log(db_file)] == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
+
+
+def test_a_move_that_fails_part_way_leaves_the_database_as_agno_2_left_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after the rows are written and the blob cleared commits nothing, so the next open moves them."""
+    db_file = create_agno_2_sessions_db(tmp_path / "code.db")
+    with closing(sqlite3.connect(db_file)) as connection:
+        before = list(connection.iterdump())
+
+    def move_then_fail(connection: sqlite3.Connection, names: TableNames) -> None:
+        move_blob_runs_to_rows(connection, names)
+        msg = "database or disk is full"
+        raise sqlite3.OperationalError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module, "move_blob_runs_to_rows", move_then_fail)
+        with pytest.raises(sqlite3.OperationalError, match="disk is full"):
+            open_conversation_store(db_file, _NAMES)
+
+    with closing(sqlite3.connect(db_file)) as connection:
+        assert list(connection.iterdump()) == before
+    open_conversation_store(db_file, _NAMES)
+    assert [(run_id, index) for run_id, index, _ in _log(db_file)] == [("run-1", 0), ("run-2", 1), ("run-3", 2)]
+    assert _blob(db_file) is None
 
 
 def test_rows_without_an_index_are_numbered_in_read_order(tmp_path: Path) -> None:
