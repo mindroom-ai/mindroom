@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type ReactNode, useRef } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -67,7 +67,7 @@ export function ServiceGroupHeading({ label }: { label: string }) {
     <tr className={`border-t border-border/60 ${STACKED.row}`}>
       <th
         colSpan={4}
-        scope="colgroup"
+        scope="rowgroup"
         className={`bg-muted/20 px-5 py-2 text-left font-normal ${STACKED_CELL}`}
       >
         <h3 className="text-xs font-medium text-muted-foreground">{label}</h3>
@@ -85,7 +85,7 @@ function Code({ children }: { children: ReactNode }) {
   );
 }
 
-/** "a", "a and b", or "a, b, and c", for items that are not plain text. */
+/** "a", "a and b", or "a, b, and c", as `formatList` joins strings, for items that are not plain text. */
 function listOf(items: { key: string; node: ReactNode }[]): ReactNode {
   return items.map(({ key, node }, index) => (
     <Fragment key={key}>
@@ -225,13 +225,18 @@ export function RowActionsMenu({
   actions: RowAction[];
   disabled?: boolean;
 }) {
+  const trigger = useRef<HTMLButtonElement>(null);
   if (actions.length === 0) return null;
   const item = (action: RowAction) => (
     <DropdownMenuItem
       key={action.label}
       aria-label={action.ariaLabel}
       disabled={action.disabled}
-      onSelect={action.onSelect}
+      onSelect={() => {
+        // A dialog the action opens returns focus to what had it, and the item is gone by then.
+        trigger.current?.focus();
+        action.onSelect();
+      }}
       className={
         action.destructive
           ? "text-destructive focus:text-destructive"
@@ -247,6 +252,7 @@ export function RowActionsMenu({
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
+          ref={trigger}
           size="sm"
           variant="ghost"
           className="h-8 w-8 p-0"

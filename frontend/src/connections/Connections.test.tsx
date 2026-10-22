@@ -1145,7 +1145,7 @@ it("does not call a requester-only connection on a shared agent shared", async (
   expect(dialog).toHaveTextContent(
     "This removes the saved Mail connection for Research Team.",
   );
-  expect(screen.queryByText(/shared with everyone/)).toBeNull();
+  expect(screen.queryByText(/shared with everyone/i)).toBeNull();
 });
 
 describe("MCP agent selection", () => {

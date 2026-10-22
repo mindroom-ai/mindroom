@@ -156,7 +156,7 @@ describe("egress credentials page", () => {
       // A limit is neither a key nor an account.
       ["Personal Mind", "Personal", "1 of 2 set"],
       ["Shared Dev", "Shared", "0 of 1 set"],
-      ["Bare Agent", "Personal", "No services yet"],
+      ["Bare Agent", "Personal", "None"],
     ]);
     expect(screen.queryByRole("region")).toBeNull();
     fireEvent.click(

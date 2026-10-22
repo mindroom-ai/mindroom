@@ -212,10 +212,16 @@ export function EgressServiceItem({
     !oauth.connected &&
     !oauth.reset_required;
   const keyActions = canManageKey && service.key_configured && !editing;
+  // A key is the main action when there is no account to connect instead.
+  const setKeyFirst =
+    canManageKey &&
+    !service.key_configured &&
+    !editing &&
+    (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
   const editable = canEdit(serviceEditing, service);
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [
-    ...(oauth && canManageKey && !showKeyControls
+    ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
       ? [
           {
             label: keyInsteadLabel,
@@ -383,10 +389,7 @@ export function EgressServiceItem({
               Reset connection
             </Button>
           ) : (
-            canManageKey &&
-            !oauth &&
-            !service.key_configured &&
-            !editing && (
+            setKeyFirst && (
               <Button
                 size="sm"
                 variant="outline"

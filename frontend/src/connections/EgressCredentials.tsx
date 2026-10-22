@@ -606,7 +606,7 @@ function AgentRow({
           data-label="Keys and accounts"
           className={`px-5 py-4 text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
         >
-          {total === 0 ? "No services yet" : `${set} of ${total} set`}
+          {total === 0 ? "None" : `${set} of ${total} set`}
         </td>
       </tr>
       {/* Hidden rather than removed, so closing the row keeps an open editor

@@ -288,6 +288,17 @@ describe("egress service rows", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("gives focus back to the row's menu button when its dialog is cancelled", async () => {
+    renderRows([openai]);
+    fireEvent.click(await rowAction("Remove key for OpenAI"));
+    await pressInDialog("Cancel");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "More actions for OpenAI" }),
+      ).toHaveFocus(),
+    );
+  });
+
   it("offers no Remove for a service without a key", async () => {
     renderRows([github]);
     await expectNoAction(/Remove/);
@@ -523,11 +534,11 @@ describe("connected accounts", () => {
   it("offers Connect only when the server says the account is connectable", async () => {
     renderRows([withAccount({ can_connect: false })]);
     expect(screen.queryByRole("button", { name: /Connect/ })).toBeNull();
-    // The key stays behind its toggle even with nothing to connect.
-    await expectNoAction("Set key for GitHub");
+    // With no account to connect, the key is the row's main action.
     expect(
-      await rowAction("Use an API key instead for GitHub"),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Set key for GitHub" }),
+    ).toBeEnabled();
+    await expectNoAction(/Use an API key instead/);
   });
 
   it("lets a user without key rights connect a requester-scoped account", async () => {
@@ -564,7 +575,7 @@ describe("connected accounts", () => {
     const github = row("GitHub");
     expect(within(github).getByText("Connected")).toBeVisible();
     expect(within(github).getByText("octocat")).toBeVisible();
-    expect(screen.queryByText(/shared with everyone/)).toBeNull();
+    expect(screen.queryByText(/shared with everyone/i)).toBeNull();
     expect(
       await rowAction("Disconnect for GitHub", github),
     ).toBeInTheDocument();
@@ -694,8 +705,8 @@ describe("connected accounts", () => {
       within(github).queryByRole("button", { name: /Connect/ }),
     ).toBeNull();
     expect(
-      await rowAction("Use an API key instead for GitHub", github),
-    ).not.toHaveAttribute("aria-disabled");
+      within(github).getByRole("button", { name: "Set key for GitHub" }),
+    ).toBeEnabled();
   });
 
   it("warns that everyone using a shared agent can act with an opted-in account", () => {
@@ -1053,7 +1064,7 @@ describe("rows with an agent's wording", () => {
       );
       renderRows([optedIn], { agent: agent({ services: [optedIn] }) });
       expect(within(row("GitHub")).getByText("octocat")).toBeVisible();
-      expect(screen.queryByText(/shared with everyone/)).toBeNull();
+      expect(screen.queryByText(/shared with everyone/i)).toBeNull();
     });
 
     it("does not ask on a personal agent", async () => {
@@ -1166,8 +1177,8 @@ describe("rows with an agent's wording", () => {
         within(github).queryByRole("button", { name: /Connect/ }),
       ).toBeNull();
       expect(
-        await rowAction("Use an API key instead for GitHub", github),
-      ).not.toHaveAttribute("aria-disabled");
+        within(github).getByRole("button", { name: "Set key for GitHub" }),
+      ).toBeEnabled();
     });
 
     it("does not name managers or say to ask anyone", () => {
