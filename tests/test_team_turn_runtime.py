@@ -229,7 +229,58 @@ async def test_the_streamed_document_keeps_the_canonical_member_and_consensus_fo
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_the_same_body(
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_blocking_team_reply_is_the_marker_free_member_and_consensus_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """A blocking reply carries no tool trace, so shown tool calls add no marker to the document it delivers."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Report"), answer("Consensus answer.", usage(50, 5))],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Member answer.")],
+    )
+
+    text = await team.respond(show_tool_calls=show_tool_calls)
+
+    assert ProbeToolkit.calls == ["a"]
+    assert text == f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
+    assert team.recorder.assistant_text == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_streamed_one_as_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """The checker finishes before the writer; only the blocking reply puts it first, and it records what it sent."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-check", "checker", "Check"),
+            delegate("call-write", "writer", "Write"),
+            answer("Both done.", usage(50, 5)),
+        ],
+        writer=[answer("Written.")],
+        checker=[answer("Checked.")],
+    )
+
+    text = await team.reply(stream=stream, show_tool_calls=False)
+
+    slots = (
+        "**Writer**: Written.\n\n**Checker**: Checked." if stream else "**Checker**: Checked.\n\n**Writer**: Written."
+    )
+    assert text == f"{HEADER}{slots}\n\n\n**Team Consensus**:\n\nBoth done."
+    assert team.recorder.assistant_text == text
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_team_reply_sends_non_streaming_requests_and_renders_the_member_and_consensus_document(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

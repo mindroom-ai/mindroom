@@ -94,7 +94,6 @@ __all__ = [
     "TurnRunState",
     "TurnSinks",
     "apply_exact_approval_decisions",
-    "apply_local_approval_decisions",
     "build_llm_request_log_context",
     "build_matrix_run_metadata",
     "local_approval_requirements",
@@ -528,19 +527,6 @@ def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
     if delegation.pending_requirements:
         return [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
     return deepcopy(record.requirements or [])
-
-
-def apply_local_approval_decisions(
-    record: AnyRunRecord,
-    *,
-    decisions: dict[str, bool],
-    denial_reasons: dict[str, str | None],
-) -> list[RunRequirement]:
-    """Apply this actor's approvals; projected child calls belong to the child executor."""
-    requirements = local_approval_requirements(record)
-    if not requirements:
-        return []
-    return apply_exact_approval_decisions(requirements, decisions=decisions, denial_reasons=denial_reasons)
 
 
 def paused_attempt_from_response(

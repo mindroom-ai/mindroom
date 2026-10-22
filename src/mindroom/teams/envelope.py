@@ -1,9 +1,9 @@
 """Team turns on the owned runtime: prepare a turn, run its leader, and render the reply through the turn drivers.
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
-turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``, so the blocking reply
-and the streamed document render the same body. ``run_prepared_team`` runs an OpenAI-compatible API team turn
-under the same leader hooks and storage.
+turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. The blocking reply
+carries no tool trace, so it renders the document without tool markers and lists the members in the order they
+finished. ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -817,10 +817,11 @@ class _TeamTurn:
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         tool_executions = team_tool_executions(record, attempt.records.members)
-        canonical_text = attempt.canonical_text()
+        # A blocking reply delivers no tool trace, so it carries the document without tool markers.
+        canonical_text = attempt.completed_text() if blocking else attempt.canonical_text()
         has_visible_output = bool(canonical_text)
         header = format_team_header(attempt.members.display_names)
-        rendered = attempt.presentation.render_body() or header + NO_TEAM_RESPONSE
+        rendered = header + (canonical_text or NO_TEAM_RESPONSE)
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -1115,8 +1116,8 @@ async def team_response_stream(
 ) -> AsyncIterator[TeamStreamChunk]:
     """Stream one team turn as a live document: a header, one section per member, and the leader's consensus.
 
-    The document is rebuilt as events arrive so its final shape matches the blocking reply. ``ctx`` carries the
-    per-turn Matrix identity; this entry refines its ``entity_label`` to the materialized team label and appends the
+    The document is rebuilt as events arrive, its members in the configured order. ``ctx`` carries the per-turn
+    Matrix identity; this entry refines its ``entity_label`` to the materialized team label and appends the
     knowledge-availability enrichment before the turn runs.
     """
     assert orchestrator.config is not None
