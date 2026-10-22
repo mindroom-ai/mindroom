@@ -399,6 +399,7 @@ Plain replies that never reach threaded context still stay plain replies.
 - `!model [name|list|reset]` - Show or switch the model used in the current thread
 - `!room_model [name|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
 - `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
+- `!yolo [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while, or show or end that window
 - `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
 - `!e2ee` - Show encryption diagnostics for this room
 - `!hi` - Show welcome message

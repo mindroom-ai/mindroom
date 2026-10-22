@@ -4399,30 +4399,48 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
 
 
 @pytest.mark.parametrize(
-    ("gated_tools", "expected_text", "expected_state", "expected_cards"),
+    ("gated_tools", "yolo_thread_id", "expected_text", "expected_state", "expected_cards"),
     [
-        (set(), None, "ready", []),
-        ({"conditional_write"}, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
+        (set(), None, None, "ready", []),
+        ({"conditional_write"}, None, "Waiting for approval: `conditional_write`", "waiting", ["conditional_write"]),
         (
             {"conditional_read", "conditional_write"},
+            None,
+            "Waiting for approval: `conditional_read`, `conditional_write`",
+            "waiting",
+            ["conditional_read", "conditional_write"],
+        ),
+        ({"conditional_read", "conditional_write"}, "$thread", None, "ready", []),
+        (
+            {"conditional_read", "conditional_write"},
+            "$other",
             "Waiting for approval: `conditional_read`, `conditional_write`",
             "waiting",
             ["conditional_read", "conditional_write"],
         ),
     ],
-    ids=["automatic", "mixed", "human"],
+    ids=["automatic", "mixed", "human", "yolo", "yolo-elsewhere"],
 )
 @pytest.mark.asyncio
 async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     tmp_path: Path,
     gated_tools: set[str],
+    yolo_thread_id: str | None,
     expected_text: str | None,
     expected_state: str,
     expected_cards: list[str],
 ) -> None:
-    """Every chained generation must durably expose only its unresolved calls."""
+    """Every chained generation must durably expose only its unresolved calls; the reply thread's window has none."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    if yolo_thread_id is not None:
+        start_yolo(
+            runner.deps.runtime_paths,
+            room_id="!room:localhost",
+            thread_id=yolo_thread_id,
+            requester_id="@user:localhost",
+            duration=timedelta(minutes=5),
+        )
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = approval_continuation(

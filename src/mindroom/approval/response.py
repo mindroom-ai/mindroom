@@ -211,7 +211,6 @@ async def plan_approval_calls(
     The approver's YOLO window in the conversation approves every call that would ask them.
     """
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
-    yolo = yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id) is not None
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool]] = {}
     for tool, tool_call_id, tool_name, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
@@ -225,6 +224,10 @@ async def plan_approval_calls(
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
         )
         requires_approval = requires_approval or tool_authored_confirmation
+        # Read after the awaited policy, so a window that ended meanwhile approves nothing.
+        yolo = requires_approval and (
+            yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id) is not None
+        )
         decisions[tool_call_id] = (
             ContinuationDecision.APPROVED
             if not requires_approval or yolo

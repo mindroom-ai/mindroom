@@ -1043,7 +1043,7 @@ class ApprovalManager:
         if self.cards is None:
             return ()
         event_ids = []
-        now = datetime.now(UTC)
+        now = _utcnow()
         async for stored in self._pending_cards(self.cards, room_id):
             if (
                 not isinstance(stored, StoredApprovalCard)

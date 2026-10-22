@@ -119,6 +119,30 @@ async def test_yolo_window_approves_every_gated_call_of_its_requester(
 
 
 @pytest.mark.asyncio
+async def test_yolo_window_that_ends_during_the_policy_check_approves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window turned off while an approval script runs leaves that call asking."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _start(runtime_paths)
+
+    async def evaluate(*_args: object) -> tuple[bool, float]:
+        end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+        return True, 60.0
+
+    monkeypatch.setattr("mindroom.approval.response.evaluate_tool_approval", evaluate)
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="shell",
+        tool_args={},
+        approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+    )
+
+    assert (await _plan(runtime_paths, tool, requester_id=HUMAN, thread_id=THREAD_ID)).decision is None
+
+
+@pytest.mark.asyncio
 async def test_yolo_window_never_approves_for_a_requester_who_cannot_approve(tmp_path: Path) -> None:
     """A call whose requester is no person stays denied even when a window names that ID."""
     runtime_paths = test_runtime_paths(tmp_path)

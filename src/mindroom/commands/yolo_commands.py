@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 
 _USAGE = "Usage: `!yolo <minutes>`, `!yolo <hours>h`, `!yolo off`, or `!yolo` to show the current window"
 _STATUS_ARGUMENTS = frozenset({"", "show", "status"})
-_OFF_ARGUMENTS = frozenset({"off", "stop", "end"})
 # A bare number counts minutes; five digits already exceed the longest window.
 _DURATION = re.compile(r"^(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?)?$")
 
@@ -103,7 +102,7 @@ async def handle_yolo_command(
             else f"⚠️ YOLO mode is on in {place} until {_until(expires_at, config)}.\n\nUse `!yolo off` to end it."
         )
 
-    if requested in _OFF_ARGUMENTS:
+    if requested == "off":
         return (
             f"✅ YOLO mode is off. Tool calls in {place} ask for approval again."
             if end_yolo(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
