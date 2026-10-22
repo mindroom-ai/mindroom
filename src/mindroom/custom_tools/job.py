@@ -19,10 +19,10 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     job_summary,
 )
-from mindroom.tool_system.agno_toolkits import ToolValue
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from agno.tools.function import Function

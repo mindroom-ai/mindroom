@@ -7,8 +7,7 @@ from dataclasses import replace
 import pytest
 
 from mindroom.agent_cli.cli_shell_agent import wrap_native_shell_window
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit
-from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 async def _run_shell_command(command: str) -> str:

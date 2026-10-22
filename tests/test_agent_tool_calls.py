@@ -25,10 +25,11 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolOutcome, current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
+from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context

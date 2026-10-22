@@ -10,8 +10,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

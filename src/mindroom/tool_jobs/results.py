@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.tool_jobs.legacy_results import drop_legacy_payload_fields
-from mindroom.tool_system.agno_toolkits import ToolValue
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime

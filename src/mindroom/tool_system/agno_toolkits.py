@@ -5,6 +5,8 @@ derives each schema and wraps each entrypoint in pydantic coercion.
 This module is where the owned loop meets those objects, in both directions: it turns a toolkit's functions into
 ``ToolFunction`` values once, and at call time it builds the Agno-shaped arguments an entrypoint declares and reads
 the Agno ``ToolResult`` it returns back into owned values.
+Those owned values, ``ToolFunction``, ``AdaptedToolkit``, and ``ToolValue``, live in ``tool_function``, so a module
+that only handles them imports no Agno module.
 It is also the one place MindRoom modules outside the tool and toolkit packages import Agno's tool types from.
 """
 
@@ -34,7 +36,7 @@ from agno.utils.schema import (
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import finished_tool_schema
-from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -49,20 +51,6 @@ _RESERVED_NAMES = frozenset((*FRAMEWORK_INJECTED_PARAMS, *AGNO_INJECTED_PARAMS, 
 _UNBINDABLE_KINDS = frozenset(
     (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD, inspect.Parameter.POSITIONAL_ONLY),
 )
-
-
-@dataclass(frozen=True, slots=True)
-class AdaptedToolkit:
-    """One Agno toolkit as the owned loop sees it; ``instructions`` is set only when Agno would add it to the prompt.
-
-    ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
-    it describes the toolkit's functions and minimal mode offers as a context document.
-    """
-
-    name: str
-    functions: tuple[ToolFunction, ...]
-    instructions: str | None
-    guidance: str | None = None
 
 
 def adapt_toolkit(toolkit: Toolkit, *, async_mode: bool = True) -> AdaptedToolkit:
@@ -102,7 +90,6 @@ def adapt_function(function: Function) -> ToolFunction:
         external_execution=prepared.external_execution,
         external_execution_silent=prepared.external_execution_silent,
         stop_after_tool_call=prepared.stop_after_tool_call,
-        show_result=prepared.show_result,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameter_names(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
@@ -254,17 +241,6 @@ class StreamCollector:
             return text
         self._merged.content = text
         return self._merged
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ToolValue:
-    """A finished tool value in owned terms: the text the model reads and the media the tool produced."""
-
-    content: str
-    images: tuple[Image, ...] = ()
-    audios: tuple[Audio, ...] = ()
-    videos: tuple[Video, ...] = ()
-    files: tuple[File, ...] = ()
 
 
 def tool_value(result: object) -> ToolValue:
@@ -434,7 +410,6 @@ def _owned_file(file: AgnoFile) -> File:
 
 
 __all__ = [
-    "AdaptedToolkit",
     "AgnoAudio",
     "AgnoFile",
     "AgnoImage",
@@ -443,7 +418,6 @@ __all__ = [
     "StreamCollector",
     "ToolCallActor",
     "ToolResult",
-    "ToolValue",
     "Toolkit",
     "adapt_function",
     "adapt_toolkit",

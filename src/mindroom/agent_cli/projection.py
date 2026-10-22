@@ -17,9 +17,9 @@ from mindroom.tool_system.output_files import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.tool_system.agno_toolkits import ToolValue
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolValue
 
 
 # Budget encoded JSON: control characters can expand sixfold on the wire.

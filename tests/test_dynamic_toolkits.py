@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 
 def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:

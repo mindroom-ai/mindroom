@@ -12,13 +12,13 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.tool_system.agno_toolkits import AdaptedToolkit, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from mindroom.llm.events import RunEvent
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
     from tests.fakes.scripted_model import ScriptedModel
 
 

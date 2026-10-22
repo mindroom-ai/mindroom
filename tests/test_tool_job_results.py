@@ -21,7 +21,7 @@ from mindroom.tool_jobs.results import (
     encode_result_payload,
     read_result_payload,
 )
-from mindroom.tool_system.agno_toolkits import ToolValue
+from mindroom.tool_system.tool_function import ToolValue
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
 
 if TYPE_CHECKING:

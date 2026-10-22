@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
+    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 
 class TeamMode(StrEnum):

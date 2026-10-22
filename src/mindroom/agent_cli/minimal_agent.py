@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
-    from mindroom.tool_system.agno_toolkits import AdaptedToolkit
-    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 __all__ = [
     "MinimalTurn",
