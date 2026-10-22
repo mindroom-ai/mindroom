@@ -997,7 +997,18 @@ def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
 
 @pytest.mark.parametrize(
     "mailbox",
-    ["", "me", "support", "a@b@contoso.com", "support@contoso.com/../me", "x" * 250 + "@contoso.com", "a?b@c.com", 3],
+    [
+        "",
+        "me",
+        "support",
+        "a@b@contoso.com",
+        "support@contoso.com/../me",
+        "x" * 250 + "@contoso.com",
+        "a?b@c.com",
+        f" {SHARED}",
+        f"{SHARED}\u200b",
+        3,
+    ],
 )
 @pytest.mark.parametrize(
     "call",
@@ -1023,7 +1034,44 @@ def test_a_malformed_mailbox_is_refused_before_any_request(
     result = _payload(call(tools, mailbox))
 
     assert (result["code"], "mailbox" in result["message"]) == ("invalid_argument", True)
+    assert "mailbox" not in result
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools: tools.outlook_mail_search(limit=0, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_search(page_token=NEXT_MESSAGES, mailbox=SHARED),
+        lambda tools: tools.outlook_mail_get_message("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_download_attachment(MESSAGE_ID, "a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_create_draft([], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_send(["not-an-email"], "s", "b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_reply(MESSAGE_ID, ["sam@contoso.com"], " ", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_mark_read("a/b", mailbox=SHARED),
+        lambda tools: tools.outlook_mail_move(MESSAGE_ID, "a/b", mailbox=SHARED),
+    ],
+)
+def test_a_refused_call_with_a_mailbox_names_the_mailbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[OutlookMailTools], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(call(tools))
+
+    assert result["code"] in {"invalid_argument", "invalid_page_token"}
+    assert result["mailbox"] == SHARED
+    assert graph.requests == []
+
+
+def test_a_graph_error_in_a_shared_mailbox_names_the_mailbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    result = _payload(tools.outlook_mail_get_message("AAMk-missing=", mailbox=SHARED))
+
+    assert (result["code"], result["graph_code"], result["mailbox"]) == ("not_found", "ErrorItemNotFound", SHARED)
 
 
 def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
@@ -1037,6 +1085,7 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
     refused = _payload(tools.outlook_mail_reply(MESSAGE_ID, ["alex@contoso.com"], "Thanks", mailbox=SHARED))
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", ["desk@outside.example"])
+    assert refused["mailbox"] == SHARED
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
         ("POST", f"{SHARED_PREFIX}messages/{MESSAGE_ID}/createReply"),
         ("DELETE", f"{SHARED_PREFIX}messages/{DRAFT_ID}"),
@@ -1045,7 +1094,13 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
 
 @pytest.mark.parametrize(
     "graph_owner",
-    [f"/users/{SHARED}", f"/users/{SHARED.replace('@', '%40')}", f"/users('{SHARED_ID}')", f"/users/{SHARED_ID}"],
+    [
+        f"/users/{SHARED}",
+        f"/users/{SHARED.replace('@', '%40')}",
+        f"/users('{SHARED_ID}')",
+        f"/users({SHARED_ID})",
+        f"/users/{SHARED_ID}",
+    ],
 )
 def test_a_shared_mailbox_page_token_names_that_mailbox_and_continues_there(
     tmp_path: Path,

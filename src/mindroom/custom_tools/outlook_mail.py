@@ -21,10 +21,12 @@ from mindroom.custom_tools.microsoft_graph import (
     checked_upload_source,
     graph_error_payload,
     graph_session,
-    graph_tool_result,
+    graph_time,
     html_to_text,
-    next_page_token,
-    page_path,
+    mailbox_next_page_token,
+    mailbox_page_path,
+    mailbox_path,
+    mailbox_tool_result,
     path_segment,
     read_upload_source,
     text_to_html,
@@ -34,6 +36,7 @@ from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -73,8 +76,6 @@ _MESSAGE_SELECT = f"{_SUMMARY_FIELDS},ccRecipients,bccRecipients,replyTo,body"
 _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
-# The mailbox a next link starts with, however Graph names it: /me, /users/{address or id}, or /users('{id}').
-_PAGE_MAILBOX = re.compile(r"^/(?:me|users/[^/]+|users\('[^/]*'\))(?=/)", re.IGNORECASE)
 _AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
 _EXTERNAL_AUDIENCES = frozenset({"none", "contactsOnly", "all"})
 _TEXT_BODY = {"Prefer": 'outlook.body-content-type="text"'}
@@ -152,35 +153,7 @@ def _attachment(attachment: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _mailbox_path(mailbox: object) -> str:
-    """Return the Graph path of the requester's own mailbox, or of the shared or delegated mailbox the call names.
-
-    A guest's sign-in name holds `#EXT#`, which Graph takes with each `#` percent-encoded, so the parts between
-    hashes are checked and escaped one by one.
-    """
-    if mailbox is None:
-        return "/me"
-    msg = "mailbox must be the email address or sign-in name of a mailbox, or omitted for the requester's own."
-    if not isinstance(mailbox, str) or len(mailbox) > _MAX_EMAIL_CHARS or not _EMAIL.fullmatch(mailbox):
-        raise _invalid(msg)
-    try:
-        return "/users/" + "%23".join(path_segment(part, "mailbox") for part in mailbox.split("#"))
-    except MicrosoftGraphError:
-        raise _invalid(msg) from None
-
-
-def _page_token(payload: Mapping[str, Any], mailbox_path: str) -> str | None:
-    """Return the next page token, naming its mailbox as the call did, however Graph's next link names it."""
-    token = next_page_token(payload)
-    return None if token is None else _PAGE_MAILBOX.sub(lambda _match: mailbox_path, token, count=1)
-
-
-def _page(page_token: object, collection: str, mailbox_path: str) -> str:
-    """Return the Graph path a page token continues, refusing a token of another collection or another mailbox."""
-    token = page_path(page_token, collection)
-    if not token.lower().startswith(f"{mailbox_path.lower()}/"):
-        msg = "page_token must be the next_page_token this function returned for the same mailbox."
-        raise MicrosoftGraphError(code="invalid_page_token", message=msg)
-    return token
+    return mailbox_path(mailbox, "mailbox")
 
 
 def _local_time(value: object, field_name: str) -> datetime | None:
@@ -221,11 +194,6 @@ def _schedule(status: str, start: object, end: object, time_zone: object) -> dic
     }
 
 
-def _fields(value: object) -> dict[str, Any]:
-    """Return a Graph JSON object, or an empty one in place of anything else."""
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
-
-
 def _reply_messages(
     status: str,
     internal_message: object,
@@ -261,18 +229,9 @@ def _reply_messages(
     return setting
 
 
-def _time(value: object) -> str | None:
-    """Return a Graph dateTimeTimeZone as ISO 8601, ending in Z for UTC and naming any other zone."""
-    moment, zone = _fields(value).get("dateTime"), _fields(value).get("timeZone")
-    if not isinstance(moment, str):
-        return None
-    moment = moment.split(".", 1)[0]
-    return f"{moment}Z" if zone in {None, "UTC"} else f"{moment} ({zone})"
-
-
 def _automatic_replies(setting: object) -> dict[str, Any]:
     """Return an automatic replies setting with its HTML messages as plain text."""
-    fields = _fields(setting)
+    fields = cast("dict[str, Any]", setting) if isinstance(setting, dict) else {}
 
     def message(field: str) -> str | None:
         value = fields.get(field)
@@ -281,8 +240,8 @@ def _automatic_replies(setting: object) -> dict[str, Any]:
     return {
         "status": fields.get("status"),
         "external_audience": fields.get("externalAudience"),
-        "scheduled_start": _time(fields.get("scheduledStartDateTime")),
-        "scheduled_end": _time(fields.get("scheduledEndDateTime")),
+        "scheduled_start": graph_time(fields.get("scheduledStartDateTime")),
+        "scheduled_end": graph_time(fields.get("scheduledEndDateTime")),
         "internal_message": message("internalReplyMessage"),
         "external_message": message("externalReplyMessage"),
     }
@@ -402,21 +361,14 @@ class OutlookMailTools(Toolkit):
             tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
         )
 
-    def _run(self, operation: Callable[[GraphSession], Mapping[str, object]], mailbox: str | None = None) -> str:
-        """Run the operation; its result names the mailbox when the call named one."""
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                fields = operation(session)
-            return fields if mailbox is None else {**fields, "mailbox": mailbox}
-
-        return graph_tool_result(_TOOL_NAME, run)
+    def _session(self) -> AbstractContextManager[GraphSession]:
+        return graph_session(
+            self._provider,
+            self._runtime_paths,
+            self._credentials_manager,
+            self._worker_target,
+            self._config,
+        )
 
     def _call(
         self,
@@ -425,14 +377,18 @@ class OutlookMailTools(Toolkit):
         validate: Callable[[], object] | None = None,
         mailbox: str | None = None,
     ) -> str:
-        """Refuse malformed arguments and mailboxes before any request, then run the operation."""
-        try:
-            _mailbox_path(mailbox)
+        """Refuse malformed arguments before any request, then run the operation.
+
+        Every result of a call that names a mailbox, errors included, repeats that mailbox.
+        """
+
+        def run() -> Mapping[str, object]:
             if validate is not None:
                 validate()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-        return self._run(operation, mailbox)
+            with self._session() as session:
+                return operation(session)
+
+        return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run)
 
     def _attachment_payloads(self, local_paths: list[Any]) -> list[dict[str, str]]:
         """Return workspace files as inline attachments, refusing them before encoding once they exceed one request."""
@@ -529,7 +485,7 @@ class OutlookMailTools(Toolkit):
         def operation(session: GraphSession) -> Mapping[str, object]:
             base = _mailbox_path(mailbox)
             if page_token is not None:
-                payload = session.json("GET", _page(page_token, _MESSAGE_PAGES, base))
+                payload = session.json("GET", mailbox_page_path(page_token, _MESSAGE_PAGES, base, "mailbox"))
             else:
                 path = (
                     f"{base}/messages"
@@ -548,11 +504,11 @@ class OutlookMailTools(Toolkit):
                 for message in payload.get("value") or []
                 if isinstance(message, dict)
             ]
-            return {"messages": messages, "next_page_token": _page_token(payload, base)}
+            return {"messages": messages, "next_page_token": mailbox_next_page_token(payload, base)}
 
         def validate() -> None:
             if page_token is not None:
-                _page(page_token, _MESSAGE_PAGES, _mailbox_path(mailbox))
+                mailbox_page_path(page_token, _MESSAGE_PAGES, _mailbox_path(mailbox), "mailbox")
                 return
             _limit(limit)
             if folder is not None:
@@ -573,10 +529,10 @@ class OutlookMailTools(Toolkit):
         attachments: list[dict[str, Any]] = []
         while True:
             attachments += [_attachment(item) for item in payload.get("value") or [] if isinstance(item, dict)]
-            token = _page_token(payload, mailbox_path)
+            token = mailbox_next_page_token(payload, mailbox_path)
             if token is None or len(attachments) >= _MAX_ATTACHMENTS:
                 return attachments[:_MAX_ATTACHMENTS], len(attachments) > _MAX_ATTACHMENTS or token is not None
-            payload = session.json("GET", _page(token, _ATTACHMENT_PAGES, mailbox_path))
+            payload = session.json("GET", mailbox_page_path(token, _ATTACHMENT_PAGES, mailbox_path, "mailbox"))
 
     def outlook_mail_get_message(self, message_id: str, mailbox: str | None = None) -> str:
         """Read one Outlook message as plain text, up to 20,000 characters, with its recipients and attachment list.
@@ -690,13 +646,14 @@ class OutlookMailTools(Toolkit):
                 omit it for the requester's own mailbox.
 
         """
-        try:
-            path = f"{_mailbox_path(mailbox)}/messages"
+
+        def run() -> Mapping[str, object]:
             message = self._message(to, subject, body, cc, attachments)
             _check_payload_size(message)
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-        return self._run(lambda session: {"message": _summary(session.json("POST", path, json=message))}, mailbox)
+            with self._session() as session:
+                return {"message": _summary(session.json("POST", f"{_mailbox_path(mailbox)}/messages", json=message))}
+
+        return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run)
 
     def outlook_mail_send(
         self,
@@ -727,18 +684,15 @@ class OutlookMailTools(Toolkit):
                 mailbox, to send from; omit it to send as the requester.
 
         """
-        try:
-            path = f"{_mailbox_path(mailbox)}/sendMail"
+
+        def run() -> Mapping[str, object]:
             request = {"message": self._message(to, subject, body, cc, attachments), "saveToSentItems": True}
             _check_payload_size(request)
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def operation(session: GraphSession) -> Mapping[str, object]:
-            session.request("POST", path, json=request)
+            with self._session() as session:
+                session.request("POST", f"{_mailbox_path(mailbox)}/sendMail", json=request)
             return {"sent": True}
 
-        return self._run(operation, mailbox)
+        return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run)
 
     def outlook_mail_reply(
         self,
@@ -862,7 +816,7 @@ class OutlookMailTools(Toolkit):
                 ),
             }
 
-        return self._run(operation)
+        return self._call(operation)
 
     def outlook_mail_set_automatic_replies(
         self,
@@ -920,4 +874,4 @@ class OutlookMailTools(Toolkit):
             payload = session.json("PATCH", "/me/mailboxSettings", json=request)
             return {"automatic_replies": _automatic_replies(payload.get("automaticRepliesSetting"))}
 
-        return self._run(operation)
+        return self._call(operation)
