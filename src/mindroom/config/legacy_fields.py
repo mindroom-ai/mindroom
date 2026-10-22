@@ -181,6 +181,7 @@ _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
 #   adapter does not accept still fails when the model is built, with the accepted keys listed.
 # Coverage: tests/test_extra_kwargs.py::test_a_retired_agno_field_loads_with_one_warning_and_the_model_answers,
 #   tests/test_extra_kwargs.py::test_retired_agno_fields_load_with_one_warning_on_the_providers_that_took_them,
+#   tests/test_extra_kwargs.py::test_a_retired_field_that_two_providers_took_warns_once,
 #   tests/test_extra_kwargs.py::test_keys_no_agno_class_of_the_provider_took_still_fail_at_build,
 #   tests/test_extra_kwargs.py::test_no_route_accepts_a_retired_agno_field_of_its_provider.
 _RETIRED_MODEL_SETTINGS = (

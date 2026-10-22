@@ -410,7 +410,7 @@ async def continue_paused_team_run(
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
     with open_resolved_scope_session_context(
-        agent_name=min(member_names, default=configured_team_name),
+        agent_name=min(member_names),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
@@ -539,7 +539,7 @@ async def continue_paused_team_run(
                     async for event in events:
                         if attempt.apply(event):
                             await publish_team_presentation(progress, presentation)
-            continued = attempt.records.terminal()
+            continued = attempt.records.terminal(entity_name)
             paused = paused_attempt_from_response(
                 continued,
                 fallback_session_id=session_id,

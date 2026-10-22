@@ -714,7 +714,7 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 metadata_content=self.failure_metadata(attempt),
             )
-        record = attempt.records.terminal()
+        record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record)
         return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
@@ -743,7 +743,7 @@ class _TeamTurn:
             yield self.error_text(error)
             yield AttemptResolved(HandledAttempt(metadata_content=self.failure_metadata(attempt)))
             return
-        record = attempt.records.terminal()
+        record = attempt.records.terminal(self.entity_name)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:

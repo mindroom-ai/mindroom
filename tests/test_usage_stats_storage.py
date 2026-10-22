@@ -21,6 +21,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats_storage import (
+    UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
     UsageStorageSource,
@@ -201,17 +202,22 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
-    assert len(row.runs) == 1
-    assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
-    assert row.runs[0].requester_id == "@alice:example.test"
-    assert row.runs[0].model_provider == "openai"
-    assert row.runs[0].model == "gpt-6-astra"
-    assert row.runs[0].created_at == 1_723_837_600
+    # The run node carries only these typed fields, so the prompt, the tool output, and the nested member's
+    # 999-token metrics have nowhere to land.
+    assert row.runs == (
+        UsageRunNode(
+            team_id=None,
+            requester_id="@alice:example.test",
+            run_id="run-1",
+            model_provider="openai",
+            model="gpt-6-astra",
+            metrics={"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+            created_at=1_723_837_600,
+        ),
+    )
+    assert row.session_metrics == {}
     assert row.runs_available is True
     assert row.session_metrics_available is False
-    assert not hasattr(row.runs[0], "member_responses")
-    assert "secret" not in repr(row)
-    assert "999" not in repr(row)
 
 
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:

@@ -57,12 +57,8 @@ from mindroom.scheduling.tasks import (
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
-from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
-from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -1095,10 +1091,13 @@ class _LiveRun:
         return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
 
 
+_DEFAULT_OUTCOME = object()
+
+
 def _live_agent(
     runs: list[dict[str, object]] | None = None,
     *,
-    outcome: object = "sent",
+    outcome: object = _DEFAULT_OUTCOME,
     toolkit: Toolkit | None = None,
     toolkit_name: str = _TOOLKIT,
     authored_confirmation: bool = False,
@@ -1108,14 +1107,14 @@ def _live_agent(
 ) -> _LiveRun:
     """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
 
-    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given, which they
-    would not reach, so passing them with ``toolkit`` is refused.
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` (``"sent"`` unless given) unless
+    ``toolkit`` is given, which they would not reach, so passing them with ``toolkit`` is refused.
     """
     if toolkit is None:
-        toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+        toolkit = _SlackTools([] if runs is None else runs, outcome="sent" if outcome is _DEFAULT_OUTCOME else outcome)
     else:
         assert runs is None, "runs records only the default toolkit's calls"
-        assert outcome == "sent", "outcome configures only the default toolkit"
+        assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = toolkit_name
         if authored_confirmation:
@@ -2008,41 +2007,23 @@ class _MirroredSlackTools(_ConfiguredSlackTools):
     runs: ClassVar[list[dict[str, object]]] = []
 
 
-def _register_toolkit(name: str, toolkit_class: type[Toolkit]) -> None:
-    """Register ``toolkit_class`` as the configured tool ``name``; the caller restores the registries afterwards."""
-
-    @register_tool_with_metadata(
-        name=name,
-        file_access=ToolFileAccess.NONE,
-        display_name=name.replace("_", " ").title(),
-        description="Posts Slack messages.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def factory() -> type[Toolkit]:
-        return toolkit_class
-
-
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
     """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
 
     The name is a built-in's, so the built-in registries it overwrites are restored too.
     """
-    snapshot = capture_tool_registry_snapshot()
-    _register_toolkit(_TOOLKIT, _ConfiguredSlackTools)
-    _ConfiguredSlackTools.runs.clear()
-    try:
+    with registered_toolkit(_TOOLKIT, _ConfiguredSlackTools):
+        _ConfiguredSlackTools.runs.clear()
         yield _ConfiguredSlackTools.runs
-    finally:
-        restore_tool_registry_snapshot(snapshot)
 
 
 @pytest.fixture
-def configured_slack_pair(configured_slack: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
+def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator[dict[str, list[dict[str, object]]]]:
     """Also register a second toolkit whose function has the stored call's name; return each toolkit's runs."""
-    _register_toolkit(_MIRRORED_TOOLKIT, _MirroredSlackTools)
-    _MirroredSlackTools.runs.clear()
-    return {_TOOLKIT: configured_slack, _MIRRORED_TOOLKIT: _MirroredSlackTools.runs}
+    with registered_toolkit(_MIRRORED_TOOLKIT, _MirroredSlackTools):
+        _MirroredSlackTools.runs.clear()
+        yield {_TOOLKIT: configured_slack, _MIRRORED_TOOLKIT: _MirroredSlackTools.runs}
 
 
 def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
@@ -2170,7 +2151,8 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
         (
             (_MIRRORED_TOOLKIT, _TOOLKIT),
-            "now comes from another toolkit than the one the call was stored for",
+            f"❌ Scheduled call `{_TASK}` did not run: "
+            "`post_slack_message` now comes from another toolkit than the one the call was stored for.",
             [],
             None,
         ),
@@ -2201,8 +2183,7 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
 
         result = await _run_in_build(manager, build, config)
 
-        assert isinstance(result, str)
-        assert expected in result
+        assert result == expected
         assert configured_slack_pair == {_TOOLKIT: stored_toolkit_runs, _MIRRORED_TOOLKIT: []}
         assert await _binding_column(journal, "outcome") == outcome
         assert (await _binding_column(journal, "consumed_at_ns") is None) == (outcome is None)

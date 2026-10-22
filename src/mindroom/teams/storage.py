@@ -64,10 +64,10 @@ class TeamRunRecords:
             return True
         return False
 
-    def terminal(self) -> TeamRunRecord:
+    def terminal(self, team_name: str) -> TeamRunRecord:
         """Return the team record the run ended with, which a run that finished without raising always handed over."""
         if self.record is None:
-            msg = "The team run ended without its terminal record"
+            msg = f"team {team_name!r} run ended without its terminal record"
             raise RuntimeError(msg)
         return self.record
 

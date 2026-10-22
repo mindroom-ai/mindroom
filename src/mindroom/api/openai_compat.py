@@ -1229,7 +1229,7 @@ async def _non_stream_team_completion(
         except Exception:
             logger.exception("Team execution failed", team=team_name)
             return _error_response(500, "Team execution failed", error_type="server_error")
-        record = completion.records.terminal()
+        record = completion.records.terminal(team_name)
         response_text = completion.text() or str(record.content or "")
 
         if _is_error_response(response_text):
