@@ -58,8 +58,9 @@ from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_argume
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
+from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -1983,9 +1984,11 @@ class _ConfiguredSlackTools(Toolkit):
 
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
-    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
+
+    The name is a built-in's, so the built-in registries it overwrites are restored too.
+    """
+    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=_TOOLKIT,
@@ -2001,10 +2004,7 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
     try:
         yield _ConfiguredSlackTools.runs
     finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
+        restore_tool_registry_snapshot(snapshot)
 
 
 @pytest.mark.asyncio
