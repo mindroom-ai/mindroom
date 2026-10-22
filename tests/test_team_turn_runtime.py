@@ -33,6 +33,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.events import ContentDelta
 from mindroom.llm.provider import TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
@@ -76,12 +77,13 @@ from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.teams.runtime import TeamRunEvent
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -510,6 +512,89 @@ async def test_a_member_tool_addresses_the_team_history_scope(
 
 
 @pytest.mark.asyncio
+async def test_a_member_s_todo_work_defaults_to_the_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A member's ``add_todo`` without an assignee assigns the work to that member, not to the team."""
+    del probe
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Plan it"), answer("Planned.", usage(50, 5))],
+        writer=[
+            calls(tool_call("add_todo", "call-todo", title="Draft the report"), metrics=usage(10, 1)),
+            answer("Done."),
+        ],
+    )
+    team.config.agents["writer"].tools = [PROBE_TOOL, "todo"]
+
+    await _stream(team)
+
+    _, [member] = _stored_runs(team)
+    assert member.tools is not None
+    assert member.tools[0].result is not None
+    assert member.tools[0].result.endswith("assigned to writer")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="claude_agent names its sessions from the injected Agno agent until the tool-layer port (F2) reads the "
+    "running agent from the tool runtime context",
+)
+@pytest.mark.asyncio
+async def test_a_member_s_claude_sessions_are_the_member_s_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A member's Claude session is keyed by the member, so members of one team never share a session."""
+    del probe
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Check Claude"), answer("Checked.", usage(50, 5))],
+        writer=[calls(tool_call("claude_session_status", "call-claude"), metrics=usage(10, 1)), answer("None yet.")],
+    )
+    team.config.agents["writer"].tools = [PROBE_TOOL, "claude_agent"]
+
+    await _stream(team)
+
+    _, [member] = _stored_runs(team)
+    assert member.tools is not None
+    assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
+
+
+@pytest.mark.asyncio
+async def test_the_team_scope_is_bound_only_while_the_run_produces_an_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The run's code sees the team scope; the reply consuming its events between pulls never does."""
+    del probe
+    team = _team(tmp_path, monkeypatch, leader=[])
+    produced: list[HistoryScope | None] = []
+
+    def current_scope() -> HistoryScope | None:
+        context = get_tool_runtime_context()
+        assert context is not None
+        return context.history_scope
+
+    async def run_events() -> AsyncIterator[TeamRunEvent]:
+        for text in ("one", "two"):
+            produced.append(current_scope())
+            yield ContentDelta(text)
+
+    with tool_runtime_context(team.runtime):
+        consumed = [current_scope() async for _event in envelope._under_team_scope(run_events(), TEAM_SCOPE)]
+
+    assert produced == [TEAM_SCOPE, TEAM_SCOPE]
+    assert consumed == [None, None]
+
+
+@pytest.mark.asyncio
 async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_team_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -609,7 +694,14 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert team.recorder.outcome == "suspended"
 
 
-async def _resume(team: _Team, paused: Any, *, approved: bool, calls_: Sequence[ApprovalCall]) -> Any:  # noqa: ANN401
+async def _resume(
+    team: _Team,
+    paused: Any,  # noqa: ANN401
+    *,
+    approved: bool,
+    calls_: Sequence[ApprovalCall],
+    session_id: str = SESSION_ID,
+) -> Any:  # noqa: ANN401
     with tool_runtime_context(team.runtime):
         return await continue_paused_team_run(
             member_names=("writer", "checker"),
@@ -617,7 +709,7 @@ async def _resume(team: _Team, paused: Any, *, approved: bool, calls_: Sequence[
             config=team.config,
             runtime_paths=team.runtime_paths,
             execution_identity=team.identity,
-            session_id=SESSION_ID,
+            session_id=session_id,
             run_id=paused.run_id,
             user_id=REQUESTER_ID,
             configured_team_name="squad",
@@ -727,6 +819,32 @@ async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_lon
 
     [error] = refused.value.exceptions
     assert str(error) == f"Saved approval toolkit {PROBE_TOOL!r} is no longer permitted; retry the request"
+    assert probe.calls == []
+    assert (team.leader.requests, team.checker.requests) == ([], [])
+    record, _ = _stored_runs(team)
+    assert record.status is RunStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_an_approval_from_another_session_never_resumes_the_paused_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A run the team store holds for another conversation is refused before anything runs, as an agent's is."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([])
+    team.models["checker-model"] = ScriptedModel([])
+
+    with pytest.raises(RuntimeError, match="is no longer available"):
+        await _resume(
+            team,
+            raised.paused,
+            approved=True,
+            calls_=(_approval("call-touch", "dangerous"),),
+            session_id=f"{ROOM_ID}:$other-thread:localhost",
+        )
+
     assert probe.calls == []
     assert (team.leader.requests, team.checker.requests) == ([], [])
     record, _ = _stored_runs(team)

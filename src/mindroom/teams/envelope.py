@@ -121,7 +121,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 
@@ -152,7 +152,7 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StreamingToolTracker, ToolTraceEntry
-    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -224,9 +224,9 @@ def _team_member(
 ) -> TeamMember:
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
-    A member's tool-call policy, output-limit policy, portable tool search, and mid-turn compaction are its own; it
-    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of
-    the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
+    A member's tool-call policy, output-limit policy, portable tool search, and mid-turn compaction are its own, and
+    its tools run under its own identity; it replays no history, so its compaction stays within the run, and the
+    leader owns the queued-message notices of the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes against.
     """
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
@@ -261,8 +261,27 @@ def _member_hooks(build: AgentBuild, *, config: Config, runtime_paths: RuntimePa
         ),
         answer_tool_calls=output_limit_policy() if capabilities.claude_family else None,
         rewrite_tool_calls=resolve_call_tool_calls if deferred and not capabilities.native_tool_search else None,
-        tool_middleware=build.tool_middleware,
+        tool_middleware=(*build.tool_middleware, _as_member(build.spec.id, model_name)),
     )
+
+
+def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
+    """Return the innermost step of a member's tool calls, which runs the tool under the member's own identity.
+
+    The turn's tool runtime context names the team. Tools that act for the running agent, such as ``todo``'s default
+    assignee and workspace templates or ``claude_agent``'s sessions and model, read it from that context, so each
+    call reaches its entrypoint with the member's name and the model it runs on. The tool-call policy around the
+    step still sees the turn's context, as it did when Agno ran the members.
+    """
+
+    async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
+        context = get_tool_runtime_context()
+        if context is None:
+            return await call_next(call.arguments)
+        with tool_runtime_context(replace(context, agent_name=member_id, active_model_name=model_name)):
+            return await call_next(call.arguments)
+
+    return run_as_member
 
 
 def _resolve_team_instance_id(
@@ -1258,21 +1277,22 @@ class _TeamTurn:
         )
 
 
-async def _under_team_scope(
+def _under_team_scope(
     events: AsyncIterator[TeamRunEvent],
     scope: HistoryScope | None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Pull the run's events with the team scope bound as the scope the running entity stores to.
 
     Tools that address history by scope, such as ``compact_context``, read it from the tool runtime context, so a
-    member compacts the team's history, not its own agent's.
+    member compacts the team's history, not its own agent's. The binding holds only while an event is pulled, so
+    the consumer never runs under it.
     """
     context = get_tool_runtime_context()
     bound = replace(context, history_scope=scope) if context is not None and scope is not None else context
-    with tool_runtime_context(bound):
-        async with closing_async_stream(events):
-            async for event in events:
-                yield event
+    return context_bound_async_stream(
+        context_factory=lambda: tool_runtime_context(bound),
+        stream_factory=lambda: events,
+    )
 
 
 def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session_id: str | None) -> str | None:
@@ -1603,14 +1623,21 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
-    """Return the paused team run the approval names, from the loaded session or the store."""
+def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str, session_id: str) -> TeamRunRecord:
+    """Return the paused team run the approval names, from the loaded session or the store.
+
+    A run the store holds for another session of the scope is refused, as the agent path refuses it.
+    """
     persisted: AnyRunRecord | None = None
     if scope.session is not None:
         persisted = next((run for run in scope.session.runs if run.run_id == run_id), None)
     if persisted is None:
         persisted = scope.storage.get_run(run_id)
-    if not isinstance(persisted, TeamRunRecord) or persisted.status is not RunStatus.paused:
+    if (
+        not isinstance(persisted, TeamRunRecord)
+        or persisted.session_id != session_id
+        or persisted.status is not RunStatus.paused
+    ):
         msg = f"Paused team run {run_id!r} is no longer available"
         raise RuntimeError(msg)
     return persisted
@@ -1885,7 +1912,7 @@ async def continue_paused_team_run(
                 msg = "Paused team history is no longer available"
                 raise RuntimeError(msg)
             set_consumption_storage(scope.storage_factory)
-            persisted = _stored_paused_team_run(scope, run_id)
+            persisted = _stored_paused_team_run(scope, run_id, session_id)
             delegated = has_delegation_state(persisted)
             approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
             async with asyncio.TaskGroup() as recovery:
