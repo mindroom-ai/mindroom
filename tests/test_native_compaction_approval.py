@@ -1,6 +1,7 @@
 """An approval resume sends the native replay policy the paused request ran with, when its route still holds.
 
-Under that policy the request replays the stored checkpoint in place of the transcript it covers.
+Under that policy the request replays the stored checkpoint in place of the transcript it covers. The agent cases
+resume a stored paused run; the team case pauses a ``squad`` turn on its checker's approval and resumes it.
 """
 
 from __future__ import annotations
@@ -13,25 +14,31 @@ import pytest
 
 from mindroom import agents
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import Capabilities, NativeCompactionReplay
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
-from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY
+from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY, record_native_checkpoint
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.conftest import bind_runtime_paths, seed_session, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.history_helpers import _team_session
 from tests.identity_helpers import entity_ids
 from tests.providers.openai_family_support import responses_adapter
+from tests.team_turn_helpers import SESSION_ID, delegate, member_approval, squad_turn
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelRequest, StreamEvent
 
 pytestmark = pytest.mark.asyncio
 
@@ -58,10 +65,25 @@ class _Compaction:
         return NativeCompactionReplay(route=self.route, threshold=threshold)
 
 
-def _compacting_model(route: str = "route-a") -> ScriptedModel:
+class _RecordingModel(ScriptedModel):
+    """A scripted provider that records each response's replay policy on it, as the Responses adapter does."""
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the next scripted turn, its completed response carrying the request's native settings."""
+        async for event in super().stream(request):
+            if isinstance(event, TurnCompleted):
+                event.message.provider_data = {"mindroom_portable_replay": request.portable_replay}
+                record_native_checkpoint(event.message, [], request.native_compaction)
+            yield event
+
+
+def _compacting_model(
+    route: str = "route-a",
+    turns: Sequence[Sequence[ScriptStep]] = (answer("Ready"),),
+) -> ScriptedModel:
     """Return a scripted provider whose route compacts natively."""
-    return ScriptedModel(
-        [answer("Ready")],
+    return _RecordingModel(
+        list(turns),
         capabilities=Capabilities(native_compaction=True),
         native_history_route=_Compaction(route),
     )
@@ -93,18 +115,23 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
     )
 
 
-def _checkpointed_run() -> RunRecord:
-    """Return an earlier finished run whose answer route-a compacted natively, after the transcript it covers."""
+def _checkpointed_messages() -> list[Message]:
+    """Return an earlier finished exchange whose answer route-a compacted natively, after the transcript it covers."""
     checkpoint = {"route": "route-a", "threshold": 1024, "checkpoint_prefix": True, "items": [_CHECKPOINT]}
+    return [
+        Message(role="user", content=_TRANSCRIPT),
+        Message(role="assistant", content="Noted.", provider_data={_NATIVE_CHECKPOINT_KEY: checkpoint}),
+    ]
+
+
+def _checkpointed_run() -> RunRecord:
+    """Return an earlier finished run of ``general`` holding the checkpointed exchange."""
     return RunRecord(
         run_id="run-0",
         agent_id="general",
         session_id="session-1",
         status=RunStatus.completed,
-        messages=[
-            Message(role="user", content=_TRANSCRIPT),
-            Message(role="assistant", content="Noted.", provider_data={_NATIVE_CHECKPOINT_KEY: checkpoint}),
-        ],
+        messages=_checkpointed_messages(),
     )
 
 
@@ -224,3 +251,53 @@ async def test_a_rebuilt_approval_keeps_the_paused_requests_replay_policy(
 
     [request] = model.requests
     assert request.portable_replay is expected
+
+
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_team_approval_resumes_the_paused_leader_requests_native_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed leader request runs under its paused request's native policy and replays the same checkpoint.
+
+    The leader's route compacts at the team's threshold, and the team's earlier answer holds that route's checkpoint;
+    both leader requests replay it in place of the transcript it covers.
+    """
+    leader = _compacting_model(
+        turns=[delegate("call-team", "checker", "Touch it"), answer("The checker touched it.")],
+    )
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=(),
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous")), answer("Touched.")],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    team.models["default"] = leader
+    team.config.models["default"].context_window = 200_000
+    team.config.defaults.compaction = CompactionConfig(threshold_tokens=30_000)
+    earlier = TeamRunRecord(
+        run_id="run-0",
+        team_id="squad",
+        status=RunStatus.completed,
+        messages=_checkpointed_messages(),
+    )
+    seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=[earlier]))
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    paused, resumed = leader.requests
+    assert paused.native_compaction == NativeCompactionReplay(route="route-a", threshold=30_000)
+    assert paused.portable_replay is True
+    assert (resumed.native_compaction, resumed.portable_replay) == (paused.native_compaction, paused.portable_replay)
+    for request in (paused, resumed):
+        replay = _responses_input(tmp_path, request)
+        assert _CHECKPOINT in replay
+        assert _TRANSCRIPT not in json.dumps(replay)
