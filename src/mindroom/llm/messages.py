@@ -38,8 +38,8 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 # readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
-# which usage attribution reads (``usage/storage.py``) and which tells a run's own answers from the replies its input
-# replays (``teams/presentation.py``).
+# which usage attribution reads (``usage/storage.py``, ``memory/_mem0_usage.py``) and which tells a run's own answers
+# from the replies its input replays (``teams/presentation.py``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
 
 
