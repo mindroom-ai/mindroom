@@ -124,14 +124,10 @@ def insert_run_entry(
 ) -> None:
     """Write one serialized run as a run row without an index, with the columns Agno 3 derived from a run dict.
 
+    A run that names an agent is an agent run and any other a team run; MindRoom stored no other kind of run.
     A row that already has the run's id is kept.
     """
-    if entry.get("agent_id") or entry.get("agent_name"):
-        run_type = "agent"
-    elif entry.get("team_id") or entry.get("team_name"):
-        run_type = "team"
-    else:
-        run_type = "workflow"
+    run_type = "agent" if entry.get("agent_id") or entry.get("agent_name") else "team"
     now = int(time.time())
     connection.execute(
         f"INSERT INTO {quote_identifier(names.runs)} (run_id, session_id, run_type, agent_id, team_id, workflow_id, "  # noqa: S608
