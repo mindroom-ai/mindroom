@@ -318,6 +318,11 @@ def team_label(member_names: Sequence[str]) -> str:
     return f"Team-{'-'.join(member_names)}"
 
 
+def materialized_team_label(display_names: Sequence[str]) -> str:
+    """Return the entity label an ad hoc team's turn and resume carry in their logs and notices."""
+    return f"Team ({', '.join(display_names)})"
+
+
 def _appended_context(existing: str, block: str) -> str:
     if not block:
         return existing
@@ -502,6 +507,7 @@ __all__ = [
     "materialize_exact_requested_team_members",
     "materialize_exact_team_members",
     "materialize_team_members",
+    "materialized_team_label",
     "requested_team_agent_names",
     "resolve_team_member_model_names",
     "resolve_team_turn_models",

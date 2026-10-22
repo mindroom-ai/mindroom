@@ -115,19 +115,24 @@ def resume_from_session(
     )
 
 
-def with_resumed_turn_log_context[EventT](events: AsyncIterator[EventT]) -> AsyncIterator[EventT]:
+def with_resumed_turn_log_context[EventT](
+    events: AsyncIterator[EventT],
+    *,
+    entity_name: str | None = None,
+) -> AsyncIterator[EventT]:
     """Return ``events`` with the request-log attribution of the turn it resumes bound around every pull.
 
     A resume runs under the tool runtime context of the turn it continues, which names the entity, session, room,
     thread, source event, requester, and correlation id a fresh turn of it binds; without one ``events`` is returned
-    as is.
+    as is. ``entity_name`` replaces the context's agent when the turn logged another entity: an ad hoc team's
+    context names the member whose account handles it, while its requests carry the team's label.
     """
     context = get_tool_runtime_context()
     if context is None:
         return events
     target = context.target
     attribution = {
-        "agent_id": context.agent_name,
+        "agent_id": context.agent_name if entity_name is None else entity_name,
         "session_id": target.session_id,
         "room_id": target.room_id,
         "thread_id": target.resolved_thread_id,

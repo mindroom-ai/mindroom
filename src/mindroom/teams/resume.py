@@ -33,7 +33,12 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.members import build_team_spec, materialize_exact_team_members, team_label
+from mindroom.teams.members import (
+    build_team_spec,
+    materialize_exact_team_members,
+    materialized_team_label,
+    team_label,
+)
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
@@ -398,6 +403,9 @@ async def continue_paused_team_run(
     being continued; the terminal delivery stays with the caller.
     """
     team_name = configured_team(config, configured_team_name)
+    # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
+    # label of an ad hoc team's members once they are known.
+    entity_name = team_name or configured_team_name
     with open_resolved_scope_session_context(
         agent_name=min(member_names, default=configured_team_name),
         session_id=session_id,
@@ -438,6 +446,8 @@ async def continue_paused_team_run(
                 active_model_names=member_model_names,
                 required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
             )
+            if team_name is None:
+                entity_name = materialized_team_label(members.display_names)
             built = build_team_spec(
                 members=members,
                 mode=mode,
@@ -463,7 +473,7 @@ async def continue_paused_team_run(
                 members=members,
                 presentation=presentation,
                 show_tool_calls=show_tool_calls,
-                team_name=configured_team_name,
+                team_name=entity_name,
                 runtime_model_name=model_name,
                 prepared_history=None,
                 canonical_per_member=dict.fromkeys(presentation.member_ids, ""),
@@ -511,7 +521,7 @@ async def continue_paused_team_run(
                 else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
                 resume,
                 paused=persisted,
-                team_name=configured_team_name,
+                team_name=entity_name,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
@@ -520,7 +530,7 @@ async def continue_paused_team_run(
                 denial_reasons=denial_reasons if delegated else None,
                 approval_calls=approval_calls if delegated else (),
             )
-            events = with_resumed_turn_log_context(events)
+            events = with_resumed_turn_log_context(events, entity_name=entity_name)
             with helper_usage_context(scope):
                 await publish_team_presentation(progress, presentation)
                 async with closing_async_stream(events):
@@ -555,7 +565,7 @@ async def continue_paused_team_run(
                 register_team_notice_storage(
                     scope_context=scope,
                     session_id=session_id,
-                    entity_name=configured_team_name,
+                    entity_name=entity_name,
                 )
 
 

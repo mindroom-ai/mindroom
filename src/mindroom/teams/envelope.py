@@ -71,6 +71,7 @@ from mindroom.teams.members import (
     allow_direct_private_team_agents,
     build_team_spec,
     materialize_team_members,
+    materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
     team_label,
@@ -987,7 +988,7 @@ def _team_turn(
     return _TeamTurn(
         ctx=replace(
             ctx,
-            entity_label=f"Team ({', '.join(team_members.display_names)})",
+            entity_label=materialized_team_label(team_members.display_names),
             background_tool_jobs=background_tool_jobs_enabled(config, orchestrator.runtime_paths),
             transient_enrichment_items=append_knowledge_availability_enrichment(
                 ctx.transient_enrichment_items,

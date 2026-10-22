@@ -30,6 +30,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta
+from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
@@ -1231,6 +1232,40 @@ async def test_a_denied_resume_shows_the_saved_document_before_the_member_answer
     assert published[0] == (0, paused.response_text)
     assert published[-1][1] == result.response_text
     assert "I did not touch it." in result.response_text
+
+
+@pytest.mark.asyncio
+async def test_an_ad_hoc_team_s_resume_logs_its_requests_under_the_label_its_turn_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A resumed ad hoc team attributes its requests to ``Team (...)`` as its turn did, not to the member that handles it."""
+    logged: list[object] = []
+
+    async def log_entity() -> None:
+        logged.append(current_llm_request_log_context().get("agent_id"))
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            [Await(log_entity), *delegate("call-team", "general", "Touch it")],
+            [Await(log_entity), *answer("Done.")],
+        ],
+        general=[
+            calls(tool_call("touch", "call-touch", label="dangerous")),
+            [Await(log_entity), *answer("Touched.")],
+        ],
+        approval_rules=[GATED],
+    )
+    paused = await _paused(team, stream=True)
+
+    result = await team.resume(paused, approved=True, approvals=(_approval("call-touch", "dangerous"),))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert probe.calls == ["dangerous"]
+    assert logged == ["Team (GeneralAgent)"] * 3
 
 
 @pytest.mark.asyncio
