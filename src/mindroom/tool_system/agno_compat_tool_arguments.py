@@ -30,10 +30,10 @@ type _Alternative = tuple[frozenset[str] | None, tuple[object, ...] | None]
 # none, null, true, or false with None, True, or False, whatever the parameter's schema, so a string parameter never
 # receives those words: a choice such as Graph's "none" or a message that is exactly "None" or "true" reaches the tool
 # as None or a boolean. The model's string is put back when it is exactly one of the parameter's choices, or when the
-# parameter takes free text and either Agno made a boolean of it or the parameter does not admit null. An optional
-# string, and a choice parameter for words that are not its choices, keep Agno's None for none and null, because models
-# send those to leave an optional parameter out (Agno renders Literal[...] | None without null). Every other parameter
-# keeps Agno's conversion, because models also send "true" for booleans and "null" for optional numbers.
+# parameter takes free text and either Agno made a boolean of it or the parameter is required and does not admit null.
+# An optional string, and a choice parameter for words that are not its choices, keep Agno's None for none and null,
+# because models send those to leave an optional parameter out. Every other parameter keeps Agno's conversion, because
+# models also send "true" for booleans and "null" for optional numbers.
 # Agno parses a model's tool calls and a resumed paused call's stored arguments through agno.utils.tools, so the patch
 # wraps that module's get_function_call.
 # Upstream issue: https://github.com/agno-agi/agno/issues/10459, open (checked October 22, 2026).
@@ -49,15 +49,15 @@ type _Alternative = tuple[frozenset[str] | None, tuple[object, ...] | None]
 @dataclass(frozen=True)
 class _StringParameter:
     free_text: bool
-    nullable: bool
-    choices: tuple[object, ...]
+    optional: bool
+    choices: tuple[str, ...]
 
     def keeps(self, converted: object, sent: str) -> bool:
         """Return whether the parameter gets the model's string back from Agno's None or boolean."""
         if sent in self.choices:
             return True
         # An optional string keeps Agno's reading of "none" and "null" as left out.
-        return self.free_text and (converted is not None or not self.nullable)
+        return self.free_text and (converted is not None or not self.optional)
 
 
 class _SchemaTooLargeError(Exception):
@@ -119,21 +119,28 @@ def _alternatives(schema: Mapping[str, Any] | None, root: Mapping[str, Any], bud
     return alternatives
 
 
-def _string_parameter(schema: Mapping[str, Any] | None, root: Mapping[str, Any]) -> _StringParameter | None:
+def _string_parameter(name: str, parameters: Mapping[str, Any]) -> _StringParameter | None:
     """Describe a parameter whose schema admits a string, or return None when it admits none."""
     try:
-        alternatives = _alternatives(schema, root, [_MAX_SCHEMA_NODES])
+        alternatives = _alternatives(parameters["properties"].get(name), parameters, [_MAX_SCHEMA_NODES])
     except _SchemaTooLargeError:
         return None
     free_text = any(types is not None and "string" in types and choices is None for types, choices in alternatives)
-    nullable = any(
+    # Agno leaves null out of the schema of Optional[X], and of X | None from Python 3.14, but X stays out of required.
+    optional = name not in _items(parameters.get("required")) or any(
         None in choices if choices is not None else types is not None and "null" in types
         for types, choices in alternatives
     )
-    choices = tuple(choice for _types, options in alternatives for choice in options or ())
-    if not free_text and not any(isinstance(choice, str) for choice in choices):
+    choices = tuple(
+        choice
+        for types, options in alternatives
+        if types is None or "string" in types
+        for choice in options or ()
+        if isinstance(choice, str)
+    )
+    if not free_text and not choices:
         return None
-    return _StringParameter(free_text=free_text, nullable=nullable, choices=choices)
+    return _StringParameter(free_text=free_text, optional=optional, choices=choices)
 
 
 def _decoded_object(arguments: str) -> Mapping[str, object]:
@@ -154,8 +161,7 @@ def _restore_string_arguments(call: FunctionCall, arguments: str) -> None:
     converted = {
         name: (value, parameter)
         for name, value in parsed.items()
-        if (value is None or isinstance(value, bool))
-        and (parameter := _string_parameter(properties.get(name), parameters)) is not None
+        if (value is None or isinstance(value, bool)) and (parameter := _string_parameter(name, parameters)) is not None
     }
     if not converted:
         return

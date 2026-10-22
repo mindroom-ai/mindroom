@@ -366,14 +366,12 @@ def test_registered_tool_contract(tool_name: str) -> None:
         verify_tool_configfields(tool_name, tool_class, init_signature)
 
 
-def _string_parameter(schema: dict[str, Any]) -> tuple[list[str], bool] | None:
-    """Return a string parameter's choices (empty for free text) and whether it is optional, or None for no string."""
-    options = (schema, *schema.get("anyOf", ()))
-    strings = [option for option in options if option.get("type") == "string"]
+def _string_choices(schema: dict[str, Any]) -> list[str] | None:
+    """Return a string parameter's choices, an empty list for free text, or None when it takes no string."""
+    strings = [option for option in (schema, *schema.get("anyOf", ())) if option.get("type") == "string"]
     if not strings:
         return None
-    choices = [value for option in strings for value in option.get("enum", ())]
-    return choices, any(option.get("type") == "null" for option in options)
+    return [value for option in strings for value in option.get("enum", ())]
 
 
 def _parsed_arguments(function: Function, arguments: dict[str, str]) -> dict[str, Any] | None:
@@ -406,18 +404,24 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
         function = Function.from_callable(method)
-        parameters = {
-            name: string_parameter
+        signature = inspect.signature(method).parameters
+        choices = {
+            name: string_choices
             for name, schema in function.parameters["properties"].items()
-            if (string_parameter := _string_parameter(schema)) is not None
+            if (string_choices := _string_choices(schema)) is not None
         }
-        free_text = {name: optional for name, (choices, optional) in parameters.items() if not choices}
+        # A parameter with a default can be left out, so its null words keep meaning "not given".
+        free_text = {
+            name: signature[name].default is not inspect.Parameter.empty
+            for name, values in choices.items()
+            if not values
+        }
         for word in (*BOOLEAN_WORDS, *NULL_WORDS) if free_text else ():
             expected = {name: None if optional and word in NULL_WORDS else word for name, optional in free_text.items()}
             assert _parsed_arguments(function, dict.fromkeys(free_text, word)) == expected, (tool_name, function_name)
-        for name, (choices, _optional) in parameters.items():
-            for choice in choices:
-                assert _parsed_arguments(function, {name: choice}) == {name: choice}, (tool_name, function_name)
+        for name, values in choices.items():
+            for value in values:
+                assert _parsed_arguments(function, {name: value}) == {name: value}, (tool_name, function_name)
 
 
 def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:

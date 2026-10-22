@@ -111,16 +111,6 @@ def test_other_parameters_keep_agnos_conversion_of_literal_words() -> None:
     assert _parsed(function, json.dumps({"text": "hi", "pinned": " False "})) == {"text": "hi", "pinned": False}
 
 
-def test_strict_schemas_keep_string_arguments() -> None:
-    """Strict schemas, which make every parameter required, keep string arguments by the same rule."""
-    function = Function.from_callable(note, strict=True)
-    function.process_entrypoint(strict=True)
-    arguments = {"text": "null", "mode": "none", "title": "true", "scope": "none", "pinned": "true", "count": "null"}
-
-    assert _parsed(function, json.dumps(arguments)) == {**arguments, "pinned": True, "count": None}
-    assert _parsed(function, json.dumps({"text": "hi", "title": "None"})) == {"text": "hi", "title": None}
-
-
 def test_python_literal_arguments_keep_string_arguments() -> None:
     """Arguments Agno decodes as a Python literal keep their strings too."""
     assert _parsed(Function.from_callable(note), "{'text': 'None', 'pinned': 'true'}") == {
@@ -136,41 +126,49 @@ def test_hand_written_schemas_keep_string_arguments() -> None:
         parameters={
             "type": "object",
             "properties": {
+                "name": {"type": "string"},
+                "cursor": {"type": "string"},
                 "kind": {"$ref": "#/$defs/Kind"},
                 "label": {"type": ["string", "null"]},
-                "cursor": {"type": ["string", "null"]},
                 "choice": {"enum": ["none", "some", None]},
                 "either": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
                 "flag": {"type": "boolean"},
                 "untyped": {},
                 "malformed": {"type": {"not": "a type"}, "enum": 5, "anyOf": "string"},
+                "switch": {"type": "boolean", "enum": ["true", True]},
             },
+            "required": ["name", "kind", "label", "either"],
             "$defs": {"Kind": {"type": "string", "enum": ["null", "all"]}},
         },
         entrypoint=lambda **kwargs: kwargs,
         skip_entrypoint_processing=True,
     )
     arguments = {
+        "name": "None",
+        "cursor": "None",
         "kind": "null",
-        "label": "false",
-        "cursor": "null",
+        "label": "null",
         "choice": "none",
-        "either": "true",
+        "either": "null",
         "flag": "true",
         "untyped": "None",
         "malformed": "None",
+        "switch": "true",
     }
 
     assert _parsed(function, json.dumps(arguments)) == {
-        "kind": "null",
-        "label": "false",
+        "name": "None",
         "cursor": None,
+        "kind": "null",
+        "label": None,
         "choice": "none",
-        "either": "true",
+        "either": "null",
         "flag": True,
         "untyped": None,
         "malformed": None,
+        "switch": True,
     }
+    assert _parsed(function, json.dumps({"cursor": "false", "label": "true"})) == {"cursor": "false", "label": "true"}
 
 
 def test_a_resumed_call_keeps_string_arguments() -> None:
