@@ -80,8 +80,8 @@ def whole_turn_deltas(
 ) -> list[StreamEvent]:
     """Return the deltas of a turn that arrived whole: its reasoning, its text, then each tool call.
 
-    A caller that reads a reply from its deltas, such as a streamed chat reply collecting the text it displays,
-    then gets the same reply whether the request streamed or not.
+    A caller that reads a reply from its deltas, such as a blocking team turn keeping the text its members
+    already returned when the attempt fails, then gets the same reply whether the request streamed or not.
     """
     events: list[StreamEvent] = []
     if reasoning:
