@@ -54,16 +54,14 @@ class PreparedTools:
 def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
     """Flatten the agent's toolkits into the functions a run offers.
 
-    The filter runs first; among the functions it keeps, the first of a repeated name wins and the rest are logged
-    and dropped, as Agno did. A toolkit's instructions are kept whenever Agno would have added them to the prompt,
-    once per toolkit identity, which Agno keyed by name, instructions, and function surface.
+    The first function of a repeated name wins and the rest are logged and dropped, as Agno did. A toolkit's
+    instructions are kept whenever Agno would have added them to the prompt, once per toolkit identity, which Agno
+    keyed by name, instructions, and function surface.
     """
     functions: dict[str, ToolFunction] = {}
     instructions: dict[tuple[str, str, frozenset[str]], str] = {}
     for toolkit in spec.toolkits:
         for function in toolkit.functions:
-            if spec.tool_filter is not None and not spec.tool_filter(function):
-                continue
             if function.name in functions:
                 logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
                 continue
@@ -225,9 +223,8 @@ def _complete_call(call: PlannedCall, outcome: ToolOutcome, elapsed: float) -> M
     execution.result = outcome.content
     execution.tool_call_error = outcome.is_error
     execution.stop_after_tool_call = outcome.stop_after_call
-    if elapsed > 0:
-        ended = time.time()
-        execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
+    ended = time.time()
+    execution.metrics = ToolCallMetrics(start_time=ended - elapsed, end_time=ended, duration=elapsed)
     return tool_result_message(execution, media=None if outcome.is_error else outcome)
 
 

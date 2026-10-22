@@ -162,9 +162,8 @@ async def forward_resume[R: AnyRunRecord](
                 record = event.record
             elif on_event is not None:
                 on_event(event)
-    if record is None:
-        msg = "Resumed run ended without its terminal record"
-        raise RuntimeError(msg)
+    # A run ends with ``RunFinished`` or raises.
+    assert record is not None
     return record
 
 

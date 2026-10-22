@@ -57,7 +57,7 @@ def json_output_prompt(schema: type[BaseModel]) -> str:
     prompt = "Provide your output as a JSON containing the following fields:"
     json_schema = schema.model_json_schema()
     properties: dict[str, Any] = {
-        name: _prompt_field(field) for name, field in (json_schema.get("properties") or {}).items()
+        name: _without_title(field) for name, field in (json_schema.get("properties") or {}).items()
     }
     definitions = json_schema.get("$defs")
     if definitions is not None:
@@ -89,15 +89,6 @@ def json_output_prompt(schema: type[BaseModel]) -> str:
 
 def _without_title(field: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in field.items() if key != "title"}
-
-
-def _prompt_field(field: Mapping[str, Any]) -> dict[str, Any]:
-    prompt_field = _without_title(field)
-    if "allOf" in prompt_field:
-        reference = prompt_field["allOf"][0].get("$ref", "")
-        if reference.startswith("#/$defs/"):
-            prompt_field["enum_type"] = reference.split("/")[-1]
-    return prompt_field
 
 
 def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
@@ -204,8 +195,6 @@ def _merged[T: BaseModel](candidates: list[str], schema: type[T]) -> T | None:
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
-            continue
-        if not isinstance(data, dict):
             continue
         for name in schema.model_fields:
             if name not in data:
