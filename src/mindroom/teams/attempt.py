@@ -1,7 +1,8 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-The attempt keeps the text each slot received without tool markers, which an interrupted turn records and a blocking
-reply delivers, collects the records the run hands over, and renders the run's metadata from them.
+``TeamReplyText`` is the reply's text without tool markers, which an interrupted turn records and a blocking reply
+delivers, on Matrix and on the OpenAI-compatible API alike; the attempt also collects the records the run hands over
+and renders the run's metadata from them.
 """
 
 from __future__ import annotations
@@ -41,6 +42,64 @@ def team_tool_executions(record: TeamRunRecord, members: Sequence[RunRecord]) ->
 
 
 @dataclass
+class TeamReplyText:
+    """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
+
+    ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
+    member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as Agno's
+    blocking reply joined them.
+    """
+
+    presentation: TeamStreamPresentation
+    per_member: dict[str, str] = field(init=False)
+    consensus: str = ""
+    # The slots in the order their members' runs first ended, which a blocking reply lists them in.
+    ended_member_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Give every configured slot empty text."""
+        self.per_member = dict.fromkeys(self.presentation.member_ids, "")
+
+    def apply(self, event: TeamRunEvent) -> None:
+        """Fold one run event into the text: a member's or the leader's delta, or the end of a member's run."""
+        if isinstance(event, MemberRunEnded):
+            member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
+            if member_id not in self.ended_member_ids:
+                self.ended_member_ids.append(member_id)
+        elif isinstance(event, MemberEvent):
+            if isinstance(event.event, ContentDelta):
+                member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
+                self.per_member[member_id] += event.event.text
+        elif isinstance(event, ContentDelta):
+            self.consensus += event.text
+
+    def canonical_text(self) -> str:
+        """Return the text in the configured member order, then the consensus: what a streamed reply records."""
+        return self._render(self.presentation.member_ids)
+
+    def completed_text(self) -> str:
+        """Return the text in the order the members finished, then the consensus: what a blocking reply delivers.
+
+        Agno's blocking reply listed the members as they finished, while the streamed document keeps the configured
+        order; a member whose run has not ended follows the others, so no text is dropped.
+        """
+        ended = self.ended_member_ids
+        return self._render(
+            [*ended, *(member_id for member_id in self.presentation.member_ids if member_id not in ended)],
+        )
+
+    def _render(self, member_ids: Sequence[str]) -> str:
+        return "\n\n".join(
+            render_team_member_slots(
+                member_ids,
+                display_names_by_id=self.presentation.display_names_by_id,
+                per_member=self.per_member,
+                consensus=self.consensus,
+            ),
+        )
+
+
+@dataclass
 class TeamAttempt:
     """One attempt of a team turn: its prepared input, its document, and what the run produced so far."""
 
@@ -52,47 +111,23 @@ class TeamAttempt:
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
     prepared_history: PreparedHistoryState | None
-    # The text each slot received, without tool markers: what an interrupted turn records and a blocking reply delivers.
-    canonical_per_member: dict[str, str]
-    canonical_consensus: str = ""
-    # The slots in the order their members' runs first ended, which a blocking reply lists them in.
-    ended_member_ids: list[str] = field(default_factory=list)
+    # The reply without tool markers: what an interrupted turn records and a blocking reply delivers.
+    reply: TeamReplyText = field(init=False)
     records: TeamRunRecords = field(default_factory=TeamRunRecords)
+
+    def __post_init__(self) -> None:
+        """Start the reply's text from the presentation's member slots."""
+        self.reply = TeamReplyText(self.presentation)
 
     @property
     def tool_tracker(self) -> StreamingToolTracker:
         """The tracker of the document's tool calls, completed and pending."""
         return self.presentation.tool_tracker
 
-    def canonical_text(self) -> str:
-        """Return the reply's text so far without display chrome: the member slots and the consensus."""
-        return self._render_slots(self.presentation.member_ids)
-
-    def completed_text(self) -> str:
-        """Return the text a blocking reply delivers, without display chrome: the member slots and the consensus.
-
-        The members come in the order their runs ended, as Agno's blocking reply listed them, while the streamed
-        document keeps the configured order.
-        """
-        ended = self.ended_member_ids
-        return self._render_slots(
-            [*ended, *(member_id for member_id in self.presentation.member_ids if member_id not in ended)],
-        )
-
-    def _render_slots(self, member_ids: Sequence[str]) -> str:
-        return "\n\n".join(
-            render_team_member_slots(
-                member_ids,
-                display_names_by_id=self.presentation.display_names_by_id,
-                per_member=self.canonical_per_member,
-                consensus=self.canonical_consensus,
-            ),
-        )
-
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return the live partial-output view of this attempt, for a turn cancelled from outside."""
         return TurnPartialSnapshot(
-            assistant_text=self.canonical_text(),
+            assistant_text=self.reply.canonical_text(),
             completed_tools=tuple(self.tool_tracker.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in self.tool_tracker.pending_tools),
             attempt_run_id=self.run_id,
@@ -100,26 +135,18 @@ class TeamAttempt:
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""
-        if isinstance(event, MemberRunEnded):
-            member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
-            if member_id not in self.ended_member_ids:
-                self.ended_member_ids.append(member_id)
+        self.reply.apply(event)
         if self.records.collect(event):
             return False
         if isinstance(event, MemberEvent):
             inner = event.event
-            if isinstance(inner, ContentDelta):
-                member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
-                self.canonical_per_member[member_id] += inner.text
-            elif isinstance(inner, ToolStarted | ToolCompleted):
+            if isinstance(inner, ToolStarted | ToolCompleted):
                 self._emit_tool_timing(inner, tool_scope="member", agent_name=event.member_name)
-            else:
+            elif not isinstance(inner, ContentDelta):
                 return False
-        elif isinstance(event, ContentDelta):
-            self.canonical_consensus += event.text
         elif isinstance(event, ToolStarted | ToolCompleted):
             self._emit_tool_timing(event, tool_scope="team", agent_name=None)
-        else:
+        elif not isinstance(event, ContentDelta):
             return False
         apply_team_event(self.presentation, event)
         return True
@@ -173,4 +200,4 @@ class TeamAttempt:
         )
 
 
-__all__ = ["TeamAttempt", "team_tool_executions"]
+__all__ = ["TeamAttempt", "TeamReplyText", "team_tool_executions"]

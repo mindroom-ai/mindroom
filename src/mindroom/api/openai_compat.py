@@ -88,6 +88,7 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import build_llm_request_log_context, stream_with_llm_request_log_context
 from mindroom.routing import suggest_responder
+from mindroom.teams.attempt import TeamReplyText
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
@@ -97,7 +98,7 @@ from mindroom.teams.members import (
     materialize_exact_team_members,
     team_label,
 )
-from mindroom.teams.presentation import TeamStreamPresentation, apply_team_event, render_team_member_slots
+from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import TeamRunRecords
@@ -1065,30 +1066,30 @@ def _build_team(
 
 @dataclass
 class _TeamCompletion:
-    """What one blocking team completion collected: the rendered document and the records its usage sums."""
+    """What one blocking team completion collected: the reply's text and the records its usage sums."""
 
-    presentation: TeamStreamPresentation
+    reply: TeamReplyText
     records: TeamRunRecords = field(default_factory=TeamRunRecords)
 
     def apply(self, event: TeamRunEvent) -> None:
-        if not self.records.collect(event):
-            apply_team_event(self.presentation, event)
+        self.reply.apply(event)
+        self.records.collect(event)
 
     def text(self) -> str:
-        """Return the member contributions and the consensus, without the Matrix header."""
-        return "\n\n".join(
-            render_team_member_slots(
-                self.presentation.member_ids,
-                display_names_by_id=self.presentation.display_names_by_id,
-                per_member=self.presentation.per_member,
-                consensus=self.presentation.consensus,
-            ),
-        )
+        """Return the document a blocking Matrix reply delivers, without its header.
+
+        The members come as they finished and carry no tool markers, as Agno's blocking team reply did on both surfaces;
+        API clients replay this text as history.
+        """
+        return self.reply.completed_text()
 
 
 def _team_completion(members: ResolvedExactTeamMembers) -> _TeamCompletion:
+    # The presentation only names the members here; the reply's text carries no tool markers either way.
     return _TeamCompletion(
-        TeamStreamPresentation.new(members.requested_agent_names, members.display_names, show_tool_calls=False),
+        TeamReplyText(
+            TeamStreamPresentation.new(members.requested_agent_names, members.display_names, show_tool_calls=False),
+        ),
     )
 
 

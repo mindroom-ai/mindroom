@@ -335,19 +335,17 @@ def test_releasing_a_spent_attempt_s_members_drops_its_partial_output(
     members = materialize_team_members(["general"], team.orchestrator, team.identity)
     presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
     presentation.start_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="touch", tool_args={}))
-    holder = _TeamTurnHolder(
-        team_members=members,
-        attempt=TeamAttempt(
-            run_id="run-1",
-            members=members,
-            presentation=presentation,
-            show_tool_calls=False,
-            team_name="team",
-            runtime_model_name="default",
-            prepared_history=None,
-            canonical_per_member={"general": "stale partial"},
-        ),
+    attempt = TeamAttempt(
+        run_id="run-1",
+        members=members,
+        presentation=presentation,
+        show_tool_calls=False,
+        team_name="team",
+        runtime_model_name="default",
+        prepared_history=None,
     )
+    attempt.reply.per_member["general"] = "stale partial"
+    holder = _TeamTurnHolder(team_members=members, attempt=attempt)
     assert holder.partial_snapshot().assistant_text
 
     holder.release_attempt_members(None)

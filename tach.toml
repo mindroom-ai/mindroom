@@ -6233,6 +6233,7 @@ from = ["mindroom.routing"]
 
 [[interfaces]]
 expose = [
+    "attempt.TeamReplyText",
     "envelope.prepare_materialized_team_execution",
     "envelope.run_prepared_team",
     "envelope.team_response",
@@ -6255,8 +6256,6 @@ expose = [
     "members.select_model_for_team",
     "members.team_label",
     "presentation.TeamStreamPresentation",
-    "presentation.apply_team_event",
-    "presentation.render_team_member_slots",
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",

@@ -478,7 +478,6 @@ async def continue_paused_team_run(
                 team_name=entity_name,
                 runtime_model_name=model_name,
                 prepared_history=None,
-                canonical_per_member=dict.fromkeys(presentation.member_ids, ""),
             )
             settings = team_history_settings(config, team_name)
             resume = TeamResume(

@@ -1,9 +1,10 @@
 """Team turns on the owned runtime: prepare a turn, run its leader, and render the reply through the turn drivers.
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
-turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. The blocking reply
-carries no tool trace, so it renders the document without tool markers and lists the members in the order they
-finished. ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
+turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply delivers
+no tool trace, so its document carries no tool markers, and it lists the members in the order they finished, as
+Agno's blocking reply did; the streamed reply shows its trace through its chunks and keeps the configured order.
+``run_prepared_team`` runs an OpenAI-compatible API team turn under the same leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -623,7 +624,6 @@ class _TeamTurn:
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
             prepared_history=prepared.prepared_history,
-            canonical_per_member=dict.fromkeys(presentation.member_ids, ""),
         )
         self.holder.attempt = attempt
         self.holder.attempt_started = True
@@ -707,7 +707,7 @@ class _TeamTurn:
                 original_status=RunStatus.error,
                 response_text=self.error_text(error),
                 reason=str(error),
-                partial_text=attempt.canonical_text(),
+                partial_text=attempt.reply.canonical_text(),
                 completed_tools=tuple(attempt.tool_tracker.completed_tools),
                 interrupted_tools=tuple(pending.trace_entry for pending in attempt.tool_tracker.pending_tools),
                 session_id=self.session_id,
@@ -776,7 +776,7 @@ class _TeamTurn:
         run.turn_state.sync_partial(
             self.turn_recorder,
             run_metadata=run.run_metadata,
-            assistant_text=attempt.canonical_text(),
+            assistant_text=attempt.reply.canonical_text(),
             completed_tools=attempt.tool_tracker.completed_tools,
             interrupted_tools=[pending.trace_entry for pending in attempt.tool_tracker.pending_tools],
         )
@@ -817,11 +817,13 @@ class _TeamTurn:
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         tool_executions = team_tool_executions(record, attempt.records.members)
-        # A blocking reply delivers no tool trace, so it carries the document without tool markers.
-        canonical_text = attempt.completed_text() if blocking else attempt.canonical_text()
-        has_visible_output = bool(canonical_text)
+        # Neither path's document carries tool markers: a blocking reply delivers no tool trace, and a streamed reply
+        # shows its trace through its chunks. A blocking reply lists the members as they finished, as Agno's blocking
+        # reply did; a streamed one keeps the configured order.
+        body_text = attempt.reply.completed_text() if blocking else attempt.reply.canonical_text()
+        has_visible_output = bool(body_text)
         header = format_team_header(attempt.members.display_names)
-        rendered = header + (canonical_text or NO_TEAM_RESPONSE)
+        rendered = header + (body_text or NO_TEAM_RESPONSE)
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -831,13 +833,13 @@ class _TeamTurn:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
         response_text = ""
         # The "No team response generated." fallback is display chrome, not replayable assistant text.
-        replayable_text = header + canonical_text if has_visible_output else ""
+        replayable_text = header + body_text if has_visible_output else ""
         if blocking:
-            consensus = attempt.canonical_consensus
+            consensus = attempt.reply.consensus
             silent = (
                 self.ctx.allow_no_report_response
                 and is_silent_schedule_no_report_response(consensus)
-                and not any(text.strip() for text in attempt.canonical_per_member.values())
+                and not any(text.strip() for text in attempt.reply.per_member.values())
             )
             response_text = consensus.strip() if silent else rendered
             if silent:

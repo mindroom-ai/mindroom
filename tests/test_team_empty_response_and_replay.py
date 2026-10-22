@@ -1,8 +1,9 @@
 """The team empty-run guard, quiet scheduled replies, and what a failed team turn records for replay.
 
 An empty completed attempt is discarded and retried once, sharing the turn's continuation budget; a second empty
-attempt answers with the shared notice. Providers are scripted at the team runtime seam
-(``tests/team_turn_helpers.py``).
+attempt answers with the shared notice. The blocking document keeps Agno's shape around tool calls: the fallback
+whatever ``show_tool_calls`` says, and a member's text joined across a hidden call. Providers are scripted at the team
+runtime seam (``tests/team_turn_helpers.py``).
 """
 # ruff: noqa: D103
 
@@ -242,11 +243,16 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
 ) -> None:
-    """The fallback line is display chrome, not an answer to replay; the attempt ran tools, so it is not retried."""
+    """The fallback line is display chrome, not an answer to replay; the attempt ran tools, so it is not retried.
+
+    A blocking reply delivers no tool trace, so shown tool calls add no marker to the fallback document either.
+    """
     team = _team(
         tmp_path,
         monkeypatch,
@@ -254,12 +260,33 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
         general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
     )
 
-    text = await team.respond(message="Run the tool.", show_tool_calls=False)
+    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls)
 
     assert text == NO_TEAM_RESPONSE
     assert len(team.models["default"].requests) == 2
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_is_joined_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The member's text before and after its tool call joins with no gap, as Agno's blocking reply joined it."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Check"), answer("Checked.")],
+        general=[calls(tool_call("touch", "call-touch", label="noon"), content="Let me check."), answer("Done.")],
+    )
+
+    text = await team.respond(message="Check.", show_tool_calls=False)
+
+    assert text == (
+        "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Let me check.Done.\n\n\n**Team Consensus**:\n\nChecked."
+    )
+    assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio

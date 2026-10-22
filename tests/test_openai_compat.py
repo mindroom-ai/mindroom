@@ -83,7 +83,7 @@ from mindroom.routing import ResponderSelection
 from mindroom.teams import envelope
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
-from mindroom.teams.runtime import MemberEvent
+from mindroom.teams.runtime import MemberEvent, MemberRunEnded
 from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.tool_calls import record_tool_success
 from mindroom.tool_system.worker_routing import (
@@ -3463,6 +3463,54 @@ class TestTeamCompletion:
         assert run.request_template.stream is False
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
+
+    def test_team_non_streaming_is_the_blocking_team_document(self, team_app_client: TestClient) -> None:
+        """The completion is the document a blocking Matrix reply delivers, as Agno's blocking team reply was.
+
+        The members come in the order they finished, a member's text joins across its hidden tool call with no marker
+        or gap, and the consensus follows: main's ``format_team_response`` rendered ``member_responses`` and the
+        content this way, and API clients replay the text as history.
+        """
+        team = _scripted_team(
+            members=[("writer", "Writer", ScriptedModel([])), ("checker", "Checker", ScriptedModel([]))],
+        )
+        tool = ToolExecution(tool_call_id="call-touch", tool_name="touch", tool_args={}, result="touched")
+
+        def ended(member_id: str, name: str, content: str) -> MemberRunEnded:
+            record = RunRecord(
+                run_id=f"{member_id}-run",
+                agent_id=member_id,
+                status=RunStatus.completed,
+                content=content,
+            )
+            return MemberRunEnded(member_id, name, record)
+
+        with (
+            patch("mindroom.api.openai_compat._build_team", return_value=team),
+            patch(
+                "mindroom.teams.envelope.run_team",
+                new=_team_events(
+                    MemberEvent("checker", "Checker", "checker-run", ContentDelta("Checked.")),
+                    ended("checker", "Checker", "Checked."),
+                    MemberEvent("writer", "Writer", "writer-run", ContentDelta("Let me check.")),
+                    MemberEvent("writer", "Writer", "writer-run", ToolStarted(tool)),
+                    MemberEvent("writer", "Writer", "writer-run", ToolCompleted(tool, parent_run_id="team-run")),
+                    MemberEvent("writer", "Writer", "writer-run", ContentDelta("Done.")),
+                    ended("writer", "Writer", "Let me check.Done."),
+                    ContentDelta("Both done."),
+                    _finished("Both done."),
+                ),
+            ),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Check and write"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == (
+            "**Checker**: Checked.\n\n**Writer**: Let me check.Done.\n\n\n**Team Consensus**:\n\nBoth done."
+        )
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""

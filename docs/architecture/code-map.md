@@ -171,7 +171,7 @@ Matrix sync callback
 | `teams/runtime.py` | `run_team` and `continue_team` over the owned loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, and the live document a resumed run publishes |
 | `teams/envelope.py` | `team_response` and `team_response_stream`: prepare a team turn, run its leader through the turn drivers, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
-| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the text an interrupted turn keeps, and its run metadata |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the marker-free reply text an interrupted turn records and a blocking Matrix or API reply delivers, and its run metadata |
 | `teams/storage.py` | Where a team's new runs and resumes store, the records a run hands over, and the team scope its tools address |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, and `continue_paused_team_run` rebuilds the team from a saved approval |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
