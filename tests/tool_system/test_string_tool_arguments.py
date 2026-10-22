@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Literal, Optional
 
 import pytest
 from agno.tools.function import Function
@@ -35,6 +35,15 @@ def _note(*, strict: bool = False) -> ToolFunction:
     return adapt_function(function)
 
 
+def _hand_written(properties: dict[str, object], **schema: object) -> ToolFunction:
+    return ToolFunction(
+        name="lookup",
+        description=None,
+        parameters={"type": "object", "properties": properties, **schema},
+        entrypoint=lambda **kwargs: kwargs,
+    )
+
+
 def _parsed(function: ToolFunction, arguments: str) -> object:
     """Parse one tool call the way the model loop does."""
     return parse_tool_arguments(arguments, function)
@@ -64,14 +73,28 @@ def test_an_optional_string_receives_boolean_words_unchanged(word: str) -> None:
     assert _parsed(_note(), json.dumps({"text": "hi", "title": word})) == {"text": "hi", "title": word}
 
 
+def _list_page_nullable(page_token: str | None = None) -> str:
+    """List one page."""
+    return page_token or "first"
+
+
+def _list_page_optional(page_token: Optional[str] = None) -> str:  # noqa: UP045 - the schema omits null.
+    """List one page."""
+    return page_token or "first"
+
+
+def _list_page_default(page_token: str = "") -> str:
+    """List one page."""
+    return page_token or "first"
+
+
 @pytest.mark.parametrize("word", NULL_WORDS)
-def test_an_optional_string_reads_null_words_as_left_out(word: str) -> None:
-    """Models send "None" or "null" to leave an optional string, such as a page token, out."""
+@pytest.mark.parametrize("list_page", [_list_page_nullable, _list_page_optional, _list_page_default])
+def test_a_string_with_a_default_reads_null_words_as_left_out(list_page: object, word: str) -> None:
+    """Models send "None" or "null" to leave out a string they may omit, such as a page token.
 
-    def list_page(page_token: str | None = None) -> str:
-        """List one page."""
-        return page_token or "first"
-
+    Agno leaves null out of the schema of ``Optional[str]`` and of a plain default, so the default decides.
+    """
     function = adapt_function(Function.from_callable(list_page))
 
     assert _parsed(function, json.dumps({"page_token": word})) == {"page_token": None}
@@ -111,48 +134,83 @@ def test_python_literal_arguments_keep_string_arguments() -> None:
 
 def test_hand_written_schemas_keep_string_arguments() -> None:
     """Schemas written by hand, as MCP servers send them, follow the same rule."""
-    function = ToolFunction(
-        name="lookup",
-        description=None,
-        parameters={
-            "type": "object",
-            "properties": {
-                "kind": {"$ref": "#/$defs/Kind"},
-                "label": {"type": ["string", "null"]},
-                "cursor": {"type": ["string", "null"]},
-                "choice": {"enum": ["none", "some", None]},
-                "either": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
-                "flag": {"type": "boolean"},
-                "untyped": {},
-                "malformed": {"type": {"not": "a type"}, "enum": 5, "anyOf": "string"},
-                "looping": {"$ref": "#/$defs/Loop"},
-            },
-            "$defs": {"Kind": {"type": "string", "enum": ["null", "all"]}, "Loop": {"$ref": "#/$defs/Loop"}},
+    function = _hand_written(
+        {
+            "name": {"type": "string"},
+            "cursor": {"type": "string"},
+            "kind": {"$ref": "#/$defs/Kind"},
+            "label": {"type": ["string", "null"]},
+            "choice": {"enum": ["none", "some", None]},
+            "either": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+            "flag": {"type": "boolean"},
+            "untyped": {},
+            "malformed": {"type": {"not": "a type"}, "enum": 5, "anyOf": "string"},
+            "switch": {"type": "boolean", "enum": ["true", True]},
+            "looping": {"$ref": "#/$defs/Loop"},
         },
-        entrypoint=lambda **kwargs: kwargs,
+        required=["name", "kind", "label", "either"],
+        **{"$defs": {"Kind": {"type": "string", "enum": ["null", "all"]}, "Loop": {"$ref": "#/$defs/Loop"}}},
     )
     arguments = {
+        "name": "None",
+        "cursor": "None",
         "kind": "null",
-        "label": "false",
-        "cursor": "null",
+        "label": "null",
         "choice": "none",
-        "either": "true",
+        "either": "null",
         "flag": "true",
         "untyped": "None",
         "malformed": "None",
+        "switch": "true",
         "looping": "true",
         "undeclared": "false",
     }
 
     assert _parsed(function, json.dumps(arguments)) == {
-        "kind": "null",
-        "label": "false",
+        "name": "None",
         "cursor": None,
+        "kind": "null",
+        "label": None,
         "choice": "none",
-        "either": "true",
+        "either": "null",
         "flag": True,
         "untyped": None,
         "malformed": None,
+        "switch": True,
         "looping": True,
         "undeclared": False,
     }
+    assert _parsed(function, json.dumps({"cursor": "false", "label": "true"})) == {"cursor": "false", "label": "true"}
+
+
+def test_choices_combined_with_a_string_type_stay_choices() -> None:
+    """A string type narrowed to choices by allOf or a reference reads words that are not choices as values."""
+    function = _hand_written(
+        {
+            "narrowed": {"type": "string", "allOf": [{"enum": ["none", "all"]}]},
+            "referenced": {"type": "string", "$ref": "#/$defs/a~1b"},
+            "either": {"anyOf": [{"$ref": "#/$defs/a~1b"}, {"type": "null"}]},
+        },
+        **{"$defs": {"a/b": {"enum": ["none", "all"]}}},
+    )
+
+    assert _parsed(function, json.dumps({"narrowed": "none", "referenced": "none", "either": "none"})) == {
+        "narrowed": "none",
+        "referenced": "none",
+        "either": "none",
+    }
+    assert _parsed(function, json.dumps({"narrowed": "null", "referenced": "True", "either": "null"})) == {
+        "narrowed": None,
+        "referenced": True,
+        "either": None,
+    }
+
+
+def test_self_referencing_schemas_read_literal_words_as_values() -> None:
+    """A schema too large to read, such as a reference that branches into itself, reads the words as values."""
+    function = _hand_written(
+        {"node": {"$ref": "#/$defs/Node"}},
+        **{"$defs": {"Node": {"type": "string", "anyOf": [{"$ref": "#/$defs/Node"}, {"$ref": "#/$defs/Node"}]}}},
+    )
+
+    assert _parsed(function, json.dumps({"node": "true"})) == {"node": True}
