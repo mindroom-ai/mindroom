@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 MEMBER_PAUSED_RESULT = "Member '{name}' requires human input before continuing."
 COLLABORATE_MEMBER_PAUSED_RESULT = "Agent {name}: Requires human input before continuing."
 NO_MEMBER_RESPONSE = "No response from the member agent."
+# How Agno's non-stream collaborate delegation labeled each member's result, and its text for a member left blank.
+COLLABORATE_MEMBER_RESULT = "Agent {name}: {result}"
+COLLABORATE_BLANK_RESULT = "No Response"
 DELEGATE_TOOL_NAMES = frozenset({"delegate_task_to_member", "delegate_task_to_members"})
 
 
@@ -48,8 +51,13 @@ def delegate_functions(
     *,
     record: TeamRunRecord,
     run_member: MemberRunner,
+    stream: bool,
 ) -> AdaptedToolkit:
-    """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``."""
+    """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``.
+
+    ``stream`` says whether the leader's requests stream: without streaming, Agno's delegation told the leader about
+    a member's run by different rules.
+    """
     by_id = {member.spec.id: member for member in members}
 
     async def delegate_task_to_member(member_id: str, task: str) -> str:
@@ -70,7 +78,7 @@ def delegate_functions(
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
             return MEMBER_PAUSED_RESULT.format(name=member.spec.name)
-        return member_result_text(child)
+        return member_result_text(child, stream=stream)
 
     async def delegate_task_to_members(task: str) -> str:
         """Use this function to send one task to every member agent and return their responses.
@@ -85,48 +93,97 @@ def delegate_functions(
         """  # noqa: D205 - Agno's two-line summary, which its schema generator reads as the tool description.
         async with asyncio.TaskGroup() as group:
             runs = [group.create_task(run_member(member, task)) for member in members]
-        return collaborate_result_text(members, [run.result() for run in runs], record)
+        return collaborate_result_text(members, [run.result() for run in runs], record, stream=stream)
 
     entrypoint = delegate_task_to_members if mode is TeamMode.COLLABORATE else delegate_task_to_member
     function = adapt_function(Function.from_callable(entrypoint, name=entrypoint.__name__))
     return AdaptedToolkit(name="team_delegation", functions=(function,), instructions=None)
 
 
-def member_result_text(child: RunRecord) -> str:
-    """Return what the leader reads for a finished member run: its text, else its tool results, else Agno's notice.
+def member_result_text(child: RunRecord, *, stream: bool) -> str:
+    """Return what a coordinate leader reads for a finished member run, by Agno's rules with or without streaming.
 
     A failed member's record holds the error text as its content, so the leader reads what went wrong, as it did
     when Agno absorbed a member error into the member's run.
     """
+    return _streamed_result(child) if stream else _blocking_result(child)
+
+
+def _streamed_result(child: RunRecord) -> str:
+    """Return the member's text, else its tool results, else Agno's notice."""
     content = child.content
     if isinstance(content, str) and content.strip():
         return content
     if isinstance(content, dict):
-        return json.dumps(content, indent=2, ensure_ascii=False)
+        return _json_text(content)
     if child.tools:
-        return ",".join(tool.result for tool in child.tools if tool.result)
+        return _tool_results(child)
     return NO_MEMBER_RESPONSE
+
+
+def _blocking_result(child: RunRecord) -> str:
+    """Return what Agno's non-stream delegation gave: the notice only for a run with neither text nor tools.
+
+    A run whose text is blank gives its tool results, which without tools leaves nothing; any other content, None
+    among it, is JSON.
+    """
+    content = child.content
+    if content is None and not child.tools:
+        return NO_MEMBER_RESPONSE
+    if isinstance(content, str):
+        return content if content.strip() else _tool_results(child)
+    return _json_text(content)
+
+
+def _tool_results(child: RunRecord) -> str:
+    return ",".join(tool.result for tool in child.tools or () if tool.result)
 
 
 def collaborate_result_text(
     members: Sequence[TeamMember],
     children: Sequence[RunRecord],
     record: TeamRunRecord,
+    *,
+    stream: bool,
 ) -> str:
-    """Return the collaborate result: every member's text in member order, with no separator, as Agno's stream did.
+    """Return the collaborate result: one piece per member in member order, joined with no separator, as Agno's was.
 
-    Agno's streaming broadcast concatenated the members' output as it arrived; member order makes the result
-    deterministic and equal to Agno's whenever arrival order matched it. A paused member contributes Agno's notice
-    and its requirements reach the team run.
+    Streaming, a piece is the member's text, as Agno's streaming broadcast concatenated the members' output as it
+    arrived; member order makes the result deterministic and equal to Agno's whenever arrival order matched it.
+    Blocking, a piece is the member's result labeled with its name, as Agno's non-stream broadcast gave it. A paused
+    member contributes Agno's notice and its requirements reach the team run.
     """
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
             pieces.append(COLLABORATE_MEMBER_PAUSED_RESULT.format(name=member.spec.name))
+        elif stream:
+            pieces.append(_streamed_result(child))
         else:
-            pieces.append(member_result_text(child))
+            pieces.append(COLLABORATE_MEMBER_RESULT.format(name=member.spec.name, result=_labeled_result(child)))
     return "".join(pieces)
+
+
+def _labeled_result(child: RunRecord) -> str:
+    """Return the result Agno's non-stream broadcast labeled for a finished member run.
+
+    Unlike a coordinate delegation, the broadcast kept empty tool results and named a blank run without tools.
+    """
+    content = child.content
+    if content is None and not child.tools:
+        return NO_MEMBER_RESPONSE
+    if isinstance(content, str):
+        if content.strip():
+            return content
+        if child.tools:
+            return ",".join(tool.result or "" for tool in child.tools)
+        return COLLABORATE_BLANK_RESULT
+    return _json_text(content)
+
+
+def _json_text(content: object) -> str:
+    return json.dumps(content, indent=2, ensure_ascii=False)
 
 
 def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: RunRecord) -> None:
@@ -151,7 +208,9 @@ def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: Run
 
 
 __all__ = [
+    "COLLABORATE_BLANK_RESULT",
     "COLLABORATE_MEMBER_PAUSED_RESULT",
+    "COLLABORATE_MEMBER_RESULT",
     "DELEGATE_TOOL_NAMES",
     "MEMBER_PAUSED_RESULT",
     "NO_MEMBER_RESPONSE",

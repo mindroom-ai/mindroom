@@ -26,7 +26,7 @@ from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TextDelta, UsageReported
+from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
@@ -588,6 +588,54 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     assert record.metrics.details is not None
     assert len(record.metrics.details["model"]) == 1
     assert record.content is None
+
+
+@pytest.mark.parametrize("ending", ["completes", "cancelled", "fails"])
+async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it_counts_its_usage_once(
+    ending: str,
+) -> None:
+    draining = asyncio.Event()
+    release = asyncio.Event()
+
+    async def finish_the_stream() -> None:
+        # What a pipeline stage does after the turn completed, such as writing the response log.
+        draining.set()
+        await release.wait()
+        if ending == "fails":
+            msg = "log write failed"
+            raise ProviderError(msg, provider="Synthetic")
+
+    # The finished turn alone carries the usage, as a provider that reports none along the way gives it.
+    finished = TurnCompleted(message=Message(role="assistant", content="done", metrics=usage(50, 2)), stop_reason="end")
+    model = ScriptedModel([[TextDelta("done"), finished, Await(finish_the_stream)]])
+    messages = _prompt()
+    record = _record()
+    task = asyncio.create_task(_run(spec(model), messages, record=record))
+    await asyncio.wait_for(draining.wait(), timeout=5)
+
+    if ending == "cancelled":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        release.set()
+        if ending == "fails":
+            with pytest.raises(ProviderError, match="log write failed"):
+                await task
+        else:
+            await task
+
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    if ending == "completes":
+        assert (messages[-1].content, record.content) == ("done", "done")
+    else:
+        # The loop never took the turn, so only its usage is kept, on a message of its own.
+        assert (messages[-1].content, messages[-1].tool_calls, record.content) == (None, None, None)
+    assert messages[-1].metrics == usage(50, 2)
+    assert record.metrics is not None
+    assert (record.metrics.input_tokens, record.metrics.output_tokens, record.metrics.total_tokens) == (50, 2, 52)
+    assert record.metrics.details is not None
+    assert len(record.metrics.details["model"]) == 1
 
 
 async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagates() -> None:
