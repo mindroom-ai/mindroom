@@ -312,6 +312,50 @@ async def test_cited_answers_replay_as_plain_text(tmp_path: Path, route: str, ci
     assert messages[1].provider_data == stored
 
 
+@pytest.mark.asyncio
+async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_blocks(tmp_path: Path) -> None:
+    """A web-search answer stored only as its fields and server-tool blocks replays the search ahead of the answer."""
+    search_use = {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "Paris"}}
+    search_result = {
+        "type": "web_search_tool_result",
+        "tool_use_id": "srvtoolu_01",
+        "content": [
+            {
+                "type": "web_search_result",
+                "url": "https://weather.example/paris",
+                "title": "Paris weather",
+                "encrypted_content": "opaque",
+                "page_age": None,
+            },
+        ],
+    }
+    answer = Message(
+        role="assistant",
+        content="It is sunny in Paris.",
+        reasoning_content="Search first.",
+        provider_data={"signature": "sig-1", "server_tool_blocks": [search_use, search_result]},
+        from_history=True,
+    )
+    wire = Wire(json_reply([{"type": "text", "text": "Still sunny."}]))
+    messages = [
+        Message(role="user", content="Weather in Paris?", from_history=True),
+        answer,
+        Message(role="user", content="And now?"),
+    ]
+
+    body = await _sent(route_provider("anthropic", tmp_path, wire), wire, messages)
+
+    assert [
+        {key: value for key, value in block.items() if key != "cache_control"}
+        for block in body["messages"][1]["content"]
+    ] == [
+        {"type": "thinking", "thinking": "Search first.", "signature": "sig-1"},
+        search_use,
+        search_result,
+        {"type": "text", "text": "It is sunny in Paris."},
+    ]
+
+
 # --- Tool result order ----------------------------------------------------------------------------------------
 
 # The user message the Agno-era loop appended after a tool batch whose results carried media.

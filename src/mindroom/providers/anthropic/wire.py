@@ -32,7 +32,7 @@ from mindroom.logging_config import get_logger
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import MessageDeltaUsage
@@ -166,7 +166,6 @@ def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
-    enable_citations: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
@@ -179,10 +178,10 @@ def format_claude_messages(
     system_texts: list[str] = []
     for message in messages:
         if message.role in {"system", "developer"}:
-            system_texts.append(message.content if isinstance(message.content, str) else _content_text(message))
+            system_texts.append(message.get_content_string())
             continue
         if message.role == "user":
-            content = _user_blocks(message, enable_citations=enable_citations)
+            content = _user_blocks(message)
         elif message.role == "assistant":
             content = _assistant_blocks(message)
             if not content:
@@ -218,11 +217,7 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-def _content_text(message: Message) -> str:
-    return "" if message.content is None else message.get_content_string()
-
-
-def _user_blocks(message: Message, *, enable_citations: bool) -> list[Any]:
+def _user_blocks(message: Message) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
     for image in message.images or ():
@@ -230,7 +225,7 @@ def _user_blocks(message: Message, *, enable_citations: bool) -> list[Any]:
         if block is not None:
             blocks.append(block)
     for file in message.files or ():
-        block = _document_block(file, enable_citations=enable_citations)
+        block = _document_block(file)
         if block is not None:
             blocks.append(block)
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
@@ -352,7 +347,7 @@ def _image_block(image: Image) -> dict[str, Any] | None:
     }
 
 
-def _document_block(file: File, *, enable_citations: bool) -> dict[str, Any] | None:
+def _document_block(file: File) -> dict[str, Any] | None:
     if file.url is not None:
         # Only a document ``inline_url_media`` left remote reaches here.
         source: dict[str, Any] = {"type": "url", "url": file.url}
@@ -374,19 +369,7 @@ def _document_block(file: File, *, enable_citations: bool) -> dict[str, Any] | N
             source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
         else:
             source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
-    document: dict[str, Any] = {"type": "document", "source": source}
-    if enable_citations:
-        document["citations"] = {"enabled": True}
-    return document
-
-
-def _block_identity(block: Mapping[str, Any]) -> tuple[str, str] | None:
-    """Return the (type, id) key pairing a server tool use with its result block, when the block has one."""
-    block_type = block.get("type")
-    block_id = block.get("id") or block.get("tool_use_id")
-    if not isinstance(block_type, str) or not isinstance(block_id, str):
-        return None
-    return (block_type, block_id)
+    return {"type": "document", "source": source, "citations": {"enabled": True}}
 
 
 def serialize_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
@@ -419,24 +402,6 @@ def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
     ]
 
 
-def _listed_blocks(message: Message) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
-    """Return the structured blocks of list-shaped assistant content and the identities they carry."""
-    listed: list[dict[str, Any]] = []
-    identities: set[tuple[str, str]] = set()
-    if not isinstance(message.content, list):
-        return listed, identities
-    for item in message.content:
-        block = as_dict(item)
-        if block is None or not block.get("type"):
-            continue
-        if block.get("type") == "tool_use" and message.tool_calls:
-            continue
-        if (identity := _block_identity(block)) is not None:
-            identities.add(identity)
-        listed.append(block)
-    return listed, identities
-
-
 def _assistant_blocks(message: Message) -> list[Any]:
     """Return an assistant turn's blocks: the stored response blocks, or a rebuild from the message fields.
 
@@ -455,15 +420,19 @@ def _assistant_blocks(message: Message) -> list[Any]:
     # Reasoning without a signature (another provider's, or a partially stored response) cannot be replayed.
     if message.redacted_reasoning_content is not None:
         blocks.append(RedactedThinkingBlock(data=message.redacted_reasoning_content, type="redacted_thinking"))
-    listed, listed_identities = _listed_blocks(message)
+    # LEGACY_COMPAT: Claude turns stored with server-tool blocks but without the response's content blocks.
+    # Legacy format: an assistant message whose provider_data carries "server_tool_blocks" (each response block
+    # other than text, thinking, and tool_use, as the SDK's model_dump) and no "content_blocks"; selected
+    # whenever such a turn is rebuilt from its fields.
+    # Last legacy release: v2026.9.43 stored them through Agno 3.0.5; v2026.9.44 (Agno 3.0.9) also stores every
+    # response block in order under "content_blocks", which replays verbatim instead.
+    # Handling: the stored server-tool blocks replay after the thinking and before the text and tool uses, as
+    # Agno's formatter rebuilt them; a stored entry that is not a dict is skipped.
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_without_content_blocks_replays_its_server_tool_blocks
     server_blocks = provider_data.get("server_tool_blocks")
-    for block in server_blocks if isinstance(server_blocks, list) else ():
-        block_dict = as_dict(block)
-        if block_dict is not None and _block_identity(block_dict) not in listed_identities:
-            blocks.append(block_dict)
-    if listed:
-        blocks.extend(listed)
-    elif isinstance(message.content, str) and message.content.strip():
+    if isinstance(server_blocks, list):
+        blocks.extend(block for block in server_blocks if isinstance(block, dict))
+    if isinstance(message.content, str) and message.content.strip():
         blocks.append(TextBlock(text=message.content, type="text"))
     for call in message.tool_calls or []:
         function = call["function"]

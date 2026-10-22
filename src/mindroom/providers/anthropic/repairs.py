@@ -5,7 +5,9 @@ response-only fields or depend on request-scoped state that a later request cann
 rejects such a request with HTTP 400, so every later turn of that thread would fail; these transforms
 repair the wire body instead, which also heals histories stored before the rules existed. Inline media
 Claude cannot read, or past the provider's size limits, becomes a short text note for the same reason.
-None of the transforms mutate their input.
+Each transform reads the body ``format_claude_messages`` built, whose ``messages`` are role dicts with a block
+list as ``content``; a block is a stored dict or one of the SDK's block models. None of the transforms mutate
+their input.
 """
 
 from __future__ import annotations
@@ -44,16 +46,11 @@ def without_replayed_citations(body: dict[str, Any]) -> dict[str, Any]:
     document citations point at request-scoped document indexes whose documents are not replayed. The model
     does not need them to read its earlier answer.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
+    messages = body["messages"]
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = as_dict(message)
-        if message_dict is None or message_dict.get("role") != "assistant":
-            continue
-        content = message_dict.get("content")
-        if not isinstance(content, list) or not any(_cited_text_block(block) is not None for block in content):
+        content = message["content"]
+        if message["role"] != "assistant" or not any(_cited_text_block(block) is not None for block in content):
             continue
         if prepared_messages is None:
             prepared_messages = list(messages)
@@ -63,7 +60,7 @@ def without_replayed_citations(body: dict[str, Any]) -> dict[str, Any]:
             else {k: v for k, v in cited.items() if k != "citations"}
             for block in content
         ]
-        prepared_messages[message_index] = {**message_dict, "content": prepared_content}
+        prepared_messages[message_index] = {**message, "content": prepared_content}
     return _with_messages(body, prepared_messages)
 
 
@@ -74,24 +71,19 @@ def with_leading_tool_results(body: dict[str, Any]) -> dict[str, Any]:
     follow-up message, or a turn stored by a provider that accepts the other order, replays only this way.
     The other blocks keep their relative order after the results.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
+    messages = body["messages"]
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = as_dict(message)
-        if message_dict is None or message_dict.get("role") != "user":
+        if message["role"] != "user":
             continue
-        content = message_dict.get("content")
-        if not isinstance(content, list):
-            continue
+        content = message["content"]
         tool_results = [block for block in content if _is_tool_result_block(block)]
         if all(_is_tool_result_block(block) for block in content[: len(tool_results)]):
             continue
         if prepared_messages is None:
             prepared_messages = list(messages)
         other_blocks = [block for block in content if not _is_tool_result_block(block)]
-        prepared_messages[message_index] = {**message_dict, "content": [*tool_results, *other_blocks]}
+        prepared_messages[message_index] = {**message, "content": [*tool_results, *other_blocks]}
     return _with_messages(body, prepared_messages)
 
 
@@ -102,18 +94,13 @@ def with_supported_inline_media(body: dict[str, Any], *, max_inline_bytes: int, 
     and documents that would push the request's inline media past ``max_inline_bytes`` are replaced too,
     keeping earlier blocks.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
+    messages = body["messages"]
     prepared_messages: list[Any] | None = None
     inline_bytes = 0
     for message_index, message in enumerate(messages):
-        message_dict = as_dict(message)
-        if message_dict is None or message_dict.get("role") != "user":
+        if message["role"] != "user":
             continue
-        content = message_dict.get("content")
-        if not isinstance(content, list):
-            continue
+        content = message["content"]
         prepared_content: list[Any] | None = None
         for block_index, block in enumerate(content):
             note, inline_bytes = _inline_media_note(block, inline_bytes, max_inline_bytes, max_image_bytes)
@@ -126,7 +113,7 @@ def with_supported_inline_media(body: dict[str, Any], *, max_inline_bytes: int, 
             continue
         if prepared_messages is None:
             prepared_messages = list(messages)
-        prepared_messages[message_index] = {**message_dict, "content": prepared_content}
+        prepared_messages[message_index] = {**message, "content": prepared_content}
     return _with_messages(body, prepared_messages)
 
 
@@ -172,21 +159,15 @@ def with_replay_safe_tool_search_results(body: dict[str, Any]) -> dict[str, Any]
     tools are called together; either makes every later request fail. Valid pairs and other server-tool
     types stay intact, and the identity keys (``type``, ``tool_use_id``) are preserved.
     """
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
+    messages = body["messages"]
     prepared_messages: list[Any] | None = None
     for message_index, message in enumerate(messages):
-        message_dict = as_dict(message)
-        content = message_dict.get("content") if message_dict is not None else None
-        if message_dict is None or not isinstance(content, list):
-            continue
-        sanitized_content, changed = _replay_safe_message_content(content)
+        sanitized_content, changed = _replay_safe_message_content(message["content"])
         if not changed:
             continue
         if prepared_messages is None:
             prepared_messages = list(messages)
-        prepared_messages[message_index] = {**message_dict, "content": sanitized_content}
+        prepared_messages[message_index] = {**message, "content": sanitized_content}
     return _with_messages(body, prepared_messages)
 
 

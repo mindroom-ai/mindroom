@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import google.auth
 import httpx
@@ -476,20 +476,14 @@ async def test_tool_definitions_carry_only_the_fields_agno_sent(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_choice", "expected"),
-    [
-        ("none", {"type": "none"}),
-        ("auto", {"type": "auto"}),
-        ("required", {"type": "any"}),
-        ({"type": "tool", "name": "get_weather"}, {"type": "tool", "name": "get_weather"}),
-        (None, {"type": "any"}),
-    ],
+    [("none", {"type": "none"}), (None, {"type": "any"})],
 )
 async def test_request_tool_choice_replaces_an_authored_one(
     tmp_path: Path,
-    tool_choice: str | dict[str, str] | None,
+    tool_choice: Literal["none"] | None,
     expected: dict[str, str],
 ) -> None:
-    """A request's choice wins over ``request_params``, including the ``extra_body`` copy the SDK merges last."""
+    """A decision's ``none`` wins over ``request_params``, including the ``extra_body`` copy the SDK merges last."""
     wire = Wire(json_reply([{"type": "text", "text": "{}"}]))
     authored = {"request_params": {"tool_choice": {"type": "auto"}, "extra_body": {"tool_choice": {"type": "any"}}}}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=authored)
@@ -604,6 +598,20 @@ async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_
     pausing = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": paused})
     with pytest.raises(ValueError, match="pause_after_compaction"):
         await claude_turn(pausing, ModelRequest(messages=_user()))
+
+
+def test_bedrock_replays_no_native_checkpoints_even_with_an_authored_compaction_edit(tmp_path: Path) -> None:
+    """Bedrock checkpoints have no endpoint to bind to, so neither MindRoom's trigger nor the authored policy replays."""
+    authored = {"edits": [{"type": "compact_20260112", "trigger": {"type": "input_tokens", "value": 80000}}]}
+    provider = route_provider(
+        "bedrock_claude",
+        tmp_path,
+        Wire(json_reply([])),
+        extra_kwargs={"context_management": authored},
+    )
+    assert provider.capabilities.native_compaction is False
+    assert provider.native_compaction_settings(threshold=60000, allow_authored=True) is None
+    assert provider.native_compaction_settings(threshold=None, allow_authored=True) is None
 
 
 @pytest.mark.asyncio
