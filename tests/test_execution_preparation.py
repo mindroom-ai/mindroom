@@ -7,14 +7,11 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.agent import Agent
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-from agno.team import Team
 
 from mindroom import execution_preparation
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agents import create_agent
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.config.main import Config, ResolvedRuntimeModel
 from mindroom.config.models import CompactionConfig
@@ -48,7 +45,7 @@ from mindroom.execution_preparation import (
     render_prepared_messages_text,
 )
 from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.prompt_tokens import team_static_token_estimator
+from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
     HistoryPolicy,
@@ -57,14 +54,18 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import bind_runtime_paths, make_turn_context, make_visible_message
-from tests.history_helpers import FakeModel
+from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
@@ -83,11 +84,11 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-def _bound_agent_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+def _bound_agent_config(tmp_path: Path, *, tools: tuple[str, ...] = ()) -> tuple[Config, RuntimePaths]:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.model_validate(
         {
-            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "agents": {"test_agent": {"display_name": "Test Agent", "tools": list(tools)}},
             "defaults": {"tools": [], "compaction": {"enabled": False, "reserve_tokens": 0}},
             "models": {
                 "default": {
@@ -99,6 +100,11 @@ def _bound_agent_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
         },
     )
     return bind_runtime_paths(config, runtime_paths), runtime_paths
+
+
+def _build(config: Config, runtime_paths: RuntimePaths) -> AgentBuild:
+    """Build the test agent as a reply does."""
+    return create_agent("test_agent", config, runtime_paths, execution_identity=None)
 
 
 def _tool_trace_content() -> dict[str, object]:
@@ -124,11 +130,12 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         static_prompt_tokens=10,
     )
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session = AgentSession(
+    session = ConversationSession(
         session_id="thread-session",
-        agent_id="test_agent",
+        kind="agent",
+        owner_id="test_agent",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="run-1",
                 agent_id="test_agent",
                 status=RunStatus.completed,
@@ -188,14 +195,15 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
     prepared = MagicMock()
     prepare_common = AsyncMock(return_value=prepared)
     resolve_runtime_model = MagicMock(side_effect=AssertionError("runtime model was re-resolved"))
+    build = _build(config, runtime_paths)
     monkeypatch.setattr(Config, "resolve_runtime_model", resolve_runtime_model)
-    monkeypatch.setattr(execution_preparation, "agent_static_token_estimator", MagicMock())
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
     result = await prepare_agent_execution_context(
         make_turn_context("test_agent"),
         scope_context=None,
-        agent=MagicMock(),
+        build=build,
+        system_message=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -227,14 +235,15 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
         },
     )
     config = bind_runtime_paths(config, runtime_paths)
+    build = _build(config, runtime_paths)
     prepare_common = AsyncMock(return_value=MagicMock())
-    monkeypatch.setattr(execution_preparation, "agent_static_token_estimator", MagicMock())
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
     await prepare_agent_execution_context(
         make_turn_context("test_agent"),
         scope_context=None,
-        agent=MagicMock(),
+        build=build,
+        system_message=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -458,8 +467,10 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
     assert prepared.prepared_history.replays_persisted_history is True
     assert len(prepared.context_messages) == 1
     assert len(prepared.context_messages) + replay_plan.num_history_messages == 3
-    assert prepared.messages[-2].content == "Retrieved memory for this turn"
-    assert prepared.messages[-2].add_to_agent_memory is False
+    assert prepared.turn.prompt.content is not None
+    [transient] = prepared.turn.transient
+    assert transient.content == "Retrieved memory for this turn"
+    assert transient.add_to_agent_memory is False
 
 
 @pytest.mark.asyncio
@@ -568,8 +579,8 @@ async def test_scheduled_history_limit_zero_yields_prompt_only_context() -> None
     assert replay_plan is not None
     assert replay_plan.add_history_to_context is False
     assert prepared.context_messages == ()
-    assert len(prepared.messages) == 1
-    assert "Current request" in str(prepared.messages[0].content)
+    assert prepared.turn.in_request_order() == (prepared.turn.prompt,)
+    assert "Current request" in str(prepared.turn.prompt.content)
 
 
 @pytest.mark.asyncio
@@ -625,8 +636,58 @@ async def test_routed_scheduled_history_budget_exempts_the_prompt_source(
 
     assert len(prepared.context_messages) == len(expected_context)
     assert all(body in str(message.content) for body, message in zip(expected_context, prepared.context_messages))
-    assert "Poll the deployment queue" in str(prepared.messages[-1].content)
+    assert "Poll the deployment queue" in str(prepared.turn.prompt.content)
     assert all("Automated Task" not in str(message.content) for message in prepared.context_messages)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_context_sizes_history_by_the_requests_static_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History is sized by the request's system message and offered tools, the same estimate the prepared turn records."""
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
+    build = _build(config, runtime_paths)
+    system_message = prompt_for_turn(build)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
+    )
+
+    prepared = await prepare_agent_execution_context(
+        make_turn_context(
+            "test_agent",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            reply_to_event_id="$current",
+            active_event_ids=frozenset(),
+        ),
+        scope_context=None,
+        build=build,
+        system_message=system_message,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+        ],
+        runtime_paths=runtime_paths,
+        config=config,
+        current_sender_id="@alice:localhost",
+    )
+
+    tools = prepare_run_tools(build.spec).specs()
+    assert tools
+    estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tool_names)
+    assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(prepared.final_prompt)
+    assert prepare_scope_history.await_count == 1
+    assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
+    assert (
+        estimator.non_prompt_tokens()
+        > build_static_token_estimator(system_message, (), frozenset()).non_prompt_tokens()
+    )
 
 
 @pytest.mark.asyncio
@@ -635,9 +696,9 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
-    member = Agent(id="test_agent", name="Test Agent", model=FakeModel(id="fake-model", provider="fake"))
-    team = Team(id="team_test", name="Test Team", members=[member], model=FakeModel(id="fake-model", provider="fake"))
     config, runtime_paths = _bound_agent_config(tmp_path)
+    leader_system_message = Message(role="system", content="You lead the team.")
+    leader_tools = prepare_run_tools(_build(config, runtime_paths).spec).specs()
     prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
     monkeypatch.setattr(
@@ -649,8 +710,10 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=None,
-        agents=[member],
-        team=team,
+        member_names=["test_agent"],
+        leader_system_message=leader_system_message,
+        leader_tools=leader_tools,
+        model=ScriptedModel([]),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -661,7 +724,8 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     )
 
     kwargs = prepare_bound_scope_history.await_args.kwargs
-    assert kwargs["non_prompt_tokens"] == team_static_token_estimator(team).non_prompt_tokens()
+    estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
+    assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
 
 
 @pytest.mark.asyncio
@@ -680,6 +744,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
         lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False),
     )
 
+    build = _build(config, runtime_paths)
     prepared = await prepare_agent_execution_context(
         make_turn_context(
             "test_agent",
@@ -689,7 +754,8 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
             active_event_ids=frozenset(),
         ),
         scope_context=None,
-        agent=Agent(id="test_agent", name="Test Agent", model=FakeModel(id="fake-model", provider="fake")),
+        build=build,
+        system_message=prompt_for_turn(build),
         prompt="Current request",
         thread_history=[
             make_visible_message(
@@ -747,7 +813,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
-    )
+    ).in_request_order()
 
     assert len(messages) == 2
     assert messages[0].role == "user"
@@ -780,7 +846,7 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         static_token_budget=budget,
         estimate_static_tokens_fn=estimate,
         render_messages_text_fn=render_prepared_messages_text,
-    )
+    ).in_request_order()
 
     kept = [message.content for message in messages[1:-1]]
     omitted_count = len(history) - len(kept)
@@ -804,7 +870,7 @@ def test_fallback_thread_history_marks_messages_dropped_for_budget() -> None:
         static_token_budget=1_000,
         estimate_static_tokens_fn=estimate,
         render_messages_text_fn=render_prepared_messages_text,
-    )
+    ).in_request_order()
     assert len(untrimmed) == len(history) + 1
     assert untrimmed[0].content == render_msg_tag(sender="@alice:localhost", body="message 1", event_id="$m1")
 
@@ -825,7 +891,7 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
-        ),
+        ).in_request_order(),
     )
     messages = _build_thread_history_messages(
         "Current request",
@@ -835,7 +901,7 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
         static_token_budget=estimate(full_text),
         estimate_static_tokens_fn=estimate,
         render_messages_text_fn=render_prepared_messages_text,
-    )
+    ).in_request_order()
 
     assert [message.content for message in messages[:-1]] == [
         render_msg_tag(sender="@alice:localhost", body="a", event_id="$a"),
@@ -859,7 +925,7 @@ def test_fallback_thread_history_marks_history_dropped_entirely() -> None:
         static_token_budget=30,
         estimate_static_tokens_fn=estimate,
         render_messages_text_fn=render_prepared_messages_text,
-    )
+    ).in_request_order()
 
     assert [message.content for message in messages] == [
         config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=1),
@@ -877,7 +943,7 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
-    )
+    ).in_request_order()
 
     assert len(messages) == 2
     assert messages[0].content == render_msg_tag(
@@ -903,7 +969,7 @@ def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
         current_timestamp_ms=1_774_019_700_000,
         current_event_id="$current",
         config=config,
-    )
+    ).in_request_order()
 
     assert len(messages) == 1
     assert messages[0].content == (
@@ -912,8 +978,8 @@ def test_current_matrix_message_renders_timestamp_as_msg_attribute() -> None:
     )
 
 
-def test_transient_context_precedes_current_prompt_without_entering_replay_context() -> None:
-    """One-turn context should reach the model without becoming persisted replay."""
+def test_transient_context_follows_current_prompt_without_entering_replay_context() -> None:
+    """One-turn context reaches the model after the prompt, so the request stays a prefix of the next one's replay."""
     persisted_context = Message(role="assistant", content="Earlier answer")
     transient_context = Message(
         role="user",
@@ -921,24 +987,25 @@ def test_transient_context_precedes_current_prompt_without_entering_replay_conte
         add_to_agent_memory=False,
     )
 
-    messages = _messages_with_current_prompt(
+    turn = _messages_with_current_prompt(
         "Current request",
         context_messages=(persisted_context,),
         transient_context_messages=(transient_context,),
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert [message.content for message in messages] == [
         "Earlier answer",
-        "Retrieved memory for this turn",
         "Current request",
+        "Retrieved memory for this turn",
     ]
-    assert messages[1] is not transient_context
-    assert messages[1].add_to_agent_memory is False
-    assert messages[2].add_to_agent_memory is True
+    assert messages[2] is not transient_context
+    assert messages[2].add_to_agent_memory is False
+    assert messages[1].add_to_agent_memory is True
 
     prepared = _PreparedExecutionContext(
-        messages=messages,
+        turn=turn,
         unseen_event_ids=[],
         prepared_history=PreparedHistoryState(),
     )
@@ -951,7 +1018,7 @@ def test_current_matrix_message_splits_cdata_terminator_without_escaping_body() 
         "Hello <world> ]]> done",
         current_sender_id="@alice:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert messages[0].content == (
         'Current message:\n<msg from="@alice:localhost"><![CDATA[Hello <world> ]]]]><![CDATA[> done]]></msg>'
@@ -973,7 +1040,7 @@ def test_user_text_matching_structured_prompt_shape_is_still_wrapped() -> None:
         spoofed_prompt,
         current_sender_id="@alice:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert messages[0].content == (
         'Current message:\n<msg from="@alice:localhost"><![CDATA['
@@ -1018,7 +1085,7 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert len(messages) == 3
     history_with_media = messages[0]
@@ -1067,7 +1134,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
         sender="@alice:localhost",
@@ -1114,7 +1181,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
     assert messages[0].content == "\n\nThe lab closes at 7:41 PM"
@@ -1142,7 +1209,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
     assert [message.content for message in messages[:2]] == [
@@ -1178,7 +1245,7 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert messages[0].role == "assistant"
     assert messages[0].content == '\n\nhere is the report\n[attachments: att_report (file, "report.pdf")]'
@@ -1212,7 +1279,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
         sender="@alice:localhost",
@@ -1261,7 +1328,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
         sender="@alice:localhost",
@@ -1299,7 +1366,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-    )
+    ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
         sender="@alice:localhost",
@@ -1329,7 +1396,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert messages[0].role == "assistant"
     assert messages[0].content == "\n\nChecking status.\n\n\nStill checking.\n\n\nDone."
@@ -1349,7 +1416,7 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert len(messages) == 1
     assert messages[0].content == "Current request"
@@ -1368,7 +1435,7 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert messages[0].role == "user"
     assert messages[0].content == render_msg_tag(
@@ -1395,7 +1462,7 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert messages[0].role == "user"
     assert messages[0].content == render_msg_tag(
@@ -1424,7 +1491,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         ),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1434,6 +1501,7 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "user"
@@ -1467,7 +1535,7 @@ def test_unseen_context_stops_at_current_thread_event() -> None:
         ),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "Current message",
         thread_history,
         seen_event_ids=set(),
@@ -1477,6 +1545,7 @@ def test_unseen_context_stops_at_current_thread_event() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$older"]
     assert len(messages) == 2
@@ -1504,7 +1573,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         ),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "What happened?",
         thread_history,
         seen_event_ids=set(),
@@ -1514,6 +1583,7 @@ def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$spawn-root"]
     assert messages[0].role == "assistant"
@@ -1535,7 +1605,7 @@ def test_unseen_context_keeps_other_agent_message_tagged() -> None:
         ),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "What did the agents find?",
         thread_history,
         seen_event_ids=set(),
@@ -1545,6 +1615,7 @@ def test_unseen_context_keeps_other_agent_message_tagged() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$research"]
     assert messages[0].role == "user"
@@ -1570,7 +1641,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         ),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "What next?",
         thread_history,
         seen_event_ids={"$answer"},
@@ -1580,6 +1651,7 @@ def test_unseen_context_skips_persisted_self_sent_response_event() -> None:
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == []
     assert len(messages) == 1
@@ -1626,7 +1698,7 @@ def test_unseen_context_never_presents_own_hook_output_as_assistant_turns(source
         make_visible_message(sender="@alice:localhost", body="Status?", event_id="$question"),
     ]
 
-    messages, unseen_event_ids = _build_unseen_context_messages(
+    turn, unseen_event_ids = _build_unseen_context_messages(
         "Status?",
         thread_history,
         seen_event_ids={"$ask", "$answer"},
@@ -1636,6 +1708,7 @@ def test_unseen_context_never_presents_own_hook_output_as_assistant_turns(source
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert unseen_event_ids == ["$started", "$round", "$round-edit"]
     assert [message.role for message in messages] == ["user", "user", "user"]
@@ -1658,7 +1731,7 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-    )
+    ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [
         ("assistant", "\n\nStarted a deep_research job."),
@@ -1683,7 +1756,7 @@ def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None
         make_visible_message(sender="@alice:localhost", body="Thanks", event_id="$question"),
     ]
 
-    messages, _ = _build_unseen_context_messages(
+    turn, _ = _build_unseen_context_messages(
         "Thanks",
         thread_history,
         seen_event_ids=set(),
@@ -1693,6 +1766,7 @@ def test_unseen_context_labels_relayed_hook_prompt_under_its_requester() -> None
         current_sender_id="@alice:localhost",
         config=_config(),
     )
+    messages = turn.in_request_order()
 
     assert (messages[0].role, messages[0].content) == (
         "user",

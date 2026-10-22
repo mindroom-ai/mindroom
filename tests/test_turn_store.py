@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
 from structlog.testing import capture_logs
 
 from mindroom import constants
@@ -33,6 +31,7 @@ from mindroom.handled_turns import (
     TurnRecordCodec,
     _reset_handled_turn_ledger_runtime,
 )
+from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
@@ -66,7 +65,7 @@ from tests.conftest import (
     seed_session,
     test_runtime_paths,
 )
-from tests.history_helpers import FakeModel, compact_runs, stored_run_ids, summary_rows_of
+from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 
@@ -2476,19 +2475,24 @@ def test_no_test_references_removed_bot_handled_turn_ledger_shim() -> None:
     assert offenders == []
 
 
-@dataclass
-class _ReplayCaptureModel(FakeModel):
-    """Capture the entire request assembled by the real Agno agent."""
-
-    requests: list[str] = field(default_factory=list)
-
-    async def ainvoke(self, *args: object, **kwargs: object) -> ModelResponse:
-        """Record every input message before returning a deterministic answer."""
-        messages = kwargs.get("messages", args[0] if args else None)
-        assert isinstance(messages, list)
-        assert all(isinstance(message, Message) for message in messages)
-        self.requests.append(str([message.content for message in messages]))
-        return ModelResponse(content="captured")
+def _next_request(storage: ConversationStore, session_id: str, scope: HistoryScope, prompt: str) -> str:
+    """Return the message contents the scope's next reply sends: its summary, the replayed history, then ``prompt``."""
+    session = storage.load_session(session_id, "agent")
+    assert session is not None
+    history = scope_history_messages(
+        session.runs,
+        scope=scope,
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    messages = build_request(
+        system=(),
+        summary=session.summary,
+        history=history,
+        turn=TurnMessages(prompt=Message(role="user", content=prompt)),
+    )
+    return str([message.content for message in messages])
 
 
 @pytest.mark.asyncio
@@ -2585,7 +2589,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         context_owner = store.get_turn_record("$user_msg")
         assert context_owner is not None
         registered_before_consumption = "$physical-edit" in (context_owner.revision_replay or {})
-        messages, consumed = _build_unseen_context_messages(
+        turn, consumed = _build_unseen_context_messages(
             "current",
             prepared.thread_history,
             seen_event_ids=set(),
@@ -2594,7 +2598,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
             response_sender_id=None,
             config=Config(),
         )
-        edited.messages = list(messages)
+        edited.messages = list(turn.in_request_order())
         edited.metadata = {constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY: consumed}
     session = ConversationSession(
         kind="agent",
@@ -2628,15 +2632,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         assert initial_persisted.summary.text == "DELETED_EDIT_MARKER"
     else:
         assert "DELETED_EDIT_MARKER" in str([run.messages for run in initial_persisted.runs or []])
-    before_model = _ReplayCaptureModel(id="test", name="test", provider="test")
-    await Agent(
-        id="agent",
-        db=storage,
-        model=before_model,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
-    ).arun("BASELINE_INPUT", session_id=target.session_id)
-    assert "DELETED_EDIT_MARKER" in str(before_model.requests)
+    assert "DELETED_EDIT_MARKER" in _next_request(storage, target.session_id, scope, "BASELINE_INPUT")
     await store.mark_source_redacted("$physical-edit", room_id="!room:example.org")
     _reset_handled_turn_ledger_runtime()
     reopened = TurnStore(store.deps)
@@ -2646,17 +2642,9 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     await remove_redacted_history_like_next_response(reopened, target, storage, scope=scope)
     persisted = storage.load_session(target.session_id, "agent")
     assert persisted is not None
-    next_model = _ReplayCaptureModel(id="test", name="test", provider="test")
-    await Agent(
-        id="agent",
-        db=storage,
-        model=next_model,
-        add_history_to_context=True,
-        add_session_summary_to_context=True,
-    ).arun("NEXT_SURVIVING_INPUT", session_id=target.session_id)
-    assert next_model.requests
-    assert "NEXT_SURVIVING_INPUT" in str(next_model.requests)
-    assert "DELETED_EDIT_MARKER" not in str(next_model.requests)
+    next_request = _next_request(storage, target.session_id, scope, "NEXT_SURVIVING_INPUT")
+    assert "NEXT_SURVIVING_INPUT" in next_request
+    assert "DELETED_EDIT_MARKER" not in next_request
     if context_only:
         assert registered_before_consumption
         assert reopened.get_turn_record("$context-source") is None

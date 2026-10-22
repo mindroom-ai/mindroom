@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, contextmanager
-from copy import deepcopy
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import (
@@ -33,7 +29,6 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.request_messages import TurnMessages
-from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
@@ -69,13 +64,10 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
     from pathlib import Path
 
-    from agno.knowledge.knowledge import Knowledge
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.identity import MatrixID
     from mindroom.media_inputs import MediaInputs
     from mindroom.reply_scope import SpanSlot
@@ -198,63 +190,6 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-class _SessionStorage:
-    def __init__(self, session: AgentSession | TeamSession | None = None) -> None:
-        self._session = deepcopy(session)
-
-    @property
-    def session(self) -> AgentSession | TeamSession | None:
-        return deepcopy(self._session)
-
-    @session.setter
-    def session(self, session: AgentSession | TeamSession | None) -> None:
-        self._session = deepcopy(session)
-
-    def open(self) -> _SessionStorageView:
-        return _SessionStorageView(self)
-
-
-class _SessionStorageView:
-    def __init__(self, store: _SessionStorage) -> None:
-        self._store = store
-
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
-        session = self._store.session
-        if session is None or session.session_id != session_id:
-            return None
-        return session
-
-    def upsert_session(self, session: AgentSession | TeamSession) -> None:
-        self._store.session = session
-
-    def upsert_run(
-        self,
-        run: object,
-        session_id: str,
-        user_id: str | None = None,
-        run_index: int | None = None,
-    ) -> None:
-        """Store the run as its own row: replace by run_id or append, like agno's runs table."""
-        del user_id, run_index
-        stored = self._store.session
-        if stored is None or stored.session_id != session_id:
-            return
-        assert isinstance(run, RunOutput | TeamRunOutput)
-        runs = [existing for existing in stored.runs or [] if existing.run_id != run.run_id]
-        stored.runs = [*runs, run]
-        self._store.session = stored
-
-    def delete_runs(self, run_ids: list[str]) -> None:
-        stored = self._store.session
-        if stored is None:
-            return
-        stored.runs = [run for run in stored.runs or [] if run.run_id not in run_ids]
-        self._store.session = stored
-
-    def close(self) -> None:
-        return None
-
-
 def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
@@ -262,32 +197,6 @@ def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
         discovered_automations=(),
         entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
         plugin_order=0,
-    )
-
-
-@contextmanager
-def _open_agent_scope_context(
-    storage: _SessionStorage,
-    *,
-    scope_id: str = "general",
-) -> Generator[ScopeSessionContext, None, None]:
-    yield ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id=scope_id),
-        storage=storage.open(),
-        session=storage.session,
-    )
-
-
-@contextmanager
-def _open_team_scope_context(
-    storage: _SessionStorage,
-    *,
-    scope_id: str = "ultimate",
-) -> Generator[ScopeSessionContext, None, None]:
-    yield ScopeSessionContext(
-        scope=HistoryScope(kind="team", scope_id=scope_id),
-        storage=storage.open(),
-        session=storage.session,
     )
 
 
@@ -329,13 +238,13 @@ def _knowledge_access_support(
         for_agent=MagicMock(return_value=knowledge),
         resolve_for_agent=MagicMock(
             return_value=_KnowledgeResolution(
-                knowledge=cast("Knowledge | None", knowledge),
+                knowledge=cast("AgentKnowledge | None", knowledge),
                 unavailable=unavailable or {},
             ),
         ),
         resolve_for_agent_async=AsyncMock(
             return_value=_KnowledgeResolution(
-                knowledge=cast("Knowledge | None", knowledge),
+                knowledge=cast("AgentKnowledge | None", knowledge),
                 unavailable=unavailable or {},
             ),
         ),
@@ -391,8 +300,6 @@ def _build_response_runner(
     """Build a real response runner for one bot-shaped test double."""
 
     def _open_test_storage(storage: object | None) -> object:
-        if isinstance(storage, _SessionStorage):
-            return storage.open()
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
@@ -449,9 +356,7 @@ def _build_response_runner(
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._conversation_state_writer.session_type_for_scope = MagicMock(
-        side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
-    )
+    bot._conversation_state_writer.session_type_for_scope = MagicMock(side_effect=lambda scope: scope.kind)
     bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
     bot.agent_reply_memberships = agent_reply_memberships

@@ -12,12 +12,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.chat_wire import chat_request_kwargs
+from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.openai.responses_wire import responses_request_kwargs
+from mindroom.providers.pipeline.wrapped import bare_adapter
+from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.llm.provider import ModelProvider
 
 
 @pytest.fixture
@@ -34,6 +43,33 @@ def identity() -> ToolExecutionIdentity:
         tenant_id="tenant-a",
         account_id="account-a",
     )
+
+
+def _sent(provider: ModelProvider) -> dict[str, Any]:
+    """Return the body fields and headers one request of ``provider`` sends beyond the SDK keywords."""
+    adapter = bare_adapter(provider)
+    request = ModelRequest(messages=(Message(role="user", content="Write an introduction."),))
+    if isinstance(adapter, ResponsesAdapter):
+        kwargs = responses_request_kwargs(
+            model_id=adapter.identity.id,
+            request=request,
+            settings=adapter.settings,
+            wire=adapter.wire,
+        )
+    else:
+        assert isinstance(adapter, ChatAdapter)
+        kwargs = chat_request_kwargs(
+            model_id=adapter.identity.id,
+            messages=request.messages,
+            tools=request.tools,
+            native_tools=request.native_tools,
+            tool_choice=request.tool_choice,
+            response_format=request.response_format,
+            stream=request.stream,
+            settings=adapter.settings,
+            wire=adapter.wire,
+        )
+    return {**kwargs.get("extra_body", {}), "extra_headers": kwargs.get("extra_headers", {})}
 
 
 def _request(
@@ -57,7 +93,7 @@ def _request(
         storage_path=root / "data",
         process_env={},
     )
-    return get_model_instance(config, runtime_paths, execution_identity=identity).get_request_params()
+    return _sent(build_model_provider(config, runtime_paths, execution_identity=identity))
 
 
 @pytest.mark.parametrize("provider", ["codex", "openai_codex", "kimi", "kimi_code"])
@@ -169,7 +205,7 @@ def test_materialized_agents_keep_distinct_cache_identity(
     team_identity = replace(identity, agent_name="team")
     persist_entity_accounts(config, runtime_paths)
     requests = [
-        create_agent(name, config, runtime_paths, execution_identity=team_identity).model.get_request_params()
+        _sent(create_agent(name, config, runtime_paths, execution_identity=team_identity).spec.model)
         for name in config.agents
     ]
 

@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallStartedEvent
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
+from mindroom.llm.events import ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -95,7 +95,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             msg = f"Timed out waiting for {expected_count} streaming deliveries"
             raise AssertionError(msg)
 
-        yield ToolCallStartedEvent(tool=ToolExecution(tool_name="shell", tool_args={"cmd": "echo hello"}))
+        yield ToolStarted(tool=ToolExecution(tool_name="shell", tool_args={"cmd": "echo hello"}))
         await asyncio.sleep(0.02)
         pump = get_worker_progress_pump()
         assert pump is not None

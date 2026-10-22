@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
-from agno.media import Image
 from agno.tools.function import Function, FunctionCall
 from agno.tools.toolkit import Toolkit
 
@@ -91,6 +90,7 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message as LoopMessage
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
@@ -102,7 +102,6 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
-from mindroom.providers.synthetic_model import SyntheticModel
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -180,6 +179,7 @@ from tests.conftest import (
     seed_session,
     unwrap_extracted_collaborator,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.reply_span_helpers import paused_for_approval, reply_span, response_span
 from tests.response_runner_helpers import (
     _bot,
@@ -8548,7 +8548,7 @@ async def _respond_with_skill_learning(
     *,
     streaming: bool = False,
     fail: bool = False,
-) -> tuple[_RecordedSkillReviews, SyntheticModel, AsyncMock]:
+) -> tuple[_RecordedSkillReviews, ScriptedModel, AsyncMock]:
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
@@ -8556,15 +8556,9 @@ async def _respond_with_skill_learning(
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     reviews = _RecordedSkillReviews(fail=fail)
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
-    model = SyntheticModel(
-        id="synthetic",
-        min_response_chars=30,
-        max_response_chars=30,
-        chars_per_second=0,
-        tool_call_probability=0,
-    )
+    model = ScriptedModel([answer("The scripted answer to the request.")])
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.agents._build_agent_model_provider", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=streaming),
@@ -8597,9 +8591,9 @@ async def test_a_completed_response_hands_its_run_and_final_request_to_the_skill
     assert captured is not None
     assert captured.model is model
     assert captured.run_id == counted["run_id"]
-    final = captured.messages[-1]
-    assert (final.role, bool(final.content), final.tool_calls) == ("assistant", True, None)
-    assert "skill_manage" in {tool.name for tool in captured.tools if isinstance(tool, Function)}
+    final = captured.request.messages[-1]
+    assert (final.role, final.content, final.tool_calls) == ("assistant", "The scripted answer to the request.", None)
+    assert "skill_manage" in {tool.name for tool in captured.request.tools}
 
 
 @pytest.mark.asyncio
@@ -8673,16 +8667,10 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     automations = _RecordedAutomations()
     coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
-    model = SyntheticModel(
-        id="synthetic",
-        min_response_chars=30,
-        max_response_chars=30,
-        chars_per_second=0,
-        tool_call_probability=0,
-    )
+    model = ScriptedModel([answer("The scripted answer to the request.")])
     request = _plain_request(_target())
     with (
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
+        patch("mindroom.agents._build_agent_model_provider", return_value=model),
         patch_response_runner_module(
             typing_indicator=_noop_typing,
             should_use_streaming=AsyncMock(return_value=False),
@@ -8692,6 +8680,8 @@ async def test_a_finished_response_tells_automations_its_source_events(tmp_path:
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
     assert automations.finished == [tuple(request.sources.logical_source_event_ids)]
+    assert len(model.requests) == 1
+    assert "The scripted answer to the request." in bot.client.room_send.await_args.kwargs["content"]["body"]
 
 
 def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:

@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import interactive
 from mindroom.cancellation import request_task_cancel
@@ -28,6 +27,8 @@ from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal.models import DeliveryStage
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
+from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -701,7 +702,7 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
     client = _client()
 
     async def final_only_stream() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content="hello from final event")
+        yield RunFinished(RunRecord(run_id="run-final", content="hello from final event"))
 
     async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = _args[3]
@@ -732,11 +733,11 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
     captured_edits: list[dict[str, Any]] = []
 
     async def tool_then_final_content() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Let me search...\n\n")
-        tool = SimpleNamespace(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="ok")
-        yield ToolCallStartedEvent(tool=tool)
-        yield ToolCallCompletedEvent(tool=tool)
-        yield RunCompletedEvent(content="Final answer")
+        yield ContentDelta("Let me search...\n\n")
+        tool = ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="ok")
+        yield ToolStarted(tool=tool)
+        yield ToolCompleted(tool=tool)
+        yield RunFinished(RunRecord(run_id="run-final", content="Final answer"))
 
     async def record_edit(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
         content = _args[3]
