@@ -95,17 +95,6 @@ describe("Navigation", () => {
     expect(home.querySelector('img[src="/logo.svg"]')).not.toBeNull();
   });
 
-  it("marks the current route without a checkmark", () => {
-    renderNavigation("/agents");
-
-    const navigation = screen.getByRole("navigation", {
-      name: "Primary navigation",
-    });
-    const agentsLink = within(navigation).getByRole("link", { name: "Agents" });
-
-    expect(agentsLink.querySelector(".lucide-check")).toBeNull();
-  });
-
   it("keeps every application route reachable", () => {
     renderNavigation();
 

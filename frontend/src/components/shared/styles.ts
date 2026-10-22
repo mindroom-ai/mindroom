@@ -51,7 +51,7 @@ export const sharedStyles = {
 
   // Creation forms
   creation: {
-    container: "border border-primary",
+    container: "border-input",
     inputContainer: "flex items-center gap-2",
     input: "flex-1",
     content: "p-3",

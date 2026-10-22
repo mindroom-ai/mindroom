@@ -280,7 +280,7 @@ function Home({
           Browse workspace
         </Button>
       </header>
-      <div className="home-day-surface">
+      <div className="home-day-surface glass-panel rounded-xl">
         <Today usage={data.usage} activity={data.activity} />
         <ComingUp schedules={data.schedules} rooms={rooms} />
       </div>
@@ -345,7 +345,7 @@ function Home({
                           kind={member.kind}
                           id={member.id}
                           name={member.name}
-                          className="h-[22px] w-[22px] text-[8px] ring-2 ring-card"
+                          className="h-[22px] w-[22px] text-[8px] ring-2 ring-background"
                         />
                       ))}
                       {members.length > 4 && (

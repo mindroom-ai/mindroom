@@ -37,9 +37,6 @@
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   padding: 24px 28px;
-  border: 1px solid hsl(var(--border));
-  border-radius: calc(var(--radius) + 8px);
-  background: hsl(var(--card));
 }
 .home-today {
   min-width: 0;

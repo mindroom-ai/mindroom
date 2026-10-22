@@ -149,7 +149,7 @@ function NavigationLinks({
                   onClick={onNavigate}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "flex items-center gap-2.5 rounded-md px-3 text-sm text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+                    "flex items-center gap-2.5 rounded-md px-3 text-sm text-muted-foreground outline-hidden transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
                     mobile ? "min-h-11" : "min-h-8",
                     active && "bg-active font-medium text-foreground",
                   )}
@@ -167,15 +167,12 @@ function NavigationLinks({
 }
 
 /** The logo and wordmark that lead back to Home from the sidebar. */
-export function BrandLink({ className }: { className?: string }) {
+function BrandLink() {
   return (
     <Link
       to="/dashboard"
       aria-label="MindRoom home"
-      className={cn(
-        "flex items-center gap-2.5 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        className,
-      )}
+      className="flex items-center gap-2.5 rounded-md outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
     >
       <img src="/logo.svg" alt="" className="h-7 w-7 shrink-0" />
       <span className="text-base font-semibold tracking-tight">MindRoom</span>
@@ -201,14 +198,14 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
               type="button"
               aria-label="Open navigation"
               className={cn(
-                "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden",
+                "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-secondary focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring md:hidden",
                 className,
               )}
             >
               <Menu aria-hidden="true" className="h-5 w-5" />
             </button>
           </DialogTrigger>
-          <DialogContent className="left-0 top-0 h-dvh w-[min(18rem,85vw)] max-w-none translate-x-0 translate-y-0 content-start gap-3 overflow-y-auto rounded-none border-0 border-r bg-background p-3 sm:rounded-none">
+          <DialogContent className="left-0 top-0 h-dvh w-[min(18rem,85vw)] max-w-none translate-x-0 translate-y-0 content-start gap-3 overflow-y-auto rounded-none border-0 border-r bg-background p-3">
             <DialogHeader className="px-2 pb-1 pt-2 text-left">
               <DialogTitle className="text-base">Navigate</DialogTitle>
               <DialogDescription className="text-xs">

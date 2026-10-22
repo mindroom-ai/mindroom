@@ -70,7 +70,7 @@ export function FilterSelector({
           aria-pressed={isSelected(option.value)}
           onClick={() => handleClick(option.value)}
           className={cn(
-            "relative rounded-md font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "relative rounded-md font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
             sizeClasses[size],
             isSelected(option.value)
               ? "bg-card text-foreground shadow-sm"

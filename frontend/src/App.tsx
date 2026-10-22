@@ -365,7 +365,7 @@ function AppContent() {
       <Navigation mode="desktop" />
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="app-topbar flex h-14 shrink-0 items-center justify-between gap-3 border-b px-2 md:px-6">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-2 md:px-6">
           <div className="flex min-w-0 items-center gap-2">
             <Navigation mode="mobile" />
             <img
@@ -373,7 +373,7 @@ function AppContent() {
               alt="MindRoom logo"
               className="h-7 w-7 shrink-0 md:hidden"
             />
-            <h1 className="truncate text-xl font-semibold tracking-tight">
+            <h1 className="truncate text-base font-semibold">
               {currentNavItem.label}
             </h1>
           </div>
