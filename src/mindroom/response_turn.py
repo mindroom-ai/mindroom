@@ -8,6 +8,8 @@ is cancelled without a recorder.
 This module owns that lifecycle exactly once; ``mindroom.ai`` and
 ``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
 bodies as injected callables.
+It also builds the run metadata and the request-log context a turn binds around
+its provider requests and stream pulls.
 
 ``ResponseTurnContext`` is the per-turn identity carrier built once by the
 caller that owns the turn: the drivers consume its Matrix-identity fields,
@@ -22,7 +24,7 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
@@ -42,6 +44,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.storage import remove_history_of_redacted_events
+from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import DENIED_WITHOUT_REASON, RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
+    from mindroom.llm.request_context import RequestAttribution
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.participation import ParticipationGate
     from mindroom.skill_learning.capture import SkillReviewCapture
@@ -91,6 +95,7 @@ __all__ = [
     "TurnSinks",
     "apply_exact_approval_decisions",
     "apply_local_approval_decisions",
+    "build_llm_request_log_context",
     "build_matrix_run_metadata",
     "local_approval_requirements",
     "pause_without_approval_error",
@@ -98,6 +103,7 @@ __all__ = [
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
     "stream_response_turn",
+    "stream_with_llm_request_log_context",
 ]
 
 
@@ -193,6 +199,57 @@ def build_matrix_run_metadata(
     ):
         metadata.pop(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY, None)
     return metadata or None
+
+
+def build_llm_request_log_context(
+    attribution: RequestAttribution,
+    *,
+    prompt: str,
+    model_prompt: str | None,
+    full_prompt: str,
+    metadata: dict[str, object] | None,
+) -> dict[str, object]:
+    """Return the request-log context for one run's provider requests: its attribution, prompts, and source events."""
+    context: dict[str, object] = {name: value for name, value in asdict(attribution).items() if value is not None}
+    context["current_turn_prompt"] = prompt
+    if model_prompt is not None:
+        context["model_prompt"] = model_prompt
+    context["full_prompt"] = full_prompt
+    if not metadata:
+        return context
+
+    source_event_ids = _normalized_string_list(
+        [
+            attribution.reply_to_event_id,
+            *_normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)),
+        ],
+    )
+    if source_event_ids:
+        context["source_event_ids"] = source_event_ids
+
+    raw_prompt_map = metadata.get(MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY)
+    if isinstance(raw_prompt_map, dict):
+        source_event_prompts = {
+            event_id: event_prompt
+            for event_id, event_prompt in raw_prompt_map.items()
+            if isinstance(event_id, str) and event_id and isinstance(event_prompt, str)
+        }
+        if source_event_prompts:
+            context["source_event_prompts"] = source_event_prompts
+
+    return context
+
+
+def stream_with_llm_request_log_context[StreamEventT](
+    stream_generator: AsyncIterator[StreamEventT],
+    *,
+    request_context: dict[str, object],
+) -> AsyncIterator[StreamEventT]:
+    """Advance one async stream with request-log context bound per item pull."""
+    return context_bound_async_stream(
+        context_factory=lambda: bind_llm_request_log_context(**request_context),
+        stream_factory=stream_generator.__aiter__,
+    )
 
 
 @dataclass(frozen=True)

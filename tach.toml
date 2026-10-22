@@ -822,7 +822,9 @@ visibility = [
     "mindroom.agent_cli.turn",
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.ai",
+    "mindroom.api.openai_compat",
     "mindroom.approval.execution",
+    "mindroom.approval.resume",
     "mindroom.response_runner",
     "mindroom.teams",
     "mindroom.delegation.direct",
@@ -1265,6 +1267,7 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.llm",
     "mindroom.loop_hooks",
+    "mindroom.response_turn",
     "mindroom.session_storage.store",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
@@ -1758,6 +1761,7 @@ depends_on = [
     "mindroom.model_usage",
     "mindroom.requester_identity",
     "mindroom.response_activity",
+    "mindroom.response_turn",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.tool_system.context_bound_streams",
@@ -5130,7 +5134,6 @@ visibility = [
     "mindroom.ai",
     "mindroom.response_turn",
     "mindroom.api.openai_compat",
-    "mindroom.llm",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -5886,7 +5889,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.llm"
-depends_on = ["mindroom.constants", "mindroom.tool_system.context_bound_streams"]
+depends_on = []
 
 [[modules]]
 path = "mindroom.providers.openai"

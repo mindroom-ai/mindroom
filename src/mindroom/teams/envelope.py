@@ -36,12 +36,7 @@ from mindroom.history.storage import new_scope_session, update_scope_seen_event_
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -60,11 +55,13 @@ from mindroom.response_turn import (
     TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
+    build_llm_request_log_context,
     build_matrix_run_metadata,
     pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     stream_response_turn,
+    stream_with_llm_request_log_context,
 )
 from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.members import (

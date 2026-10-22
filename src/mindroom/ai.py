@@ -56,12 +56,7 @@ from mindroom.hooks import (
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import ContentDelta, RequestCompleted, RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.request_context import (
-    RequestAttribution,
-    bind_llm_request_log_context,
-    build_llm_request_log_context,
-    stream_with_llm_request_log_context,
-)
+from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -88,12 +83,14 @@ from mindroom.response_turn import (
     TurnContinuationRunState,
     TurnPartialSnapshot,
     TurnSinks,
+    build_llm_request_log_context,
     build_matrix_run_metadata,
     pause_without_approval_error,
     paused_attempt_from_response,
     run_blocking_response_turn,
     skip_unapproved_attempt,
     stream_response_turn,
+    stream_with_llm_request_log_context,
 )
 from mindroom.session_storage.store import persist_to
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
