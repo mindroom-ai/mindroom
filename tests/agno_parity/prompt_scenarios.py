@@ -26,8 +26,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import nio
-from agno.media import Image
-from agno.models.response import ModelResponse
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
@@ -47,6 +45,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
@@ -172,12 +171,12 @@ class ModelCall:
     deferred_tool_names: list[str]
 
 
-type Responder = Callable[[ModelCall], ModelResponse]
+type Responder = Callable[[ModelCall], OwnedMessage]
 
 
-def answer_ok(_call: ModelCall) -> ModelResponse:
+def answer_ok(_call: ModelCall) -> OwnedMessage:
     """Answer every request with one short assistant message."""
-    return ModelResponse(role="assistant", content="ok")
+    return OwnedMessage(role="assistant", content="ok")
 
 
 @dataclass
@@ -195,7 +194,7 @@ class Recorder:
         """
         return sorted(self.calls, key=lambda call: call.model_index)
 
-    def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> ModelResponse:
+    def _respond_to_request(self, identity: ModelIdentity, index: int, request: ModelRequest) -> OwnedMessage:
         call = ModelCall(
             model_id=identity.id,
             model_provider=identity.provider,
@@ -240,7 +239,7 @@ class _RecordingAdapter:
     """
 
     adapter: ModelProvider
-    respond: Callable[[ModelRequest], ModelResponse]
+    respond: Callable[[ModelRequest], OwnedMessage]
 
     @property
     def identity(self) -> ModelIdentity:
@@ -272,8 +271,7 @@ class _RecordingAdapter:
         response = self.respond(request)
         if response.content:
             yield TextDelta(response.content)
-        message = OwnedMessage(role="assistant", content=response.content, tool_calls=response.tool_calls or None)
-        yield TurnCompleted(message=message, stop_reason="tool_use" if response.tool_calls else "end")
+        yield TurnCompleted(message=response, stop_reason="tool_use" if response.tool_calls else "end")
 
 
 @dataclass(frozen=True)
@@ -286,7 +284,7 @@ class ScenarioOutput:
 
 @dataclass(frozen=True)
 class Scenario:
-    """One golden: what it pins and how to capture it.
+    """One golden: what it pins and how its scenario runs.
 
     ``turn`` builds the Matrix reply a scenario starts with, for the scenarios that start with one.
     """
@@ -326,7 +324,7 @@ def call_dict(call: ModelCall) -> dict[str, Any]:
 
 
 def normalize(value: object, root: Path) -> object:
-    """Replace what changes between captures: the capture's temporary root, today's date, and random ids."""
+    """Replace what changes between runs: the scenario's temporary root, today's date, and random ids."""
     text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     for path in {str(root.resolve()), str(root)}:
         text = text.replace(path, "<TMP>")
@@ -485,7 +483,7 @@ def _knowledge(base_id: str, description: str) -> AgentKnowledge:
 
 
 def _assert_answered(recorder: TurnRecorder) -> None:
-    """Fail the capture when a reply ended early, because its requests would not be the ones production sends."""
+    """Fail the scenario when a reply ended early, because its requests would not be the ones production sends."""
     assert (recorder.outcome, recorder.assistant_text) == ("completed", "ok"), (
         recorder.outcome,
         recorder.assistant_text,
@@ -611,17 +609,17 @@ def _answers_tools(call: ModelCall) -> bool:
     return any(message.role == "tool" for message in call.messages)
 
 
-def answer_as_team(call: ModelCall) -> ModelResponse:
+def answer_as_team(call: ModelCall) -> OwnedMessage:
     """Delegate once as the team leader, then answer; members answer their task directly."""
     names = _tool_names(call)
     if _answers_tools(call) or not names & {"delegate_task_to_member", "delegate_task_to_members"}:
         return answer_ok(call)
     if "delegate_task_to_members" in names:
-        return ModelResponse(
+        return OwnedMessage(
             role="assistant",
             tool_calls=[_tool_call("call_team_1", "delegate_task_to_members", {"task": "Draft the launch note."})],
         )
-    return ModelResponse(
+    return OwnedMessage(
         role="assistant",
         tool_calls=[
             _tool_call("call_team_1", "delegate_task_to_member", {"member_id": "planner", "task": "List the steps."}),
@@ -709,8 +707,8 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
 def answer_with(content: str) -> Responder:
     """Answer every request with ``content``, such as JSON for a structured helper."""
 
-    def respond(_call: ModelCall) -> ModelResponse:
-        return ModelResponse(role="assistant", content=content)
+    def respond(_call: ModelCall) -> OwnedMessage:
+        return OwnedMessage(role="assistant", content=content)
 
     return respond
 
@@ -718,10 +716,10 @@ def answer_with(content: str) -> Responder:
 def answer_after_one_tool_call(name: str, arguments: dict[str, object]) -> Responder:
     """Call one tool on the first request, then answer once its result is back."""
 
-    def respond(call: ModelCall) -> ModelResponse:
+    def respond(call: ModelCall) -> OwnedMessage:
         if _answers_tools(call):
             return answer_ok(call)
-        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_1", name, arguments)])
+        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_1", name, arguments)])
 
     return respond
 
@@ -862,10 +860,10 @@ def _helper(entry_point: str, call: HelperCall, answer: str, *, model: dict[str,
 
 
 def _structured_helper(name: str, entry_point: str, call: HelperCall, answer: str) -> dict[str, Scenario]:
-    """Capture a structured-output helper on each of Agno's three structured-output paths.
+    """Run a structured-output helper on each of the three structured-output paths the goldens pin.
 
-    Agno passes the schema as the response format to Claude, asks Vertex Claude for JSON in its system message, and
-    sends Cerebras a JSON-schema response format without the JSON prompt.
+    Claude receives the schema as the response format, Vertex Claude is asked for JSON in its system message, and
+    Cerebras receives a JSON-schema response format without the JSON prompt.
     """
     return {
         f"helper_{name}_anthropic": _helper(entry_point, call, answer),
@@ -1123,10 +1121,10 @@ def _last_user_text(call: ModelCall) -> str:
 _PARTICIPATION_INSTRUCTIONS = "Reply only when the message asks about the handbook."
 
 
-def answer_participation(call: ModelCall) -> ModelResponse:
+def answer_participation(call: ModelCall) -> OwnedMessage:
     """Decide to respond on the decision request, which alone disables tool choice, then answer."""
     if call.tool_choice == "none":
-        return ModelResponse(role="assistant", content='{"action": "respond", "reason": "A direct handbook question."}')
+        return OwnedMessage(role="assistant", content='{"action": "respond", "reason": "A direct handbook question."}')
     return answer_ok(call)
 
 
@@ -1165,12 +1163,12 @@ _COMPACT_PROMPT = "Please compact our conversation before we continue."
 _COMPACTION_SUMMARY_TEXT = "Alice asked the assistant to compact the conversation; it scheduled compaction."
 
 
-def answer_compaction(call: ModelCall) -> ModelResponse:
+def answer_compaction(call: ModelCall) -> OwnedMessage:
     """Call compact_context on the first turn, summarize on the summary request, and answer the rest."""
     if not call.stream:
-        return ModelResponse(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
+        return OwnedMessage(role="assistant", content=_COMPACTION_SUMMARY_TEXT)
     if not _answers_tools(call) and _COMPACT_PROMPT in _last_user_text(call):
-        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
+        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_compact", "compact_context", {})])
     return answer_ok(call)
 
 
@@ -1208,17 +1206,17 @@ _CRITIC_PROFILE = (
 )
 
 
-def answer_as_delegating_parent(call: ModelCall) -> ModelResponse:
+def answer_as_delegating_parent(call: ModelCall) -> OwnedMessage:
     """Delegate to the researcher, then to the critic profile, then answer; children answer directly."""
     if "run_subagent" not in _tool_names(call):
         return answer_ok(call)
     results = sum(1 for message in call.messages if message.role == "tool")
     if results == 0:
         arguments: dict[str, object] = {"agent_name": "researcher", "task": "Summarize the travel policy."}
-        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_child", "run_subagent", arguments)])
+        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_child", "run_subagent", arguments)])
     if results == 1:
         arguments = {"profile": "critic", "task": "Name the biggest risk in the travel policy."}
-        return ModelResponse(role="assistant", tool_calls=[_tool_call("call_persona", "run_subagent", arguments)])
+        return OwnedMessage(role="assistant", tool_calls=[_tool_call("call_persona", "run_subagent", arguments)])
     return answer_ok(call)
 
 
