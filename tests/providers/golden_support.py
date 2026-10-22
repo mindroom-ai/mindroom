@@ -346,10 +346,12 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         )
         assert native_compaction is not None, "the golden's route supports native compaction"
     deferred = case_input["deferred_tool_search"]
+    tool_choice = case_input["tool_choice"]
+    assert tool_choice in (None, "none"), "the owned loop sends tool_choice only as None or 'none'"
     return ModelRequest(
         messages=[Message.from_dict(deepcopy(message)) for message in case_input["messages"]],
         tools=tools,
-        tool_choice=case_input["tool_choice"],
+        tool_choice=tool_choice,
         response_format=response_format_from_golden(case_input["response_format"]),
         stream=case_input["stream"],
         deferred_tool_names=frozenset(deferred["tool_names"]) if deferred is not None else frozenset(),

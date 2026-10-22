@@ -30,7 +30,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
 | `input.messages` | Stored-message dicts in `Message.to_dict()` shape, oldest first; earlier turns carry `from_history: true` as replayed history does. |
 | `input.tools` | `Function.to_dict()` dicts, which Agno's `_format_tools` turns into request tools. |
-| `input.tool_choice` | `null`, `"none"`, or a forced call in the shape the route's Agno adapter forwards: `{"type": "function", "function": {"name": ...}}` on Chat routes, `{"type": "function", "name": ...}` on Responses routes, and `"any"` on Gemini. |
+| `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
 | `input.response_format` | `null`, `{"type": "dict", "value": ...}`, or `{"type": "pydantic", "model": "module:Class", "json_schema": ...}`; it is the value Agno's agent resolves for the model's structured-output support, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |

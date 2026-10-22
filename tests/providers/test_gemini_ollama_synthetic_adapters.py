@@ -370,7 +370,10 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
 
 
 def test_gemini_tool_choice_none_turns_function_calling_off() -> None:
-    """Outside a decision request too, a ``"none"`` tool choice sets Gemini's function-calling mode NONE."""
+    """The wire helper maps a ``"none"`` tool choice to Gemini's function-calling mode NONE.
+
+    No production request reaches it with that choice outside a decision request.
+    """
     assert gemini_wire.tool_config("none") == {"function_calling_config": {"mode": "NONE"}}
 
 
