@@ -76,6 +76,29 @@ def test_matrix_oidc_authorize_redirects_anonymous_users_to_platform_login(monke
     )
 
 
+@pytest.mark.parametrize(("callback_client", "status"), [("tenant-matrix", 307), ("mindroom-matrix", 400)])
+def test_matrix_oidc_callback_names_the_configured_client(monkeypatch, callback_client: str, status: int) -> None:
+    """Tuwunel's callback path ends in the client ID, so only the configured client's callback gets a code."""
+    matrix_oidc = _patch_oidc(monkeypatch)
+    monkeypatch.setattr(matrix_oidc, "MATRIX_OIDC_CLIENT_ID", "tenant-matrix")
+    client = TestClient(app)
+
+    response = client.get(
+        "/matrix-oidc/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "tenant-matrix",
+            "redirect_uri": f"https://1.matrix.mindroom.chat/_matrix/client/unstable/login/sso/callback/{callback_client}",
+            "scope": "openid",
+            "state": "state-123",
+        },
+        headers={"host": "api.mindroom.chat"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == status
+
+
 @pytest.mark.parametrize(
     "redirect_uri",
     [
