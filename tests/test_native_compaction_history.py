@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from mindroom.config.agent import TeamConfig
-from mindroom.config.models import CompactionConfig, ModelConfig
+from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig
 from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.replay import compaction_summary_message
 from mindroom.history.request_messages import scope_history_messages
@@ -522,12 +522,18 @@ async def test_native_route_names_the_summary_the_log_replays(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
-    """A team's native policy belongs to its leader model, not its first member."""
+    """A team's native policy belongs to its leader model and the team's settings, not to its member's."""
     config, paths = _make_config(
         tmp_path,
+        compaction=CompactionOverrideConfig(threshold_tokens=30000),
         defaults_compaction=CompactionConfig(threshold_tokens=120000),
-        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000)},
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000),
+            "member": ModelConfig(provider="openai", id="gpt-6-luna", context_window=200000),
+        },
     )
+    # The member compacts on its own model at its own threshold; neither may reach the team's requests.
+    config.agents["test_agent"].model = "member"
     config.teams["team"] = TeamConfig(agents=["test_agent"], display_name="Team", role="Coordinate work.")
     leader = responses_adapter(tmp_path, store=False)
     db = create_state_storage("test_agent", tmp_path, session_table="test_agent_sessions")
@@ -547,10 +553,13 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
         non_prompt_tokens=0,
     )
 
-    expected = leader.native_compaction_settings(threshold=120000)
-    assert expected is not None
     assert prepared.native_history is not None
-    assert prepared.native_history.native_compaction == expected
+    native = prepared.native_history.native_compaction
+    assert native is not None
+    assert native == leader.native_compaction_settings(threshold=120000)
+    member = responses_adapter(tmp_path, "gpt-6-luna", store=False).native_compaction_settings(threshold=30000)
+    assert member is not None
+    assert (native.route, native.threshold) != (member.route, member.threshold)
 
 
 @pytest.mark.parametrize(

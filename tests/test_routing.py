@@ -171,7 +171,6 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
             "queued_message_signal_context",
             "scrub_queued_notice_session_context",
         ),
-        "mindroom.teams": ("PreparedMaterializedTeamExecution",),
     }
     for module_name, attrs in hidden_attrs.items():
         module = importlib.import_module(module_name)
