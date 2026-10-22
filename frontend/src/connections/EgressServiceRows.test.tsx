@@ -491,7 +491,7 @@ describe("connected accounts", () => {
       },
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+      screen.getByRole("button", { name: "Use account for GitHub" }),
     );
     await pressInDialog("Use account");
     await waitFor(() =>
@@ -829,9 +829,9 @@ describe("connected accounts", () => {
       ).toBeVisible();
       expect(within(github).getByText("octocat")).toBeVisible();
       const use = within(github).getByRole("button", {
-        name: "Use my GitHub account for GitHub",
+        name: "Use account for GitHub",
       });
-      expect(use).toHaveTextContent("Use my GitHub account");
+      expect(use).toHaveTextContent("Use account");
 
       fireEvent.click(use);
       const dialog = await screen.findByRole("dialog");
@@ -859,7 +859,7 @@ describe("connected accounts", () => {
       renderRows([toolsOnly]);
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my GitHub account for GitHub",
+          name: "Use account for GitHub",
         }),
       );
       await pressInDialog("Cancel");
@@ -877,7 +877,7 @@ describe("connected accounts", () => {
       const connect = screen.getByRole("button", {
         name: "Connect GitHub for Agent Keys for GitHub",
       });
-      expect(connect).toHaveTextContent("Connect GitHub for Agent Keys");
+      expect(connect).toHaveTextContent("Connect");
 
       fireEvent.click(connect);
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -920,7 +920,7 @@ describe("connected accounts", () => {
       );
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my Google Drive account for Drive",
+          name: "Use account for Drive",
         }),
       );
       expect(await screen.findByRole("dialog")).toHaveTextContent(
@@ -949,7 +949,7 @@ describe("connected accounts", () => {
       });
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Use my Google Drive account for Drive",
+          name: "Use account for Drive",
         }),
       );
       const dialog = await screen.findByRole("dialog");
@@ -1670,15 +1670,15 @@ describe("rows with an agent's wording", () => {
       { name: "work", display_name: "Work GitHub" },
     );
     renderRows([first, second]);
-    const visible = ["Connect GitHub for Agent Keys", "Use an API key instead"];
+    const visible = ["Connect", "Use an API key instead"];
     const controls = [
       ...(await rowControls("GitHub")),
       ...(await rowControls("Work GitHub")),
     ].filter(({ text }) => visible.includes(text));
     expect(controls.map(({ text }) => text)).toEqual([
-      "Connect GitHub for Agent Keys",
+      "Connect",
       "Use an API key instead",
-      "Connect GitHub for Agent Keys",
+      "Connect",
       "Use an API key instead",
     ]);
     expect(controls.map(({ name }) => name)).toEqual([
