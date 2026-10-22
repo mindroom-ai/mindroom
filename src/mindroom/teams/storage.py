@@ -108,7 +108,7 @@ def team_history_settings(config: Config, team_name: str | None) -> ResolvedHist
 def register_team_notice_storage(
     *,
     scope_context: ScopeSessionContext | None,
-    session_id: str | None,
+    session_id: str,
     entity_name: str,
 ) -> None:
     """Register team storage for response-boundary notice finalization."""

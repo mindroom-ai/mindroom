@@ -452,7 +452,7 @@ def _persist_bound_seen_event_ids(
     The row is re-read and only then written, so the seen ids land without putting the loaded snapshot's fields
     back over what the run stored.
     """
-    if not event_ids or scope_context is None:
+    if scope_context is None:
         return
     session = scope_context.storage.load_session(session_id, "team")
     if session is None:
@@ -791,7 +791,7 @@ class _TeamTurn:
         """Return the pause the lifecycle owner asks the requester about, rendered into the attempt's document."""
         paused = paused_attempt_from_response(
             record,
-            fallback_session_id=self.ctx.session_id,
+            fallback_session_id=self.session_id,
             fallback_run_id=attempt.run_id,
             toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
         )
@@ -849,7 +849,7 @@ class _TeamTurn:
                 # A quiet scheduled reply records the bare token, as it delivers it, not the team document.
                 replayable_text = response_text
         metadata_content = (
-            attempt.metadata_content(self.config, session_id=self.ctx.session_id, status=record.status)
+            attempt.metadata_content(self.config, session_id=self.session_id, status=record.status)
             if self.run_metadata_collector is not None
             else None
         )
@@ -874,7 +874,7 @@ class _TeamTurn:
     def register_notice_storage(self, scope_context: ScopeSessionContext | None) -> None:
         register_team_notice_storage(
             scope_context=scope_context,
-            session_id=self.ctx.session_id,
+            session_id=self.session_id,
             entity_name=self.entity_name,
         )
 
@@ -890,7 +890,7 @@ class _TeamTurn:
     def open_scope(self) -> AbstractContextManager[ScopeSessionContext | None]:
         return open_bound_scope_session_context(
             member_names=self.requested_agent_names,
-            session_id=self.ctx.session_id,
+            session_id=self.session_id,
             runtime_paths=self.runtime_paths,
             config=self.config,
             execution_identity=self.execution_identity,
