@@ -671,6 +671,40 @@ def test_agent_role_lists_the_shared_directories_the_agent_reaches(
     assert file_access_line in general.role
 
 
+@pytest.mark.parametrize(
+    "process_env",
+    [{"MINDROOM_WORKER_BACKEND": "kubernetes"}, {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox:8766"}],
+)
+def test_no_workspace_line_omits_shared_directories_primary_tools_cannot_reach(
+    tmp_path: Path,
+    process_env: dict[str, str],
+) -> None:
+    """Beside workers, primary-process path tools reach no shared directory, so the line names only attachments."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    rendered = _render_tool_execution_environment(
+        runtime_paths=runtime_paths,
+        local_tool_names=("file",),
+        worker_routed_tool_names=("shell",),
+        worker_scope=None,
+        file_access="workspace",
+        has_workspace=False,
+        unconfined_tool_names=("shell",),
+        primary_only_unconfined_tool_names=(),
+        shared_directories=("`/shares/general/report` (yours, read-write)",),
+    )
+
+    assert (
+        "- File access for path tools: `workspace` (this agent has no workspace, "
+        "so path tools in the primary runtime reach only attachments)."
+    ) in rendered
+    assert "- Shared directories: `/shares/general/report` (yours, read-write)." in rendered
+
+
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
     """Without unconfined tools there is no unconfined-tools line."""
     rendered = _render_tool_execution_environment(

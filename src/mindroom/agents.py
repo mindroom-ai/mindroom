@@ -59,7 +59,10 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.session_storage import agent_storage
-from mindroom.shared_directories.paths import describe_agent_shared_directories
+from mindroom.shared_directories.paths import (
+    describe_agent_shared_directories,
+    primary_tools_reach_shared_directories,
+)
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_call_budget import install_model_call_cap
@@ -970,7 +973,8 @@ def _render_tool_execution_environment(
     if not worker_routed_tool_names and not local_tool_names:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
-    without_workspace = "attachments and the shared directories below" if shared_directories else "attachments"
+    primary_shares = shared_directories and primary_tools_reach_shared_directories(runtime_paths)
+    without_workspace = "attachments and the shared directories below" if primary_shares else "attachments"
     file_access_description = {
         "workspace": (
             "agent workspace and attachments only"
