@@ -460,7 +460,7 @@ class PersonalRoomService:
         guests: set[str],
         state: dict[tuple[str, str], dict],
     ) -> None:
-        """Remove people other than the owner, then tell the room why once."""
+        """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
         for user_id in sorted(guests):
@@ -549,6 +549,13 @@ class PersonalRoomService:
                 record = await run_blocking_until_complete(read_personal_room, path)
                 if record is not None and record.room_id == room_id:
                     await self._validate_room(record)
+        except PersonalRoomRosterMismatchError as error:
+            # Expected until a person changes the room, so no traceback and no retry.
+            logger.warning(
+                "Personal-room imported roster has unattested members",
+                room_id=room_id,
+                unexpected_user_ids=error.unexpected_user_ids,
+            )
         except Exception:
             logger.exception("Personal-room guest removal failed", room_id=room_id)
             return False

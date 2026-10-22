@@ -78,7 +78,7 @@ Revoking the human's access to the agent, or disabling `personal_rooms`, cancels
 | Log message | Meaning |
 | --- | --- |
 | `Personal-room validation failed for an onboarding trigger` | An existing personal room failed ownership or membership checks, for example because another account already holds the alias, or a guest the agent cannot remove was raised to the agent's power level. |
-| `Personal-room imported roster has unattested members` | An adopted room contains a person its record does not list; the warning names every unlisted member, and MindRoom does not change the room. |
+| `Personal-room imported roster has unattested members` | An adopted room contains someone other than a MindRoom agent that its record does not list; the warning names every unlisted member, and MindRoom does not change the room. |
 | `Personal-room validation failed for an owner membership event` | The owner joined or changed their profile in a personal room that fails these checks; the agent keeps answering there. A room whose reconciliation is still failing keeps retrying up to hourly; otherwise the room is checked again on restart or config reload. |
 | `Personal-room onboarding trigger failed` | Any other failure, such as an invite refused by the human's homeserver. |
 | `Personal-room reconciliation failed` | An automatic retry failed; the log shows the attempt number and the delay before the next try. |
@@ -119,6 +119,6 @@ For a room with shared history and one existing guest, a record looks like this:
 - `additional_user_ids` (default `[]`) lists the only other participants allowed to stay joined, invited, or knocking; it does not invite anyone or grant power.
 - Set `welcome_completed: true` to skip the welcome; otherwise MindRoom sends the configured welcome.
 
-If the room's history setting stops matching the record, or a person it does not list joins, onboarding for that human fails with one of the log messages above until someone fixes the room.
+If the room's history setting stops matching the record, or anyone other than a MindRoom agent it does not list joins, is invited, or knocks, onboarding for that human fails with one of the log messages above until someone fixes the room.
 MindRoom does not change an adopted room's name, topic, or history setting, and removes only MindRoom agents the record does not list.
 It invites the requester if they are not in the room yet and applies the configured `requester_admin`, avatar, and welcome settings.

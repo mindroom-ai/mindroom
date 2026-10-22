@@ -660,8 +660,14 @@ async def test_an_unattested_agent_is_removed_from_an_imported_room(
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     record = read_personal_room(path)
-    record.adoption = PersonalRoomAdoption(creator_user_id=server.user_id, agent_user_id=server.user_id)
+    record.adoption = PersonalRoomAdoption(
+        creator_user_id=server.user_id,
+        agent_user_id=server.user_id,
+        additional_user_ids=["@mindroom_general:localhost"],
+    )
     write_personal_room(path, record)
+    owner.runtime.config.agents["general"] = owner.runtime.config.agents["helper"].model_copy()
+    server.set_member(room_id, "@mindroom_general:localhost", "join")
     server.set_member(room_id, "@mindroom_router:localhost", "join")
 
     assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
@@ -697,6 +703,18 @@ async def test_an_agent_invited_into_an_imported_room_is_removed_when_the_invite
     assert server.kicks == [(room_id, "@mindroom_router:localhost")]
     assert server.membership(room_id, "@bob:localhost") == "invite"
     assert not owner._guest_removal_retries
+
+    # With a person outside the roster, the room fails closed: an agent stays,
+    # and since only a person can fix that, nothing is retried or logged as an error.
+    owner.runtime.config.agents["general"] = owner.runtime.config.agents["helper"].model_copy()
+    server.set_member(room_id, "@mindroom_general:localhost", "invite")
+    room.add_member("@mindroom_general:localhost", None, None, invited=True)
+    with capture_logs() as logs:
+        await owner.guest_membership_event(room, "@mindroom_general:localhost", "invite")
+
+    assert server.membership(room_id, "@mindroom_general:localhost") == "invite"
+    assert not owner._guest_removal_retries
+    assert [entry["log_level"] for entry in logs if entry["log_level"] in {"warning", "error"}] == ["warning"]
 
 
 @pytest.mark.asyncio
