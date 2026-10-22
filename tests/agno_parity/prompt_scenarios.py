@@ -100,7 +100,7 @@ if TYPE_CHECKING:
         ModelIdentity,
         ModelProvider,
         ModelRequest,
-        NativeCompaction,
+        NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
     )
@@ -253,9 +253,9 @@ class _RecordingAdapter:
         return self.adapter.capabilities
 
     @property
-    def native_compaction(self) -> NativeCompaction | None:
-        """The adapter's native history."""
-        return self.adapter.native_compaction
+    def native_history_route(self) -> NativeHistoryRoute | None:
+        """The adapter's native-history route."""
+        return self.adapter.native_history_route
 
     @property
     def replay_estimator(self) -> PortableReplayEstimator | None:

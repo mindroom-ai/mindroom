@@ -192,7 +192,7 @@ class ModelTurn:
         return self.message.metrics
 
 
-class NativeCompaction(Protocol):
+class NativeHistoryRoute(Protocol):
     """A route whose provider manages history of its own, by continuing state it stored or by compacting it."""
 
     def native_compaction_settings(
@@ -237,8 +237,12 @@ class ModelProvider(Protocol):
         ...
 
     @property
-    def native_compaction(self) -> NativeCompaction | None:
-        """The route's provider-managed history, or None when its requests carry no native history settings."""
+    def native_history_route(self) -> NativeHistoryRoute | None:
+        """The provider's native-history route, or None when its requests carry no native history settings.
+
+        Having one does not imply ``capabilities.native_compaction``: a route whose provider keeps history without
+        compacting it still plans its replay through this route.
+        """
         ...
 
     @property
@@ -275,8 +279,8 @@ __all__ = [
     "ModelProvider",
     "ModelRequest",
     "ModelTurn",
-    "NativeCompaction",
     "NativeCompactionReplay",
+    "NativeHistoryRoute",
     "PortableReplayEstimator",
     "ReasoningDelta",
     "RequestOverrides",

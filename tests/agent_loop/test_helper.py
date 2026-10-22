@@ -41,7 +41,7 @@ class _RecordingProvider:
     answer: str
     capabilities: Capabilities = field(default_factory=Capabilities)
     identity: ModelIdentity = IDENTITY
-    native_compaction: None = None
+    native_history_route: None = None
     replay_estimator: None = None
     model_params: dict[str, object] = field(default_factory=dict)
     finish: bool = True

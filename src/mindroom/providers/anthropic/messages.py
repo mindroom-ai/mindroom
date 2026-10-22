@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import NativeCompaction, StopReason
+    from mindroom.llm.provider import NativeHistoryRoute, StopReason
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -196,7 +196,7 @@ class ClaudeProvider:
     replay_estimator: ClassVar[None] = None
 
     @property
-    def native_compaction(self) -> NativeCompaction:
+    def native_history_route(self) -> NativeHistoryRoute:
         """Claude compacts history on the provider side where the route supports it or the model config authored it."""
         return self
 

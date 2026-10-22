@@ -28,8 +28,8 @@ def configure_native_history(
 
     None means the provider route manages no history of its own, so the requests carry no native settings.
     """
-    compaction = provider.native_compaction
-    if compaction is None:
+    history_route = provider.native_history_route
+    if history_route is None:
         return None
     threshold = plan.trigger_threshold_tokens
     static_tokens = plan.static_prompt_tokens
@@ -45,7 +45,7 @@ def configure_native_history(
         and static_tokens < threshold < static_tokens + hard_budget
     )
     return NativeHistory(
-        native_compaction=compaction.native_compaction_settings(
+        native_compaction=history_route.native_compaction_settings(
             threshold=threshold if enabled else None,
             history_generation=_history_generation(session),
             allow_authored=enabled,
@@ -61,12 +61,12 @@ def restore_native_history(
     session: ConversationSession | None,
 ) -> NativeHistory | None:
     """Return the native settings a resume of ``persisted_run`` sends: the paused request's policy when its route holds."""
-    compaction = provider.native_compaction
-    if compaction is None:
+    history_route = provider.native_history_route
+    if history_route is None:
         return None
     latest = next((message for message in reversed(persisted_run.messages) if message.role == "assistant"), None)
     saved = recorded_native_settings(latest) if latest is not None else None
-    native = compaction.native_compaction_settings(
+    native = history_route.native_compaction_settings(
         threshold=saved.threshold if saved is not None else None,
         history_generation=_history_generation(session),
         allow_authored=saved is not None and saved.threshold is None,

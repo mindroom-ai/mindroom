@@ -50,7 +50,7 @@ if TYPE_CHECKING:
         Capabilities,
         ModelIdentity,
         ModelRequest,
-        NativeCompaction,
+        NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
     )
@@ -81,7 +81,7 @@ class ResponsesAdapter:
     clients: SDKClients
 
     @property
-    def native_compaction(self) -> NativeCompaction:
+    def native_history_route(self) -> NativeHistoryRoute:
         """Responses keeps provider-side state, so every request carries its replay policy and compaction settings."""
         return self
 

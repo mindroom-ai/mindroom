@@ -116,7 +116,7 @@ class _ToolLoopModel:
     ) -> None:
         self.identity = _TEST_MODEL
         self.capabilities = Capabilities()
-        self.native_compaction = None
+        self.native_history_route = None
         self.replay_estimator = None
         self.model_params: dict[str, Any] = {}
         self.tool_rounds = tool_rounds

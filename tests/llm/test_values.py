@@ -239,7 +239,7 @@ def test_team_run_record_defaults() -> None:
 class _ScriptedProvider:
     identity = ModelIdentity(id="scripted", provider="Synthetic", provider_name="Synthetic")
     capabilities = Capabilities()
-    native_compaction = None
+    native_history_route = None
     replay_estimator = None
 
     def __init__(self, events: Sequence[StreamEvent]) -> None:

@@ -75,7 +75,7 @@ class _ScriptedProvider:
     attempts: list[list[_Step]]
     identity: ModelIdentity = _IDENTITY
     capabilities: Capabilities = _CAPABILITIES
-    native_compaction: None = None
+    native_history_route: None = None
     replay_estimator: None = None
     model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)

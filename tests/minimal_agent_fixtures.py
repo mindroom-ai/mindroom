@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.llm.provider import ModelIdentity, NativeCompaction, PortableReplayEstimator, StreamEvent
+    from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, PortableReplayEstimator, StreamEvent
 
 
 def cli_window() -> str | None:
@@ -194,7 +194,7 @@ class ScriptedProvider:
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
     # A scripted route keeps no provider-side history, sizes replayed history canonically, and records no settings.
-    native_compaction: NativeCompaction | None = None
+    native_history_route: NativeHistoryRoute | None = None
     replay_estimator: PortableReplayEstimator | None = None
     model_params: dict[str, Any] = field(default_factory=dict)
 

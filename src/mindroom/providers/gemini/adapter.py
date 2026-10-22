@@ -98,7 +98,7 @@ class GeminiProvider:
     vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
     # Gemini keeps no history of its own, and its replayed history is sized canonically.
-    native_compaction: ClassVar[None] = None
+    native_history_route: ClassVar[None] = None
     replay_estimator: ClassVar[None] = None
 
     @property

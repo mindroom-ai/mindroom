@@ -206,7 +206,7 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
 def test_every_documented_provider_value_gets_its_adapter_and_identity(route: str, runtime_paths: RuntimePaths) -> None:
     """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry.
 
-    The pipeline hands callers the adapter's own native history (Responses and Claude), replay estimator
+    The pipeline hands callers the adapter as its own native-history route (Responses and Claude), replay estimator
     (Responses), and recorded settings, so nothing has to unwrap it.
     """
     fields, adapter_type, provider_label, provider_name = _ROUTES[route]
@@ -219,7 +219,7 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     assert (provider.identity.provider, provider.identity.provider_name) == (provider_label, provider_name)
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
-    assert provider.native_compaction is native_history
+    assert provider.native_history_route is native_history
     assert provider.replay_estimator is (adapter if adapter_type is ResponsesAdapter else None)
     assert provider.model_params == adapter.model_params
 

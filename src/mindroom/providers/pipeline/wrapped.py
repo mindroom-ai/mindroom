@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         ModelIdentity,
         ModelProvider,
         ModelRequest,
-        NativeCompaction,
+        NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
     )
@@ -62,9 +62,9 @@ class WrappedProvider:
         return self.inner.capabilities
 
     @property
-    def native_compaction(self) -> NativeCompaction | None:
-        """The wrapped provider's native history."""
-        return self.inner.native_compaction
+    def native_history_route(self) -> NativeHistoryRoute | None:
+        """The wrapped provider's native-history route."""
+        return self.inner.native_history_route
 
     @property
     def replay_estimator(self) -> PortableReplayEstimator | None:

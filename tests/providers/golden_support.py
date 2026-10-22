@@ -33,7 +33,7 @@ from mindroom.tool_jobs.execution import project_definitions
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
-    from mindroom.llm.provider import ModelProvider, NativeCompaction, StopReason, StreamEvent
+    from mindroom.llm.provider import ModelProvider, NativeHistoryRoute, StopReason, StreamEvent
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 
@@ -324,7 +324,7 @@ def tool_spec_from_dict(tool: dict[str, Any]) -> ToolSpec:
     )
 
 
-def golden_request(case_input: dict[str, Any], *, native: NativeCompaction | None = None) -> ModelRequest:
+def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | None = None) -> ModelRequest:
     """Return the owned request a golden's input describes.
 
     Deferred tool names always travel on the request: the portable tool-search stage hides them behind
@@ -388,7 +388,7 @@ async def replay_through_pipeline(
 
     A decision request runs inside ``without_provider_tools()``, as participation decisions and judgments do.
     """
-    request = golden_request(case_input, native=adapter.native_compaction)
+    request = golden_request(case_input, native=adapter.native_history_route)
     decision = without_provider_tools() if case_input.get("provider_tools_disabled") else nullcontext()
     with decision:
         events = [event async for event in pipeline_provider(adapter).stream(request)]

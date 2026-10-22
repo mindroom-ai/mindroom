@@ -57,7 +57,7 @@ def _compacting_model(route: str = "route-a") -> ScriptedModel:
     return ScriptedModel(
         [answer("Ready")],
         capabilities=Capabilities(native_compaction=True),
-        native_compaction=_Compaction(route),
+        native_history_route=_Compaction(route),
     )
 
 
