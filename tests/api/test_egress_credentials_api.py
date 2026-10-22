@@ -27,7 +27,7 @@ from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker import secrets
+from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.env import egress_agent_scope
 from mindroom.egress_broker.oauth_source import resolve_oauth_token
@@ -1422,7 +1422,13 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
     _restart_with_env(portal, GOOGLE_SERVICE_ACCOUNT_FILE="service-account.json")
 
     row = _egress_row(portal, "alice", "personal", "drive")
-    assert row["oauth"] == _oauth_block(connected=True, can_connect=False, service_account=True, reuse_enabled=True)
+    assert row["oauth"] == _oauth_block(
+        connected=True,
+        account_label="alice@example.com",
+        can_connect=False,
+        service_account=True,
+        reuse_enabled=True,
+    )
     assert row["active_source"] == "oauth"
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
     token = resolve_oauth_token(
@@ -1434,6 +1440,57 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         worker_target=build_connection_agent_target(config, portal["paths"], "@alice:example.org", "personal"),
     )
     assert isinstance(token, secrets.Secret)
+
+
+def test_a_personal_connection_beside_a_service_account_stays_visible_to_allow_stop_and_remove(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page shows a personal connection stored before a service account, so the user can allow or remove it.
+
+    Without the opt-in the broker and the status behind placeholders still never read it; allowing and stopping it
+    flips only whether Agent Keys uses it.
+    """
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _restart_with_env(portal, GOOGLE_SERVICE_ACCOUNT_FILE="service-account.json")
+    tools_only = _oauth_block(
+        connected=True,
+        account_label="alice@example.com",
+        can_connect=False,
+        service_account=True,
+    )
+    config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
+    target = _broker_target(portal, "@alice:example.org", "personal")
+
+    def never(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the broker must not read a connection Agent Keys may not use")
+
+    before = _egress_row(portal, "alice", "personal", "drive")
+    with monkeypatch.context() as broker_reads_nothing:
+        broker_reads_nothing.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", never)
+        broker_reads_nothing.setattr(oauth_source, "refresh_oauth_credentials_blocking", never)
+        token = _broker_reads(portal, "@alice:example.org", "personal", "drive", "google_drive")
+        placeholder_status = oauth_source.oauth_status(
+            "google_drive",
+            target,
+            service="drive",
+            config=config,
+            runtime_paths=portal["paths"],
+            credentials_manager=get_runtime_credentials_manager(portal["paths"]),
+        )
+    allowed = _allow_reuse(portal, "alice", "personal", "drive")
+    after_allow = _egress_row(portal, "alice", "personal", "drive")
+    stopped = _stop_reuse(portal, "alice", "personal", "drive")
+    after_stop = _egress_row(portal, "alice", "personal", "drive")
+
+    assert (before["oauth"], before["active_source"]) == (tools_only, None)
+    assert token == secrets.SecretMissing(provider="google_drive", reuse_off=True)
+    assert placeholder_status is not None
+    assert (placeholder_status.connected, placeholder_status.reuse_enabled) == (False, False)
+    assert (allowed.status_code, stopped.status_code) == (204, 204), (allowed.text, stopped.text)
+    assert (after_allow["oauth"], after_allow["active_source"]) == ({**tools_only, "reuse_enabled": True}, "oauth")
+    assert (after_stop["oauth"], after_stop["active_source"]) == (tools_only, None)
 
 
 def test_listing_never_refreshes_tokens(oauth_egress_portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

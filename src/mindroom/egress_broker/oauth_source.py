@@ -11,6 +11,7 @@ Logs carry the service, the provider id, and error types, never tokens or connec
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SharedWorkerOAuth",
     "broker_credential_context",
+    "oauth_connection_for_display",
     "oauth_status",
     "resolve_oauth_token",
     "shared_worker_oauth",
@@ -193,6 +195,19 @@ def oauth_status(
         shared_worker_opt_in=access == "allowed",
         reuse_enabled=reuse_enabled,
     )
+
+
+def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool, str | None]:
+    """Return whether the context's stored connection is usable and its account label, read whatever the opt-in.
+
+    Only the egress pages call this, to show an account a user may allow or disconnect; the broker reads through
+    `resolve_oauth_token` and `oauth_status`, which never read a connection Agent Keys may not use.
+    """
+    credentials = None
+    with contextlib.suppress(OAuthCredentialUnreadableError):
+        credentials = load_oauth_credentials_snapshot_sync(context).credentials
+    connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
+    return connected, oauth_account_label(credentials) if connected and credentials else None
 
 
 def shared_worker_oauth(

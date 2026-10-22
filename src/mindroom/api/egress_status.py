@@ -16,7 +16,7 @@ from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
 from mindroom.egress_broker.oauth_source import (
     broker_credential_context,
-    oauth_status,
+    oauth_connection_for_display,
     shared_worker_oauth,
     shared_worker_unavailable_status,
 )
@@ -320,8 +320,8 @@ async def egress_oauth_status(
     (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
     connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
-    account is not a token the broker can inject, so with one `connected` only reflects a stored personal connection
-    that the broker would still use, and nothing is connectable. Any failure to read one provider's state, the worker
+    account is not a token the broker can inject, so with one `connected` and `account_label` only reflect a stored
+    personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.
     """
     provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
@@ -340,20 +340,13 @@ async def egress_oauth_status(
         context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
         reuse_enabled = await asyncio.to_thread(oauth_reuse_enabled, context, name, provider.id)
         if result.has_service_account_config:
-            stored = await asyncio.to_thread(
-                oauth_status,
-                provider.id,
-                worker_target,
-                service=name,
-                config=config,
-                runtime_paths=runtime_paths,
-                credentials_manager=manager,
-            )
+            # Shown whether or not Agent Keys may use it, so the user can allow or disconnect it.
+            connected, account_label = await asyncio.to_thread(oauth_connection_for_display, context)
             status = OAuthStatus(
                 provider=result.provider,
                 display_name=result.display_name,
-                connected=stored is not None and stored.connected,
-                account_label=None,
+                connected=connected,
+                account_label=account_label,
                 can_connect=False,
                 reset_required=result.reset_required,
                 service_account=True,
