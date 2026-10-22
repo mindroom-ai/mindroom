@@ -104,6 +104,7 @@ from mindroom.tools.microsoft_files import microsoft_files_tools
 from mindroom.tools.microsoft_meetings import microsoft_meetings_tools
 from mindroom.tools.microsoft_onenote import microsoft_onenote_tools
 from mindroom.tools.microsoft_people import microsoft_people_tools
+from mindroom.tools.microsoft_sharepoint import microsoft_sharepoint_tools
 from mindroom.tools.microsoft_teams import microsoft_teams_tools
 from mindroom.tools.microsoft_todo import microsoft_todo_tools
 from mindroom.tools.modelslabs import modelslabs_tools
@@ -251,6 +252,7 @@ __all__ = [
     "microsoft_meetings_tools",
     "microsoft_onenote_tools",
     "microsoft_people_tools",
+    "microsoft_sharepoint_tools",
     "microsoft_teams_tools",
     "microsoft_todo_tools",
     "modelslabs_tools",

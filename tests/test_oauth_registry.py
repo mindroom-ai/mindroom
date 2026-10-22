@@ -76,6 +76,15 @@ def test_builtin_oauth_registry_includes_microsoft_files() -> None:
     assert providers["microsoft_files"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
+def test_builtin_oauth_registry_includes_microsoft_sharepoint() -> None:
+    """Microsoft SharePoint shares the Microsoft app client config but keeps its own token and settings services."""
+    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
+
+    assert providers["microsoft_sharepoint"].credential_service == "microsoft_sharepoint_oauth"
+    assert providers["microsoft_sharepoint"].tool_config_service == "microsoft_sharepoint"
+    assert providers["microsoft_sharepoint"].shared_client_config_services == ("microsoft_oauth_client",)
+
+
 def test_builtin_oauth_registry_includes_outlook_mail() -> None:
     """Outlook mail shares the Microsoft app client config but keeps its own token and settings services."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}

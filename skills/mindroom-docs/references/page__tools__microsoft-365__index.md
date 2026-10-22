@@ -7,6 +7,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | Tool | What it covers | Provider ID | Delegated Graph permissions |
 | --- | --- | --- | --- |
 | `microsoft_files` | OneDrive and SharePoint files, and Excel ranges in them | `microsoft_files` | `Files.ReadWrite.All` |
+| `microsoft_sharepoint` | SharePoint sites, list items, and site pages the requester can open | `microsoft_sharepoint` | `Sites.ReadWrite.All` |
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
@@ -68,6 +69,7 @@ agents:
   assistant:
     tools:
       - microsoft_files
+      - microsoft_sharepoint
       - outlook_mail
       - outlook_calendar
       - microsoft_todo
@@ -80,6 +82,7 @@ agents:
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
+| `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values; with `false`, those functions are not offered. |
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating and sending drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
@@ -128,6 +131,28 @@ A written string that starts with `=` becomes a formula.
 
 Search uses Microsoft Search, which covers work and school accounts.
 Search and folder listings return a `next_page_token` while more results exist; passing it back continues the same search or listing.
+
+## SharePoint
+
+| Function | Changes data | Purpose |
+| --- | --- | --- |
+| `microsoft_sharepoint_search_sites` | no | Search the SharePoint sites the requester can open by keyword. |
+| `microsoft_sharepoint_get_site` | no | Get a site from its address, such as `https://contoso.sharepoint.com/sites/team`. |
+| `microsoft_sharepoint_list_lists` | no | List a site's lists and document libraries, leaving out hidden and system lists. |
+| `microsoft_sharepoint_get_list` | no | Read a list with its columns: internal name, display name, type, and whether each is required or read-only. |
+| `microsoft_sharepoint_list_items` | no | List up to 50 items of a list with their column values, each text value up to 4,000 characters. |
+| `microsoft_sharepoint_create_item` | yes | Add an item to a list with the given column values. |
+| `microsoft_sharepoint_update_item` | yes | Change column values of a list item; columns not given stay unchanged. |
+| `microsoft_sharepoint_list_pages` | no | List a site's pages and news posts. |
+| `microsoft_sharepoint_get_page` | no | Read a page as plain text, its title and then its text web parts in layout order, in chunks of up to 30,000 characters. |
+
+The tool covers sites, lists, list items, and pages; files and the files in document libraries stay with `microsoft_files`.
+List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_get_list` reports next to the display name.
+A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
+A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
+Site addresses must be the site itself, without a page, list, or library path after it.
+Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
+Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
 
 ## Mail
 
@@ -285,6 +310,10 @@ tool_approval:
     - match: microsoft_files_upload_file
       action: require_approval
     - match: microsoft_files_excel_update_range
+      action: require_approval
+    - match: microsoft_sharepoint_create_item
+      action: require_approval
+    - match: microsoft_sharepoint_update_item
       action: require_approval
     - match: outlook_mail_send
       action: require_approval

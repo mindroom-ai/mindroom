@@ -9328,6 +9328,53 @@
     },
     {
       "agent_override_fields": null,
+      "auth_provider": "microsoft_sharepoint",
+      "category": "productivity",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": true,
+          "description": "Allow adding list items and changing their fields.",
+          "label": "Allow Write Operations",
+          "name": "write",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Find SharePoint sites, read and change list items, and read site pages as the connected user",
+      "display_name": "Microsoft SharePoint",
+      "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "microsoft_sharepoint_search_sites",
+        "microsoft_sharepoint_get_site",
+        "microsoft_sharepoint_list_lists",
+        "microsoft_sharepoint_get_list",
+        "microsoft_sharepoint_list_items",
+        "microsoft_sharepoint_create_item",
+        "microsoft_sharepoint_update_item",
+        "microsoft_sharepoint_list_pages",
+        "microsoft_sharepoint_get_page"
+      ],
+      "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
+      "icon": "LayoutList",
+      "icon_color": "text-teal-600",
+      "name": "microsoft_sharepoint",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
       "auth_provider": "microsoft_todo",
       "category": "productivity",
       "config_fields": [
