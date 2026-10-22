@@ -47,7 +47,7 @@ _PrivateWorkerScope = Literal["user", "user_agent"]
 # the private workspace, so it must never be, or contain, one of these.
 # LEGACY_COMPAT: Agno Learning databases left in private state roots.
 # Legacy format: `learning/<agent>.db` holding requester profiles and memories, written while Learning was enabled.
-# Last legacy release: v2026.10.418, the newest tag when written; replacement: unreleased, bump both at merge.
+# Last legacy release: v2026.10.454; replacement: unreleased.
 # Handling: Keep `learning` reserved, so a worker never mounts a leftover learning database as a private workspace.
 # Coverage: tests/test_private_root_reservations.py::test_primary_state_written_beside_a_private_workspace_is_reserved.
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(

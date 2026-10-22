@@ -9,8 +9,8 @@ from typing import Any
 # item's text length and its Agno run event under a class path such as `agno.run.agent.RunContentEvent`), and
 # `control` (the fields of an `AgentRunException` the tool raised, with `Message`-tagged values); its `ToolResult`
 # values carry `metadata`, and its media Agno's `media_reference` and, for files, `external` and `citations`.
-# Last legacy release: v2026.10.433, the newest tag when written; replacement: unreleased, bump both at merge; the
-# owned executor saves only `value`, `state_delta`, and `error`.
+# Last legacy release: v2026.10.454; replacement: unreleased; the owned executor saves only `value`, `state_delta`,
+# and `error`.
 # Handling: drop the three fields before decoding, so their tags never decode. The value's text already joins every
 # item a stream yielded, which is what the model read, so a call consumed from a legacy payload returns that text; a
 # legacy `control` payload kept the exception's text as its `error`. The decoder reads only the fields the owned
