@@ -382,11 +382,12 @@ class _SavedRun:
 def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
     """Make ``session``'s copies of the saved runs what the store holds, in the order a load returns them.
 
-    A written run's copy is its row decoded afresh, never the record the caller handed over: it stays in its place,
-    or goes last when its row took the log's next position (a new run, or one saved visible over its paused,
-    cancelled, or errored row). Member runs keep their own copies. A removed run leaves the session with every run
-    below it. A frozen run's row did not change, so neither does the session's copy, nor its absence when the
-    session holds none. ``session.runs`` becomes a new list, so a reader of the old one is unaffected.
+    A written run's copy is its row decoded afresh, never the record the caller handed over: it replaces the
+    session's copy in place, or goes last when the session holds none or the row took the log's next position (a
+    new run, or one saved visible over its paused, cancelled, or errored row). Member runs keep their own copies. A
+    removed run leaves the session with every run below it. A frozen run's row did not change, so neither does the
+    session's copy, nor its absence when the session holds none. ``session.runs`` becomes a new list, so a reader
+    of the old one is unaffected.
     """
     runs = list(session.runs)
     for save in saved:
