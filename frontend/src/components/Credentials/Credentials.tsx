@@ -542,7 +542,7 @@ export function Credentials() {
                                 "w-full rounded-md border p-2 text-left transition-colors",
                                 isActive
                                   ? "border-primary bg-primary/5"
-                                  : "border-border hover:border-primary/40 hover:bg-muted/40",
+                                  : "border-border hover:bg-secondary",
                               )}
                             >
                               <div className="flex items-center justify-between gap-2">

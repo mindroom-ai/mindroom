@@ -158,17 +158,17 @@ Counter values can change between reports as coverage improves.
 `GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
-The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity.
+The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
 A [Connections portal](https://docs.mindroom.chat/connections-portal/) session from MindRoom Chat does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 
 ## Usage Export Service
 
-Strict JWT deployments can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
+Deployments with trusted upstream auth can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
 The route returns the same report, parameters, and polling behavior as [`GET /api/usage`](#usage-report-api).
 
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), including `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER`, then add a dedicated service audience and client ID:
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated service audience and client ID:
 
 ```bash
 MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
@@ -181,7 +181,7 @@ It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Usage export service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a service setting is missing |
+| `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
 | `401` `Invalid usage service JWT` | Missing or invalid assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.

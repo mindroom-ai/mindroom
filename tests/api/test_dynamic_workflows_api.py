@@ -13,7 +13,7 @@ from mindroom.api import main
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
-from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers, use_trusted_upstream_runtime
 
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
@@ -222,7 +222,7 @@ def test_private_dynamic_workflow_report_rejects_access_token_for_other_hosted_u
         headers=trusted_upstream_headers(
             user_id="user-bob",
             email="bob@example.com",
-            matrix_user_id="",
+            matrix_user_id="@bob:example.org",
         ),
     )
 
@@ -266,13 +266,12 @@ def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(
 def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix_user(test_client: TestClient) -> None:
     """Trusted upstream auth can use an email-derived Matrix identity to read a Matrix-requested report."""
     runtime_paths = main._app_runtime_paths(test_client.app)
+    env = trusted_upstream_env(matrix_user_id_claim=None)
     trusted_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=runtime_paths.storage_root,
-        process_env={
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
+        process_env=env
+        | {
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": "example.com",
         },
@@ -298,10 +297,8 @@ def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix
 
     response = test_client.get(
         f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
-        headers={
-            "X-Trusted-User": "user-alice",
-            "X-Trusted-Email": "alice@example.com",
-        },
+        # Without a Matrix claim, the email names the requester.
+        headers=trusted_upstream_headers(user_id="user-alice", matrix_user_id="@ignored:example.org"),
     )
 
     assert response.status_code == 200

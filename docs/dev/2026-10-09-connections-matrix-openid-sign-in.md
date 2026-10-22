@@ -72,6 +72,6 @@ The rollout order is an operator constraint and lives in [Token binding](../conn
 ## Limitations
 
 - Native Chat builds do not offer Connections, because the shells have no pop-up window to hand a token to.
-- The MCP Gateway still needs trusted upstream strict JWT; sessions from Chat reach its portal controls only through the email-to-Matrix template mapping, because they carry no email.
+- With managed MCP account provisioning, sessions from Chat reach the MCP Gateway's portal controls only through the email-to-Matrix template mapping, because they carry no email.
 - Chat reaches only the backend set under Computers.
 - Without binding, a token stays replayable within its lifetime.

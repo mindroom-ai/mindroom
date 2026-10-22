@@ -937,7 +937,7 @@ describe("egress broker connected accounts", () => {
     ).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+      screen.getByRole("button", { name: "Use account for GitHub" }),
     );
     const question = await screen.findByRole("dialog", {
       name: "Use your GitHub account for Agent Keys?",

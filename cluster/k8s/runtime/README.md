@@ -882,7 +882,7 @@ It cannot be combined with `workers.kubernetes.agentVault`; to switch an existin
 With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
 Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings, which the chart does not render for you:
 
-- **Trusted upstream auth with JWT.** The gateway in front of the runtime must authenticate users and sign a JWT; header-only mode is not enough.
+- **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
   This chart has no values for it, so set the `MINDROOM_TRUSTED_UPSTREAM_*` variables and an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
   The chart creates no ingress.
@@ -895,8 +895,6 @@ env:
     MINDROOM_PUBLIC_URL: "https://assistant.example.org"
     MINDROOM_CONNECTIONS_AGENT: personal
     MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED: "true"
-    MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER: X-MindRoom-User-Id
-    MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT: "true"
     MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER: X-Trusted-Jwt
     MINDROOM_TRUSTED_UPSTREAM_JWKS_URL: https://gateway.example.com/.well-known/jwks.json
     MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE: mindroom-dashboard

@@ -341,7 +341,7 @@ On a standalone deployment the script authenticates with `Authorization: Bearer 
 
 ### Connecting an account
 
-On the personal egress page and the dashboard panel, a service with an account provider offers **Connect <provider> for Agent Keys**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
+On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
 A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
 In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
@@ -358,15 +358,15 @@ A connection that everyone using an agent shares never gets a link; connect it a
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
 On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](../authorization.md#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
 
-The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) or from [trusted upstream auth](trusted-upstream-auth.md) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`).
-With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no JWT, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
+The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](../connections-portal.md#open-it-from-mindroom-chat) or from [trusted upstream auth](trusted-upstream-auth.md).
+With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no trusted upstream auth, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
 A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables one of those sign-ins or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
 When more than one user can sign in through a trusted upstream gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](trusted-upstream-auth.md#security-boundary)).
 
 ### Using a connected account
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
-Its row then shows "Connected for tools only" and offers **Use my <provider> account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+Its row then shows "Connected for tools only" and offers **Use account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
@@ -444,7 +444,7 @@ Another service of the user's own (or, on a shared agent, its credential manager
 ## Connections pages
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
-Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat.
+Both need trusted upstream auth or Matrix sign-in from MindRoom Chat.
 The portal shows how many of each agent's keys and accounts are set and links to the agent's section on the personal page, where keys are set and services are added, edited, and deleted.
 The personal page lists each agent with how many of its keys and accounts are set; expand an agent to see its services.
 Each service row shows the action that makes it work, such as **Connect** or **Set key**, as a button, and keeps the rest, such as **Replace key**, **Disconnect**, **Edit service**, and **Delete service**, in its **⋯** menu.
@@ -637,7 +637,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
 5. Remove the `agent-vault-bridge` plugin from the config.
 6. Set the keys, or connect and allow the accounts, of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth with JWT; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
+   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
 7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
 8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
 
@@ -648,7 +648,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
    The chart refuses both being on at once.
    If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
 3. Have users and credential managers enter their keys, or connect and allow their accounts, on `/connections/egress` or the dashboard.
-   Users open the personal page from MindRoom Chat or through trusted upstream auth with JWT; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
+   Users open the personal page from MindRoom Chat or through trusted upstream auth; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
 4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
    Replaying the proxy URL after the token TTL returns 407.
 5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.

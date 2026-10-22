@@ -13,8 +13,9 @@ In MindRoom Chat, the user opens **Connections** in Settings, General, which ope
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
+Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
+When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
+On other homeservers, users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
@@ -57,7 +58,7 @@ The portal never shows tokens, model configuration, generic credential editing, 
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](deployment/mcp-gateway.md#choose-exposed-agents-and-tools) exposes on the same page.
 Users signed in from Chat have no email, so when MCP accounts are [SCIM-provisioned](deployment/mcp-gateway.md#managed-account-provisioning), that section uses the one active account whose `userName` maps to the signed-in Matrix user through `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` and `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN`, the mapping a trusted upstream sign-in with that email uses.
-Without that mapping, when `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
+Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
 
 ## Sessions And Dashboard Access
 
@@ -82,7 +83,7 @@ Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongsid
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
@@ -94,7 +95,7 @@ The request-by-request exchange is described in [Connections portal sign-in](arc
 
 ## Trusted Upstream Sign-In
 
-Behind an identity gateway, users can also reach the portal through [strict JWT mode](deployment/trusted-upstream-auth.md#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+Behind an identity gateway, users can also reach the portal through [trusted upstream auth](deployment/trusted-upstream-auth.md) with a [Matrix identity](deployment/trusted-upstream-auth.md#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](deployment/trusted-upstream-auth.md#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.
@@ -104,8 +105,8 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 
 | Status and message | Fix |
 | --- | --- |
-| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable strict JWT mode |
-| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable trusted upstream auth |
+| `403 Connections require a verified Matrix identity` | Configure a trusted upstream Matrix claim or email-to-Matrix template |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | Turn on token binding on the homeserver (`mindroom_openid_audience` on MindRoom's Tuwunel fork), and set `MINDROOM_PUBLIC_URL` to the origin Chat opens unless that is `http://localhost:<MINDROOM_PORT>`, or list the Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` to accept the replay risk described under [Token Binding](#token-binding) |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list |

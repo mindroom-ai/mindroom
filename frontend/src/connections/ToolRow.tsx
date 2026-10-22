@@ -28,7 +28,7 @@ export function ItemName({
       />
       <div className="min-w-0 space-y-0.5">
         {/* A block, so the gap below it applies. */}
-        <span className="block font-medium">{title}</span>
+        <span className="block font-medium wrap-anywhere">{title}</span>
         {description && (
           <p
             className="max-w-md truncate text-xs text-muted-foreground"

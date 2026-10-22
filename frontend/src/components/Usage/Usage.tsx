@@ -124,7 +124,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
               <CardContent className="space-y-3 p-5">
                 <div className="flex items-center justify-between text-sm text-muted-foreground">
                   <span>{label}</span>
-                  <Icon className="h-4 w-4 text-primary" aria-hidden="true" />
+                  <Icon className="h-4 w-4" aria-hidden="true" />
                 </div>
                 <p className="break-words text-3xl font-semibold tracking-tight tabular-nums">
                   {formatTokens(value)}
@@ -265,7 +265,7 @@ export function Usage() {
     <div className="mx-auto w-full max-w-6xl space-y-6 p-2 pb-8 sm:p-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Usage</h1>
+          <h2 className="text-2xl font-bold tracking-tight">Usage</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Token usage across this deployment
           </p>
@@ -304,7 +304,7 @@ export function Usage() {
         <Card>
           <CardContent className="flex items-center gap-3 p-8">
             <Loader2
-              className="h-5 w-5 animate-spin text-primary"
+              className="h-5 w-5 animate-spin text-muted-foreground"
               aria-hidden="true"
             />
             <div role="status">

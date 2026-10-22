@@ -170,7 +170,6 @@ When the agent's shell runs in a worker, Bash runs in that same worker, which mu
 Worker shells can reach MindRoom's API, so the API must be locked down:
 
 - Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
-- With trusted-upstream authentication enabled, set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`.
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.

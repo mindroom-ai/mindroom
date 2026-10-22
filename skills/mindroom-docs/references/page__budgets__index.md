@@ -123,8 +123,8 @@ URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexa
 
 ## Budget Service
 
-Strict JWT deployments can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated audience and client ID:
+Deployments with trusted upstream auth can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated audience and client ID:
 
 ```bash
 MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE=mindroom-budget-service
@@ -137,5 +137,5 @@ A budget service assertion authorizes only the `/api/budgets/service` routes, an
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Budget service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a budget service setting is missing |
+| `503` `Budget service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a budget service setting is missing |
 | `401` `Invalid budget service JWT` | Missing or invalid assertion |

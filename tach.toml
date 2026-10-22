@@ -2320,10 +2320,8 @@ depends_on = [
     "mindroom.custom_tools.chat_ui",
     "mindroom.logging_config",
     "mindroom.orchestration.computer_runtime",
-    "mindroom.runtime_env_policy",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
-    "mindroom.worker_computer.sessions",
 ]
 visibility = ["mindroom.agents"]
 
@@ -4522,6 +4520,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.orchestration.server_state",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
     "mindroom.tool_jobs.follow_ups",
@@ -4781,6 +4780,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.origins",
     "mindroom.api.auth",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
@@ -7789,6 +7789,16 @@ depends_on = [
     "mindroom.workers.runtime",
     "mindroom.origins",
 ]
+
+[[modules]]
+path = "mindroom.orchestration.server_state"
+depends_on = [
+    "mindroom.logging_config",
+    "mindroom.matrix.event_types",
+    "mindroom.matrix_openid",
+    "mindroom.orchestration.computer_runtime",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.orchestration.computer_runtime"

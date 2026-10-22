@@ -1055,7 +1055,7 @@ def test_list_calendars_reads_the_owners_mailbox(tmp_path: Path, monkeypatch: py
     routes = {("GET", f"/users/{OWNER}/calendars"): httpx.Response(200, json=page)}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_list_calendars(calendar_owner=f" {OWNER} "))
+    result = _payload(tools.outlook_calendar_list_calendars(calendar_owner=OWNER))
 
     assert result["calendar_owner"] == OWNER
     assert result["calendars"][0]["owner"] == {"name": "Kim", "email": OWNER}
@@ -1335,7 +1335,8 @@ def test_delete_event_deletes_the_owners_event(tmp_path: Path, monkeypatch: pyte
         "me",
         "kim@contoso.com/calendar",
         "kim@contoso.com?x=1",
-        "kim#EXT#@contoso.com",
+        f" {OWNER} ",
+        f"{OWNER}\u202e",
         "kim\\x@contoso.com",
         "kim\x00@contoso.com",
         f"{'k' * 250}@contoso.com",
@@ -1357,6 +1358,23 @@ def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
     assert result["message"] == "calendar_owner must be an email address or sign-in name, such as kim@contoso.com."
     assert "calendar_owner" not in result
     assert graph.requests == []
+
+
+def test_a_guest_calendar_owner_is_escaped_as_one_path_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guest = "kim_fabrikam.com#EXT#@contoso.onmicrosoft.com"
+    routes = {("GET", f"/users/{guest}/events/{EVENT_ID}"): httpx.Response(200, json=_graph_event())}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_get_event(EVENT_ID, calendar_owner=guest))
+
+    assert result["calendar_owner"] == guest
+    [request] = graph.requests
+    assert request.url.raw_path.split(b"?")[0] == (
+        f"/v1.0/users/kim_fabrikam.com%23EXT%23@contoso.onmicrosoft.com/events/{EVENT_ID}".encode()
+    )
 
 
 @pytest.mark.parametrize(

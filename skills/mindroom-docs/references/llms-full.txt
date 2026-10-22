@@ -1604,7 +1604,7 @@ Provider keys from the environment or `.env` are also copied into the shared cre
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MINDROOM_API_KEY` | API key for dashboard/API requests; `mindroom config init` and first-run `mindroom run` add a generated key to `.env` when it has none; unset or empty means open access | _(none)_ |
-| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; set the API server bind port with `mindroom run --api-port` instead, and set this too when the port changes | `8765` |
+| `MINDROOM_PORT` | Port in the default OAuth callback URL when `MINDROOM_PUBLIC_URL` and `MINDROOM_BASE_URL` are unset, and in the default [Connections token audience](https://docs.mindroom.chat/connections-portal/#token-binding) and the address MindRoom Chat finds when `MINDROOM_PUBLIC_URL` is unset, also read by deployment tooling; it does not set the API server's bind port, which is `mindroom run --api-port`, and when unset it follows that port | the `--api-port` port, `8765` by default |
 | `MINDROOM_DASHBOARD_ALLOWED_HOSTS` | Comma-separated extra host names that unauthenticated dashboard or `/v1` requests may address (see [Authorization](https://docs.mindroom.chat/authorization/#unauthenticated-dashboard-host-names)) | _(none)_ |
 | `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed credentialed dashboard CORS responses; cookie and trusted-upstream mutations still require the app's own origin | `http://localhost:3003`, `http://localhost:5173`, `http://127.0.0.1:3003`, `http://127.0.0.1:5173`, or the hosted public origins when `MINDROOM_PUBLIC_URL` is set |
 | `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` | `true` allows every dashboard API origin while disabling credentialed CORS responses; without dashboard authentication, origins outside `MINDROOM_DASHBOARD_ALLOWED_HOSTS` are still refused | _(unset)_ |
@@ -6223,17 +6223,17 @@ Counter values can change between reports as coverage improves.
 `GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
-The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity.
+The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
 A [Connections portal](https://docs.mindroom.chat/connections-portal/) session from MindRoom Chat does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 
 ## Usage Export Service
 
-Strict JWT deployments can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
+Deployments with trusted upstream auth can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
 The route returns the same report, parameters, and polling behavior as [`GET /api/usage`](#usage-report-api).
 
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), including `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER`, then add a dedicated service audience and client ID:
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated service audience and client ID:
 
 ```bash
 MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
@@ -6246,7 +6246,7 @@ It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Usage export service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a service setting is missing |
+| `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
 | `401` `Invalid usage service JWT` | Missing or invalid assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
@@ -6433,8 +6433,8 @@ URL-encode `user_id` in the path, for example `/api/budgets/users/%40alice%3Aexa
 
 ## Budget Service
 
-Strict JWT deployments can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), then add a dedicated audience and client ID:
+Deployments with trusted upstream auth can let a service, such as a company spend dashboard, read budgets and set caps without a browser or administrator identity.
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated audience and client ID:
 
 ```bash
 MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE=mindroom-budget-service
@@ -6447,7 +6447,7 @@ A budget service assertion authorizes only the `/api/budgets/service` routes, an
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Budget service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a budget service setting is missing |
+| `503` `Budget service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a budget service setting is missing |
 | `401` `Invalid budget service JWT` | Missing or invalid assertion |
 
 # Matrix Integration
@@ -7743,7 +7743,6 @@ When the agent's shell runs in a worker, Bash runs in that same worker, which mu
 Worker shells can reach MindRoom's API, so the API must be locked down:
 
 - Set `MINDROOM_API_KEY`; `mindroom run` adds a generated key to `.env` when Docker or Kubernetes workers are configured and the dashboard has no credential, while an explicitly empty `MINDROOM_API_KEY=` keeps open access and leaves minimal mode unavailable.
-- With trusted-upstream authentication enabled, set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`.
 - Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`.
 
 Workers call MindRoom at `MINDROOM_AGENT_CLI_PRIMARY_URL`, a plain `http(s)://host:port` origin, when it is set.
@@ -8122,9 +8121,12 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 }
 ```
 
-The shipped value is empty, which hides the Computer action.
+When it is empty, as shipped, Chat on a homeserver that binds tokens uses the runtime origin that the room's MindRoom agents publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`; on other homeservers the Computer action stays hidden.
+The iOS app ignores a published `localhost` origin, which on a phone is the phone itself, so for computers there set `MINDROOM_PUBLIC_URL` to an address the phone can reach.
 Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
-Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
+Chat shows the Computer action when an origin is known and the room has a joined MindRoom agent with a worker computer.
+With a configured Computers URL, an agent whose MindRoom does not yet publish its server counts as having one; without one, each agent must publish its own server with `computer: true`.
+With several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
@@ -12729,10 +12731,11 @@ Exchange permissions on that mailbox decide what works: reading and changing its
 With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
 A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
 Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again.
+A call with `mailbox` repeats it in every result, errors included.
 
 Automatic replies are always the requester's own.
 Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
-Turning them on names both messages and the external audience, so an approval card shows everything senders get.
+Turning them on names the internal message and an external audience of `internal_only`, `contactsOnly`, or `all`, plus the external message unless the audience is `internal_only`, so an approval card shows everything senders get.
 Outlook Mail asks a requester to connect again when their connection lacks any of the permissions above.
 
 Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
@@ -14695,7 +14698,7 @@ Providers, built in or from plugins, supply only provider-specific details such 
 
 ### Connect An Account
 
-Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream strict JWT auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
+Users connect an account from the dashboard **Tools** tab, the [Connections portal](https://docs.mindroom.chat/connections-portal/) (opened from MindRoom Chat or signed in through trusted upstream auth), or a link an agent posts in the conversation (see [MindRoom-Managed OAuth Onboarding In Conversation](#mindroom-managed-oauth-onboarding-in-conversation)).
 The API routes are:
 
 | Method | Route | Purpose |
@@ -14862,8 +14865,9 @@ In MindRoom Chat, the user opens **Connections** in Settings, General, which ope
 On a homeserver that binds tokens to one deployment (MindRoom's Tuwunel fork with `mindroom_openid_audience` on, see [Token Binding](#token-binding)), MindRoom needs no settings for this when Chat opens it at `http://localhost:<MINDROOM_PORT>`, such as MindRoom on the user's own machine beside MindRoom's hosted Chat at `https://chat.mindroom.chat`, or a Docker stack opened on the machine it runs on.
 For any other address, such as a public one or a LAN address like `http://192.168.1.10:8765`, set `MINDROOM_PUBLIC_URL` to the origin Chat opens, so the homeserver accepts the tokens and OAuth callbacks come back to MindRoom.
 On a homeserver that does not bind tokens, list the Chat origins in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, which accepts the replay risk described under [Token Binding](#token-binding).
-Chat opens the backend set as its Computers backend: the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`, or each user's Computers URL in Settings, General.
-Hosted MindRoom Chat ships `mindroom.computers.apiUrl` empty, so its users enter their backend's URL under Computers before the card works.
+Chat opens the backend set as its Computers backend: each user's Computers URL in Settings, General, or the deployment key `mindroom.computers.apiUrl` in Chat's `config.json`.
+When neither is set, as in hosted MindRoom Chat, Chat on a homeserver that binds tokens opens the backend that the MindRoom agents in the user's rooms publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, with one button per backend when it finds several.
+On other homeservers, users enter their backend's URL under Computers before the card works.
 Native MindRoom Chat apps do not offer Connections yet.
 
 Sign-in works as follows:
@@ -14906,7 +14910,7 @@ The portal never shows tokens, model configuration, generic credential editing, 
 When a service uses a shared service account, such as `GOOGLE_SERVICE_ACCOUNT_FILE`, the portal does not show it as a personal connection and disables **Connect** for that service.
 Users choose the agents and tools the optional [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#choose-exposed-agents-and-tools) exposes on the same page.
 Users signed in from Chat have no email, so when MCP accounts are [SCIM-provisioned](https://docs.mindroom.chat/deployment/mcp-gateway/#managed-account-provisioning), that section uses the one active account whose `userName` maps to the signed-in Matrix user through `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` and `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN`, the mapping a trusted upstream sign-in with that email uses.
-Without that mapping, when `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
+Without that mapping, when trusted upstream auth is enabled with `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` (a signed Matrix claim takes precedence over the template), or when more than one active account maps to the same Matrix user, the section works only for users who sign in through the trusted upstream.
 
 ## Sessions And Dashboard Access
 
@@ -14931,7 +14935,7 @@ Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongsid
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.
@@ -14943,7 +14947,7 @@ The request-by-request exchange is described in [Connections portal sign-in](htt
 
 ## Trusted Upstream Sign-In
 
-Behind an identity gateway, users can also reach the portal through [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a Matrix identity from a signed Matrix claim or the email-to-Matrix template; header-only, API-key, and `MINDROOM_OWNER_USER_ID` authentication are rejected.
+Behind an identity gateway, users can also reach the portal through [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
 Exclude `/connections` from the other application's service-worker navigation fallback.
@@ -14953,8 +14957,8 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 
 | Status and message | Fix |
 | --- | --- |
-| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable strict JWT mode |
-| `403 Connections require a verified Matrix identity` | Enable strict JWT mode with a Matrix claim or email-to-Matrix template |
+| `401 Connections sign-in required` | Open Connections from MindRoom Chat, or enable trusted upstream auth |
+| `403 Connections require a verified Matrix identity` | Configure a trusted upstream Matrix claim or email-to-Matrix template |
 | `401 Invalid sign-in request` | The sign-in body was malformed, such as an incomplete OpenID token from Chat; open Connections from MindRoom Chat again, and update MindRoom Chat and MindRoom if it keeps failing |
 | `403 Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | Turn on token binding on the homeserver (`mindroom_openid_audience` on MindRoom's Tuwunel fork), and set `MINDROOM_PUBLIC_URL` to the origin Chat opens unless that is `http://localhost:<MINDROOM_PORT>`, or list the Chat origin in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` to accept the replay risk described under [Token Binding](#token-binding) |
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list |
@@ -15405,6 +15409,8 @@ Do not report or "fix" these; they are deliberate.
 - `skill_manage`, used in chat by agents that list it or learn skills and by skill reviews, runs in the primary process and writes only below the agent's workspace `skills/` directory through no-follow descriptors, regardless of `file_access`, like MindRoom-owned output.
 - An authored subagent, started by `run_subagent` with `system_prompt`, `tools`, or `profile` or by a Dynamic Workflow `subagent` participant, runs as its caller with the caller's tools, credentials, workspace, and approval rules, which for a workflow participant include the caller's `dynamic_workflow` `allowed_tools` pre-approval and reading the skills it names when the caller could without approval; worker code that edits a `subagents/*.md` profile can change what such a child is told, but gives it nothing the caller lacks.
 - Each agent publishes its running background jobs in each room as unencrypted room state keyed by its own user ID: job ID, thread, kind, tool name, status, requester ID, and start time, never arguments or results, so the homeserver and every room member can read them even in an encrypted room.
+- Each agent, team, and the router also publishes its runtime's origin, `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`, and whether it has a worker computer, as unencrypted room state keyed by its own user ID, so the homeserver and every room member can read the address, including a LAN or localhost one.
+  MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - An agent's 🛑 reaction, its Stop button included, stops nothing unless it comes from [`stop_reply`](https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply), which counts as the Stop of the user the agent acts for and needs that user's access to the stopped agent.
 - The agent or team that answers in a conversation lists, reads, and cancels the background jobs its team members started there for the same requester, because the team already receives its members' output.
@@ -15434,7 +15440,7 @@ Do not report or "fix" these; they are deliberate.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.
-- The Connections portal signs users in either through trusted upstream strict JWT auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
+- The Connections portal signs users in either through trusted upstream auth or through a Matrix OpenID token that MindRoom Chat hands to the portal window, from the origins `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` lists or, unset, from MindRoom's hosted Chat and, for a portal on a local address, any Chat on a local address.
   Under the default list, MindRoom accepts that sign-in only while the homeserver binds tokens, because otherwise any backend a user opens from Chat could replay their token to it, and request headers cannot show that a portal is out of such a backend's reach; an explicit list is the operator's choice.
   The session cookie names the verified Matrix user and a fixed one-hour lifetime, signed with a key each MindRoom process generates at start, and it authenticates the portal and its APIs, the OAuth callback for flows it started, and the OAuth success page.
   Outside hosted platform mode, it also opens the dashboard, but only for a user in `administrators` whose token the homeserver bound to this deployment at sign-in; everyone else, and every session on a homeserver that does not bind tokens, needs the API key for the dashboard.
@@ -17510,10 +17516,9 @@ Neither the gateway nor clients should automatically retry a failed or timed-out
 
 ## Enable the gateway
 
-First configure strict signed upstream authentication (`MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true` and `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`), so the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) accepts your gateway's users.
-The gateway stays disabled without it, even though users can open the portal from MindRoom Chat.
-When more than one user signs in through the upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)); it names the private agent each user's selection starts with.
-Then enable the gateway:
+Users approve MCP clients and choose their tools on the [Connections portal](https://docs.mindroom.chat/connections-portal/), which they open from MindRoom Chat or reach through [trusted upstream auth](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in).
+When more than one user signs in through a trusted upstream, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)); it names the private agent each user's selection starts with.
+Enable the gateway:
 
 ```bash
 MINDROOM_CONNECTIONS_AGENT=personal
@@ -17521,7 +17526,7 @@ MINDROOM_PUBLIC_URL=https://assistant.example.org
 MINDROOM_MCP_GATEWAY_ENABLED=true
 ```
 
-The gateway is disabled by default and stays disabled unless the strict signed upstream settings, `MINDROOM_PUBLIC_URL`, and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
+The gateway is disabled by default and stays disabled unless `MINDROOM_PUBLIC_URL` and `MINDROOM_MCP_GATEWAY_ENABLED` are present.
 `MINDROOM_PUBLIC_URL` must be an HTTPS origin without a path, query, or fragment; loopback HTTP origins are accepted for local development.
 Internationalized hostnames must be written in their ASCII `xn--` form.
 Restart the API after changing any gateway environment variable.
@@ -17562,7 +17567,7 @@ Tools that share a service connection share its OAuth controls, and tools that n
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
-Without such a template, when a signed trusted upstream Matrix claim is configured, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
+Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.
 
 ## Route browser and machine traffic
 
@@ -17579,7 +17584,6 @@ Forward these paths to the MindRoom API:
 
 Browser consent lives at `/connections/mcp/authorize`, inside the authenticated browser prefix, so keep it out of any other frontend's service-worker navigation fallback.
 Machine endpoints must receive MCP and OAuth responses, not an access proxy's HTML login page.
-Strip client-supplied trusted identity headers at the proxy, including on machine paths.
 Preserve the public `Host` header and the `Authorization`, `Origin`, `Accept`, `Content-Type`, `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers.
 Forward the exact `/mcp` path without adding a trailing slash.
 
@@ -18635,7 +18639,7 @@ The runtime chart rejects a file-sourced config inside `agents`, `private_instan
 > [!WARNING]
 > The sidecar protects the primary runtime's secrets and state, but it is not an isolation boundary between agents.
 > All proxied tool calls share one runner process and user, and the sidecar sees every agent's state directory, including workspaces, sessions, learning data, and memory.
-> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication with `requireJwt`; header-only trusted-upstream authentication is forgeable from the sidecar.
+> The sidecar also shares the pod network namespace, so the primary API must require authentication that tool code cannot forge, such as platform authentication, `MINDROOM_API_KEY`, or trusted-upstream authentication.
 > Without Supabase authentication, both charts give the primary a generated `MINDROOM_API_KEY`.
 > Use dedicated Kubernetes workers through the runtime chart when per-agent filesystem and credential isolation are required.
 
@@ -19337,7 +19341,7 @@ On a standalone deployment the script authenticates with `Authorization: Bearer 
 
 ### Connecting an account
 
-On the personal egress page and the dashboard panel, a service with an account provider offers **Connect <provider> for Agent Keys**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
+On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
 A row whose account Agent Keys uses shows "Using connected account" with the account's verified email, or otherwise its login, such as `octocat`, and offers **Stop using <provider> account** and **Disconnect**, and a row whose saved connection cannot be read offers only **Reset connection** until it is reset.
 In a shared sandbox, GitHub and Atlassian rows offer no **Connect**; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes).
 
@@ -19354,15 +19358,15 @@ A connection that everyone using an agent shares never gets a link; connect it a
 **Who may connect and set keys.** On `user` and `user_agent` agents each user manages their own keys, accounts, and [services](#user-services) on the personal page.
 On `shared` and unscoped agents only administrators and the agent's `credential_managers` do (see [Platform and credential authority](https://docs.mindroom.chat/authorization/#platform-and-credential-authority)); GitHub and Atlassian under `oauth_on_shared_workers` are the exception, where each user connects and allows their own account.
 
-The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with JWT (`MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT`).
-With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no JWT, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
+The personal egress page and its API need a verified Matrix identity on the request, from [opening Connections in MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) or from [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/).
+With sign-in from Chat turned off (`MINDROOM_CONNECTIONS_ALLOWED_ORIGINS='[]'`) and no trusted upstream auth, nobody can sign in to the personal page and the dashboard sets only the keys and accounts of `shared` and unscoped agents.
 A `user` or `user_agent` agent, private agents included, then has no page where its keys can be set: until an administrator enables one of those sign-ins or gives the agent a shared worker scope, its brokered calls to a service without a key are refused, and the refusal names no page.
 When more than one user can sign in through a trusted upstream gateway, set `MINDROOM_CONNECTIONS_AGENT` as well, or every user the gateway admits gets full dashboard access, including configuration edits, shared keys, and every requester's log; with it set, non-administrators who open the dashboard are sent to the Connections portal (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 
 ### Using a connected account
 
 An account connected for the provider's tools, on the Connections portal or here, serves only those tools until someone allows Agent Keys to use it for the service.
-Its row then shows "Connected for tools only" and offers **Use my <provider> account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
+Its row then shows "Connected for tools only" and offers **Use account**, and brokered requests that need it are refused with `oauth_reuse: "off"` (see [Error responses](#error-responses)).
 The provider's tools ask for approval before they write, but an allowed account lets the agent's shell and python commands act as it with its full access and without those prompts, so allowing it asks for confirmation first.
 Whoever may connect the account may allow it (see **Who may connect and set keys** above).
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
@@ -19440,7 +19444,7 @@ Another service of the user's own (or, on a shared agent, its credential manager
 ## Connections pages
 
 Users see two pages: the Connections portal at `/connections` (their agents, tools, and account cards) and the personal egress page at `/connections/egress` (titled "Agent Keys").
-Both need trusted upstream auth with JWT or Matrix sign-in from MindRoom Chat.
+Both need trusted upstream auth or Matrix sign-in from MindRoom Chat.
 The portal shows how many of each agent's keys and accounts are set and links to the agent's section on the personal page, where keys are set and services are added, edited, and deleted.
 The personal page lists each agent with how many of its keys and accounts are set; expand an agent to see its services.
 Each service row shows the action that makes it work, such as **Connect** or **Set key**, as a button, and keeps the rest, such as **Replace key**, **Disconnect**, **Edit service**, and **Delete service**, in its **⋯** menu.
@@ -19633,7 +19637,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
 4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
 5. Remove the `agent-vault-bridge` plugin from the config.
 6. Set the keys, or connect and allow the accounts, of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth with JWT; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
+   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
 7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
 8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
 
@@ -19644,7 +19648,7 @@ Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker s
    The chart refuses both being on at once.
    If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
 3. Have users and credential managers enter their keys, or connect and allow their accounts, on `/connections/egress` or the dashboard.
-   Users open the personal page from MindRoom Chat or through trusted upstream auth with JWT; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
+   Users open the personal page from MindRoom Chat or through trusted upstream auth; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
 4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
    Replaying the proxy URL after the token TTL returns 407.
 5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.
@@ -19959,53 +19963,20 @@ Beyond the chart's required settings:
 
 # Trusted Upstream Browser Auth
 
-Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned reverse proxy or identity gateway that has already authenticated the human.
+Use trusted upstream auth when the MindRoom API and dashboard sit behind a deployment-owned identity gateway that has already authenticated the human and signs a JWT saying who they are.
 Hosted multi-user deployments need it so the browser that opens an agent-issued OAuth link, such as `/api/oauth/google_drive/authorize?connect_token=...`, signs in as the Matrix requester that triggered it.
 The standalone `MINDROOM_OWNER_USER_ID` setting maps every dashboard request to one Matrix user, so it suits only single-owner deployments.
-The [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), the [usage export service](https://docs.mindroom.chat/usage/#usage-export-service), and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
-The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use strict JWT mode, and users signed in to MindRoom Chat can open it without a gateway.
+The [usage export service](https://docs.mindroom.chat/usage/#usage-export-service) and the [budget service](https://docs.mindroom.chat/budgets/#budget-service) also build on this mode.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
-Trusted upstream auth is disabled by default and works with any gateway, such as an ingress controller, OAuth2 proxy, or identity-aware proxy.
-Enable it only when every network path to MindRoom removes client-supplied copies of the trusted headers and injects verified values itself; never expose such an instance directly to browsers or the public internet.
-Header-only mode trusts those headers alone and suits deployments reachable only through the gateway.
-Prefer [strict JWT mode](#strict-jwt-mode) whenever the gateway can sign an assertion.
+Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
+MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
-## Header Setup
-
-Set the header names that your access layer owns:
+## Setup
 
 ```bash
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
-MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=X-MindRoom-User-Id
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER=X-MindRoom-User-Email
-MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER=X-MindRoom-Matrix-User-Id
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE='@{localpart}:example.org'
-MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN=example.com
-```
-
-| Variable | Meaning |
-| --- | --- |
-| `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
-| `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER` | Required; a header carrying a stable ID for the authenticated browser user |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` | Optional; header carrying the user's email, required in header-only mode when an email-to-Matrix template is set |
-| `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` | Optional; header carrying the user's Matrix ID |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` | Optional; derives the Matrix ID from the email localpart and must contain exactly one `{localpart}` placeholder |
-| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
-
-Shared dashboard access needs only the user ID header.
-Personal `user` and `user_agent` OAuth connections, the Connections portal, and personal APIs also need a Matrix identity that matches the requester used in conversations.
-Prefer the Matrix user ID header when the access layer can supply a real Matrix ID; header-only mode uses it when present and otherwise derives the ID from the email.
-With the template `@{localpart}:example.org` and domain `example.com`, `alice@example.com` maps to `@alice:example.org`.
-Domain matching is case-insensitive, emails from any other domain or a subdomain are rejected, and the result must be a valid Matrix user ID.
-
-## Strict JWT Mode
-
-Strict mode requires every request to carry a signed JWT from the gateway alongside the identity headers, so a spoofed identity header alone is rejected.
-Use it when the gateway publishes a JWKS endpoint and issues short-lived assertions for authenticated browser requests.
-
-```bash
-MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true
 MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=X-Trusted-Jwt
 MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.com/.well-known/jwks.json
 MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
@@ -20017,23 +19988,26 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 
 | Variable | Meaning |
 | --- | --- |
-| `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT` | Turns strict mode on; default `false` |
+| `MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED` | Turns the mode on; default `false` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER` | Required; header carrying the JWT |
 | `MINDROOM_TRUSTED_UPSTREAM_JWKS_URL` | Required; the gateway's signing keys |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE` | Required; expected `aud` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER` | Required; expected `iss` |
 | `MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM` | Claim holding the verified email; default `email` |
-| `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` | Optional; claim holding a stable user ID distinct from the email |
-| `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` | Optional; claim holding a signed Matrix user ID |
+| `MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM` | Optional; claim holding a stable user ID distinct from the email, which is the user ID otherwise |
+| `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` | Optional; claim holding the user's Matrix ID |
+| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE` | Optional; derives the Matrix ID from the email localpart and must contain exactly one `{localpart}` placeholder |
+| `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
 
 MindRoom verifies the signature, expiry, issuer, audience, and every configured claim, and picks up gateway key rotation without a restart.
-Headers must agree with the verified claims:
 
-- The user ID header must equal the user ID claim when configured, and otherwise the email claim.
-- A configured email header must equal the email claim; without an email header, MindRoom uses the email claim.
-- With a Matrix user ID claim, that claim is the Matrix identity, and a Matrix user ID header must equal it.
-- Without one, the Matrix identity can only come from the email-to-Matrix template applied to the verified email, which works without an email header, and a Matrix user ID header must equal the derived ID.
-- With neither a Matrix claim nor a template, any Matrix user ID header is rejected because no signature backs it.
+## Matrix Identity
+
+Shared dashboard access needs only the signed user.
+Personal `user` and `user_agent` OAuth connections, the Connections portal, and personal APIs also need a Matrix identity that matches the requester used in conversations.
+With a Matrix user ID claim configured, that claim is the Matrix identity.
+Otherwise the email-to-Matrix template, when set, derives it from the signed email: with the template `@{localpart}:example.org` and domain `example.com`, `alice@example.com` maps to `@alice:example.org`.
+Domain matching is case-insensitive, emails from any other domain or a subdomain are rejected, and the result must be a valid Matrix user ID.
 
 ## Helm Charts
 
@@ -20042,12 +20016,6 @@ For the hosted instance chart, set the equivalent values:
 ```yaml
 trustedUpstreamAuth:
   enabled: "true"
-  userIdHeader: X-MindRoom-User-Id
-  emailHeader: X-MindRoom-User-Email
-  matrixUserIdHeader: X-MindRoom-Matrix-User-Id
-  emailToMatrixUserIdTemplate: "@{localpart}:example.org"
-  emailDomain: example.com
-  requireJwt: "true"
   jwtHeader: X-Trusted-Jwt
   jwksUrl: https://gateway.example.com/.well-known/jwks.json
   jwtAudience: mindroom-dashboard
@@ -20055,11 +20023,13 @@ trustedUpstreamAuth:
   jwtEmailClaim: email
   jwtUserIdClaim: sub
   jwtMatrixUserIdClaim: matrix_user_id
+  emailToMatrixUserIdTemplate: "@{localpart}:example.org"
+  emailDomain: example.com
 ```
 
 The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `userIdHeader`, when `emailToMatrixUserIdTemplate` is set without both `emailHeader` and `emailDomain`, or when `requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`.
+Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
 ## Security Boundary
 
@@ -20069,7 +20039,6 @@ With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also re
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
-Strict JWT mode adds signature checks but does not replace header stripping, which every network path still needs.
 A personal OAuth link opened by a browser signed in as anyone other than the requester who received it fails with `403`; see [Connect An Account](https://docs.mindroom.chat/oauth-framework/#connect-an-account) for link rules.
 
 ## Browser Mutation Protection
@@ -20084,16 +20053,12 @@ Host the dashboard on the app's public origin, or use its development proxy, whi
 
 | Status and message | Fix |
 | --- | --- |
-| `500 Trusted upstream auth is enabled but MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER is not set` | Set the user ID header variable |
-| `500 Trusted upstream strict JWT auth is enabled but <variable> is not set` | Set the named strict-mode variable |
-| `500 Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set` | In header-only mode, set the email header or use the Matrix user ID header instead |
+| `500 Trusted upstream auth is enabled but <variable> is not set` | Set the named variable |
 | `500 Trusted upstream email mapping requires a valid template and MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | Use exactly one `{localpart}` in a valid Matrix ID template and set the email domain |
-| `401 Missing trusted upstream identity header: <header>`, `Missing trusted upstream email header: <header>`, or `Missing trusted upstream JWT header: <header>` | The gateway did not send the header; check its routing and header injection |
+| `401 Missing trusted upstream JWT header: <header>` | The gateway did not send its assertion; check its routing and that it signs requests for this application |
 | `401 Invalid trusted upstream JWT` | The JWT is expired, signed by an unknown key, for the wrong issuer or audience, or lacks a configured claim |
-| `401 Trusted upstream identity does not match JWT claim` | Make the user ID and email headers carry the same values as the JWT claims |
-| `401 Trusted upstream Matrix identity does not match JWT claim`, `does not match verified email`, or `is not signed` | Make the Matrix user ID header match the signed or derived ID, configure a Matrix claim or template, or stop sending the header |
 | `401 Invalid trusted upstream email identity` | The email is outside `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` |
-| `401 Invalid trusted upstream Matrix user id` | The Matrix header or claim is not a valid Matrix user ID |
+| `401 Invalid trusted upstream Matrix user id` | The Matrix claim is not a valid Matrix user ID |
 | `403 Administrator access required` | With `MINDROOM_CONNECTIONS_AGENT` set, only `administrators` reach ordinary dashboard routes |
 | `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |

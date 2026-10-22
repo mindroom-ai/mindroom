@@ -431,7 +431,7 @@ export function EgressServiceItem({
         </div>
       </td>
       <td className={SERVICE_CELL.actions}>
-        <div className="flex items-center gap-1 max-sm:justify-start sm:justify-end">
+        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:justify-end">
           {busyNote ? (
             <BusyNote>{busyNote}</BusyNote>
           ) : canConnect ? (
@@ -449,9 +449,7 @@ export function EgressServiceItem({
                       : connect()
                 }
               >
-                {busy === "connect"
-                  ? "Connecting…"
-                  : `Connect ${oauth.display_name} for Agent Keys`}
+                {busy === "connect" ? "Connecting…" : "Connect"}
               </Button>
               {busy === "connect" && (
                 <Button
@@ -481,10 +479,10 @@ export function EgressServiceItem({
               size="sm"
               variant="outline"
               disabled={busy !== null}
-              aria-label={`Use my ${oauth.display_name} account for ${name}`}
+              aria-label={`Use account for ${name}`}
               onClick={() => setConfirm("reuse")}
             >
-              Use my {oauth.display_name} account
+              Use account
             </Button>
           ) : (
             setKeyFirst && (
@@ -507,7 +505,7 @@ export function EgressServiceItem({
         </div>
         {canManageKey && editing && (
           <form
-            className="mt-2 flex flex-wrap items-center gap-2 sm:flex-nowrap"
+            className="mt-2 flex flex-wrap items-center gap-2 sm:justify-end"
             onSubmit={save}
           >
             <Input
@@ -516,7 +514,7 @@ export function EgressServiceItem({
               aria-label={keyLabel}
               placeholder="Paste the key"
               autoFocus
-              className="h-9 min-w-0 flex-1 max-sm:basis-full"
+              className="h-9 min-w-0 basis-full"
               value={secret}
               disabled={busy !== null}
               onChange={(event) => setSecret(event.target.value)}

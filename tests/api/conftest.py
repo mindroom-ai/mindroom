@@ -2,13 +2,19 @@
 
 # Import the app after we can mock the config path
 import asyncio
+import json
 from collections.abc import Callable, Generator
+from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import jwt
 import pytest
 import yaml
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from jwt.algorithms import RSAAlgorithm
 
 from mindroom.api import config_lifecycle
 
@@ -22,23 +28,104 @@ def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
 
 
+_TRUSTED_UPSTREAM_AUDIENCE = "mindroom-dashboard"
+_TRUSTED_UPSTREAM_ISSUER = "https://issuer.example"
+_TRUSTED_UPSTREAM_JWKS_URL = "https://issuer.example/conftest/jwks"
+
+
+def trusted_upstream_jwt_key() -> rsa.RSAPrivateKey:
+    """Return a new RSA key for signing trusted-upstream JWTs."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def trusted_upstream_jwks(private_key: rsa.RSAPrivateKey, kid: str = "test-key") -> dict[str, Any]:
+    """Return the JWKS that publishes `private_key`."""
+    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    return {"keys": [{**jwk, "kid": kid, "use": "sig", "alg": "RS256"}]}
+
+
+def trusted_upstream_jwt(
+    private_key: rsa.RSAPrivateKey,
+    *,
+    audience: str = _TRUSTED_UPSTREAM_AUDIENCE,
+    email: str = "alice@example.com",
+    expires_at: datetime | None = None,
+    issuer: str = _TRUSTED_UPSTREAM_ISSUER,
+    kid: str = "test-key",
+    matrix_user_id: str | None = None,
+    user_id: str = "user_123",
+) -> str:
+    """Return a gateway assertion signed by `private_key`."""
+    now = datetime.now(UTC)
+    claims = {
+        "iss": issuer,
+        "aud": audience,
+        "exp": expires_at or now + timedelta(minutes=5),
+        "iat": now,
+        "email": email,
+        "sub": user_id,
+    }
+    if matrix_user_id is not None:
+        claims["matrix_user_id"] = matrix_user_id
+    return jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": kid})
+
+
+@cache
+def _shared_trusted_upstream_key() -> rsa.RSAPrivateKey:
+    return trusted_upstream_jwt_key()
+
+
+@pytest.fixture(autouse=True)
+def _serve_trusted_upstream_jwks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the key `trusted_upstream_headers` signs with at the JWKS URL `use_trusted_upstream_runtime` sets."""
+    fetch_data = jwt.PyJWKClient.fetch_data
+
+    def serve(client: jwt.PyJWKClient) -> Any:  # noqa: ANN401
+        if client.uri != _TRUSTED_UPSTREAM_JWKS_URL:
+            return fetch_data(client)
+        return trusted_upstream_jwks(_shared_trusted_upstream_key())
+
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", serve)
+
+
 def trusted_upstream_headers(
     *,
     user_id: str = "alice",
     email: str = "alice@example.com",
     matrix_user_id: str = "@alice:example.org",
 ) -> dict[str, str]:
-    """Return trusted-upstream auth headers for API tests."""
-    return {
-        "Origin": "http://testserver",
-        "X-Trusted-User": user_id,
-        "X-Trusted-Email": email,
-        "X-Trusted-Matrix-User": matrix_user_id,
+    """Return the Origin header and a gateway-signed assertion for an app set up by `use_trusted_upstream_runtime`."""
+    token = trusted_upstream_jwt(
+        _shared_trusted_upstream_key(),
+        email=email,
+        matrix_user_id=matrix_user_id,
+        user_id=user_id,
+    )
+    return {"Origin": "http://testserver", "X-Trusted-Jwt": token}
+
+
+def trusted_upstream_env(
+    *,
+    user_id_claim: str | None = "sub",
+    matrix_user_id_claim: str | None = "matrix_user_id",
+) -> dict[str, str]:
+    """Return the env that turns on trusted-upstream auth accepting `trusted_upstream_jwt` assertions."""
+    env = {
+        "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
+        "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": _TRUSTED_UPSTREAM_JWKS_URL,
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": _TRUSTED_UPSTREAM_AUDIENCE,
+        "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER": _TRUSTED_UPSTREAM_ISSUER,
     }
+    if user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] = user_id_claim
+    if matrix_user_id_claim is not None:
+        env["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] = matrix_user_id_claim
+    return env
 
 
 def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
-    """Reinitialize one API app with trusted-upstream auth enabled."""
+    """Reinitialize one API app with trusted-upstream auth that accepts `trusted_upstream_headers`."""
     from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
@@ -46,12 +133,7 @@ def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
     trusted_runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=runtime_paths.storage_root,
-        process_env={
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-Trusted-User",
-            "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "X-Trusted-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER": "X-Trusted-Matrix-User",
-        },
+        process_env=trusted_upstream_env(),
     )
     main.initialize_api_app(api_app, trusted_runtime_paths)
     return trusted_runtime_paths

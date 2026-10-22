@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 from tests.api.test_usage_service_auth import _install_manual_export_runner
 
 if TYPE_CHECKING:
@@ -24,18 +24,15 @@ if TYPE_CHECKING:
 def signed_usage_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], Callable[..., dict[str, str]]]:
-    """Return strict dashboard auth settings and real signed identity headers."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    """Return dashboard auth settings and real signed identity headers."""
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     env = {
         "MINDROOM_API_KEY": "test-usage-key",
         "MINDROOM_CONNECTIONS_AGENT": "test_agent",
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "Cf-Access-Authenticated-User-Email",
-        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "Cf-Access-Authenticated-User-Email",
         "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": "example.org",
         "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "Cf-Access-Jwt-Assertion",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example/jwks",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -50,8 +47,7 @@ def signed_usage_auth(
         expires_at: datetime | None = None,
     ) -> dict[str, str]:
         return {
-            "Cf-Access-Authenticated-User-Email": email,
-            "Cf-Access-Jwt-Assertion": _trusted_upstream_jwt(
+            "Cf-Access-Jwt-Assertion": trusted_upstream_jwt(
                 private_key,
                 email=email,
                 audience=audience,
@@ -179,7 +175,7 @@ def test_usage_dashboard_accepts_real_signed_administrator(
         ("expired", 401),
         ("wrong-audience", 401),
         ("wrong-issuer", 401),
-        ("mismatched-email", 401),
+        ("owner-email-header", 403),
     ],
 )
 def test_usage_dashboard_rejects_invalid_or_unauthorized_identity(
@@ -201,7 +197,7 @@ def test_usage_dashboard_rejects_invalid_or_unauthorized_identity(
         "expired": signed_headers(expires_at=datetime.now(UTC) - timedelta(minutes=1)),
         "wrong-audience": signed_headers(audience="another-application"),
         "wrong-issuer": signed_headers(issuer="https://another-issuer.example"),
-        "mismatched-email": {
+        "owner-email-header": {
             **signed_headers("alice@example.org"),
             "Cf-Access-Authenticated-User-Email": "owner@example.org",
         },

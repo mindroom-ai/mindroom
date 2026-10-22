@@ -15,6 +15,7 @@ import typer
 from rich.markup import escape
 
 from mindroom.constants import ensure_writable_config_path
+from mindroom.origins import with_api_port
 
 from .api import is_loopback_host
 from .banner import make_banner
@@ -329,7 +330,8 @@ async def _run(
     """Run the multi-agent system with friendly error handling."""
     from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError  # noqa: PLC0415
 
-    runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
+    # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port the API serves on.
+    runtime_paths = with_api_port(activate_cli_runtime(path=config_path, storage_path=storage_path), api_port)
     # Validate again: pairing may have rewritten owner placeholders in the config.
     _load_active_config_or_exit(runtime_paths)
 
