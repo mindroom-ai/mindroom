@@ -125,17 +125,19 @@ def with_resumed_turn_log_context[EventT](events: AsyncIterator[EventT]) -> Asyn
     if context is None:
         return events
     target = context.target
-    attribution = RequestAttribution(
-        agent_id=context.agent_name,
-        session_id=target.session_id,
-        room_id=target.room_id,
-        thread_id=target.resolved_thread_id,
-        reply_to_event_id=target.reply_to_event_id,
-        requester_id=context.requester_id,
-        correlation_id=context.correlation_id,
+    attribution = asdict(
+        RequestAttribution(
+            agent_id=context.agent_name,
+            session_id=target.session_id,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            reply_to_event_id=target.reply_to_event_id,
+            requester_id=context.requester_id,
+            correlation_id=context.correlation_id,
+        ),
     )
     return context_bound_async_stream(
-        context_factory=lambda: bind_llm_request_log_context(**asdict(attribution)),
+        context_factory=lambda: bind_llm_request_log_context(**attribution),
         stream_factory=events.__aiter__,
     )
 
