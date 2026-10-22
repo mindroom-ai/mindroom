@@ -24,6 +24,7 @@ from mindroom import agents, response_runner
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -709,6 +710,35 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
 
 
 @pytest.mark.asyncio
+async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A run whose leader request fails after a member answered reports that run, ended in error, as the reply's metadata."""
+    del probe
+
+    async def lose_the_provider() -> None:
+        msg = "provider connection lost"
+        raise ProviderError(msg, provider="Synthetic")
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[_delegate("call-team", "writer", "Draft it"), [Await(lose_the_provider)]],
+        writer=[answer("Draft.", usage(20, 2))],
+    )
+    metadata: dict[str, Any] = {}
+
+    await _stream(team, run_metadata_collector=metadata)
+
+    record, _ = _stored_runs(team)
+    payload = metadata[AI_RUN_METADATA_KEY]
+    assert (record.status, payload["run_id"], payload["status"]) == (RunStatus.error, record.run_id, "error")
+    assert payload["tools"] == {"count": 1}
+
+
+@pytest.mark.asyncio
 async def test_a_resume_is_refused_before_anything_runs_when_the_approval_no_longer_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -757,9 +787,12 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
         helper=[calls(tool_call("touch", "call-helper", label="dug"), metrics=usage(5, 1)), answer("Helper found it.")],
     )
 
-    chunks = await _stream(team)
+    metadata: dict[str, Any] = {}
+    chunks = await _stream(team, run_metadata_collector=metadata)
 
     assert probe.calls == ["dug"]
+    # The writer's run ended twice, paused and then completed; the turn counts its record once.
+    assert metadata[AI_RUN_METADATA_KEY]["tools"] == {"count": 2}
     assert chunks[-1].content == (
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: the helper found it.\n\n\n"
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
