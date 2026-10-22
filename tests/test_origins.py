@@ -9,8 +9,10 @@ from mindroom.origins import (
     allowed_client_origins,
     connections_client_origin_allowed,
     connections_sign_in_enabled,
+    local_api_origin,
     normalized_origin,
     parse_browser_origin,
+    with_api_port,
 )
 
 
@@ -195,3 +197,22 @@ def test_configured_connections_client_origins_replace_the_defaults(tmp_path: Pa
         assert not connections_client_origin_allowed(off, "https://chat.mindroom.chat", PUBLIC)
         assert not connections_client_origin_allowed(off, "http://192.168.1.10:8080", LAN)
         assert not connections_sign_in_enabled(off)
+
+
+@pytest.mark.parametrize(
+    ("env", "origin"),
+    [
+        ({}, "http://localhost:9000"),
+        ({"MINDROOM_PORT": "  "}, "http://localhost:9000"),
+        ({"MINDROOM_PORT": "8765"}, "http://localhost:8765"),
+    ],
+    ids=["unset", "blank", "operator-set"],
+)
+def test_the_api_port_is_the_local_origin_unless_the_operator_set_one(
+    tmp_path: Path,
+    env: dict[str, str],
+    origin: str,
+) -> None:
+    """`mindroom run --api-port 9000` links, verifies tokens for, and publishes the port Chat can reach."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    assert local_api_origin(with_api_port(paths, 9000)) == origin

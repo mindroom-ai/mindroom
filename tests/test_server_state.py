@@ -45,6 +45,8 @@ def _state(content: dict[str, object]) -> nio.RoomGetStateEventResponse:
 
 
 _NOT_FOUND = nio.RoomGetStateEventError("Event not found.", status_code="M_NOT_FOUND")
+# A read that failed cannot prove the room holds no address, so the write still runs.
+_UNREADABLE = nio.RoomGetStateEventError("Too many requests.", status_code="M_LIMIT_EXCEEDED")
 
 
 @pytest.mark.parametrize(
@@ -116,8 +118,18 @@ def test_content_says_whether_the_entity_has_a_worker_computer(
         ),
         (_state({"api_origin": "http://localhost:8765", "computer": False}), {}, True),
         (_NOT_FOUND, {}, False),
+        (_UNREADABLE, {}, True),
+        (_UNREADABLE, {"api_origin": "http://localhost:8765", "computer": False}, True),
     ],
-    ids=["first-write", "changed", "unchanged", "cleared", "nothing-to-clear"],
+    ids=[
+        "first-write",
+        "changed",
+        "unchanged",
+        "cleared",
+        "nothing-to-clear",
+        "clear-after-failed-read",
+        "write-after-failed-read",
+    ],
 )
 async def test_publish_writes_only_what_the_room_does_not_hold(
     current: nio.Response,

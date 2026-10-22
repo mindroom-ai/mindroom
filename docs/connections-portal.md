@@ -82,7 +82,7 @@ Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongsid
 
 ## Token Binding
 
-MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to `8765`, and `mindroom run --api-port` does not change it.
+MindRoom sends the normalized origin of `MINDROOM_PUBLIC_URL` (lowercase scheme and host, no path, no default port) to the homeserver as the token's audience, or `http://localhost:<MINDROOM_PORT>` when it is unset, the address Chat opens for a backend on the same machine; `MINDROOM_PORT` defaults to the port of `mindroom run --api-port`, `8765` unless changed.
 A homeserver that binds tokens, MindRoom's Tuwunel fork with `mindroom_openid_audience` on, then accepts only tokens Chat requested for that origin, and other homeservers ignore the audience.
 MindRoom never derives the audience from the request, because a replaying backend controls the `Host` header, so on a binding homeserver sign-in fails with 401 when Chat opens another origin than the audience; then set `MINDROOM_PUBLIC_URL` to the origin Chat opens.
 Without binding support tokens are not bound, and a backend that a user points Chat at could replay the token to another deployment on the same homeserver until the token expires.

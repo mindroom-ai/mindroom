@@ -45,8 +45,10 @@ async def publish_server_state(client: nio.AsyncClient, room_id: str, content: d
     user_id = client.user_id
     try:
         current = await client.room_get_state_event(room_id, MINDROOM_SERVER_EVENT_TYPE, user_id)
-        published = current.content if isinstance(current, nio.RoomGetStateEventResponse) else {}
-        if published == content:
+        published = current.content if isinstance(current, nio.RoomGetStateEventResponse) else None
+        absent = isinstance(current, nio.RoomGetStateEventError) and current.status_code == "M_NOT_FOUND"
+        # Only a confirmed state skips the write; after a failed read the write still clears a stale address.
+        if published == content or (absent and not content):
             return
         response = await client.room_put_state(room_id, MINDROOM_SERVER_EVENT_TYPE, content, state_key=user_id)
     except Exception:

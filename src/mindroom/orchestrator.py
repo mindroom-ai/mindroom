@@ -86,6 +86,7 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.origins import with_api_port
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ResponseIdentity
@@ -3162,6 +3163,8 @@ async def main(
     Two runtimes on one storage root would both answer every message and take
     each other's replies over, so the second refuses to start.
     """
+    # Links, OAuth callbacks, the OpenID audience, and the server Chat finds then name the port Chat can reach.
+    runtime_paths = with_api_port(runtime_paths, api_port)
     runtime_lock = try_exclusive_file_lock(tracking_dir(runtime_paths) / "runtime.lock")
     if runtime_lock is None:
         msg = f"Another MindRoom is already running with the storage at {runtime_paths.storage_root}"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -66,6 +67,13 @@ def is_local_origin(origin: str | None) -> bool:
 def local_api_origin(paths: RuntimePaths) -> str:
     """Return MindRoom's own API origin on this machine, which links, callbacks, and token audiences use by default."""
     return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765') or '8765'}"
+
+
+def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
+    """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
+    if (paths.env_value("MINDROOM_PORT") or "").strip():
+        return paths
+    return replace(paths, process_env={**paths.process_env, "MINDROOM_PORT": str(api_port)})
 
 
 def deployment_origin(public_url: str | None, fallback_url: str) -> str | None:

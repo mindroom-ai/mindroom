@@ -2939,6 +2939,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.origins",
     "mindroom.agent_cli.session",
     "mindroom.api.agent_cli",
     "mindroom.approval.manager",
