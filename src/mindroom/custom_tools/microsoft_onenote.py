@@ -37,20 +37,23 @@ _MAX_LISTING = 50
 _MAX_TEXT_CHARACTERS = 30_000
 # Page tokens are item or character offsets, accepted up to this bound.
 _MAX_OFFSET = 2**31 - 1
-_NOTEBOOK_SELECT = "id,displayName,isDefault,isShared,userRole,lastModifiedDateTime"
+_NOTEBOOK_SELECT = "id,displayName,isDefault,isShared,userRole,lastModifiedDateTime,links"
 _SECTION_SELECT = "id,displayName,isDefault,lastModifiedDateTime"
 _PAGE_SELECT = "id,title,createdDateTime,lastModifiedDateTime"
 _HTML_ACCEPT = {"Accept": "text/html"}
 _HTML_CONTENT = {"Content-Type": "text/html; charset=utf-8"}
-_TARGET_MISMATCH = "The target is not in expected_notebook; tell the requester its real notebook before trying again."
+_TARGET_MISMATCH = (
+    "The target's notebook is not at expected_web_url; tell the requester the notebook's real web_url before "
+    "trying again."
+)
 
 
 @dataclass(frozen=True)
 class _Target:
-    """The section or page a write changes and the name of the notebook the call expects it in."""
+    """The section or page a write changes and the web_url of the notebook the call expects it in."""
 
     path: str
-    notebook: str
+    web_url: str
 
 
 @dataclass(frozen=True)
@@ -70,10 +73,13 @@ class _Request:
 
     def send(self, session: GraphSession) -> dict[str, Any]:
         if (target := self.target) is not None:
+            # Graph documents only the id, name, and self link of an expanded parent notebook, so the web link comes
+            # from the notebook itself.
             found = session.json("GET", target.path, params={"$expand": "parentNotebook"})
-            name = (found.get("parentNotebook") or {}).get("displayName") or ""
-            if name.casefold() != target.notebook.casefold():
-                raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, notebook=name)
+            notebook_path = _notebook_path((found.get("parentNotebook") or {}).get("id"))
+            web_url = _web_url(session.json("GET", notebook_path, params={"$select": "links"}))
+            if web_url != target.web_url.strip():
+                raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
         return session.json(
             self.method,
             self.path,
@@ -84,8 +90,17 @@ class _Request:
         )
 
 
+def _notebook_path(notebook_id: object) -> str:
+    return f"/me/onenote/notebooks/{path_segment(notebook_id, 'notebook_id')}"
+
+
 def _page_path(page_id: object) -> str:
     return f"/me/onenote/pages/{path_segment(page_id, 'page_id')}"
+
+
+def _web_url(notebook: Mapping[str, Any]) -> object:
+    """Return a notebook's OneNote on the web link, which names the OneDrive or SharePoint site that holds it."""
+    return ((notebook.get("links") or {}).get("oneNoteWebUrl") or {}).get("href")
 
 
 def _listing(path: str, select: str, limit: int, page_token: object) -> _Request:
@@ -143,6 +158,7 @@ def _notebook(notebook: Mapping[str, Any]) -> dict[str, Any]:
         "is_default": notebook.get("isDefault"),
         "is_shared": notebook.get("isShared"),
         "user_role": notebook.get("userRole"),
+        "web_url": _web_url(notebook),
         "last_modified": notebook.get("lastModifiedDateTime"),
     }
 
@@ -260,7 +276,7 @@ class MicrosoftOneNoteTools(Toolkit):
         """
         return self._send(
             lambda: _listing(
-                f"/me/onenote/notebooks/{path_segment(notebook_id, 'notebook_id')}/sections",
+                f"{_notebook_path(notebook_id)}/sections",
                 _SECTION_SELECT,
                 _MAX_LISTING,
                 page_token,
@@ -312,17 +328,17 @@ class MicrosoftOneNoteTools(Toolkit):
             ),
         )
 
-    def microsoft_onenote_create_page(self, section_id: str, title: str, content: str, expected_notebook: str) -> str:
+    def microsoft_onenote_create_page(self, section_id: str, title: str, content: str, expected_web_url: str) -> str:
         """Create a OneNote page with a title and plain-text content in one section.
 
-        The write fails with target_mismatch unless expected_notebook is the name of the section's notebook. The
+        The write fails with target_mismatch unless expected_web_url is the web_url of the section's notebook. The
         content keeps its line breaks, and any HTML in it shows literally.
 
         Args:
             section_id: The section's id from microsoft_onenote_list_sections.
             title: The page title.
             content: The page text, as plain text; may be empty for a page with only a title.
-            expected_notebook: The name of the section's notebook from microsoft_onenote_list_notebooks; required.
+            expected_web_url: The web_url of the section's notebook from microsoft_onenote_list_notebooks; required.
 
         """
 
@@ -332,7 +348,7 @@ class MicrosoftOneNoteTools(Toolkit):
                 f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title', required=True))}</title></head>"
                 f"<body>{_paragraph(_text(content, 'content', required=False))}</body></html>"
             )
-            target = _Target(section, _text(expected_notebook, "expected_notebook", required=True))
+            target = _Target(section, _text(expected_web_url, "expected_web_url", required=True))
             return _Request(
                 "POST",
                 f"{section}/pages",
@@ -343,16 +359,16 @@ class MicrosoftOneNoteTools(Toolkit):
 
         return self._send(build, lambda _request, payload: {"page": _page(payload)})
 
-    def microsoft_onenote_append_to_page(self, page_id: str, content: str, expected_notebook: str) -> str:
+    def microsoft_onenote_append_to_page(self, page_id: str, content: str, expected_web_url: str) -> str:
         """Append plain text to one OneNote page, as a new paragraph at the end of the page's first block of content.
 
-        The write fails with target_mismatch unless expected_notebook is the name of the page's notebook. The text
+        The write fails with target_mismatch unless expected_web_url is the web_url of the page's notebook. The text
         keeps its line breaks, and any HTML in it shows literally.
 
         Args:
             page_id: The page's id from microsoft_onenote_list_pages.
             content: The text to add, as plain text.
-            expected_notebook: The name of the page's notebook from microsoft_onenote_list_notebooks; required.
+            expected_web_url: The web_url of the page's notebook from microsoft_onenote_list_notebooks; required.
 
         """
 
@@ -363,7 +379,7 @@ class MicrosoftOneNoteTools(Toolkit):
                 "action": "append",
                 "content": _paragraph(_text(content, "content", required=True)),
             }
-            target = _Target(page, _text(expected_notebook, "expected_notebook", required=True))
+            target = _Target(page, _text(expected_web_url, "expected_web_url", required=True))
             return _Request("PATCH", f"{page}/content", body=[change], target=target)
 
         return self._send(build, lambda _request, _payload: {"appended": {"page_id": page_id}})
