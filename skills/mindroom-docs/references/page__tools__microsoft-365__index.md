@@ -214,7 +214,7 @@ Reading needs at least read access to that calendar and writing needs edit or de
 Calendar IDs, event IDs, and page tokens from such a call belong to that person's mailbox, so follow-up calls pass the same `calendar_owner`, and a page token from another mailbox fails with `invalid_page_token`.
 A calendar shared with the requester can also appear in their own calendar list, with that person as owner, and its ID works without `calendar_owner`.
 On another person's calendar, that person organizes a new event, and Outlook sends its invitations, updates, and cancellations in that person's name, sent by the requester on their behalf.
-A call with `calendar_owner` shows it on its approval card and repeats it in its result.
+A call with `calendar_owner` shows it on its approval card and repeats it in every result, errors included.
 Responding to invitations covers only the requester's own invitations, and free/busy already looks up other people.
 `Calendars.ReadWrite.Shared` needs no administrator consent; calendar connections made before the tool requested it lack it, so each requester reconnects once.
 

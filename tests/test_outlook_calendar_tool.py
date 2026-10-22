@@ -1023,7 +1023,7 @@ def _owner_call(tools: OutlookCalendarTools, name: str, owner: object, **extra: 
         "outlook_calendar_update_event": {"event_id": EVENT_ID, "subject": "Moved"},
         "outlook_calendar_delete_event": {"event_id": EVENT_ID},
     }
-    return _payload(getattr(tools, name)(**arguments[name], calendar_owner=owner, **extra))
+    return _payload(getattr(tools, name)(**{**arguments[name], **extra}, calendar_owner=owner))
 
 
 def test_only_the_calendar_functions_take_a_calendar_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1267,6 +1267,7 @@ def test_create_event_on_the_owners_calendar_without_a_meeting_provider_sends_no
     result = _owner_call(tools, "outlook_calendar_create_event", OWNER, is_online_meeting=True)
 
     assert result["code"] == "online_meeting_unavailable"
+    assert result["calendar_owner"] == OWNER
     assert [(request.method, request.url.path) for request in graph.requests] == [
         ("GET", f"/v1.0/users/{OWNER}/calendar"),
     ]
@@ -1286,6 +1287,7 @@ def test_update_event_checks_the_owners_event_before_replacing_its_body(
     result = _payload(tools.outlook_calendar_update_event(EVENT_ID, body="New agenda", calendar_owner=OWNER))
 
     assert result["code"] == "online_meeting_body"
+    assert result["calendar_owner"] == OWNER
     assert [(request.method, request.url.path) for request in graph.requests] == [("GET", f"/v1.0{event_path}")]
 
 
@@ -1353,6 +1355,33 @@ def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
 
     assert result["code"] == "invalid_argument"
     assert result["message"] == "calendar_owner must be an email address or sign-in name, such as kim@contoso.com."
+    assert "calendar_owner" not in result
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "bad"),
+    [
+        ("outlook_calendar_list_calendars", {"page_token": "/me/messages?$top=1"}),
+        ("outlook_calendar_list_events", {"limit": 0}),
+        ("outlook_calendar_get_event", {"event_id": "a/b"}),
+        ("outlook_calendar_create_event", {"attendees": ["not-an-email"]}),
+        ("outlook_calendar_update_event", {"event_id": "a/b"}),
+        ("outlook_calendar_delete_event", {"event_id": "a/b"}),
+    ],
+)
+def test_a_refused_call_with_a_calendar_owner_names_the_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    bad: dict[str, object],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = _owner_call(tools, name, OWNER, **bad)
+
+    assert result["code"] in {"invalid_argument", "invalid_page_token"}
+    assert result["calendar_owner"] == OWNER
     assert graph.requests == []
 
 
@@ -1370,3 +1399,5 @@ def test_a_calendar_that_is_not_shared_reports_graphs_refusal(tmp_path: Path, mo
     result = _owner_call(tools, "outlook_calendar_list_events", OWNER)
 
     assert (result["code"], result["graph_code"]) == ("forbidden", "ErrorAccessDenied")
+    assert result["graph_message"] == "Access is denied. Check credentials and try again."
+    assert result["calendar_owner"] == OWNER

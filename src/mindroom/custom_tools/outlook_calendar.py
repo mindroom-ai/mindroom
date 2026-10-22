@@ -276,12 +276,6 @@ def _next_page(payload: Mapping[str, Any], owner: object) -> str | None:
     return _mailbox(owner) + token[link_mailbox.end() :]
 
 
-def _owned(fields: dict[str, Any], owner: object) -> dict[str, Any]:
-    """Add the calendar owner a call named to its result."""
-    address = _owner(owner)
-    return fields if address is None else {**fields, "calendar_owner": address}
-
-
 def _dict(value: object) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
@@ -496,23 +490,37 @@ class OutlookCalendarTools(Toolkit):
         render: Callable[[dict[str, Any]], Mapping[str, object]],
         *,
         prepare: _Prepare | None = None,
+        owner: object = None,
     ) -> str:
-        """Refuse malformed arguments before any request, then send the request and render its answer."""
+        """Refuse malformed arguments before any request, then send the request and render its answer.
+
+        Every result of a call that names a calendar owner, errors included, repeats that owner.
+        """
+        try:
+            address = _owner(owner)
+        except MicrosoftGraphError as exc:
+            return graph_error_payload(_TOOL_NAME, exc)
+        named = {} if address is None else {"calendar_owner": address}
         try:
             request = build()
         except MicrosoftGraphError as exc:
+            exc.details.update(named)
             return graph_error_payload(_TOOL_NAME, exc)
 
         def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                prepared = request if prepare is None else prepare(session, request)
-                return render(prepared.send(session))
+            try:
+                with graph_session(
+                    self._provider,
+                    self._runtime_paths,
+                    self._credentials_manager,
+                    self._worker_target,
+                    self._config,
+                ) as session:
+                    prepared = request if prepare is None else prepare(session, request)
+                    return {**render(prepared.send(session)), **named}
+            except MicrosoftGraphError as exc:
+                exc.details.update(named)
+                raise
 
         return graph_tool_result(_TOOL_NAME, run)
 
@@ -548,13 +556,11 @@ class OutlookCalendarTools(Toolkit):
 
         return self._send(
             build,
-            lambda payload: _owned(
-                {
-                    "calendars": [_calendar(calendar) for calendar in _records(payload)],
-                    "next_page_token": _next_page(payload, calendar_owner),
-                },
-                calendar_owner,
-            ),
+            lambda payload: {
+                "calendars": [_calendar(calendar) for calendar in _records(payload)],
+                "next_page_token": _next_page(payload, calendar_owner),
+            },
+            owner=calendar_owner,
         )
 
     def outlook_calendar_list_events(
@@ -605,13 +611,11 @@ class OutlookCalendarTools(Toolkit):
 
         return self._send(
             build,
-            lambda payload: _owned(
-                {
-                    "events": [_event(event) for event in _records(payload)],
-                    "next_page_token": _next_page(payload, calendar_owner),
-                },
-                calendar_owner,
-            ),
+            lambda payload: {
+                "events": [_event(event) for event in _records(payload)],
+                "next_page_token": _next_page(payload, calendar_owner),
+            },
+            owner=calendar_owner,
         )
 
     def outlook_calendar_get_event(self, event_id: str, calendar_owner: str | None = None) -> str:
@@ -633,7 +637,8 @@ class OutlookCalendarTools(Toolkit):
                 params={"$select": f"{_EVENT_SELECT},body"},
                 prefer=_TEXT,
             ),
-            lambda payload: _owned({"event": _event_with_body(payload)}, calendar_owner),
+            lambda payload: {"event": _event_with_body(payload)},
+            owner=calendar_owner,
         )
 
     def outlook_calendar_get_free_busy(
@@ -753,8 +758,9 @@ class OutlookCalendarTools(Toolkit):
 
         return self._send(
             build,
-            lambda payload: _owned({"event": _event(payload)}, calendar_owner),
+            lambda payload: {"event": _event(payload)},
             prepare=_add_online_meeting_provider(calendar, calendar_owner) if is_online_meeting is True else None,
+            owner=calendar_owner,
         )
 
     def outlook_calendar_update_event(
@@ -805,8 +811,9 @@ class OutlookCalendarTools(Toolkit):
 
         return self._send(
             build,
-            lambda payload: _owned({"event": _event(payload)}, calendar_owner),
+            lambda payload: {"event": _event(payload)},
             prepare=None if body is None else _refuse_online_meeting_body(event_id, calendar_owner),
+            owner=calendar_owner,
         )
 
     def outlook_calendar_delete_event(self, event_id: str, calendar_owner: str | None = None) -> str:
@@ -828,7 +835,8 @@ class OutlookCalendarTools(Toolkit):
         """
         return self._send(
             lambda: _GraphRequest("DELETE", _event_path(event_id, calendar_owner)),
-            lambda _payload: _owned({"deleted": True, "event_id": event_id}, calendar_owner),
+            lambda _payload: {"deleted": True, "event_id": event_id},
+            owner=calendar_owner,
         )
 
     def outlook_calendar_respond_to_event(
