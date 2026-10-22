@@ -12,6 +12,7 @@ import yaml
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
+from mindroom.api import egress_broker as egress_broker_api
 from mindroom.api import egress_status, oauth
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import EgressService
@@ -35,6 +36,8 @@ from tests.api.test_egress_credentials_api import (
     _oauth_block,
     _oauth_services,
     _use_fake_oauth_providers,
+    require_concurrent_calls,
+    track_concurrent_calls,
 )
 
 if TYPE_CHECKING:
@@ -1100,3 +1103,25 @@ def test_key_status_is_read_off_the_event_loop(
     assert oauth_broker_client.get("/api/egress-broker/services").status_code == 200
     assert on_loop
     assert not any(on_loop)
+
+
+def test_services_load_every_status_at_once(oauth_broker_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like the personal listing, the panel loads its services concurrently instead of one hop after another."""
+    started = require_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status", expected=4)
+    response = oauth_broker_client.get("/api/egress-broker/services")
+    assert response.status_code == 200, response.text
+    assert [service["name"] for service in response.json()["services"]] == ["drive", "gh", "ghost", "github"]
+    assert sorted(started) == ["drive", "gh", "ghost", "github"]
+
+
+def test_services_load_at_most_the_status_load_limit_at_once(
+    oauth_broker_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The panel shares the personal listing's limit on service status loads running at once."""
+    monkeypatch.setattr(egress_status, "_STATUS_LOAD_LIMIT", 2)
+    counts = track_concurrent_calls(monkeypatch, egress_broker_api, "egress_service_status")
+    response = oauth_broker_client.get("/api/egress-broker/services")
+    assert response.status_code == 200, response.text
+    assert [service["name"] for service in response.json()["services"]] == ["drive", "gh", "ghost", "github"]
+    assert counts == [0, 2]

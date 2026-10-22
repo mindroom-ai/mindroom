@@ -882,11 +882,15 @@ def oauth_credentials_usable(
     now: float | None = None,
     scope_validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
-    """Return whether stored OAuth credentials can currently authenticate provider calls."""
-    client_config = provider.client_config(runtime_paths)
-    if not credentials or client_config is None:
+    """Return whether stored OAuth credentials can currently authenticate provider calls.
+
+    Without credentials it reads nothing: the client config is a credential file read, which listings of many scopes
+    that never connected would otherwise repeat on the event loop.
+    """
+    if not credentials:
         return False
-    if not oauth_credentials_match_client_id(client_config, credentials):
+    client_config = provider.client_config(runtime_paths)
+    if client_config is None or not oauth_credentials_match_client_id(client_config, credentials):
         return False
     if not (
         scope_validator(credentials)

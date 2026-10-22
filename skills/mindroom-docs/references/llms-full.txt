@@ -6793,6 +6793,7 @@ It applies only when MindRoom creates the room, and never joins someone who alre
 
 An onboarding failure affects only that human, and the onboarding room keeps working for everyone else.
 Failed onboarding is retried automatically, first after 30 seconds and then at doubling intervals up to one hour, and a config reload retries it immediately.
+A personal room that fails its ownership or membership checks keeps retrying only while its reconciliation is still failing; otherwise it is checked again on restart or config reload.
 A join or command that arrives before the personal-room agent connects is handled once it does.
 Revoking the human's access to the agent, or disabling `personal_rooms`, cancels a welcome that has not been sent yet.
 
