@@ -2318,6 +2318,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
 A model with any other key fails to load with an `Unsupported extra_kwargs` error that names the unknown keys and lists the accepted ones.
+Retired Agno model settings that older configs still set, such as `retries`, load with a warning and are ignored.
 
 - `base_url` sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
