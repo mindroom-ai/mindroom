@@ -484,6 +484,9 @@ def shorten_gil_switch_interval() -> None:
     a switch interval to get it back, so a callback with tens of such calls
     stalled for hundreds of milliseconds. A shorter interval makes those waits
     shorter; it does not help while another thread is inside one long C call.
+    The 2026-09-07 startup trial in ``docs/dev/2026-09-07-ledger-write-ownership.md``
+    saw no gain because its reply times were dominated by model output and few
+    threads were runnable; it did not measure steady-state loop latency.
     """
     sys.setswitchinterval(_GIL_SWITCH_INTERVAL_SECONDS)
     logger.info("gil_switch_interval_set", interval_seconds=_GIL_SWITCH_INTERVAL_SECONDS)

@@ -642,6 +642,7 @@ class TestAgentBot(AgentBotTestBase):
     async def test_orchestrator_main_reraises_permanent_startup_error(self, tmp_path: Path) -> None:
         """Permanent startup errors should stop the process and surface the failure."""
         reset_runtime_state()
+        sys.setswitchinterval(0.005)
         blocking_event = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
@@ -662,6 +663,8 @@ class TestAgentBot(AgentBotTestBase):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
         mock_orchestrator.stop.assert_awaited_once()
+        # Startup shortens the GIL switch interval before the orchestrator starts.
+        assert sys.getswitchinterval() == pytest.approx(0.001)
         state = get_runtime_state()
         assert state.phase == "idle"
         assert state.detail is None
