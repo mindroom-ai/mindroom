@@ -43,7 +43,9 @@ _KIMI_HOME = "<kimi_home>"
 _TOKEN_EXPIRY = 4102444800
 
 
-def _unsigned_jwt(claims: dict[str, Any]) -> str:
+def unsigned_jwt(claims: dict[str, Any]) -> str:
+    """Return an unsigned JWT carrying ``claims``, the shape the Codex CLI's access token has."""
+
     def encode(part: dict[str, Any]) -> str:
         return base64.urlsafe_b64encode(json.dumps(part).encode()).rstrip(b"=").decode()
 
@@ -59,7 +61,7 @@ def write_cli_logins(root: Path) -> dict[str, str]:
             {
                 "auth_mode": "chatgpt",
                 "tokens": {
-                    "access_token": _unsigned_jwt({"exp": _TOKEN_EXPIRY}),
+                    "access_token": unsigned_jwt({"exp": _TOKEN_EXPIRY}),
                     "refresh_token": "parity-refresh-token",
                     "account_id": "parity-account",
                 },

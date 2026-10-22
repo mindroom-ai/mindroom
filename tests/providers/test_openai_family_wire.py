@@ -36,7 +36,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
-from tests.providers.openai_family_support import golden_provider
+from tests.providers.openai_family_support import golden_provider, unsigned_jwt
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -648,8 +648,7 @@ async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path
     """A ChatGPT login without an account id still works; the account header is simply left out."""
     codex_home = tmp_path / "login"
     codex_home.mkdir()
-    claims = base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=")
-    tokens = {"access_token": f"header.{claims}.signature", "refresh_token": "refresh-value"}
+    tokens = {"access_token": unsigned_jwt({"exp": 4102444800}), "refresh_token": "refresh-value"}
     (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}), encoding="utf-8")
     model_config = {"provider": "codex", "id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": str(codex_home)}}
     built = _Built(tmp_path, model_config, _responses_reply(*_text_events("ok"), _completed()))
@@ -1224,7 +1223,7 @@ class _Extraction(BaseModel):
 
 @pytest.mark.asyncio
 async def test_cerebras_structured_output_closes_every_object(tmp_path: Path) -> None:
-    """Cerebras accepts a JSON schema only when every object, the nested models included, is closed."""
+    """Cerebras accepts a JSON schema only when every object, the nested models under ``$defs`` included, is closed."""
     built = _Built(
         tmp_path,
         {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "k"},

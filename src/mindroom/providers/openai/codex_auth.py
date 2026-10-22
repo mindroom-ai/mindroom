@@ -160,10 +160,14 @@ def _refresh_codex_tokens(refresh_token: str) -> dict[str, Any]:
         raise CodexAuthError(msg) from None
 
     try:
-        return response.json()
+        refreshed = response.json()
     except json.JSONDecodeError as exc:
         msg = "Codex token refresh returned invalid JSON."
         raise CodexAuthError(msg) from exc
+    if not isinstance(refreshed, dict):
+        msg = "Codex token refresh returned an unexpected payload."
+        raise CodexAuthError(msg)
+    return refreshed
 
 
 def _refresh_error_code(error_body: str) -> str | None:
@@ -171,7 +175,7 @@ def _refresh_error_code(error_body: str) -> str | None:
         error = json.loads(error_body)
     except json.JSONDecodeError:
         return None
-    code = error.get("error")
+    code = error.get("error") if isinstance(error, dict) else None
     return code if isinstance(code, str) else None
 
 
