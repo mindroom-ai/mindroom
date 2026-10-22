@@ -1393,25 +1393,23 @@ describe("shared accounts on agent cards", () => {
   });
 
   describe("naming who manages a shared agent", () => {
-    const egressRow = (changes: Partial<EgressCredentialService> = {}) =>
-      credentialService({
-        name: "openai",
-        display_name: "OpenAI",
-        description: "OpenAI API",
-        is_shared: true,
-        can_manage: false,
-        configured: true,
-        active_source: "key",
-        key_configured: true,
-        ...changes,
-      });
+    const egressRow = credentialService({
+      name: "openai",
+      display_name: "OpenAI",
+      description: "OpenAI API",
+      is_shared: true,
+      can_manage: false,
+      configured: true,
+      active_source: "key",
+      key_configured: true,
+    });
     const catalogWith = (
       agent: Record<string, unknown>,
       serviceChanges: Record<string, unknown> = {},
     ) => ({
       agents: [
         {
-          ...sharedCatalog([egressRow()]).agents[0],
+          ...sharedCatalog([egressRow]).agents[0],
           ...agent,
           services: [{ ...service, is_shared: true, ...serviceChanges }],
         },

@@ -49,13 +49,11 @@ export interface ServiceEditing {
 
 /** Whether a service or limit gets its edit actions: it has the `editableSource` and the viewer manages it. */
 export function canEdit(
-  editing: ServiceEditing | undefined,
+  editing: ServiceEditing,
   service: EgressCredentialService | null,
-): editing is ServiceEditing {
+): boolean {
   return (
-    editing !== undefined &&
-    service?.can_manage === true &&
-    service.source === editing.editableSource
+    service?.can_manage === true && service.source === editing.editableSource
   );
 }
 

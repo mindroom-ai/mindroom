@@ -24,7 +24,7 @@ import type { EgressCredentialService } from "./types";
 export function useLimitActions(
   limit: EgressCredentialService | null,
   label: string,
-  serviceEditing: ServiceEditing | undefined,
+  serviceEditing: ServiceEditing,
   onError: (message: string | null) => void,
 ) {
   const [confirming, setConfirming] = useState(false);
@@ -89,7 +89,7 @@ export function LimitRow({
   serviceEditing,
 }: {
   service: EgressCredentialService;
-  serviceEditing?: ServiceEditing;
+  serviceEditing: ServiceEditing;
 }) {
   const [error, setError] = useState<string | null>(null);
   const limitActions = useLimitActions(

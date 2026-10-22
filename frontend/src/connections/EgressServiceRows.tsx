@@ -109,7 +109,7 @@ export function EgressServiceRows({
   /** Wording for 403 and 404 responses outside the Connections portal. */
   errorMessages?: RequestErrorMessages;
   /** Edit and delete controls for the services the viewer defines. */
-  serviceEditing?: ServiceEditing;
+  serviceEditing: ServiceEditing;
   /** The agent the rows belong to, for the wording that depends on it. */
   agent: RowAgent;
   /** Leaves out what sets, removes, or connects a key or account, for rows no agent uses. */

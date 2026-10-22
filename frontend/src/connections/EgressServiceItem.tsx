@@ -61,7 +61,7 @@ export function EgressServiceItem({
   service: EgressCredentialService;
   onChanged: () => void;
   errorMessages?: RequestErrorMessages;
-  serviceEditing?: ServiceEditing;
+  serviceEditing: ServiceEditing;
   agent: RowAgent;
   hideKeyActions: boolean;
 }) {
@@ -103,7 +103,7 @@ export function EgressServiceItem({
   // A service that already has a limit changes or removes it instead of getting another.
   const canLimit =
     limit === null &&
-    serviceEditing?.onLimitToRepositories !== undefined &&
+    serviceEditing.onLimitToRepositories !== undefined &&
     service.source === "config" &&
     service.can_manage &&
     coversGithub(service.rules);
@@ -174,7 +174,7 @@ export function EgressServiceItem({
     setBusy("delete");
     setError(null);
     try {
-      await serviceEditing?.onDelete(service);
+      await serviceEditing.onDelete(service);
     } catch (cause) {
       setError(errorText(cause, "Could not delete the service. Try again."));
     } finally {
@@ -239,7 +239,7 @@ export function EgressServiceItem({
           },
         ]
       : []),
-    ...(canLimit && serviceEditing?.onLimitToRepositories
+    ...(canLimit && serviceEditing.onLimitToRepositories
       ? [
           {
             label: "Limit to repositories",

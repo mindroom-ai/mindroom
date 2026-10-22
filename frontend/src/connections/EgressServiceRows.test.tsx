@@ -32,17 +32,19 @@ import type {
 type RowsProps =
   ComponentProps<typeof Rows> extends infer P
     ? P extends { agentName?: infer Name }
-      ? Omit<P, "agent" | "agentName" | "onChanged"> & {
+      ? Omit<P, "agent" | "agentName" | "onChanged" | "serviceEditing"> & {
           agent?: RowAgent;
           agentName?: Name;
           onChanged?: () => void;
+          serviceEditing?: ServiceEditing;
         }
       : never
     : never;
 
 /**
  * The rows as a page renders them: for the agent "personal", whose rows say
- * Personal Mind, unless a test passes another target or agent.
+ * Personal Mind, with the user's own services editable, unless a test passes
+ * another target, agent, or service editing.
  */
 function EgressServiceRows({ onChanged = vi.fn(), ...props }: RowsProps) {
   const agent = props.agent ?? {
@@ -57,6 +59,7 @@ function EgressServiceRows({ onChanged = vi.fn(), ...props }: RowsProps) {
         {...(target as ComponentProps<typeof Rows>)}
         onChanged={onChanged}
         agent={agent}
+        serviceEditing={props.serviceEditing ?? editing()}
       />
     </EgressServiceTable>
   );
@@ -841,11 +844,6 @@ describe("egress service rows with service editing", () => {
 
   it("hides Edit and Delete from someone who cannot manage the service", async () => {
     renderRows([{ ...mine, can_manage: false }], { serviceEditing: editing() });
-    await expectNoAction(/Edit|Delete/);
-  });
-
-  it("offers nothing without service editing", async () => {
-    renderRows([mine]);
     await expectNoAction(/Edit|Delete/);
   });
 
