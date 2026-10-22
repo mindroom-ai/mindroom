@@ -2,6 +2,7 @@
 
 These fixtures pin what MindRoom sent and stored while Agno 3.0.9 ran it, so the owned runtime can prove it changes no persisted data and no model-visible bytes (`docs/dev/2026-10-20-replace-agno-design.md`).
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime, so no golden can be captured again; the owned code's parity tests read them.
+The tool goldens are the exception: `tests.agno_parity.regenerate_tool_goldens` rewrites them from the owned toolkit adapter, so a deliberate tool change regenerates them instead of editing them by hand.
 A deliberate change to model-visible bytes or a provider request edits its golden by hand in the same commit; the storage, run, history, and codec goldens hold data Agno wrote and never change.
 
 ## Provider wire goldens (`providers/`)
@@ -146,6 +147,7 @@ Agent scenarios set `learning: false`, because Agno Learning is retired with Agn
 
 `tools/schemas.json`, `tools/schemas_all_enabled.json`, and `tools/arguments.json` were captured from Agno 3.0.9's tool preparation and tool-call handling.
 `tests/tool_system/test_agno_toolkits.py` compares every adapted toolkit with the two schema files, and `tests/tool_system/test_tool_invocation.py` runs every argument case through the owned tool-call execution.
+After a deliberate change to a tool's functions, schema, flags, or instructions, run `.venv/bin/python -m tests.agno_parity.regenerate_tool_goldens` from the repository root with every extra installed and commit the rewritten files with the change; it builds and normalizes the entries through the same support functions the tests compare with, so an unchanged tool reproduces its entry byte for byte.
 All three are pretty JSON.
 The schema files list tools in sorted order and keep every other key in the order providers receive it, such as `parameters` as `type`, `properties`, `required`, with properties in signature order; the test compares serialized bytes, so a reordered key fails parity.
 `arguments.json` has sorted keys and is compared by value.

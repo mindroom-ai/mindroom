@@ -32,49 +32,21 @@ SCHEMAS = json.loads(support.SCHEMAS_PATH.read_text(encoding="utf-8"))
 ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
 
 
-def expected_entry(golden: dict[str, Any]) -> dict[str, object]:
-    """Return a golden entry as the adapter reports it: instructions only when Agno adds them.
-
-    Each function keeps every recorded field but ``show_result``, which the owned loop does not read.
-    """
-    return {
-        "instructions": golden["instructions"] if golden["add_instructions"] else None,
-        "functions": [
-            {key: value for key, value in function.items() if key != "show_result"} for function in golden["functions"]
-        ],
-    }
-
-
-def adapted_entry(adapted: AdaptedToolkit) -> object:
-    """Return the golden-recorded fields an adapted toolkit carries, in the golden's key order."""
-    return support.normalize_version(
-        {
-            "instructions": adapted.instructions,
-            "functions": [
-                {
-                    "name": function.name,
-                    "description": function.description,
-                    "parameters": function.parameters,
-                    "strict": function.strict,
-                    "requires_confirmation": function.requires_confirmation,
-                    "external_execution": function.external_execution,
-                    "approval_type": function.approval_type,
-                    "stop_after_tool_call": function.stop_after_tool_call,
-                }
-                for function in adapted.functions
-            ],
-        },
-    )
-
-
 def assert_same_json(actual: object, golden: object) -> None:
     """Compare values and key order, because providers receive schemas as serialized bytes."""
     assert json.dumps(actual, indent=2) == json.dumps(golden, indent=2)
 
 
+def assert_instructions_as_golden(toolkit: Toolkit, adapted: AdaptedToolkit, golden: dict[str, Any]) -> None:
+    """The adapter carries the toolkit's instructions only when Agno added them, and no function sets its own."""
+    expected = golden["instructions"] if golden["add_instructions"] else None
+    assert support.normalize_version(adapted.instructions) == expected
+    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+
+
 @pytest.fixture(scope="module")
 def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Config, RuntimePaths]:
-    """Build the capture runtime once per worker."""
+    """Build the golden runtime once per worker."""
     root = tmp_path_factory.mktemp("tool-golden").resolve()
     with support.isolated_process(root):
         config, runtime_paths = support.golden_runtime(root)
@@ -91,11 +63,8 @@ def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path,
         toolkit = support.build_toolkit(tool_name, config, runtime_paths)
         adapted = adapt_toolkit(toolkit)
     assert adapted.name == toolkit.name
-    assert_same_json(adapted_entry(adapted), expected_entry(SCHEMAS[tool_name]))
-    # The adapter carries only toolkit instructions, so no registered function may set instructions of its own.
-    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
-    # The owned loop never echoes a tool result, so a function that sets show_result asks for nothing.
-    assert not any(function.show_result for function in toolkit.get_async_functions().values())
+    assert_same_json(support.golden_entry(toolkit, adapted), SCHEMAS[tool_name])
+    assert_instructions_as_golden(toolkit, adapted, SCHEMAS[tool_name])
 
 
 @pytest.mark.parametrize("tool_name", sorted(ALL_ENABLED_SCHEMAS))
@@ -109,12 +78,11 @@ def test_adapted_all_enabled_tool_matches_golden(
     with support.isolated_process(root):
         if (missing := support.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")
-        assert support.all_enabled_overrides(tool_name) == golden["overrides"]
-        toolkit = support.build_toolkit(tool_name, config, runtime_paths, golden["overrides"])
+        overrides = support.all_enabled_overrides(tool_name)
+        toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
         adapted = adapt_toolkit(toolkit)
-    assert_same_json(adapted_entry(adapted), expected_entry(golden))
-    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
-    assert not any(function.show_result for function in toolkit.get_async_functions().values())
+    assert_same_json({"overrides": overrides, **support.golden_entry(toolkit, adapted)}, golden)
+    assert_instructions_as_golden(toolkit, adapted, golden)
 
 
 def test_adapting_leaves_the_shared_function_untouched() -> None:
