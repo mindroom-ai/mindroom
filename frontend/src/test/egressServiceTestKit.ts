@@ -159,3 +159,121 @@ export async function pressInDialog(name: string) {
     within(await screen.findByRole("dialog")).getByRole("button", { name }),
   );
 }
+
+/** Opens a row's ⋯ menu from its button, closing any other menu first, and returns the open menu. */
+async function openMenu(trigger: HTMLElement) {
+  for (const menu of screen.queryAllByRole("menu"))
+    if (menu.getAttribute("aria-labelledby") !== trigger.id)
+      fireEvent.keyDown(menu, { key: "Escape" });
+  if (trigger.getAttribute("aria-expanded") !== "true")
+    fireEvent.keyDown(trigger, { key: "Enter" });
+  return within(
+    await screen.findByRole("menu", {
+      name: trigger.getAttribute("aria-label") ?? "",
+    }),
+  );
+}
+
+const closeMenus = () => {
+  for (const menu of screen.queryAllByRole("menu"))
+    fireEvent.keyDown(menu, { key: "Escape" });
+};
+
+/**
+ * Opens the ⋯ menu of the service row named `service`, once it is shown, and
+ * returns it. `scope` picks the row when several tables have one with that name.
+ */
+export async function openRowMenu(
+  service: string,
+  scope: HTMLElement = document.body,
+) {
+  return openMenu(
+    await within(scope).findByRole("button", {
+      name: `More actions for ${service}`,
+    }),
+  );
+}
+
+/**
+ * The item of a row's ⋯ menu that an action such as "Edit service for GitHub"
+ * names, with that menu open.
+ */
+export async function rowAction(
+  action: string,
+  scope: HTMLElement = document.body,
+) {
+  const service = action.slice(action.lastIndexOf(" for ") + " for ".length);
+  return (await openRowMenu(service, scope)).getByRole("menuitem", {
+    name: action,
+  });
+}
+
+/** The names of a row's ⋯ menu items, in order; none when the row has no menu. */
+export async function rowActions(
+  service: string,
+  scope: HTMLElement = document.body,
+) {
+  const trigger = within(scope).queryByRole("button", {
+    name: `More actions for ${service}`,
+  });
+  if (!trigger) return [];
+  const names = (await openMenu(trigger))
+    .getAllByRole("menuitem")
+    .map((item) => item.getAttribute("aria-label") ?? "");
+  closeMenus();
+  return names;
+}
+
+/**
+ * A row's actions in order, its buttons and then its ⋯ menu items, each with
+ * its visible text and accessible name.
+ */
+export async function rowControls(
+  service: string,
+  scope: HTMLElement = document.body,
+) {
+  const row = within(scope).getByRole("row", { name: service });
+  const control = (element: HTMLElement) => ({
+    text: element.textContent ?? "",
+    name: element.getAttribute("aria-label") ?? element.textContent ?? "",
+  });
+  const trigger = within(row).queryByRole("button", {
+    name: `More actions for ${service}`,
+  });
+  const controls = within(row)
+    .queryAllByRole("button")
+    .filter((button) => button !== trigger)
+    .map(control);
+  if (trigger) {
+    controls.push(
+      ...(await openMenu(trigger)).getAllByRole("menuitem").map(control),
+    );
+    closeMenus();
+  }
+  return controls;
+}
+
+/** Asserts that no button in `scope`, and no item of any ⋯ menu there, matches `name`. */
+export async function expectNoAction(
+  name: RegExp | string,
+  scope: HTMLElement = document.body,
+) {
+  expect(within(scope).queryByRole("button", { name })).toBeNull();
+  const matches = (label: string) =>
+    typeof name === "string" ? label === name : name.test(label);
+  for (const trigger of within(scope).queryAllByRole("button", {
+    name: /^More actions for /,
+  })) {
+    const names = (await openMenu(trigger))
+      .getAllByRole("menuitem")
+      .map((item) => item.getAttribute("aria-label") ?? "");
+    closeMenus();
+    expect(names.filter(matches)).toEqual([]);
+  }
+}
+
+/** Matches the element whose text, split over several elements such as code, reads `text`. */
+export const wholeText =
+  (text: string) => (_content: string, element: Element | null) =>
+    element?.textContent === text &&
+    ![...element.children].some((child) => child.textContent === text);

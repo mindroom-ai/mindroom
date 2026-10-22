@@ -6,7 +6,6 @@ import { Input } from "@/components/ui/input";
 import { disconnectDescription } from "./accountCopy";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
-  agentSeesNote,
   canEdit,
   limitedNote,
   limitOverlap,
@@ -19,9 +18,16 @@ import {
   sharesAccount,
   unsetNote,
 } from "./egressRowText";
-import { LimitActions } from "./EgressLimitRows";
+import { BusyNote, useLimitActions } from "./EgressLimitRows";
 import { ServiceStatus } from "./EgressServiceStatus";
-import { SERVICE_CELL, SERVICE_ROW, ServiceHosts } from "./EgressServiceTable";
+import {
+  AgentSees,
+  type RowAction,
+  RowActionsMenu,
+  SERVICE_CELL,
+  SERVICE_ROW,
+  ServiceHosts,
+} from "./EgressServiceTable";
 import { coversGithub } from "./githubLimits";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import {
@@ -104,8 +110,13 @@ export function EgressServiceItem({
   // Everyone using a shared agent acts as the account connected there.
   const asksAboutSharedAccount = sharesAccount(agent, oauth);
   const limitedText = limitedNote(service);
-  const seesText = agentSeesNote(service);
   const unsetText = unsetNote(service);
+  const limitActions = useLimitActions(
+    limit,
+    service.display_name,
+    serviceEditing,
+    setError,
+  );
 
   useEffect(() => () => operation.current?.abort(), []);
 
@@ -192,6 +203,100 @@ export function EgressServiceItem({
     );
   };
 
+  const name = service.display_name;
+  // Connecting reads the saved connection first, so an unreadable one needs a reset before.
+  const canConnect =
+    oauth !== null &&
+    !hideKeyActions &&
+    oauth.can_connect &&
+    !oauth.connected &&
+    !oauth.reset_required;
+  const keyActions = canManageKey && service.key_configured && !editing;
+  const editable = canEdit(serviceEditing, service);
+  // Everything but the action that makes the service work, which is a button of its own.
+  const actions: RowAction[] = [
+    ...(oauth && canManageKey && !showKeyControls
+      ? [
+          {
+            label: keyInsteadLabel,
+            ariaLabel: `${keyInsteadLabel} for ${name}`,
+            onSelect: openKeyForm,
+          },
+        ]
+      : []),
+    ...(keyActions
+      ? [
+          {
+            label: "Replace key",
+            ariaLabel: `Replace key for ${name}`,
+            onSelect: openKeyForm,
+          },
+        ]
+      : []),
+    ...(canLimit && serviceEditing?.onLimitToRepositories
+      ? [
+          {
+            label: "Limit to repositories",
+            ariaLabel: `Limit to repositories for ${name}`,
+            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
+            onSelect: () => serviceEditing.onLimitToRepositories?.(service),
+          },
+        ]
+      : []),
+    ...limitActions.actions,
+    ...(editable
+      ? [
+          {
+            label: "Edit service",
+            ariaLabel: `Edit service for ${name}`,
+            disabled:
+              serviceEditing.disabled ||
+              serviceEditing.editingName === service.name,
+            onSelect: () => serviceEditing.onEdit(service),
+          },
+        ]
+      : []),
+    ...(keyActions
+      ? [
+          {
+            label: "Remove key",
+            ariaLabel: `Remove key for ${name}`,
+            destructive: true,
+            onSelect: () => setConfirm("key"),
+          },
+        ]
+      : []),
+    ...(oauth?.connected && canResetAccount
+      ? [
+          {
+            label: "Disconnect",
+            ariaLabel: `Disconnect for ${name}`,
+            destructive: true,
+            onSelect: () => setConfirm("account"),
+          },
+        ]
+      : []),
+    ...(editable
+      ? [
+          {
+            label: "Delete service",
+            ariaLabel: `Delete service for ${name}`,
+            disabled: serviceEditing.disabled,
+            destructive: true,
+            onSelect: () => setConfirm("service"),
+          },
+        ]
+      : []),
+  ];
+  const busyNote =
+    busy === "remove" || limitActions.busy
+      ? "Removing…"
+      : busy === "disconnect"
+        ? "Disconnecting…"
+        : busy === "delete"
+          ? "Deleting…"
+          : null;
+
   return (
     <tr aria-label={service.display_name} className={SERVICE_ROW}>
       {/* What the service is, what the agent sees, and the limit that narrows it. */}
@@ -205,30 +310,16 @@ export function EgressServiceItem({
           title={service.display_name}
           description={service.description}
         >
-          {seesText && (
-            <p className="break-words text-xs text-muted-foreground">
-              {seesText}
-            </p>
-          )}
+          <AgentSees service={service} />
           {limitedText && (
             <p className="text-xs text-muted-foreground">{limitedText}</p>
           )}
           {limit && (
-            <div className="flex flex-wrap items-center gap-x-2">
-              <p className="text-xs text-muted-foreground">
-                {overlap
-                  ? `Limited to ${limitTarget(limit)}. ${overlap}`
-                  : `Limited to ${limitTarget(limit)}`}
-              </p>
-              {canEdit(serviceEditing, limit) && (
-                <LimitActions
-                  limit={limit}
-                  label={service.display_name}
-                  serviceEditing={serviceEditing}
-                  onError={setError}
-                />
-              )}
-            </div>
+            <p className="text-xs text-muted-foreground">
+              {overlap
+                ? `Limited to ${limitTarget(limit)}. ${overlap}`
+                : `Limited to ${limitTarget(limit)}`}
+            </p>
           )}
         </ItemName>
       </th>
@@ -248,17 +339,15 @@ export function EgressServiceItem({
         </div>
       </td>
       <td className={SERVICE_CELL.actions}>
-        <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
-          {/* Connecting reads the saved connection first, so an unreadable one needs a reset before. */}
-          {oauth &&
-            !hideKeyActions &&
-            oauth.can_connect &&
-            !oauth.connected &&
-            !oauth.reset_required && (
+        <div className="flex items-center gap-1 max-sm:justify-start sm:justify-end">
+          {busyNote ? (
+            <BusyNote>{busyNote}</BusyNote>
+          ) : canConnect ? (
+            <>
               <Button
                 size="sm"
                 disabled={busy !== null}
-                aria-label={`Connect ${oauth.display_name} for ${service.display_name}`}
+                aria-label={`Connect ${oauth.display_name} for ${name}`}
                 onClick={() =>
                   asksAboutSharedAccount ? setConfirm("shared") : connect()
                 }
@@ -266,114 +355,54 @@ export function EgressServiceItem({
                 {busy === "connect"
                   ? "Connecting…"
                   : // The row names the service; only another account needs naming.
-                    oauth.display_name === service.display_name
+                    oauth.display_name === name
                     ? "Connect"
                     : `Connect ${oauth.display_name}`}
               </Button>
-            )}
-          {busy === "connect" && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                operation.current?.abort();
-                setBusy(null);
-              }}
-            >
-              Cancel
-            </Button>
-          )}
-          {oauth && canResetAccount && (
+              {busy === "connect" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    operation.current?.abort();
+                    setBusy(null);
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </>
+          ) : oauth?.reset_required && canResetAccount ? (
             <Button
               size="sm"
               variant="outline"
               disabled={busy !== null}
-              aria-label={`${oauth.connected ? "Disconnect" : "Reset connection"} for ${service.display_name}`}
+              aria-label={`Reset connection for ${name}`}
               onClick={() => setConfirm("account")}
             >
-              {busy === "disconnect"
-                ? "Disconnecting…"
-                : oauth.connected
-                  ? "Disconnect"
-                  : "Reset connection"}
+              Reset connection
             </Button>
-          )}
-          {oauth && canManageKey && !showKeyControls && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy !== null}
-              aria-label={`${keyInsteadLabel} for ${service.display_name}`}
-              onClick={openKeyForm}
-            >
-              {keyInsteadLabel}
-            </Button>
-          )}
-          {canManageKey && showKeyControls && !editing && (
-            <>
+          ) : (
+            canManageKey &&
+            !oauth &&
+            !service.key_configured &&
+            !editing && (
               <Button
                 size="sm"
                 variant="outline"
                 disabled={busy !== null}
-                aria-label={`${service.key_configured ? "Replace" : "Set"} key for ${service.display_name}`}
+                aria-label={`Set key for ${name}`}
                 onClick={openKeyForm}
               >
-                {service.key_configured ? "Replace key" : "Set key"}
+                Set key
               </Button>
-              {service.key_configured && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy !== null}
-                  aria-label={`Remove key for ${service.display_name}`}
-                  onClick={() => setConfirm("key")}
-                >
-                  {busy === "remove" ? "Removing…" : "Remove key"}
-                </Button>
-              )}
-            </>
+            )
           )}
-          {canLimit && serviceEditing?.onLimitToRepositories && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={
-                busy !== null ||
-                serviceEditing.disabled ||
-                serviceEditing.limitDisabled
-              }
-              aria-label={`Limit to repositories for ${service.display_name}`}
-              onClick={() => serviceEditing.onLimitToRepositories?.(service)}
-            >
-              Limit to repositories
-            </Button>
-          )}
-          {canEdit(serviceEditing, service) && (
-            <>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={
-                  busy !== null ||
-                  serviceEditing.disabled ||
-                  serviceEditing.editingName === service.name
-                }
-                aria-label={`Edit service for ${service.display_name}`}
-                onClick={() => serviceEditing.onEdit(service)}
-              >
-                Edit service
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy !== null || serviceEditing.disabled}
-                aria-label={`Delete service for ${service.display_name}`}
-                onClick={() => setConfirm("service")}
-              >
-                {busy === "delete" ? "Deleting…" : "Delete service"}
-              </Button>
-            </>
-          )}
+          <RowActionsMenu
+            service={name}
+            actions={actions}
+            disabled={busy !== null || limitActions.busy}
+          />
         </div>
         {canManageKey && editing && (
           <form
@@ -385,6 +414,7 @@ export function EgressServiceItem({
               autoComplete="off"
               aria-label={keyLabel}
               placeholder="Paste the key"
+              autoFocus
               className="h-9 min-w-0 flex-1 max-sm:basis-full"
               value={secret}
               disabled={busy !== null}
@@ -423,6 +453,7 @@ export function EgressServiceItem({
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
+        {limitActions.dialog}
         <ConfirmDialog
           open={confirm === "key"}
           title={`Remove ${keyLabel}?`}

@@ -10,10 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import egressPresets from "@/test/fixtures/egressPresets.json";
 import {
   credentialService,
+  expectNoAction,
   limitRules,
   oauthStatus,
-  pressInDialog,
   presetsReady,
+  pressInDialog,
+  rowAction,
   ruleSummaries,
   storedLimit,
 } from "@/test/egressServiceTestKit";
@@ -239,10 +241,8 @@ describe("egress credentials page", () => {
       target: { value: "abc" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Replace key for GitHub" }),
-      ).toBeInTheDocument(),
+    await waitFor(async () =>
+      expect(await rowAction("Replace key for GitHub")).toBeInTheDocument(),
     );
   });
 
@@ -309,7 +309,7 @@ describe("egress credentials page", () => {
         },
       }),
     );
-    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+    expect(await screen.findByText("octocat")).toBeInTheDocument();
     expect(
       vi
         .mocked(fetch)
@@ -318,14 +318,12 @@ describe("egress credentials page", () => {
         ),
     ).toHaveLength(2);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Disconnect for GitHub" }),
-    );
+    fireEvent.click(await rowAction("Disconnect for GitHub"));
     await pressInDialog("Disconnect");
     expect(
       await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Connected as/)).toBeNull();
+    expect(screen.queryByText("octocat")).toBeNull();
   });
 });
 
@@ -518,9 +516,7 @@ describe("egress services on the personal page", () => {
 
     it("sets a key while editing a service", async () => {
       await renderPage();
-      fireEvent.click(
-        await screen.findByRole("button", { name: "Edit service for My API" }),
-      );
+      fireEvent.click(await rowAction("Edit service for My API"));
       await presetsReady();
       fireEvent.change(screen.getByLabelText("API key"), {
         target: { value: "sk-new" },
@@ -627,9 +623,7 @@ describe("egress services on the personal page", () => {
 
   it("edits a user service from its authored form and keeps the name", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit service for My API" }),
-    );
+    fireEvent.click(await rowAction("Edit service for My API"));
     const form = await screen.findByRole("form", { name: "Edit mine" });
     expect(within(form).getByLabelText("Name")).toBeDisabled();
     expect(within(form).getByLabelText("Preset")).toHaveValue("openai");
@@ -656,9 +650,7 @@ describe("egress services on the personal page", () => {
 
   it("deletes a user service after confirmation", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Delete service for My API" }),
-    );
+    fireEvent.click(await rowAction("Delete service for My API"));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent("deletes the service and its saved key");
     expect(writes()).toEqual([]);
@@ -672,9 +664,7 @@ describe("egress services on the personal page", () => {
 
   it("deletes from inside the editor too", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit service for My API" }),
-    );
+    fireEvent.click(await rowAction("Edit service for My API"));
     await screen.findByRole("form", { name: "Edit mine" });
     listing[0].services = [configService];
     fireEvent.click(screen.getByRole("button", { name: "Delete service" }));
@@ -687,9 +677,7 @@ describe("egress services on the personal page", () => {
     mutation = () =>
       json({ detail: "Service is not a service of your own" }, 404);
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Delete service for My API" }),
-    );
+    fireEvent.click(await rowAction("Delete service for My API"));
     await pressInDialog("Delete");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "no longer available",
@@ -701,9 +689,7 @@ describe("egress services on the personal page", () => {
     await renderPage();
     const row = await screen.findByLabelText("GitHub");
     expect(within(row).queryByText(/administrator/)).toBeNull();
-    expect(
-      within(row).queryByRole("button", { name: /Edit|Delete/ }),
-    ).toBeNull();
+    await expectNoAction(/Edit|Delete/, row);
     // The key can still be set on it, as before.
     expect(
       within(row).getByRole("button", { name: "Set key for GitHub" }),
@@ -779,7 +765,7 @@ describe("egress services on the personal page", () => {
       within(managed).getByRole("button", { name: "Add service for Managed" }),
     ).toBeInTheDocument();
     expect(
-      within(managed).getByRole("button", { name: "Edit service for My API" }),
+      await rowAction("Edit service for My API", managed),
     ).toBeInTheDocument();
     // The agent's row says whether it is shared.
     const agentRow = (name: string) =>
@@ -954,9 +940,7 @@ describe("egress services on the personal page", () => {
         : json({ detail: "Service is not a service of your own" }, 404),
     );
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit service for My API" }),
-    );
+    fireEvent.click(await rowAction("Edit service for My API"));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "no longer available",
     );
@@ -1005,9 +989,7 @@ describe("presets and unsaved edits on the personal page", () => {
     return screen.getByLabelText("Description");
   };
   const edit = async (name: string) => {
-    fireEvent.click(
-      await screen.findByRole("button", { name: `Edit service for ${name}` }),
-    );
+    fireEvent.click(await rowAction(`Edit service for ${name}`));
     await screen.findByRole("form", { name: `Edit ${name.toLowerCase()}` });
     await presetsReady();
   };
@@ -1016,7 +998,7 @@ describe("presets and unsaved edits on the personal page", () => {
 
   it("fetches the presets from the personal API only when an editor opens", async () => {
     await renderPage();
-    await screen.findByRole("button", { name: "Edit service for One" });
+    await rowAction("Edit service for One");
     expect(presetRequests()).toBe(0);
 
     await edit("One");
@@ -1038,23 +1020,26 @@ describe("presets and unsaved edits on the personal page", () => {
     await edit("One");
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
 
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Edit service for Two" }),
-      ).toBeDisabled(),
+    await waitFor(async () =>
+      expect(await rowAction("Edit service for Two")).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
     );
-    expect(
-      screen.getByRole("button", { name: "Delete service for One" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Delete service for Two" }),
-    ).toBeDisabled();
+    expect(await rowAction("Delete service for One")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(await rowAction("Delete service for Two")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
 
     finish(new Response(null, { status: 204 }));
     await waitFor(() => expect(screen.queryByRole("form")).toBeNull());
-    expect(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    ).toBeEnabled();
+    expect(await rowAction("Edit service for Two")).not.toHaveAttribute(
+      "aria-disabled",
+    );
     // The write ran to the end: nothing started after it replaced or aborted it.
     expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
   });
@@ -1066,9 +1051,7 @@ describe("presets and unsaved edits on the personal page", () => {
       target: { value: "typed but not saved" },
     });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     expect(screen.getByRole("alert")).toHaveTextContent(
       "You have unsaved changes in the open editor.",
     );
@@ -1081,9 +1064,7 @@ describe("presets and unsaved edits on the personal page", () => {
     expect(screen.queryByText(/unsaved changes in the open editor/)).toBeNull();
     expect(description()).toHaveValue("typed but not saved");
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
     expect(
       await screen.findByRole("form", { name: "Edit two" }),
@@ -1096,16 +1077,17 @@ describe("presets and unsaved edits on the personal page", () => {
     await renderPage();
     await edit("One");
     // Opening it again would only offer to throw away what is typed.
-    expect(
-      screen.getByRole("button", { name: "Edit service for One" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    ).toBeEnabled();
+    expect(await rowAction("Edit service for One")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(await rowAction("Edit service for Two")).not.toHaveAttribute(
+      "aria-disabled",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(
-      screen.getByRole("button", { name: "Edit service for One" }),
-    ).toBeEnabled();
+    expect(await rowAction("Edit service for One")).not.toHaveAttribute(
+      "aria-disabled",
+    );
   });
 
   it("drops the question about another service when the editor is cancelled", async () => {
@@ -1114,9 +1096,7 @@ describe("presets and unsaved edits on the personal page", () => {
     fireEvent.change(description(), {
       target: { value: "typed but not saved" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     expect(
       screen.getByText(/unsaved changes in the open editor/),
     ).toBeInTheDocument();
@@ -1136,9 +1116,7 @@ describe("presets and unsaved edits on the personal page", () => {
     fireEvent.change(description(), {
       target: { value: "typed but not saved" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     listing[0].services = [listing[0].services[1]];
     fireEvent.click(screen.getByRole("button", { name: "Delete service" }));
     fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
@@ -1149,9 +1127,7 @@ describe("presets and unsaved edits on the personal page", () => {
   it("opens another service straight away when nothing was changed", async () => {
     await renderPage();
     await edit("One");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     expect(
       await screen.findByRole("form", { name: "Edit two" }),
     ).toBeInTheDocument();
@@ -1164,9 +1140,7 @@ describe("presets and unsaved edits on the personal page", () => {
     const field = description();
     fireEvent.change(field, { target: { value: "x" } });
     fireEvent.change(field, { target: { value: "" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Edit service for Two" }),
-    );
+    fireEvent.click(await rowAction("Edit service for Two"));
     expect(
       await screen.findByRole("form", { name: "Edit two" }),
     ).toBeInTheDocument();
@@ -1196,9 +1170,7 @@ describe("what deleting a service says about its scope", () => {
       throw new Error(`Unexpected request: ${String(input)}`);
     });
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Delete service for My API" }),
-    );
+    fireEvent.click(await rowAction("Delete service for My API"));
     return (await screen.findByRole("dialog")).textContent;
   };
 
@@ -1436,9 +1408,7 @@ describe("inactive services on the personal page", () => {
         finish = done;
       });
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Edit service for My API" }),
-    );
+    fireEvent.click(await rowAction("Edit service for My API"));
     await screen.findByRole("form", { name: "Edit mine" });
     await presetsReady();
     fireEvent.click(screen.getByRole("button", { name: "Save service" }));
@@ -2197,11 +2167,7 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("opens a limit with the name github-limited, the repositories, and no key", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    );
+    fireEvent.click(await rowAction("Limit to repositories for GitHub"));
     const form = await screen.findByRole("form", {
       name: "Limit to repositories",
     });
@@ -2219,18 +2185,15 @@ describe("limiting a GitHub service to repositories", () => {
       ),
     ).toBeVisible();
     // The editor is open, so a second one is not started.
-    expect(
-      screen.getByRole("button", { name: "Limit to repositories for GitHub" }),
-    ).toBeDisabled();
+    expect(await rowAction("Limit to repositories for GitHub")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 
   it("saves the limit as a restrict-only service and closes", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    );
+    fireEvent.click(await rowAction("Limit to repositories for GitHub"));
     fireEvent.change(await screen.findByLabelText("GitHub repositories"), {
       target: { value: "octocat/Hello-World" },
     });
@@ -2258,11 +2221,7 @@ describe("limiting a GitHub service to repositories", () => {
 
   it("asks for a repository instead of saving a limit without one", async () => {
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    );
+    fireEvent.click(await rowAction("Limit to repositories for GitHub"));
     fireEvent.click(await screen.findByRole("button", { name: "Save limit" }));
     expect(
       await screen.findByText(
@@ -2280,11 +2239,7 @@ describe("limiting a GitHub service to repositories", () => {
       restrict_only: false,
     });
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    );
+    fireEvent.click(await rowAction("Limit to repositories for GitHub"));
     expect(await screen.findByLabelText("Name")).toHaveValue(
       "github-limited-2",
     );
@@ -2298,7 +2253,7 @@ describe("limiting a GitHub service to repositories", () => {
     };
     await renderPage();
     await screen.findByRole("region", { name: "Personal Mind" });
-    expect(screen.queryByText("Limit to repositories")).toBeNull();
+    await expectNoAction(/Limit to repositories/);
   });
 
   it("shows the administrator's row as limited, with Change limit and Remove limit", async () => {
@@ -2308,18 +2263,10 @@ describe("limiting a GitHub service to repositories", () => {
     expect(
       within(row).getByText("Limited to basnijholt/agent-cli"),
     ).toBeVisible();
-    expect(
-      within(row).getByRole("button", { name: "Change limit for GitHub" }),
-    ).toBeVisible();
-    expect(
-      within(row).getByRole("button", { name: "Remove limit for GitHub" }),
-    ).toBeVisible();
+    expect(await rowAction("Change limit for GitHub", row)).toBeVisible();
+    expect(await rowAction("Remove limit for GitHub", row)).toBeVisible();
     // The limit replaces the offer to add another.
-    expect(
-      within(row).queryByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    ).toBeNull();
+    await expectNoAction("Limit to repositories for GitHub", row);
   });
 
   // The broker lets a request past the user's limit when any of the user's
@@ -2358,11 +2305,7 @@ describe("limiting a GitHub service to repositories", () => {
   it("notes it in the limit's form too, after what the limit refuses", async () => {
     listing[0].services.push(mine());
     await renderPage();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    );
+    fireEvent.click(await rowAction("Limit to repositories for GitHub"));
     const form = await screen.findByRole("form", {
       name: "Limit to repositories",
     });
@@ -2387,11 +2330,9 @@ describe("limiting a GitHub service to repositories", () => {
     ).toBeVisible();
     // It has no key, account, or status to set.
     expect(within(row).queryByText("Not set")).toBeNull();
-    expect(within(row).queryByRole("button", { name: /key/i })).toBeNull();
+    await expectNoAction(/key/i, row);
     expect(
-      within(row).getByRole("button", {
-        name: "Change limit for GitHub (basnijholt/agent-cli)",
-      }),
+      await rowAction("Change limit for GitHub (basnijholt/agent-cli)", row),
     ).toBeVisible();
   });
 
@@ -2399,9 +2340,7 @@ describe("limiting a GitHub service to repositories", () => {
     listing[0].services.push(limited("github-limited", "a/b"));
     await renderPage();
     fireEvent.click(
-      within(await githubRow()).getByRole("button", {
-        name: "Change limit for GitHub",
-      }),
+      await rowAction("Change limit for GitHub", await githubRow()),
     );
     const form = await screen.findByRole("form", { name: "Change limit" });
     expect(
@@ -2439,9 +2378,7 @@ describe("limiting a GitHub service to repositories", () => {
     listing[0].services.push(limited("github-limited", "a/b"));
     await renderPage();
     fireEvent.click(
-      within(await githubRow()).getByRole("button", {
-        name: "Remove limit for GitHub",
-      }),
+      await rowAction("Remove limit for GitHub", await githubRow()),
     );
     const dialog = await screen.findByRole("dialog", {
       name: "Remove the limit on GitHub?",
@@ -2466,11 +2403,7 @@ describe("limiting a GitHub service to repositories", () => {
         },
       ]),
     );
-    expect(
-      await screen.findByRole("button", {
-        name: "Limit to repositories for GitHub",
-      }),
-    ).toBeVisible();
+    expect(await rowAction("Limit to repositories for GitHub")).toBeVisible();
     expect(screen.queryByText(/Limited to a\/b/)).toBeNull();
   });
 
@@ -2486,9 +2419,7 @@ describe("limiting a GitHub service to repositories", () => {
     });
     await renderPage();
     fireEvent.click(
-      within(await githubRow()).getByRole("button", {
-        name: "Remove limit for GitHub",
-      }),
+      await rowAction("Remove limit for GitHub", await githubRow()),
     );
     await pressInDialog("Remove limit");
     // The server says why, as it does for every change to a service.
@@ -2522,21 +2453,18 @@ describe("limiting a GitHub service to repositories", () => {
     });
     await renderPage();
     fireEvent.click(
-      within(await githubRow()).getByRole("button", {
-        name: "Remove limit for GitHub",
-      }),
+      await rowAction("Remove limit for GitHub", await githubRow()),
     );
     await pressInDialog("Remove limit");
-    const actions = () =>
-      [
-        "Change limit for GitHub",
-        "Remove limit for GitHub",
-        "Change limit for GitHub (a/b)",
-        "Remove limit for GitHub (a/b)",
-      ].map((name) => screen.getByRole("button", { name }));
-    await waitFor(() => {
-      for (const button of actions()) expect(button).toBeDisabled();
-    });
+    // The row it was removed from says so, and the limit's own row turns its actions off.
+    expect(within(await githubRow()).getByRole("status")).toHaveTextContent(
+      "Removing…",
+    );
+    for (const name of [
+      "Change limit for GitHub (a/b)",
+      "Remove limit for GitHub (a/b)",
+    ])
+      expect(await rowAction(name)).toHaveAttribute("aria-disabled", "true");
     release();
     await waitFor(() => expect(writes()).toHaveLength(1));
   });

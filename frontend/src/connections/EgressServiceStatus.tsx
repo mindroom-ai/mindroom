@@ -3,6 +3,7 @@ import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
   type RowAgent,
   type ServiceEditing,
+  sharesAccount,
   statusLabel,
 } from "./egressRowText";
 import type { EgressCredentialService } from "./types";
@@ -26,11 +27,18 @@ export function ServiceStatus({
     <>
       <Badge
         variant={service.configured ? "secondary" : "outline"}
-        // A long label, such as a shared account's, wraps in its column.
-        className="max-w-full rounded-lg font-normal"
+        className="max-w-full font-normal"
       >
-        {statusLabel(service, agent)}
+        {statusLabel(service)}
       </Badge>
+      {service.active_source === "oauth" && oauth?.account_label && (
+        <span className="break-all text-xs">{oauth.account_label}</span>
+      )}
+      {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
+        <span className="text-xs text-muted-foreground">
+          Shared with everyone using {agent.displayName}
+        </span>
+      )}
       {service.active_source === "key" && oauth?.connected && (
         <span className="text-xs text-muted-foreground">
           Your connected {oauth.display_name} account is kept for other

@@ -10,8 +10,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   credentialService,
+  expectNoAction,
   oauthStatus,
   pressInDialog,
+  rowAction,
 } from "@/test/egressServiceTestKit";
 import { Connections } from "./Connections";
 import type { ConnectionService, EgressCredentialService } from "./types";
@@ -162,9 +164,7 @@ describe("brokered API keys on agent cards", () => {
       target: { value: "abc" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(
-      await screen.findByRole("button", { name: "Replace key for GitHub" }),
-    ).toBeInTheDocument();
+    expect(await rowAction("Replace key for GitHub")).toBeInTheDocument();
     expect(catalogRequests).toBe(2);
     expect(
       screen.getByRole("button", { name: "Collapse Personal assistant" }),
@@ -210,9 +210,7 @@ describe("brokered API keys on agent cards", () => {
       screen.getByText("No services are set up for this agent yet."),
     ).toBeInTheDocument();
     // There is nothing to set a key on yet.
-    expect(
-      screen.queryByRole("button", { name: /^(Set|Replace|Remove) key for / }),
-    ).toBeNull();
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
   });
 
   it("links the API key section to the agent's services on the personal page", async () => {
@@ -286,7 +284,7 @@ describe("brokered API keys on agent cards", () => {
       within(github).getByText("Limited to octocat/Hello-World"),
     ).toBeVisible();
     // The portal has no editor, so there is nothing to change or remove here.
-    expect(screen.queryByRole("button", { name: /limit/i })).toBeNull();
+    await expectNoAction(/limit/i);
     const limit = screen.getByLabelText("GitHub (octocat/Hello-World)");
     expect(within(limit).getByText("Limit only")).toBeVisible();
     expect(within(limit).queryByRole("button")).toBeNull();
@@ -373,11 +371,7 @@ describe("brokered API keys on agent cards", () => {
       render(<Connections />);
       await expandAgent();
       await screen.findByRole("button", { name: "Disconnect for Mail" });
-      fireEvent.click(
-        within(gmailRow()).getByRole("button", {
-          name: "Disconnect for Gmail",
-        }),
-      );
+      fireEvent.click(await rowAction("Disconnect for Gmail", gmailRow()));
       await pressInDialog("Disconnect");
 
       expect(
@@ -443,11 +437,9 @@ describe("brokered API keys on agent cards", () => {
         },
       }),
     );
-    expect(await screen.findByText("Connected as octocat")).toBeInTheDocument();
+    expect(await screen.findByText("octocat")).toBeInTheDocument();
     expect(catalogRequests).toBe(2);
-    expect(
-      screen.getByRole("button", { name: "Disconnect for GitHub" }),
-    ).toBeInTheDocument();
+    expect(await rowAction("Disconnect for GitHub")).toBeInTheDocument();
   });
 });
 
