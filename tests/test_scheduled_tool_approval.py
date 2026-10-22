@@ -1107,10 +1107,14 @@ def _live_agent(
 ) -> _LiveRun:
     """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
 
-    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given.
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` unless ``toolkit`` is given, which they
+    would not reach, so passing them with ``toolkit`` is refused.
     """
     if toolkit is None:
         toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    else:
+        assert runs is None, "runs records only the default toolkit's calls"
+        assert outcome == "sent", "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = toolkit_name
         if authored_confirmation:
