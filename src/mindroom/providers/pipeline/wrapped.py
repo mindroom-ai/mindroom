@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.usage.storage import has_token_usage
 
@@ -34,13 +35,10 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = [
-    "AGGREGATE_USAGE_KEY",
     "WrappedProvider",
     "is_visible_output",
     "with_carried_usage",
 ]
-
-AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 

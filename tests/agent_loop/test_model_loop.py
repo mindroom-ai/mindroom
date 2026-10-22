@@ -25,7 +25,7 @@ from mindroom.agent_loop.model_loop import (
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
@@ -590,9 +590,11 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     assert record.content is None
 
 
+@pytest.mark.parametrize("retried", [False, True], ids=["one-attempt", "retried-sum"])
 @pytest.mark.parametrize("ending", ["completes", "cancelled", "fails"])
 async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it_counts_its_usage_once(
     ending: str,
+    retried: bool,
 ) -> None:
     draining = asyncio.Event()
     release = asyncio.Event()
@@ -605,8 +607,13 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
             msg = "log write failed"
             raise ProviderError(msg, provider="Synthetic")
 
-    # The finished turn alone carries the usage, as a provider that reports none along the way gives it.
-    finished = TurnCompleted(message=Message(role="assistant", content="done", metrics=usage(50, 2)), stop_reason="end")
+    # The finished turn alone carries the usage, as a provider that reports none along the way gives it; after a
+    # retry it is the attempts' sum, which the pipeline marks.
+    marker = {AGGREGATE_USAGE_KEY: True} if retried else None
+    finished = TurnCompleted(
+        message=Message(role="assistant", content="done", metrics=usage(50, 2), provider_data=marker),
+        stop_reason="end",
+    )
     model = ScriptedModel([[TextDelta("done"), finished, Await(finish_the_stream)]])
     messages = _prompt()
     record = _record()
@@ -632,6 +639,11 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
         # The loop never took the turn, so only its usage is kept, on a message of its own.
         assert (messages[-1].content, messages[-1].tool_calls, record.content) == (None, None, None)
     assert messages[-1].metrics == usage(50, 2)
+    # Kept or cut off, the usage reads as one request only when it was one.
+    assert messages[-1].provider_data == {
+        **(marker or {}),
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert (record.metrics.input_tokens, record.metrics.output_tokens, record.metrics.total_tokens) == (50, 2, 52)
     assert record.metrics.details is not None

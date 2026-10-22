@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_loop.tools import dispatch_tool_calls, media_follow_up, plan_tool_batch
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RequestCompleted, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
@@ -187,6 +187,8 @@ async def run_model_loop(
         events = _stream_turn(model, request, messages, metrics)
         async with closing_async_stream(events):
             async for event in events:
+                # No await or break between taking the turn and asking for the next event: _stream_turn settles
+                # the usage of a turn it still holds, and _accept_turn counts a handed-off one.
                 if isinstance(event, TurnCompleted):
                     turn = event
                 else:
@@ -367,6 +369,9 @@ async def _stream_turn(
             billed = turn.message.metrics if turn is not None else reported.received
             if billed is not None and billed.to_dict():
                 cut_off = Message(role="assistant", metrics=billed)
+                if turn is not None and (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True:
+                    # The turn's usage sums retried attempts, which must not read as one request's.
+                    cut_off.provider_data = {AGGREGATE_USAGE_KEY: True}
                 _stamp_model(cut_off, identity)
                 messages.append(cut_off)
                 _count_request(metrics, billed, identity)

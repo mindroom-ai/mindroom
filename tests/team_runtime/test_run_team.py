@@ -53,6 +53,11 @@ def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetric
 _BLOCKING = ModelRequest(messages=(), stream=False)
 
 
+async def _overloaded() -> None:
+    msg = "Checker overloaded"
+    raise ProviderError(msg, provider="Synthetic", status_code=503)
+
+
 def _silent() -> list[Any]:
     """A turn that ends with no text at all, not even an empty string."""
     return [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")]
@@ -119,16 +124,12 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
     team_row = golden_run("team_squad", SQUAD, "team-member-error")
     checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-000000000054")
 
-    async def overloaded() -> None:
-        msg = "Checker overloaded"
-        raise ProviderError(msg, provider="Synthetic", status_code=503)
-
     leader = scripted(
         "leader-model",
         _delegate("call-team-checker", "checker", "Check that 2 + 3 = 5", metrics=usage(420, 12)),
         answer("The checker could not answer.", usage(470, 8, time_to_first_token=0.25)),
     )
-    checker = scripted("checker-model", [Await(overloaded)])
+    checker = scripted("checker-model", [Await(_overloaded)])
     ctx = run_context("team-member-error", SQUAD, golden_metadata(team_row))
     store = Store()
 
@@ -423,6 +424,13 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
             "Agent Writer: a,Agent Checker: null",
             id="tool-only",
         ),
+        pytest.param(
+            [answer("Five is prime.")],
+            [[Await(_overloaded)]],
+            # A failed member's record holds its error text, which the broadcast labels like any result.
+            "Agent Writer: Five is prime.Agent Checker: Checker overloaded",
+            id="error",
+        ),
     ],
 )
 async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member_results(
@@ -499,7 +507,7 @@ async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_not
         pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
     ],
 )
-async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_delegation_gave_it_per_mode(
+async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_delegation_gave_it_on_each_path(
     stream: bool,
     writer_turns: list[list[Any]],
     expected: str,

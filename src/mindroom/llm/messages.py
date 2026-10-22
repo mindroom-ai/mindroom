@@ -34,6 +34,11 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
     return [decode(item) for item in items]
 
 
+# ``Message.provider_data`` key marking an assistant message whose usage sums a retried request's attempts, so usage
+# readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
+AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
+
+
 @dataclass(slots=True, kw_only=True)
 class Message:
     """One message in a model conversation.
@@ -162,5 +167,6 @@ class Message:
 
 
 __all__ = [
+    "AGGREGATE_USAGE_KEY",
     "Message",
 ]

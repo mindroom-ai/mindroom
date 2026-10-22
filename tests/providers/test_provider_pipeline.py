@@ -26,7 +26,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
 )
 from mindroom.llm.media import Audio, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -54,7 +54,7 @@ from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_st
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
-from mindroom.providers.pipeline.wrapped import AGGREGATE_USAGE_KEY, WrappedProvider
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:

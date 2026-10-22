@@ -1,10 +1,11 @@
-"""What the leader reads for a finished member run follows Agno's result rules, per mode."""
+"""What the leader reads for a finished member run follows Agno's result rules, with and without streaming."""
 # ruff: noqa: D103
 
 from __future__ import annotations
 
-from mindroom.llm.runs import RunRecord, ToolExecution
-from mindroom.teams.delegate_tools import NO_MEMBER_RESPONSE, member_result_text
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.teams.delegate_tools import NO_MEMBER_RESPONSE, collaborate_result_text, member_result_text
+from tests.team_runtime.squad import member, scripted
 
 _TOOLS = [ToolExecution(result="first"), ToolExecution(result=None), ToolExecution(result="second")]
 
@@ -26,3 +27,23 @@ def test_blocking_member_result_text_follows_agno_s_non_stream_delegation() -> N
     assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "null"
     assert member_result_text(RunRecord(run_id="r", content=None), stream=False) == NO_MEMBER_RESPONSE
     assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=False) == ""
+
+
+def test_collaborate_result_text_labels_json_content_and_a_failed_member_only_without_streaming() -> None:
+    members = [
+        member("writer", "Writer", scripted("writer-model")),
+        member("checker", "Checker", scripted("checker-model")),
+    ]
+    # A failed member's record holds its error text as its content, which the broadcast reads like any result.
+    children = [
+        RunRecord(run_id="w", status=RunStatus.completed, content={"answer": 42}),
+        RunRecord(run_id="c", status=RunStatus.error, content="Checker overloaded"),
+    ]
+    record = TeamRunRecord(run_id="t", team_id="squad", team_name="Squad")
+
+    blocking = collaborate_result_text(members, children, record, stream=False)
+    streamed = collaborate_result_text(members, children, record, stream=True)
+
+    assert blocking == 'Agent Writer: {\n  "answer": 42\n}Agent Checker: Checker overloaded'
+    assert streamed == '{\n  "answer": 42\n}Checker overloaded'
+    assert record.member_responses == []
