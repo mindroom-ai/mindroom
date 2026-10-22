@@ -105,6 +105,11 @@ def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
         "src/mindroom/constants.py": "pydantic-settings",
         "src/mindroom/matrix/client.py": "aiohttp",
         "src/mindroom/mcp/transports.py": "anyio",
+        # Agno is installed without its provider extras, so each provider SDK is a base dependency.
+        "src/mindroom/providers/anthropic/messages.py": "anthropic",
+        "src/mindroom/providers/gemini/adapter.py": "google-genai",
+        "src/mindroom/providers/ollama_adapter.py": "ollama",
+        "src/mindroom/providers/openai/build.py": "openai",
     }
 
     for module_path, dependency_name in required_runtime_dependencies.items():
