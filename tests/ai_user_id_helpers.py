@@ -5,15 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.ai import (
-    _PreparedAgentRun,
-)
 from mindroom.bot import AgentBot
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -28,16 +25,14 @@ from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, Resp
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.request_messages import TurnMessages
 from mindroom.history.team_scope import ad_hoc_team_scope_id
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
@@ -159,28 +154,6 @@ def _config_with_team_matrix_message() -> Config:
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
-    )
-
-
-def _prepared_prompt_result(
-    build: object,
-    *,
-    prompt: str = "test prompt",
-    prepared_context_tokens: int | None = None,
-    runtime_model_name: str = "default",
-) -> _PreparedAgentRun:
-    return _PreparedAgentRun(
-        build=cast("Any", build),
-        spec=cast("Any", build).spec,
-        turn=TurnMessages(prompt=OwnedMessage(role="user", content=prompt)),
-        history=(),
-        summary=None,
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(
-            prepared_context_tokens=prepared_context_tokens,
-        ),
-        runtime_model_name=runtime_model_name,
-        cli_context={},
     )
 
 
