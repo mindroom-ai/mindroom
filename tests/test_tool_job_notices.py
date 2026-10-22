@@ -11,6 +11,7 @@ import pytest
 from mindroom import ai
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.llm.runs import RunStatus
 from mindroom.prompts import BACKGROUND_JOBS_ENDED_NOTICE
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
@@ -24,7 +25,7 @@ from mindroom.tool_jobs.notices import (
     append_turn_start_job_note,
     job_notice_context,
 )
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobUnavailableError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import make_turn_context
@@ -347,6 +348,37 @@ async def test_a_cancellation_whose_acknowledgement_fails_is_noticed_again(
         with tool_runtime_context(conversation.context), job_notice_context(JobNotices()):
             assert "`cancelled`" in str(await _turn_start_job_note())
         assert (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
+    finally:
+        await conversation.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_the_runtime_no_longer_serves_still_lets_the_reply_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A noticed cancellation that expired or lost its access before it could be acknowledged costs no reply.
+
+    The notice still reaches the model after the tool batch, and the cancellation stays unacknowledged.
+    """
+    conversation = await _conversation(tmp_path)
+    try:
+        await conversation.start("cancelled")
+        await conversation.cancel("cancelled")
+
+        async def gone(*_args: object, **_kwargs: object) -> Never:
+            msg = "Job is unavailable."
+            raise JobUnavailableError(msg)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(conversation.runtime, "wait", gone)
+            response = await _run(conversation, [calls(tool_call("noop", "noop")), answer("done")])
+        assert response.status is RunStatus.completed
+        assert response.content == "done"
+        (result,) = _tool_results(response)
+        assert result.startswith("nothing")
+        assert "`cancelled` (tool_cancelled) cancelled" in result
+        assert not (await lookup(conversation.runtime, "cancelled", owner=conversation.owner, depth=0)).consumed
     finally:
         await conversation.runtime.shutdown()
 
