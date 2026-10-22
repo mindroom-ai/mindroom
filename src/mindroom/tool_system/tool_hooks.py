@@ -29,7 +29,7 @@ from mindroom.providers.model_http_client import closing_model_connections
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
-from mindroom.tool_system import agno_compat_tool_hooks
+from mindroom.tool_system import agno_compat_tool_arguments, agno_compat_tool_hooks
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -479,6 +479,7 @@ agno_compat_tool_hooks.install_patch(
     run_sync_entrypoint=run_sync_tool_entrypoint,
     has_completion_tracker=lambda: _SYNC_TOOL_COMPLETION_TRACKER.get() is not None,
 )
+agno_compat_tool_arguments.install_patch()
 
 
 async def _call_tool(

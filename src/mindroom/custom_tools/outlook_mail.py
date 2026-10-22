@@ -77,14 +77,9 @@ _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
-# AGNO_COMPAT: Tool-call argument parsing turns the strings none, null, true, and false into None and booleans.
-# Reason: Agno 3.0.9 get_function_call rewrites any string argument equal to one of them, ignoring case and spaces,
-# before the tool runs, so an external_audience of Graph's "none" always arrived as no audience; the choice that sets
-# Graph's "none" is therefore named internal_only.
-# Upstream issue: Tracking gap; a search of agno-agi/agno issues found none (checked October 22, 2026).
-# Upstream PR: None identified.
-# Remove when: Agno passes string arguments through unchanged; internal_only can stay as the choice's name.
-# Coverage: tests/test_outlook_mail_tool.py::test_every_choice_reaches_the_tool_through_agnos_argument_parsing
+# The choice that sets Graph's "none" is named internal_only because Agno's argument parsing turns the string "none"
+# into None; tool_system/agno_compat_tool_arguments.py gives string parameters the model's string, and the clearer
+# name stays.
 _EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
 # Graph writes these values in either case; reads report them as the setter takes them.
 _READ_STATUSES = {status.casefold(): status for status in _AUTOMATIC_REPLY_STATUSES}

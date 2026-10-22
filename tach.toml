@@ -5277,6 +5277,7 @@ visibility = [
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.tool_jobs.control",
+    "mindroom.tool_system.agno_compat_tool_arguments",
     "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.tool_system.call_record",
     "mindroom.hooks",
@@ -7913,6 +7914,15 @@ visibility = ["mindroom.tool_system.tool_hooks"]
 
 [[interfaces]]
 from = ["mindroom.tool_system.agno_compat_tool_hooks"]
+expose = ["install_patch"]
+
+[[modules]]
+path = "mindroom.tool_system.agno_compat_tool_arguments"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_tool_arguments"]
 expose = ["install_patch"]
 
 [[modules]]
