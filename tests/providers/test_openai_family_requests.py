@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from openai.types.chat import ChatCompletion
 from openai.types.responses import Response, ResponseUsage
 from openai.types.responses.response_input_item_param import ResponseInputItemParam
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
@@ -25,6 +26,7 @@ from mindroom.providers.openai.chat_wire import parse_chat_completion
 from mindroom.providers.openai.legacy_replay import repair_legacy_responses_span
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import parse_response, responses_input, responses_request_kwargs
+from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
 from tests.providers.openai_family_support import responses_adapter
@@ -225,6 +227,34 @@ def test_a_rewritten_tool_turn_replays_its_calls_from_canonical_history(tmp_path
         {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
     ]
     assert [message.to_dict() for message in messages] == original
+
+
+def test_stored_output_missing_one_of_the_turn_s_calls_is_not_reused(tmp_path: Path) -> None:
+    """Captured output that cannot account for every call cannot order them; the calls replay from canonical history."""
+    adapter = responses_adapter(tmp_path, store=False)
+    parsed = _parsed(adapter, [_REASONING, _CALL])
+    assert parsed.tool_calls is not None
+    messages = [
+        Message(role="user", content="Check both services."),
+        replace(parsed, tool_calls=[*parsed.tool_calls, _call("second")]),
+        Message(role="tool", tool_call_id="fc_lookup", content="Found it"),
+        Message(role="tool", tool_call_id="fc_second", content="Second ready"),
+    ]
+
+    replay = _input(messages)
+
+    assert replay[1:] == [
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {
+            "type": "function_call",
+            "call_id": "call_second",
+            "name": "lookup",
+            "arguments": json.dumps({"service": "second"}),
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        {"type": "function_call_output", "call_id": "call_second", "output": "Second ready"},
+    ]
 
 
 @pytest.mark.parametrize("reasoning", [None, _REASONING, {"type": "reasoning", "id": "rs_last", "summary": []}])
@@ -647,6 +677,23 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
     ]
 
 
+def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:
+    """An attachment recorded without a filename or type still reaches Responses, named and typed by its file."""
+    stored_path = tmp_path / "att_document.bin"
+    stored_path.write_bytes(b"synthetic attachment")
+    _, _, files, _ = attachment_records_to_media(
+        [AttachmentRecord(attachment_id="att_document", local_path=stored_path, kind="file")],
+    )
+
+    replay = _input([Message(role="user", content="Read the attachment.", files=files)])
+
+    assert replay[0]["content"][1] == {
+        "type": "input_file",
+        "filename": "att_document.bin",
+        "file_data": f"data:application/octet-stream;base64,{base64.b64encode(b'synthetic attachment').decode()}",
+    }
+
+
 def test_remote_file_references_stay_references() -> None:
     """Filename inference never turns a remote file into a local data block."""
     file = File(url="https://example.com/report.pdf", filename="notes.txt")
@@ -654,6 +701,30 @@ def test_remote_file_references_stay_references() -> None:
     replay = _input([Message(role="user", content="Read the attachment.", files=[file])])
 
     assert replay[0]["content"][1] == {"type": "input_file", "file_url": "https://example.com/report.pdf"}
+
+
+# --- Structured output ----------------------------------------------------------------------------------------
+
+
+class _Tally(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    counts: dict[str, int]
+    note: str | None = None
+
+
+def test_the_strict_schema_keeps_closed_objects_and_open_maps() -> None:
+    """A model that already forbids extra keys stays closed, and a ``dict`` field stays an open, optional map."""
+    assert strict_response_schema(_Tally) == {
+        "additionalProperties": False,
+        "properties": {
+            "counts": {"additionalProperties": {"type": "integer"}, "title": "Counts", "type": "object"},
+            "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Note"},
+        },
+        "required": ["note"],
+        "title": "_Tally",
+        "type": "object",
+    }
 
 
 # --- Usage ----------------------------------------------------------------------------------------------------

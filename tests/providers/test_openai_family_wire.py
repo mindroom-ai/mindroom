@@ -3,15 +3,22 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+import httpx
+import openai
 import pytest
+from pydantic import BaseModel
+from structlog.testing import capture_logs
 
+from mindroom.agent_loop.structured import select_response_format
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.errors import ContextWindowExceeded, InvalidRequest, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
@@ -25,6 +32,7 @@ from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.tool_policy import without_provider_tools
@@ -303,6 +311,201 @@ async def test_chat_tool_calls_without_ids_get_generated_ids(tmp_path: Path) -> 
     assert len(turn.tool_calls[0]["id"]) == 36
 
 
+@pytest.mark.asyncio
+async def test_a_chat_stream_without_a_finish_reason_reports_no_stop_reason(tmp_path: Path) -> None:
+    """OpenAI-compatible servers may end a stream without ``finish_reason``; the text still arrives whole."""
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply(_chunk({"content": "Pack a coat."})))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert (turn.content, turn.stop_reason) == ("Pack a coat.", None)
+
+
+@pytest.mark.asyncio
+async def test_a_chat_call_id_may_arrive_after_its_name_and_arguments(tmp_path: Path) -> None:
+    opening = {"index": 0, "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
+    identified = {"index": 0, "id": "call_1", "type": "function"}
+    built = _Built(
+        tmp_path,
+        {"provider": "llama_cpp", "id": "qwen"},
+        _chat_reply(
+            _chunk({"tool_calls": [opening]}),
+            _chunk({"tool_calls": [identified]}, finish_reason="tool_calls"),
+        ),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert turn.tool_calls == [_CALL]
+
+
+@pytest.mark.asyncio
+async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fields(tmp_path: Path) -> None:
+    """Reasoning details streamed in pieces are stored whole for replay, with the upstream OpenRouter routed to."""
+    first = [{"type": "reasoning.text", "text": "Rain is likely", "index": 0}]
+    second = [{"type": "reasoning.text", "text": " this afternoon.", "index": 0}]
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "api_key": "k"},
+        _chat_reply(
+            _chunk({"reasoning": "Rain is likely", "reasoning_details": first}, provider="Anthropic"),
+            _chunk(
+                {"content": "Pack a coat.", "reasoning": " this afternoon.", "reasoning_details": second},
+                finish_reason="stop",
+                provider="Anthropic",
+            ),
+        ),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert turn.message.reasoning_content == "Rain is likely this afternoon."
+    assert turn.message.provider_data["reasoning_details"] == first + second
+    assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
+
+
+def _completion(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}],
+        "usage": _USAGE,
+    }
+
+
+_REASONING_DETAILS = [{"type": "reasoning.text", "text": "Rain is likely."}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "reasoning_fields", "reasoning_details"),
+    [
+        (
+            {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
+            {"reasoning_content": "Rain is likely."},
+            None,
+        ),
+        (
+            {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
+            {"reasoning": "Rain is likely.", "reasoning_details": _REASONING_DETAILS},
+            _REASONING_DETAILS,
+        ),
+    ],
+    ids=["deepseek", "openrouter"],
+)
+async def test_a_non_streamed_chat_reply_keeps_its_reasoning(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    reasoning_fields: dict[str, Any],
+    reasoning_details: list[dict[str, str]] | None,
+) -> None:
+    """Helper and decision requests do not stream; the reasoning those replies carry is kept like a streamed one."""
+    built = _Built(tmp_path, model_config, _json_reply(_completion({"content": "Pack a coat.", **reasoning_fields})))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+
+    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
+    assert turn.message.provider_data.get("reasoning_details") == reasoning_details
+
+
+@pytest.mark.asyncio
+async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_path: Path) -> None:
+    """Calls a Responses model made earlier in the thread, and their results, take ids Chat Completions accepts."""
+    responses_call = {**_CALL, "id": "fc_68a1", "call_id": "call_68a1"}
+    chat_call = {**_CALL, "id": "call_2"}
+    # A result may name either id of a Responses call, and a resumed turn repeats the call it continues.
+    history = [
+        _user(),
+        Message(role="assistant", tool_calls=[responses_call, chat_call]),
+        Message(role="tool", tool_call_id="fc_68a1", content="sunny"),
+        Message(role="tool", tool_call_id="call_2", content="rainy"),
+        Message(role="assistant", tool_calls=[responses_call]),
+        Message(role="tool", tool_call_id="call_68a1", content="sunny"),
+    ]
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=history))
+
+    sent = built.body()["messages"]
+    rewritten = "call_" + "0" * 35
+    assert [call["id"] for call in sent[1]["tool_calls"]] == [rewritten, "call_2"]
+    assert [message["tool_call_id"] for message in sent if message["role"] == "tool"] == [
+        rewritten,
+        "call_2",
+        rewritten,
+    ]
+    assert sent[4]["tool_calls"][0]["id"] == rewritten
+    assert history[1].tool_calls == [responses_call, chat_call]
+
+
+# --- Chat attachments -----------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Path) -> None:
+    """Chat Completions carries attachments as inline parts, the file ahead of the text and the audio after it."""
+    voice = tmp_path / "att_voice.wav"
+    voice.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt synthetic")
+    report = tmp_path / "att_report.pdf"
+    report.write_bytes(b"%PDF-1.7 synthetic")
+    message = Message(
+        role="user",
+        content="Summarize both.",
+        audio=[Audio(id="att_voice", filepath=str(voice), mime_type="audio/wav")],
+        files=[File(id="att_report", filepath=str(report), mime_type="application/pdf", filename="report.pdf")],
+    )
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[message]))
+
+    pdf = base64.b64encode(report.read_bytes()).decode()
+    assert built.body()["messages"][0]["content"] == [
+        {"type": "file", "file": {"filename": "att_report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
+        {"type": "text", "text": "Summarize both."},
+        {
+            "type": "input_audio",
+            "input_audio": {"data": base64.b64encode(voice.read_bytes()).decode(), "format": "wav"},
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "reply", "text_part"),
+    [
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")), "text"),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()), "input_text"),
+    ],
+    ids=["chat", "responses"],
+)
+async def test_attachments_deleted_since_their_turn_are_left_out(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    text_part: str,
+) -> None:
+    """History whose attachment files were cleaned up still replays: its text is sent and each missing file logged."""
+    gone = tmp_path / "cleaned-up"
+    photo, report = gone / "att_photo.png", gone / "att_report.pdf"
+    earlier = Message(
+        role="user",
+        content="Compare these.",
+        images=[Image(id="att_photo", filepath=str(photo), mime_type="image/png")],
+        files=[File(id="att_report", filepath=str(report), mime_type="application/pdf")],
+    )
+    built = _Built(tmp_path, model_config, reply)
+
+    with capture_logs() as logs:
+        await _turn(built, ModelRequest(messages=[earlier, _user("Which is newer?")]))
+
+    body = built.body()
+    sent = body["messages"][0] if "messages" in body else body["input"][0]
+    assert sent["content"] == [{"type": text_part, "text": "Compare these."}]
+    assert [log["path"] for log in logs if log["event"] == "Model input file not found"] == [str(photo), str(report)]
+
+
 # --- Errors ---------------------------------------------------------------------------------------------------
 
 
@@ -364,13 +567,120 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
 
 
 @pytest.mark.asyncio
-async def test_missing_api_key_fails_at_the_first_request(tmp_path: Path) -> None:
-    built = _Built(tmp_path, {"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply())
+async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -> None:
+    """A server that reports an overlong request after the stream started still triggers history compaction."""
+    error = {
+        "message": "This model's maximum context length is 131072 tokens.",
+        "type": "invalid_request_error",
+        "code": "context_length_exceeded",
+    }
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _chat_reply({"data": {"error": error}}))
 
-    with pytest.raises(ProviderError, match="OPENROUTER_API_KEY not set") as info:
+    with pytest.raises(ContextWindowExceeded, match="maximum context length") as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert (info.value.code, info.value.retryable) == ("context_length_exceeded", False)
+
+
+@pytest.mark.asyncio
+async def test_an_error_body_without_a_message_reports_the_response_text(tmp_path: Path) -> None:
+    """Servers that answer outside the OpenAI error shape still surface what they said."""
+    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _json_reply({"detail": "Not Found"}, status=404))
+    request = ModelRequest(messages=[_user()], stream=False, overrides=RequestOverrides(sdk_max_retries=0))
+
+    with pytest.raises(InvalidRequest) as info:
+        await _turn(built, request)
+
+    assert (str(info.value), info.value.status_code) == ('{"detail": "Not Found"}', 404)
+
+
+def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
+    """A proxy in front of the endpoint answers 502 with an HTML page, which the SDK keeps as the error body."""
+    page = "<html><body>502 Bad Gateway</body></html>"
+    response = httpx.Response(502, text=page, request=httpx.Request("POST", "https://proxy.test/v1/chat/completions"))
+
+    error = provider_error(openai.InternalServerError(page, response=response, body=page), provider="OpenAI Chat")
+
+    assert type(error) is ProviderUnavailable
+    assert (str(error), error.status_code, error.retryable) == (page, 502, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "reply", "message"),
+    [
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply(), "OPENROUTER_API_KEY not set"),
+        ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, _responses_reply(), "OPENAI_API_KEY not set"),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"},
+            },
+            _chat_reply(),
+            "Please provide one of: AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or",
+        ),
+    ],
+    ids=["chat", "responses", "azure"],
+)
+async def test_missing_api_key_fails_at_the_first_request(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    message: str,
+) -> None:
+    built = _Built(tmp_path, model_config, reply)
+
+    with pytest.raises(ProviderError, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, built.requests) == (401, "missing_api_key", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "home_key", "reply", "message"),
+    [
+        ({"provider": "kimi_code", "id": "k3"}, "kimi_home", _chat_reply(), "Kimi Code credentials not found"),
+        ({"provider": "codex", "id": "gpt-6.1-sol"}, "codex_home", _responses_reply(), "Codex auth file not found"),
+    ],
+    ids=["kimi", "codex"],
+)
+async def test_a_missing_cli_login_fails_the_request_before_sending(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    home_key: str,
+    reply: dict[str, Any],
+    message: str,
+) -> None:
+    """Without a CLI login the request fails as an authentication error the user fixes by logging in."""
+    logged_out = tmp_path / "logged-out"
+    logged_out.mkdir()
+    built = _Built(tmp_path, {**model_config, "extra_kwargs": {home_key: str(logged_out)}}, reply)
+
+    with pytest.raises(ProviderError, match=message) as info:
+        await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert (info.value.status_code, info.value.code, info.value.retryable) == (401, "authentication", False)
+    assert built.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_codex_login_without_an_account_sends_no_account_header(tmp_path: Path) -> None:
+    """A ChatGPT login without an account id still works; the account header is simply left out."""
+    codex_home = tmp_path / "login"
+    codex_home.mkdir()
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": 4102444800}).encode()).decode().rstrip("=")
+    tokens = {"access_token": f"header.{claims}.signature", "refresh_token": "refresh-value"}
+    (codex_home / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}), encoding="utf-8")
+    model_config = {"provider": "codex", "id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": str(codex_home)}}
+    built = _Built(tmp_path, model_config, _responses_reply(*_text_events("ok"), _completed()))
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    headers = built.requests[0].headers
+    assert headers["authorization"] == f"Bearer {tokens['access_token']}"
+    assert "chatgpt-account-id" not in headers
 
 
 # --- Responses lifecycle --------------------------------------------------------------------------------------
@@ -405,6 +715,39 @@ async def test_failed_response_reports_its_usage_before_raising(tmp_path: Path) 
         await drain()
 
     assert [event.usage.input_tokens for event in events if isinstance(event, UsageReported)] == [42]
+
+
+_REASONING_ITEM = {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Rain is likely."}]}
+_MESSAGE_ITEM = {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": "Pack a coat.", "annotations": []}],
+}
+
+
+@pytest.mark.asyncio
+async def test_a_non_streamed_response_keeps_its_reasoning_summary(tmp_path: Path) -> None:
+    """A helper call on the Responses route reads the reasoning summary; a stored response needs no reasoning copy."""
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(_response(output=[_REASONING_ITEM, _MESSAGE_ITEM])))
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], stream=False))
+
+    assert (turn.content, turn.message.reasoning_content) == ("Pack a coat.", "Rain is likely.")
+    assert turn.message.provider_data["response_id"] == "resp_1"
+    assert "reasoning_output" not in turn.message.provider_data
+
+
+@pytest.mark.asyncio
+async def test_a_non_streamed_failed_response_raises_its_error(tmp_path: Path) -> None:
+    failed = _response("failed", error={"code": "server_error", "message": "The server had an error."})
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _json_reply(failed))
+
+    with pytest.raises(ProviderUnavailable, match="The server had an error") as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()], stream=False))
+
+    assert (info.value.status_code, info.value.code) == (500, "server_error")
 
 
 @pytest.mark.asyncio
@@ -466,8 +809,24 @@ def _argument_delta(delta: str) -> dict[str, Any]:
             1,
         ),
         ([_text_events("")[0], _item_event("added", _FUNCTION_CALL), _argument_delta('{"city"')], True, False, 1),
+        (
+            [
+                _text_events("")[0],
+                _item_event("added", _REASONING_ITEM),
+                _item_event("done", _REASONING_ITEM),
+                _SERVER_ERROR,
+            ],
+            False,
+            True,
+            5,
+        ),
     ],
-    ids=["before-output", "hosted-tool-then-error-event", "function-call-then-dropped-connection"],
+    ids=[
+        "before-output",
+        "hosted-tool-then-error-event",
+        "function-call-then-dropped-connection",
+        "finished-reasoning-then-error-event",
+    ],
 )
 async def test_responses_failure_after_exposed_output_is_final(
     tmp_path: Path,
@@ -828,20 +1187,116 @@ async def test_a_disabled_openrouter_web_plugin_still_lets_decisions_run_without
 
 
 @pytest.mark.asyncio
-async def test_deepseek_thinking_follows_use_thinking(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("model_id", "use_thinking", "thinking"),
+    [("deepseek-flash", {"use_thinking": False}, {"type": "disabled"}), ("deepseek-chat", {}, None)],
+    ids=["turned-off", "non-thinking-model"],
+)
+async def test_deepseek_thinking_follows_use_thinking(
+    tmp_path: Path,
+    model_id: str,
+    use_thinking: dict[str, bool],
+    thinking: dict[str, str] | None,
+) -> None:
+    """Without thinking no reasoning effort is sent; only a config that turns thinking off says so."""
     config = {
         "provider": "deepseek",
-        "id": "deepseek-flash",
+        "id": model_id,
         "api_key": "k",
-        "extra_kwargs": {"use_thinking": False, "reasoning_effort": "max"},
+        "extra_kwargs": {**use_thinking, "reasoning_effort": "max"},
     }
     built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()]))
 
     body = built.body()
-    assert body["thinking"] == {"type": "disabled"}
+    assert body.get("thinking") == thinking
     assert "reasoning_effort" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "parallel"),
+    [("llama-4-scout-17b-16e-instruct", False), ("gpt-oss-120b", True)],
+    ids=["serial-tool-model", "configured"],
+)
+async def test_cerebras_parallel_tool_calls_follow_the_model_then_the_config(
+    tmp_path: Path,
+    model_id: str,
+    parallel: bool,
+) -> None:
+    """The model Cerebras serves only with serial calls never gets parallel ones, whatever the config says."""
+    config = {"provider": "cerebras", "id": model_id, "api_key": "k", "extra_kwargs": {"parallel_tool_calls": True}}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]))
+
+    assert built.body()["parallel_tool_calls"] is parallel
+
+
+class _Entity(BaseModel):
+    name: str
+    kind: str
+
+
+class _Extraction(BaseModel):
+    entities: list[_Entity]
+    summary: str
+
+
+@pytest.mark.asyncio
+async def test_cerebras_structured_output_closes_every_object(tmp_path: Path) -> None:
+    """Cerebras accepts a JSON schema only when every object, the nested models included, is closed."""
+    built = _Built(
+        tmp_path,
+        {"provider": "cerebras", "id": "gpt-oss-120b", "api_key": "k"},
+        _chat_reply(_chunk({"content": "{}"}, finish_reason="stop")),
+    )
+    response_format = select_response_format(built.adapter.capabilities, _Extraction).request_format
+
+    await _turn(built, ModelRequest(messages=[_user()], response_format=response_format))
+
+    sent = built.body()["response_format"]["json_schema"]
+    assert sent["strict"] is True
+    assert sent["schema"]["additionalProperties"] is False
+    assert sent["schema"]["$defs"]["_Entity"]["additionalProperties"] is False
+    assert sent["schema"]["properties"]["entities"]["items"] == {"$ref": "#/$defs/_Entity"}
+    assert "additionalProperties" not in _Extraction.model_json_schema()
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_summary_and_verbosity_reach_the_body(tmp_path: Path) -> None:
+    extra_kwargs = {"reasoning_effort": "high", "reasoning_summary": "auto", "verbosity": "low"}
+    built = _Built(
+        tmp_path,
+        {**_OPENAI_RESPONSES, "extra_kwargs": extra_kwargs},
+        _responses_reply(*_text_events("ok"), _completed()),
+    )
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    body = built.body()
+    assert (body["reasoning"], body["text"]) == ({"effort": "high", "summary": "auto"}, {"verbosity": "low"})
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_path: Path) -> None:
+    """An MCP tool may declare a nullable parameter as a list of types; Responses receives the first one."""
+    tool = ToolSpec(
+        name="search_issues",
+        description="Search issues.",
+        parameters={
+            "type": "object",
+            "properties": {"label": {"type": ["string", "null"]}, "limit": {"type": "integer"}},
+        },
+    )
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()))
+
+    await _turn(built, ModelRequest(messages=[_user()], tools=[tool]))
+
+    sent = built.body()["tools"][0]["parameters"]["properties"]
+    assert sent == {"label": {"type": "string"}, "limit": {"type": "integer"}}
+    assert tool.parameters["properties"]["label"]["type"] == ["string", "null"]
 
 
 @pytest.mark.asyncio

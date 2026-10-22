@@ -313,16 +313,30 @@ def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(
     assert 500 < estimates[0] < 2000
 
 
-@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "GIF", "WEBP"])
+@pytest.mark.parametrize(
+    ("image_format", "color", "options"),
+    [
+        ("PNG", "blue", {}),
+        ("JPEG", "blue", {}),
+        ("GIF", "blue", {}),
+        ("WEBP", "blue", {}),
+        ("WEBP", (0, 0, 255, 128), {}),
+        ("WEBP", "blue", {"lossless": True}),
+    ],
+    ids=["png", "jpeg", "gif", "webp-lossy", "webp-extended", "webp-lossless"],
+)
 @pytest.mark.parametrize("detail", ["low", "high", "original", "auto"])
 def test_responses_image_header_dimensions_keep_nonzero_visual_budget(
     tmp_path: Path,
     image_format: str,
+    color: str | tuple[int, ...],
+    options: dict[str, Any],
     detail: str,
 ) -> None:
-    """Supported image headers all describe the same visual patch area."""
+    """Supported image headers all describe the same visual patch area, WebP in each of its three layouts."""
     buffer = BytesIO()
-    PillowImage.new("RGB", (1024, 1024), "blue").save(buffer, format=image_format)
+    mode = "RGBA" if isinstance(color, tuple) else "RGB"
+    PillowImage.new(mode, (1024, 1024), color).save(buffer, format=image_format, **options)
     tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
         [
             Message(
@@ -336,9 +350,21 @@ def test_responses_image_header_dimensions_keep_nonzero_visual_budget(
     assert visual_tokens <= tokens < visual_tokens + 100
 
 
+def _bmp() -> bytes:
+    buffer = BytesIO()
+    PillowImage.new("RGB", (64, 64), "blue").save(buffer, format="BMP")
+    return buffer.getvalue()
+
+
 @pytest.mark.parametrize(
     "source",
-    ["https://example.test/image.png", "data:image/png;base64,invalid", "data:image/png;base64,aGVsbG8="],
+    [
+        "https://example.test/image.png",
+        "data:image/png;base64,invalid",
+        "data:image/png;base64,aGVsbG8=",
+        "data:image/bmp;base64," + b64encode(_bmp()).decode(),
+    ],
+    ids=["remote", "invalid-base64", "too-short", "unsupported-format"],
 )
 @pytest.mark.parametrize(
     ("detail", "visual_tokens"),

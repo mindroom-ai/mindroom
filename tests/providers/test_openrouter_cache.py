@@ -123,6 +123,21 @@ async def test_an_anthropic_route_gets_the_claude_ladder(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_an_agent_without_instructions_still_caches_its_conversation_and_tools(tmp_path: Path) -> None:
+    """With no system prompt, the two newest message parts and the last tool still take the markers."""
+    conversation = [message for message in _conversation() if message.role != "system"]
+
+    payload, _ = await _send(tmp_path, conversation, tools=_TOOLS)
+
+    messages = payload["messages"]
+    assert messages[0] == {"role": "user", "content": "Look something up."}
+    assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]
+    assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
+    assert payload["tools"][1]["cache_control"] == _ONE_HOUR
+    assert _markers(payload) == [_ONE_HOUR] * 3
+
+
+@pytest.mark.asyncio
 async def test_a_tool_loop_request_extends_the_previous_boundary(tmp_path: Path) -> None:
     """A tool result takes the newest rung so the next loop iteration reads the previous prefix."""
     payload, _ = await _send(tmp_path, _conversation()[:4])
