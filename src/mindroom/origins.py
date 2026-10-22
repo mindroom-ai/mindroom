@@ -6,6 +6,7 @@ import ipaddress
 import json
 from contextlib import suppress
 from dataclasses import replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -73,7 +74,7 @@ def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
     """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
     if (paths.env_value("MINDROOM_PORT") or "").strip():
         return paths
-    return replace(paths, process_env={**paths.process_env, "MINDROOM_PORT": str(api_port)})
+    return replace(paths, process_env=MappingProxyType({**paths.process_env, "MINDROOM_PORT": str(api_port)}))
 
 
 def deployment_origin(public_url: str | None, fallback_url: str) -> str | None:

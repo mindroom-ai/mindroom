@@ -215,4 +215,8 @@ def test_the_api_port_is_the_local_origin_unless_the_operator_set_one(
 ) -> None:
     """`mindroom run --api-port 9000` links, verifies tokens for, and publishes the port Chat can reach."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
-    assert local_api_origin(with_api_port(paths, 9000)) == origin
+    ported = with_api_port(paths, 9000)
+    assert local_api_origin(ported) == origin
+    # The process env stays a read-only snapshot, as every other constructor leaves it.
+    with pytest.raises(TypeError):
+        ported.process_env["MINDROOM_PORT"] = "1"  # type: ignore[index]
