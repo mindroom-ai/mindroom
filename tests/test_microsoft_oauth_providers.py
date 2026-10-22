@@ -20,6 +20,7 @@ from mindroom.oauth.microsoft import (
     microsoft_files_oauth_provider,
     microsoft_onenote_oauth_provider,
     microsoft_people_oauth_provider,
+    microsoft_sharepoint_oauth_provider,
     microsoft_todo_oauth_provider,
 )
 from mindroom.oauth.providers import OAuthProviderError
@@ -105,6 +106,16 @@ def test_files_provider_declares_a_requester_scoped_graph_contract() -> None:
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.token_endpoint_auth_method == "client_secret_post"
     assert provider.pkce_code_challenge_method == "S256"
+    assert provider.requester_scoped_credentials is True
+
+
+def test_sharepoint_provider_requests_only_sites_read_write_all() -> None:
+    provider = microsoft_sharepoint_oauth_provider()
+
+    assert (provider.id, provider.display_name) == ("microsoft_sharepoint", "Microsoft SharePoint")
+    assert provider.scopes == ("Sites.ReadWrite.All", "User.Read", "offline_access")
+    assert provider.credential_service == "microsoft_sharepoint_oauth"
+    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.requester_scoped_credentials is True
 
 

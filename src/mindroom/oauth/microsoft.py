@@ -22,6 +22,7 @@ __all__ = [
     "microsoft_oauth_provider",
     "microsoft_onenote_oauth_provider",
     "microsoft_people_oauth_provider",
+    "microsoft_sharepoint_oauth_provider",
     "microsoft_teams_oauth_provider",
     "microsoft_todo_oauth_provider",
     "microsoft_token_url",
@@ -135,6 +136,16 @@ def microsoft_files_oauth_provider() -> OAuthProvider:
         display_name="Microsoft OneDrive and SharePoint",
         scopes=("Files.ReadWrite.All",),
         status_capabilities=("search, read, and save OneDrive and SharePoint files",),
+    )
+
+
+def microsoft_sharepoint_oauth_provider() -> OAuthProvider:
+    """Return the SharePoint sites, lists, and pages provider."""
+    return microsoft_oauth_provider(
+        provider_id="microsoft_sharepoint",
+        display_name="Microsoft SharePoint",
+        scopes=("Sites.ReadWrite.All",),
+        status_capabilities=("read SharePoint sites, lists, and pages, and add and change list items",),
     )
 
 

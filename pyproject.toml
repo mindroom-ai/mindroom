@@ -314,6 +314,7 @@ microsoft_files = []
 microsoft_meetings = []
 microsoft_onenote = []
 microsoft_people = []
+microsoft_sharepoint = []
 microsoft_teams = []
 microsoft_todo = []
 modelslabs = [
