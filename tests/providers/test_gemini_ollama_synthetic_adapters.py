@@ -309,7 +309,7 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
     assert body["generationConfig"] == {"responseMimeType": "application/json"}
 
 
-@pytest.mark.parametrize(("tool_choice", "mode"), [("auto", "AUTO"), ("none", "NONE"), ("required", "ANY")])
+@pytest.mark.parametrize(("tool_choice", "mode"), [("none", "NONE"), ("required", "ANY")])
 def test_gemini_tool_choice_modes(tool_choice: str, mode: str) -> None:
     """The protocol's tool choices map to Gemini function-calling modes."""
     assert gemini_wire.tool_config(tool_choice) == {"function_calling_config": {"mode": mode}}

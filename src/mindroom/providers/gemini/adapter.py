@@ -238,16 +238,13 @@ class GeminiProvider:
         # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
         if thinking:
             config["thinking_config"] = thinking
-        built_in_tools = [{"google_search": {}}] if settings.search else []
         # Agno sent built-in tools instead of the function declarations, so a grounded model calls no function.
-        declarations = None if built_in_tools else function_declarations(request.tools)
-        tools = [*built_in_tools, *([declarations] if declarations is not None else []), *request.native_tools]
-        if tools:
-            config["tools"] = tools
+        if settings.search:
+            config["tools"] = [{"google_search": {}}]
+        elif (declarations := function_declarations(request.tools)) is not None:
+            config["tools"] = [declarations]
         if (function_calling := tool_config(request.tool_choice)) is not None:
             config["tool_config"] = function_calling
-        if overrides.timeout_seconds is not None:
-            config["http_options"] = {"timeout": int(overrides.timeout_seconds * 1000)}
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}

@@ -75,7 +75,8 @@ _FORMAT_TO_MIME = {
     "webm": "video/webm",
     "pdf": "application/pdf",
 }
-_TOOL_CHOICE_MODES = {"auto": "AUTO", "none": "NONE", "required": "ANY"}
+# Participation decisions send "none"; the forced-choice goldens pin "required" as Gemini's ANY mode.
+_TOOL_CHOICE_MODES = {"none": "NONE", "required": "ANY"}
 _FILTERED_FINISH_REASONS = frozenset(
     {
         "SAFETY",
@@ -409,8 +410,9 @@ def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     """Return the function-calling config for ``tool_choice``."""
     if tool_choice is None:
         return None
+    # ToolChoice still admits a named-function mapping, which no MindRoom caller sends.
     if not isinstance(tool_choice, str):
-        msg = "Gemini supports tool_choice 'auto', 'none', or 'required'"
+        msg = "Gemini supports tool_choice 'none' or 'required'"
         raise ValueError(msg)  # noqa: TRY004 - the value is unsupported, not of the wrong type
     return {"function_calling_config": {"mode": _TOOL_CHOICE_MODES[tool_choice]}}
 
