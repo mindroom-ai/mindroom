@@ -2,17 +2,44 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.approval import receipt as approval_receipt
-from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
+from mindroom.approval.receipt import (
+    approval_receipt_context,
+    approval_receipt_hook,
+    build_approval_receipt,
+    messages_with_approval_receipt,
+)
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, context, spec
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    registered_report_tool,
+    respond,
+    resume,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_approval_receipt_distinguishes_human_and_policy_decisions() -> None:
@@ -208,6 +235,72 @@ async def test_the_hook_projects_the_receipt_into_the_first_request_only() -> No
     assert all(
         "trusted approval receipt" not in str(message.content) for message in [*first.messages, *second.messages]
     )
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receipt_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The receipt goes with the resumed parent's first request only, not with each continuation after a delegation."""
+    paths = _runtime_paths(tmp_path)
+    requester = "@alice:example.org"
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", tools=["report"], delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code"),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
+        ),
+        "code",
+        users=[requester],
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        requester,
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "session",
+    )
+    leader = ScriptedModel(
+        [
+            calls(tool_call("write_report", "call-1")),
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Check the intro")),
+            calls(tool_call("run_subagent", "delegate-2", agent_name="code", task="Check the outro")),
+            answer("Report written and checked."),
+        ],
+    )
+    code = ScriptedModel([answer("Intro is fine."), answer("Outro is fine.")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    with registered_report_tool():
+        paused = await respond("leader", "Write the report", **options)
+        assert isinstance(paused, PausedAttempt)
+        approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"write_report": "report"})
+        decided = tuple(replace(call, decision=ApprovalDecision.APPROVED) for call in approvals)
+        with approval_receipt_context(build_approval_receipt(decided)):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                approvals,
+                agent_name="leader",
+                **options,
+                decisions={call.tool_call_id: True for call in approvals},
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    # The fresh turn's request, the resumed request, and one continuation after each delegation.
+    assert [
+        any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+        for request in leader.requests
+    ] == [False, True, False, False]
 
 
 @pytest.mark.asyncio
