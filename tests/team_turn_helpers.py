@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     import pytest
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
@@ -132,8 +133,8 @@ def registered_probe() -> Iterator[type[ProbeToolkit]]:
         yield ProbeToolkit
 
 
-def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ScriptedModel]) -> None:
-    """Install the team runtime seam: each member's and the leader's provider is the scripted model of its model name.
+def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ModelProvider]) -> None:
+    """Install the team runtime seam: each member's and the leader's provider is the one ``models`` maps its model to.
 
     ``models`` is read at every build, so a test may replace a model between a pause and its resume.
     """

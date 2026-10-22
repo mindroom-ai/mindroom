@@ -2,7 +2,8 @@
 
 Each golden pins the request Agno 3.0.9 plus MindRoom's patches sent for ``anthropic``, ``vertexai_claude``,
 or ``bedrock_claude`` and the assistant message they parsed from the canned reply; the owned adapter must
-produce the same request (method, URL, kept headers, JSON body) and the same message, metrics, and stop reason.
+produce the same request (method, URL, kept headers, JSON body) and the same message, metrics, and stop reason,
+and its output events, streamed or whole, must add up to that message.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
 from tests.providers.anthropic_family_support import FAMILIES, run_golden
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
@@ -42,3 +44,17 @@ async def test_owned_adapter_reproduces_golden(path: Path, tmp_path: Path) -> No
     assert replay.request == fixture["request"]
     assert replay.parsed == expected_parsed(fixture)
     assert replay.stop_reason == expected_stop_reason(fixture)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _FIXTURES, ids=golden_id)
+async def test_output_events_add_up_to_the_finished_message(path: Path, tmp_path: Path) -> None:
+    """Streamed or whole, a reply's deltas and ready tool calls add up to its finished message."""
+    replay = await run_golden(load_golden(path), tmp_path)
+    completed = replay.events[-1]
+    assert isinstance(completed, TurnCompleted)
+    message = completed.message
+    assert "".join(event.text for event in replay.events if isinstance(event, TextDelta)) == (message.content or "")
+    reasoning = "".join(event.text for event in replay.events if isinstance(event, ReasoningDelta))
+    assert reasoning == (message.reasoning_content or "")
+    assert [event.call for event in replay.events if isinstance(event, ToolCallReady)] == (message.tool_calls or [])
