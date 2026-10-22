@@ -6,7 +6,7 @@ import { type RequestErrorMessages, requestConnection } from "./request";
 import { STACKED } from "./stackedTable";
 import type { EgressCredentialList, EgressCredentialService } from "./types";
 
-type AccountAction = "connect" | "disconnect";
+type AccountAction = "connect" | "disconnect" | "oauth-reuse";
 
 /** Where one service's secret is written and its account is connected. */
 type ServiceTarget =
@@ -53,6 +53,7 @@ function servicePathsFor(
       secret: target.secretPath(serviceName),
       connect: target.accountPath(serviceName, "connect"),
       disconnect: target.accountPath(serviceName, "disconnect"),
+      reuse: target.accountPath(serviceName, "oauth-reuse"),
       accountConnected: async (signal) =>
         accountConnectedIn(
           (
@@ -71,6 +72,7 @@ function servicePathsFor(
     secret: base,
     connect: `${base}/connect`,
     disconnect: `${base}/disconnect`,
+    reuse: `${base}/oauth-reuse`,
     accountConnected: async (signal) =>
       accountConnectedIn(
         (

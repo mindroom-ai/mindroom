@@ -31,7 +31,8 @@ export function ServiceStatus({
       >
         {statusLabel(service)}
       </Badge>
-      {service.active_source === "oauth" && oauth?.account_label && (
+      {/* Also beside an account only its tools use: the one Agent Keys would use once allowed. */}
+      {service.active_source !== "key" && oauth?.account_label && (
         <span className="break-all text-xs">{oauth.account_label}</span>
       )}
       {service.active_source === "oauth" && sharesAccount(agent, oauth) && (

@@ -93,7 +93,9 @@ export function statusLabel(service: EgressCredentialService): string {
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
     // The row names the account below the badge.
-    if (service.active_source === "oauth") return "Connected";
+    if (service.active_source === "oauth") return "Using connected account";
+    if (oauth.connected && !oauth.reuse_enabled)
+      return "Connected for tools only";
     return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";

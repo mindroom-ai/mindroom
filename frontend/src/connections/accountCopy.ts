@@ -36,6 +36,47 @@ export function disconnectDescription(
 }
 
 /**
+ * What Disconnect on an Agent Keys row removes: the saved connection, which
+ * the provider's tools lose too. While Agent Keys may use the account, Stop
+ * using keeps it for the tools instead.
+ */
+export function egressDisconnectDescription(
+  provider: string,
+  agent: string,
+  services: readonly string[],
+  reuseEnabled: boolean,
+): string {
+  const keep = reuseEnabled
+    ? ` To keep it for them, choose Stop using ${provider} account instead.`
+    : "";
+  return `${disconnectDescription(provider, agent, services)} ${provider} tools lose it too.${keep}`;
+}
+
+/**
+ * Asked before Agent Keys may use an account: the agent's commands then act
+ * as it without the approval prompts its tools ask for. `sharedAgent` names a
+ * shared agent whose own account this is, which everyone using it gets;
+ * otherwise the opt-in covers the user's agents whose service uses this
+ * account.
+ */
+export function accountReuseDescription({
+  provider,
+  account,
+  service,
+  sharedAgent,
+}: {
+  provider: string;
+  account: string;
+  service: string;
+  sharedAgent: string | null;
+}): string {
+  const who = sharedAgent
+    ? `Everyone using ${sharedAgent} gets this.`
+    : `This covers each of your agents whose ${service} service uses this account.`;
+  return `Commands this agent runs (shell, python) will act as ${account} with its full access, without the approval prompts ${provider} tools ask for. ${who}`;
+}
+
+/**
  * Who can change the keys of a shared agent, for the note under its name.
  * Beside an account the user cannot change, `keysShown` false (the agent shows
  * no keys, as while Agent Keys is off) names its accounts instead.

@@ -874,7 +874,9 @@ describe("egress broker connected accounts", () => {
     await screen.findByText("GitHub");
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     // Everyone who uses the shared agent acts as the account, so the admin is asked first.
     const question = await screen.findByRole("dialog", {
@@ -915,12 +917,59 @@ describe("egress broker connected accounts", () => {
     expect(listings()).toHaveLength(2);
   });
 
+  it("lets the selected agent's commands use its connected account after confirming", async () => {
+    services = [
+      {
+        ...github,
+        oauth: {
+          ...githubAccount,
+          connected: true,
+          account_label: "team-bot",
+          reuse_enabled: false,
+        },
+      },
+      openai,
+    ];
+    sharedCoder();
+    render(<EgressBroker />);
+    expect(
+      await screen.findByText("Connected for tools only"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use my GitHub account for GitHub" }),
+    );
+    const question = await screen.findByRole("dialog", {
+      name: "Use your GitHub account for Agent Keys?",
+    });
+    expect(question).toHaveTextContent(
+      "Commands this agent runs (shell, python) will act as team-bot with its full access, without the approval prompts GitHub tools ask for. Everyone using Agent coder gets this.",
+    );
+    fireEvent.click(
+      within(question).getByRole("button", { name: "Use account" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        requests("/api/egress-broker/services/github/oauth-reuse", "PUT"),
+      ).toHaveLength(1),
+    );
+    const [allow] = requests(
+      "/api/egress-broker/services/github/oauth-reuse",
+      "PUT",
+    );
+    expect(allow.searchParams.get("agent_name")).toBe("coder");
+    await waitFor(() => expect(listings()).toHaveLength(2));
+  });
+
   it("reads the selected agent's services again when the popup closes without answering", async () => {
     mutationResponse = () => json(authorization);
     sharedCoder();
     render(<EgressBroker />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Connect GitHub for GitHub" }),
+      await screen.findByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
     );
     const question = await screen.findByRole("dialog", {
       name: "Connect a shared account?",
@@ -971,7 +1020,7 @@ describe("egress broker connected accounts", () => {
     });
     expect(
       within(dialog).getByText(
-        "This removes the saved GitHub connection for the agents without a scope. These services stop working until an account is connected again: GitHub.",
+        "This removes the saved GitHub connection for the agents without a scope. These services stop working until an account is connected again: GitHub. GitHub tools lose it too. To keep it for them, choose Stop using GitHub account instead.",
       ),
     ).toBeVisible();
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));

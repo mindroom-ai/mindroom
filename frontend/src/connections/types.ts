@@ -82,6 +82,11 @@ export interface EgressOAuthStatus {
   unavailable_reason: "shared_sandbox" | null;
   /** The service allows personal accounts in this shared sandbox anyway, so every user of the agent can act with one. */
   shared_worker_opt_in: boolean;
+  /**
+   * Agent Keys may use this connection for the service. Until someone allows
+   * it, a connected account serves only its tools.
+   */
+  reuse_enabled: boolean;
 }
 
 /** Who defined a service: the administrator in config.yaml or the caller's own scope. */
