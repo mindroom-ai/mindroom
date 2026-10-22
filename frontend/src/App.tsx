@@ -286,7 +286,7 @@ function AppContent() {
           {!isAuthError && validationIssues.length > 0 && (
             <div className="mb-6 rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
               <p className="font-medium">Current configuration is invalid.</p>
-              <p className="mt-1 text-destructive/80">
+              <p className="mt-1">
                 Fix the reported issues in <code>config.yaml</code> or the
                 referenced plugin manifests, then retry loading the dashboard.
               </p>
@@ -434,7 +434,7 @@ function AppContent() {
               <p className="font-medium">
                 This draft still has configuration validation issues.
               </p>
-              <p className="text-destructive/80">
+              <p>
                 Resolve the reported issues in the draft below, then save to
                 replace <code>config.yaml</code>.
               </p>

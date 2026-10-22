@@ -1134,7 +1134,7 @@ export function Integrations() {
         : "Available";
 
     return (
-      <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
+      <Card className="h-full">
         <CardHeader>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">

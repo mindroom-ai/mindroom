@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Download, Search, X } from "lucide-react";
+import { Check, Download, Search, X } from "lucide-react";
 
 import { EntityAvatar } from "@/components/shared/EntityAvatar";
 import { Button } from "@/components/ui/button";
@@ -694,6 +694,12 @@ export function WorkspaceDirectory() {
                           {item.metadata}
                         </span>
                       </span>
+                      {isSelected && (
+                        <Check
+                          aria-hidden="true"
+                          className="h-4 w-4 shrink-0 text-foreground"
+                        />
+                      )}
                     </button>
                   );
                 })}

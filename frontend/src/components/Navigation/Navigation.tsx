@@ -149,7 +149,7 @@ function NavigationLinks({
                   onClick={onNavigate}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "flex items-center gap-2.5 rounded-md px-3 text-sm text-muted-foreground outline-hidden transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+                    "flex items-center gap-2.5 rounded-md px-3 text-sm text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                     mobile ? "min-h-11" : "min-h-8",
                     active && "bg-active font-medium text-foreground",
                   )}
@@ -172,7 +172,7 @@ function BrandLink() {
     <Link
       to="/dashboard"
       aria-label="MindRoom home"
-      className="flex items-center gap-2.5 rounded-md outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      className="-mx-1.5 flex items-center gap-2.5 rounded-md px-1.5 py-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
     >
       <img src="/logo.svg" alt="" className="h-7 w-7 shrink-0" />
       <span className="text-base font-semibold tracking-tight">MindRoom</span>

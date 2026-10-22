@@ -178,8 +178,9 @@ export function Settings() {
                     type="button"
                     aria-current={section.id === active.id ? "page" : undefined}
                     className={cn(
-                      "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
-                      section.id === active.id && "bg-muted font-medium",
+                      "w-full rounded-md px-3 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground",
+                      section.id === active.id &&
+                        "bg-active font-medium text-foreground hover:bg-active",
                     )}
                     onClick={() => setSelectedId(section.id)}
                   >

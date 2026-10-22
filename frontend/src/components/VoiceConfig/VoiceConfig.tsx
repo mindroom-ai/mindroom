@@ -223,7 +223,7 @@ export function VoiceConfig() {
           </Alert>
 
           {/* Current Settings Summary */}
-          <div className="rounded-lg border border-border bg-muted/40 p-4 shadow-sm">
+          <div className="rounded-lg border border-border bg-muted/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold">
                 Current Effective Settings
@@ -280,7 +280,7 @@ export function VoiceConfig() {
             </div>
           </div>
 
-          <div className="rounded-lg border border-border bg-background p-4 shadow-sm">
+          <div className="rounded-lg border border-border bg-background p-4">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
                 <Label

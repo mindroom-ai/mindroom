@@ -470,7 +470,9 @@ export function ToolConfigPanel({
             />
             <Label
               htmlFor={`${lazyId}-initial`}
-              className={`cursor-pointer text-sm ${deferEnabled ? "" : "text-muted-foreground"}`}
+              className={`cursor-pointer text-sm ${
+                deferEnabled ? "" : "text-muted-foreground"
+              }`}
             >
               Send on every request
             </Label>

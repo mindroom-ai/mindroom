@@ -84,7 +84,7 @@ export function FilterSelector({
                   <Filter
                     className={cn(
                       "w-3.5 h-3.5",
-                      isSelected(option.value) && "text-primary",
+                      isSelected(option.value) && "text-foreground",
                     )}
                   />
                 )}
@@ -96,7 +96,7 @@ export function FilterSelector({
                   "min-w-[1.25rem] h-5 px-1 rounded-full",
                   "text-xs font-medium",
                   isSelected(option.value)
-                    ? "bg-accent text-accent-foreground"
+                    ? "bg-foreground/[0.07] text-foreground"
                     : "bg-foreground/[0.07] text-muted-foreground",
                 )}
               >

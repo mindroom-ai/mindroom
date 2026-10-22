@@ -77,7 +77,7 @@ export function Toaster() {
           </div>
           <button
             onClick={() => dismiss(toast.id)}
-            className="absolute right-2 top-2 rounded-md p-1 text-foreground/50 opacity-0 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
+            className="absolute right-2 top-2 rounded-md p-1 text-current opacity-0 hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <X className="h-4 w-4" />
           </button>
