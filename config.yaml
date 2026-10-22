@@ -80,6 +80,8 @@ agents:
     - twilio
   code:
     display_name: CodeAgent
+    # Its shell runs in the primary process and reaches every path anyway, so file may too, from the same directory.
+    file_access: unrestricted
     instructions:
     - Write clean, well-documented code following best practices
     - Use appropriate error handling
@@ -138,6 +140,8 @@ agents:
     - For email drafts, maintain appropriate tone and formality based on context
     learning: true
     learning_mode: always
+    # A workspace gives file and gmail attachments a place to work under the default file_access: workspace.
+    memory_backend: file
     model: sol
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
       intelligence
