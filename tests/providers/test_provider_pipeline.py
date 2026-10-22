@@ -46,7 +46,7 @@ from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import stream_idle_timeout_seconds, wrap_provider
 from mindroom.providers.pipeline.deferred_tools import portable_tool_search_stream
 from mindroom.providers.pipeline.guidance_retry import guidance_retry_stream
-from mindroom.providers.pipeline.media import FALLBACK_MARKER, forget_learned_media_limits, media_fallback_stream
+from mindroom.providers.pipeline.media import FALLBACK_MARKER, media_fallback_stream
 from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
@@ -232,19 +232,11 @@ async def test_non_streaming_requests_are_not_retried() -> None:
 # --- Media fallback -------------------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def _fresh_media_limits() -> AsyncIterator[None]:
-    forget_learned_media_limits()
-    yield
-    forget_learned_media_limits()
-
-
 def _image(image_id: str = "image-1") -> Image:
     return Image(id=image_id, content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_media_the_route_omits_is_replaced_by_the_fallback_note() -> None:
     inner = _ScriptedProvider([[_turn()]], capabilities=Capabilities(omitted_media=frozenset({"audio"})))
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
@@ -259,7 +251,6 @@ async def test_media_the_route_omits_is_replaced_by_the_fallback_note() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_route() -> None:
     rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
     inner = _ScriptedProvider([[UsageReported(MessageMetrics(input_tokens=5)), rejection], [_turn()], [_turn()]])
@@ -281,7 +272,6 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_input_specific_rejection_retries_without_learning() -> None:
     rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted Chat", status_code=400)
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
@@ -296,7 +286,6 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_a_mixed_media_rejection_retries_without_learning() -> None:
     """A rejection of a request with two media kinds cannot say which kind the model lacks."""
     rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
@@ -313,7 +302,6 @@ async def test_a_mixed_media_rejection_retries_without_learning() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
     """The same model id behind another endpoint keeps sending the media one endpoint rejected."""
     rejection = InvalidRequest("This model does not support image input", provider="Scripted Chat", status_code=400)
@@ -328,7 +316,6 @@ async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_retryable_failures_and_visible_output_are_not_media_retries() -> None:
     transient = _ScriptedProvider([[_transient()]])
     visible = _ScriptedProvider(
@@ -343,7 +330,6 @@ async def test_retryable_failures_and_visible_output_are_not_media_retries() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
     receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
     messages = [
@@ -508,7 +494,6 @@ async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
     """A transient failure before still retries; the refused attempt ends the request with its media intact."""
     usage = MessageMetrics(input_tokens=40, output_tokens=9, total_tokens=49)
@@ -768,7 +753,6 @@ def test_stream_idle_limit_policy(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 async def test_composed_pipeline_drains_with_complete() -> None:
     inner = _ScriptedProvider([[_transient()], [TextDelta("done"), _turn()]])
     provider = wrap_provider(inner, idle_timeout_seconds=None, media_fallback_prompt="x", request_log=None)
@@ -780,7 +764,6 @@ async def test_composed_pipeline_drains_with_complete() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_fresh_media_limits")
 @pytest.mark.parametrize(
     "rejection",
     [

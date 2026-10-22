@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import MediaKind, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["FALLBACK_MARKER", "forget_learned_media_limits", "media_fallback_stream"]
+__all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
 
 logger = get_logger(__name__)
 
@@ -68,11 +68,6 @@ class _Route:
 
 # Learned limits live for the process only; a provider may add a capability at any time.
 _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
-
-
-def forget_learned_media_limits() -> None:
-    """Clear the media limits learned from provider rejections, for isolated tests."""
-    _LEARNED_UNSUPPORTED.clear()
 
 
 def _route(identity: ModelIdentity) -> _Route:

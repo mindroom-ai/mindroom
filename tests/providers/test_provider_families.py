@@ -25,7 +25,7 @@ from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.gemini.wire import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.media import FALLBACK_MARKER, forget_learned_media_limits
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
@@ -61,7 +61,6 @@ _OVERLOADED = "The model is overloaded"
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     scrub_provider_env(monkeypatch)
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
-    forget_learned_media_limits()
 
 
 def _tool(name: str) -> ToolSpec:
