@@ -18,8 +18,6 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
 import json5
-from agno.skills import Skills
-from agno.skills.skill import Skill as AgnoSkill
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
@@ -477,47 +475,6 @@ def _configured_skill_file(directory: Path, subpath: str) -> Path | None:
     return target if target.is_relative_to(root) else None
 
 
-class _AgnoSkills(Skills):
-    """The Agno ``Skills`` object agents built on Agno take, offering one owned ``SkillsToolkit``.
-
-    Like Agno's own, it builds fresh skill functions on every ``get_tools`` call, because Agno's callers prepare and
-    mutate the functions they receive.
-    """
-
-    def __init__(self, toolkit: SkillsToolkit) -> None:
-        self.toolkit = toolkit
-        super().__init__(loaders=[])
-
-    def get_skill(self, name: str) -> AgnoSkill | None:
-        """Return the loaded skill named ``name``."""
-        skill = self.toolkit.get_skill(name)
-        return None if skill is None else _agno_skill(skill)
-
-    def get_all_skills(self) -> list[AgnoSkill]:
-        """Return every loaded skill."""
-        return [_agno_skill(skill) for skill in self.toolkit.skills]
-
-    def get_system_prompt_snippet(self) -> str:
-        """Return the skills section of the system prompt."""
-        return self.toolkit.prompt_block()
-
-    def get_tools(self) -> list[Function]:
-        """Return fresh skill functions."""
-        return self.toolkit._new_functions()
-
-
-def _agno_skill(skill: Skill) -> AgnoSkill:
-    return AgnoSkill(
-        name=skill.name,
-        description=skill.description,
-        instructions=skill.instructions,
-        source_path=str(skill.source_path),
-        scripts=list(skill.scripts),
-        references=list(skill.references),
-        metadata=None if skill.metadata is None else dict(skill.metadata),
-    )
-
-
 def build_skills_toolkit(
     agent_name: str,
     config: Config,
@@ -608,35 +565,6 @@ def _load_skills(
                 workspace_roots.pop(skill.name, None)
     logger.debug("Loaded skills", count=len(skills))
     return skills, workspace_roots
-
-
-def build_agent_skills(
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skill_roots: Sequence[Path] | None = None,
-    workspace_root: Path | None = None,
-    env_vars: Mapping[str, str] | None = None,
-    credential_keys: set[str] | None = None,
-    output_file_policy: ToolOutputFilePolicy | None = None,
-    only: Collection[str] | None = None,
-    refused: list[RefusedWorkspaceSkill] | None = None,
-) -> Skills | None:
-    """Return ``build_skills_toolkit``'s toolkit as the Agno ``Skills`` object agents built on Agno take."""
-    toolkit = build_skills_toolkit(
-        agent_name,
-        config,
-        runtime_paths,
-        skill_roots=skill_roots,
-        workspace_root=workspace_root,
-        env_vars=env_vars,
-        credential_keys=credential_keys,
-        output_file_policy=output_file_policy,
-        only=only,
-        refused=refused,
-    )
-    return None if toolkit is None else _AgnoSkills(toolkit)
 
 
 @dataclass(frozen=True)
