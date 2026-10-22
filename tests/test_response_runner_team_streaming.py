@@ -56,8 +56,8 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _set_gateway_method,
-    _team_orchestrator,
     bind_runtime_paths,
+    team_orchestrator,
 )
 from tests.bot_helpers import (
     _handled_response_event_id,
@@ -150,7 +150,7 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         await coordinator.generate_team_response_helper(
@@ -200,7 +200,7 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
@@ -248,7 +248,7 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     _install_inert_post_response_effects(coordinator)
     boundary_started = asyncio.Event()
@@ -344,7 +344,7 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -390,7 +390,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         coordinator.deps = replace(coordinator.deps, redacted_history_events=redacted_history_events)
         _install_inert_post_response_effects(coordinator)
@@ -441,7 +441,7 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -491,7 +491,7 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -562,7 +562,7 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         await coordinator.generate_team_response_helper(
@@ -628,7 +628,7 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         coordinator.deps.delivery_gateway.send_text.return_value = "$msg"
@@ -687,7 +687,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_fail(request: object) -> StreamTransportOutcome:
@@ -775,7 +775,7 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery(request: object) -> StreamTransportOutcome:
@@ -830,7 +830,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -902,7 +902,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_fail(_request: object) -> StreamTransportOutcome:
@@ -1015,7 +1015,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
@@ -1065,7 +1065,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1120,7 +1120,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1211,7 +1211,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1272,7 +1272,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1345,7 +1345,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1517,7 +1517,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
-        orchestrator = _team_orchestrator(config, runtime_paths)
+        orchestrator = team_orchestrator(config, runtime_paths)
         orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
         coordinator = _build_response_runner(
             bot,
@@ -1605,7 +1605,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
 
@@ -1685,7 +1685,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def consume_delivery_and_cancel(request: object) -> StreamTransportOutcome:
@@ -1758,7 +1758,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         async def fake_team_response(*_args: object, **kwargs: object) -> str:
@@ -1802,7 +1802,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             storage_path=tmp_path,
             requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
 
         resolution = await coordinator.generate_team_response_helper(
@@ -1848,7 +1848,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1923,7 +1923,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
+            orchestrator=team_orchestrator(config, runtime_paths),
         )
         _install_inert_post_response_effects(coordinator)
 
@@ -1983,7 +1983,7 @@ async def test_persist_interrupted_recorder_off_loop_swallows_persist_failure(tm
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.record_interrupted(
@@ -2021,7 +2021,7 @@ async def test_persist_interrupted_recorder_off_loop_propagates_cancellation(tmp
         storage_path=tmp_path,
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=_team_orchestrator(config, runtime_paths),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     recorder = TurnRecorder(user_message="Hello")
     recorder.record_interrupted(

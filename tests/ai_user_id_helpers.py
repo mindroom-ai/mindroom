@@ -225,7 +225,8 @@ def _knowledge_access_support(
     )
 
 
-def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+    """Return a stand-in orchestrator with what a team reply reads from one: config, paths, hooks, and budgets."""
     matrix_admin = object()
     knowledge_refresh_scheduler = SimpleNamespace(
         schedule_refresh=lambda _base_id: None,

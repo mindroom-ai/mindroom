@@ -45,7 +45,7 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
-from tests.ai_user_id_helpers import _team_orchestrator
+from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
@@ -497,7 +497,7 @@ async def respond_team(
         identity=identity,
         correlation_id=correlation_id,
     )
-    orchestrator = _team_orchestrator(config, runtime_paths)
+    orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
     ctx = make_turn_context(
         team_name,
