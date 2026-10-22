@@ -26,7 +26,7 @@ from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, prepare_run_tools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ContentDelta, ReasoningDelta, RequestCompleted, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TextDelta, UsageReported
+from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics
@@ -605,7 +605,9 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
             msg = "log write failed"
             raise ProviderError(msg, provider="Synthetic")
 
-    model = ScriptedModel([[*answer("done", usage(50, 2)), Await(finish_the_stream)]])
+    # The finished turn alone carries the usage, as a provider that reports none along the way gives it.
+    finished = TurnCompleted(message=Message(role="assistant", content="done", metrics=usage(50, 2)), stop_reason="end")
+    model = ScriptedModel([[TextDelta("done"), finished, Await(finish_the_stream)]])
     messages = _prompt()
     record = _record()
     task = asyncio.create_task(_run(spec(model), messages, record=record))

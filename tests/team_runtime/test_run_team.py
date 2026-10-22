@@ -417,9 +417,10 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
             id="empty",
         ),
         pytest.param(
-            [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="b")), answer("")],
+            [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), answer("")],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
-            "Agent Writer: a,bAgent Checker: null",
+            # The broadcast keeps an empty tool result, which a coordinate delegation drops.
+            "Agent Writer: a,Agent Checker: null",
             id="tool-only",
         ),
     ],

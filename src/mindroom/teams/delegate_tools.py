@@ -55,8 +55,8 @@ def delegate_functions(
 ) -> AdaptedToolkit:
     """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``.
 
-    ``stream`` says whether the leader's requests stream, which selects the result rules Agno's delegation applied
-    in that mode.
+    ``stream`` says whether the leader's requests stream: without streaming, Agno's delegation told the leader about
+    a member's run by different rules.
     """
     by_id = {member.spec.id: member for member in members}
 
@@ -101,7 +101,7 @@ def delegate_functions(
 
 
 def member_result_text(child: RunRecord, *, stream: bool) -> str:
-    """Return what a coordinate leader reads for a finished member run, by the rules of Agno's delegation in its mode.
+    """Return what a coordinate leader reads for a finished member run, by Agno's rules with or without streaming.
 
     A failed member's record holds the error text as its content, so the leader reads what went wrong, as it did
     when Agno absorbed a member error into the member's run.
