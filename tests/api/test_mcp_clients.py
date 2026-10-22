@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mindroom.api import config_lifecycle, connections
-from mindroom.api.connections_session_cookie import CONNECTIONS_SESSION_COOKIE, issue_connections_session
+from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
     ORIGIN,
@@ -183,7 +183,7 @@ def test_portal_session_finds_the_account_its_email_mapping_names(
     for account in accounts:
         _provision(managed_client, **{"user": "alice", **account})
     managed_client.cookies.set(
-        CONNECTIONS_SESSION_COOKIE,
+        connections_session_cookie(ORIGIN),
         issue_connections_session(f"@{session_user}:example.org", now=time.time(), dashboard=False),
     )
 

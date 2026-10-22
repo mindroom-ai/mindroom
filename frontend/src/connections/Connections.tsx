@@ -14,8 +14,8 @@ export function Connections() {
   const mcp = useMcpSelection();
   const [connections, setConnections] = useState<ConnectionList | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // The tool section and the API keys section can show the same account, so
-  // a change in either reloads the catalog and the tool statuses together.
+  // An account change reloads the catalog, whose API key counts can depend on
+  // the same account, and the tool statuses together.
   const [refreshVersion, setRefreshVersion] = useState(0);
   const refresh = () => setRefreshVersion((version) => version + 1);
   useEffect(() => {
@@ -93,7 +93,6 @@ export function Connections() {
             mcp={mcp}
             refreshVersion={refreshVersion}
             onConnectionChange={refresh}
-            onEgressChange={refresh}
           />
         )}
         <ConnectedClients />

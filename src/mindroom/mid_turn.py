@@ -74,6 +74,7 @@ class QueuedMessage:
     event_id: str
     text: str | None
     visible_response: str | None = ""
+    requester_id: str | None = None
 
 
 @dataclass

@@ -93,6 +93,36 @@ async def test_audience_mismatch_from_userinfo_is_unauthorized(homeserver: tuple
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("public_url", "request_origin", "hint"),
+    [
+        (
+            "",
+            "http://10.42.0.6:8765/",
+            " MindRoom checked the token for http://localhost:8765; if MindRoom is opened at http://10.42.0.6:8765,"
+            " set MINDROOM_PUBLIC_URL to it.",
+        ),
+        ("", "http://localhost:8765/", ""),
+        ("", None, ""),
+        (AUDIENCE, "http://10.42.0.6:8765/", ""),
+    ],
+    ids=["other-address-without-public-url", "default-address", "no-request-origin", "public-url-set"],
+)
+async def test_refusal_at_another_address_names_the_public_url_setting(
+    homeserver: tuple[ComputerPeer, RuntimePaths],
+    public_url: str,
+    request_origin: str | None,
+    hint: str,
+) -> None:
+    """Chat binds the token to the address it opened, so a refusal there names the setting only while it is unset."""
+    peer, paths = homeserver
+    peer.expected_audience = "http://10.42.0.6:8765"
+    with pytest.raises(MatrixOpenIDError) as error:
+        await verify_matrix_openid(TOKEN, _with_public_url(paths, public_url), request_origin=request_origin)
+    assert (error.value.status_code, error.value.detail) == (401, "Matrix OpenID verification failed." + hint)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("public_url", "audience"),
     [
         ("https://Portal.Example.org:443", "https://portal.example.org"),
@@ -118,8 +148,6 @@ async def test_audience_is_the_normalized_browser_origin(
 @pytest.mark.parametrize(
     "public_url",
     [
-        "",
-        "   ",
         "portal.example.org",
         "localhost:8765",
         "ftp://portal.example.org",
@@ -132,10 +160,33 @@ async def test_no_audience_without_a_usable_public_url(
     homeserver: tuple[ComputerPeer, RuntimePaths],
     public_url: str,
 ) -> None:
-    """The audience is never guessed from anywhere but MINDROOM_PUBLIC_URL, so none is sent without one."""
+    """An unusable MINDROOM_PUBLIC_URL is never replaced by a guess, so no audience is sent."""
     peer, paths = homeserver
     assert await verify_matrix_openid(TOKEN, _with_public_url(paths, public_url)) == "@alice:example.org"
     assert peer.userinfo_audiences == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("env", "audience"),
+    [
+        ({}, "http://localhost:8765"),
+        ({"MINDROOM_PORT": "9000"}, "http://localhost:9000"),
+        ({"MINDROOM_PORT": "80"}, "http://localhost"),
+    ],
+)
+async def test_audience_defaults_to_the_local_api_origin(
+    homeserver: tuple[ComputerPeer, RuntimePaths],
+    env: dict[str, str],
+    audience: str,
+) -> None:
+    """Without MINDROOM_PUBLIC_URL the audience is MindRoom's own local origin, which Chat opens on the same machine."""
+    peer, paths = homeserver
+    for public_url in ("", "   "):
+        local = replace(paths, process_env={**paths.process_env, "MINDROOM_PUBLIC_URL": public_url, **env})
+        peer.userinfo_audiences.clear()
+        assert await verify_matrix_openid(TOKEN, local) == "@alice:example.org"
+        assert peer.userinfo_audiences == [audience]
 
 
 _VersionsServer = Callable[[web.Response], Awaitable[RuntimePaths]]
@@ -185,6 +236,23 @@ async def test_binding_probe_true_when_versions_advertises_the_flag(versions_ser
         web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}}),
     )
     assert await homeserver_binds_openid_audience(paths) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "env",
+    [{"MINDROOM_PORT": "tcp://10.0.0.1:8765"}, {"MINDROOM_PUBLIC_URL": "https://portal.example.org:bad"}],
+    ids=["kubernetes-service-link-port", "unusable-public-url"],
+)
+async def test_binding_probe_false_without_an_audience_to_send(
+    versions_server: _VersionsServer,
+    env: dict[str, str],
+) -> None:
+    """Without an audience a binding homeserver still accepts unbound tokens, so no audience counts as no binding."""
+    paths = await versions_server(
+        web.json_response({"versions": ["v1.11"], "unstable_features": {"io.mindroom.openid_audience": True}}),
+    )
+    assert await homeserver_binds_openid_audience(replace(paths, process_env={**paths.process_env, **env})) is False
 
 
 @pytest.mark.asyncio

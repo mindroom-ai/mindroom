@@ -8,28 +8,37 @@ export interface OAuthAuthorization {
 
 const OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
 
-function isLoopbackHostname(hostname: string): boolean {
+/** Loopback names and addresses, or a literal private address, where MindRoom serves the portal over plain HTTP. */
+function isLocalHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/\.$/, "");
   if (
     normalized === "localhost" ||
     normalized.endsWith(".localhost") ||
-    normalized === "[::1]"
+    normalized === "[::1]" ||
+    /^\[f[cd][\da-f]{2}:/.test(normalized)
   )
     return true;
   const octets = normalized.split(".");
+  if (
+    octets.length !== 4 ||
+    !octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+  )
+    return false;
+  const [first, second] = octets.map(Number);
   return (
-    octets.length === 4 &&
-    octets[0] === "127" &&
-    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    first === 127 ||
+    first === 10 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
   );
 }
 
-function isAllowedOAuthUrl(url: URL, allowLoopbackHttp: boolean): boolean {
+function isAllowedOAuthUrl(url: URL, allowLocalHttp: boolean): boolean {
   return (
     url.protocol === "https:" ||
-    (allowLoopbackHttp &&
+    (allowLocalHttp &&
       url.protocol === "http:" &&
-      isLoopbackHostname(url.hostname))
+      isLocalHostname(url.hostname))
   );
 }
 
@@ -47,8 +56,8 @@ export async function connectWithPopup(
 ): Promise<void> {
   if (signal.aborted) throw new Error("Authorization was cancelled.");
   const pageUrl = new URL(window.location.href);
-  const allowLoopbackHttp =
-    pageUrl.protocol === "http:" && isLoopbackHostname(pageUrl.hostname);
+  const allowLocalHttp =
+    pageUrl.protocol === "http:" && isLocalHostname(pageUrl.hostname);
   // Keep this before the first await so browsers retain the click's user activation.
   const popup = window.open("about:blank", "_blank", "width=500,height=700");
   if (!popup)
@@ -97,8 +106,8 @@ export async function connectWithPopup(
         const completionUrl = new URL(data.completion_origin);
         if (
           data.provider !== provider ||
-          !isAllowedOAuthUrl(authUrl, allowLoopbackHttp) ||
-          !isAllowedOAuthUrl(completionUrl, allowLoopbackHttp)
+          !isAllowedOAuthUrl(authUrl, allowLocalHttp) ||
+          !isAllowedOAuthUrl(completionUrl, allowLocalHttp)
         )
           throw new Error("Could not start the connection. Try again.");
         expectedOrigin = completionUrl.origin;

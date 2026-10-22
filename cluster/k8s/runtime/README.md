@@ -880,7 +880,7 @@ It cannot be combined with `workers.kubernetes.agentVault`; to switch an existin
 ### Self-service for users
 
 With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
-The page needs these settings, which the chart does not render for you:
+Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings, which the chart does not render for you:
 
 - **Trusted upstream auth with JWT.** The gateway in front of the runtime must authenticate users and sign a JWT; header-only mode is not enough.
   This chart has no values for it, so set the `MINDROOM_TRUSTED_UPSTREAM_*` variables and an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import httpx
 from packaging.version import Version
 
 from mindroom.agents import build_agent_toolkit
@@ -118,6 +119,12 @@ OFFLINE_CLIENTS = {
     "jira": "agno.tools.jira.JIRA",
     "mem0": "agno.tools.mem0.MemoryClient",
     "neo4j": "agno.tools.neo4j.GraphDatabase",
+    "zep": "agno.tools.zep.Zep",
+}
+# HTTP requests a toolkit sends while constructed, refused before they dial; the goldens record the refused outcome.
+REFUSED_REQUESTS = {
+    # Its instructions report the PyPI release check, which fails offline.
+    "update_awareness": "mindroom.custom_tools.update_awareness.httpx.get",
 }
 # Overrides beyond the `all` and `enable_*` switches that a tool needs before it registers every function it can.
 EXTRA_ENABLING_OVERRIDES: dict[str, dict[str, object]] = {
@@ -138,6 +145,11 @@ _PYDANTIC_ERROR_URL_PLACEHOLDER = "https://errors.pydantic.dev/<PYDANTIC_VERSION
 def _refuse_network(*_args: object, **_kwargs: object) -> None:
     msg = "Golden capture refuses network connections"
     raise OSError(msg)
+
+
+def _refuse_request(url: str, **_kwargs: object) -> None:
+    msg = "Golden capture refuses network connections"
+    raise httpx.ConnectError(msg, request=httpx.Request("GET", url))
 
 
 @contextmanager
@@ -209,7 +221,12 @@ def build_toolkit(
         # Tool search exists only beside a deferred toolkit, and its own functions do not depend on which one.
         calculator = build_toolkit("calculator", config, runtime_paths)
         deferred_toolkits = (defer_toolkit("calculator", TOOL_METADATA["calculator"].description, calculator),)
-    with patch(OFFLINE_CLIENTS[tool_name]) if tool_name in OFFLINE_CLIENTS else nullcontext():
+    with (
+        patch(OFFLINE_CLIENTS[tool_name]) if tool_name in OFFLINE_CLIENTS else nullcontext(),
+        patch(REFUSED_REQUESTS[tool_name], side_effect=_refuse_request)
+        if tool_name in REFUSED_REQUESTS
+        else nullcontext(),
+    ):
         toolkit = build_agent_toolkit(
             tool_name,
             agent_name=AGENT_NAME,

@@ -59,7 +59,7 @@ _MALFORMED = "The request is malformed and was refused."
 # a connect link, and `refusal_body` drops `manage_url`, the dashboard. The `egress_credentials` tool ends its note
 # with the same sentences, and the key and reconnect texts stay short enough for the 200-character reason phrase.
 CONNECTIONS_PAGE_NOT_SERVED = (
-    "on the Connections page, which this deployment does not serve. "
+    "on the Connections page, which nobody can sign in to here. "
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 _WITHOUT_PAGE = {

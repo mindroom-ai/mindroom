@@ -314,7 +314,7 @@ def test_manage_url_points_at_the_dashboard_or_the_personal_page(tmp_path: Path)
 
 # What the tool says where a personal scope's keys cannot be set: the broker's refusal says the same.
 _PAGE_NOT_SERVED_NOTE = (
-    "Each user sets this agent's keys and accounts on the Connections page, which this deployment does not serve. "
+    "Each user sets this agent's keys and accounts on the Connections page, which nobody can sign in to here. "
     "An administrator can enable Connections sign-in or make the agent shared."
 )
 
@@ -322,8 +322,16 @@ _PAGE_NOT_SERVED_NOTE = (
 @pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
 @pytest.mark.parametrize(
     "env",
-    [{}, {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"}],
-    ids=["standalone", "trusted-without-jwt"],
+    [
+        {},
+        {"MINDROOM_EGRESS_BROKER_PORT": "8768", "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]"},
+        {
+            "MINDROOM_EGRESS_BROKER_PORT": "8768",
+            "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": "[]",
+            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
+        },
+    ],
+    ids=["broker-off", "chat-sign-in-off", "trusted-without-jwt"],
 )
 def test_personal_scope_without_the_personal_page_is_sent_to_no_page(
     tmp_path: Path,
@@ -332,7 +340,8 @@ def test_personal_scope_without_the_personal_page_is_sent_to_no_page(
 ) -> None:
     """Only the personal page sets a personal scope's keys; where it is not served the tool names no page, as the broker.
 
-    Trusted upstream auth without JWT does not serve it: the personal API answers 403 without signed requests.
+    With sign-in from Chat off, trusted upstream auth without JWT does not serve it either: the personal API answers
+    403 without signed requests.
     """
     runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example", **env)
     tool = _tool(runtime_paths, worker_scope=worker_scope)

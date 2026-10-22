@@ -19,8 +19,8 @@ from mindroom.api.connection_agents import (
     resolve_connection_user,
 )
 from mindroom.api.connections_session_cookie import (
-    CONNECTIONS_SESSION_COOKIE,
     CONNECTIONS_SESSION_SECONDS,
+    connections_session_cookie,
     issue_connections_session,
 )
 from mindroom.constants import RuntimePaths
@@ -29,11 +29,9 @@ from mindroom.matrix_openid import (
     MatrixOpenIDError,
     MatrixOpenIDToken,
     homeserver_binds_openid_audience,
-    openid_audience,
     verify_matrix_openid,
 )
-from mindroom.origins import allowed_client_origins
-from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
+from mindroom.origins import connections_client_origin_allowed, connections_origins_configured, deployment_origin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -72,19 +70,12 @@ class _SignedIn(BaseModel):
     matrix_user_id: str
 
 
-def _enabled_portal_paths(request: Request) -> RuntimePaths:
-    paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
-    if not (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
-        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
-    return paths
-
-
 def _portal_paths(request: Request) -> RuntimePaths:
     """Gate the request before its body is validated, so a refused request never has its token validated or verified.
 
     FastAPI has already read and JSON-parsed the body by the time dependencies run.
     """
-    paths = _enabled_portal_paths(request)
+    paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     require_connections_same_origin(request, paths)
     return paths
 
@@ -104,7 +95,7 @@ async def _dashboard_allowed(
     homeserver. `/versions` shows only that binding was on after the first verification, so the token is verified
     again afterwards: a binding switch between the requests cannot then pass an unbound token in either direction.
     """
-    if not is_administrator(matrix_user_id, snapshot) or openid_audience(paths) is None:
+    if not is_administrator(matrix_user_id, snapshot):
         return False
     if not await homeserver_binds_openid_audience(paths):
         return False
@@ -120,10 +111,20 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     """Trust a Matrix OpenID token only from an allowlisted Chat origin, then start a portal session."""
     # The portal page reports the postMessage origin it received the token from. Without this
     # allowlist a page the victim visits could hand the portal an attacker's token.
-    if body.client_origin not in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV):
+    origin = deployment_origin(paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
+    if not connections_client_origin_allowed(paths, body.client_origin, origin):
         raise HTTPException(403, "Connections sign-in is not allowed from this client", headers=CONNECTIONS_HEADERS)
+    # Without binding, any backend a user opens from Chat could replay their token here. Request headers cannot show
+    # that a portal is out of such a backend's reach, so only an operator's explicit list accepts that risk.
+    if not connections_origins_configured(paths) and not await homeserver_binds_openid_audience(paths):
+        raise HTTPException(
+            403,
+            "Connections sign-in from MindRoom Chat needs a homeserver that binds tokens, "
+            "or MINDROOM_CONNECTIONS_ALLOWED_ORIGINS",
+            headers=CONNECTIONS_HEADERS,
+        )
     try:
-        matrix_user_id = await verify_matrix_openid(body.openid_token, paths)
+        matrix_user_id = await verify_matrix_openid(body.openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
         raise HTTPException(error.status_code, error.detail, headers=CONNECTIONS_HEADERS) from error
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.
@@ -138,12 +139,13 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
         dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot, paths),
     )
     response.headers.update(CONNECTIONS_HEADERS)
+    cookie = connections_session_cookie(origin)
     response.set_cookie(
-        CONNECTIONS_SESSION_COOKIE,
+        cookie,
         token,
         max_age=CONNECTIONS_SESSION_SECONDS,
         path="/",
-        secure=True,
+        secure=cookie.startswith("__Host-"),
         httponly=True,
         samesite="lax",
     )
@@ -153,7 +155,6 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
 @router.get("")
 async def current_session(request: Request, response: Response) -> _SignedIn:
     """Tell the portal page which Matrix user is signed in, or 401 so it signs in."""
-    _enabled_portal_paths(request)
     try:
         auth_user = await require_connections_user(request)
     except HTTPException as error:

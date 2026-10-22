@@ -8,7 +8,11 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import egressPresets from "@/test/fixtures/egressPresets.json";
-import { pressInDialog, presetsReady } from "@/test/egressServiceTestKit";
+import {
+  presetsReady,
+  pressInDialog,
+  rowAction,
+} from "@/test/egressServiceTestKit";
 import { readConfigRoot, useConfigStore } from "@/store/configStore";
 import { EgressBroker } from "./EgressBroker";
 
@@ -79,9 +83,7 @@ function saveBodies() {
 /** Refuses other paths on GitHub's hosts and saves, the edit the GitHub tests make. */
 async function restrictGithub() {
   render(<EgressBroker />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "Edit service for GitHub" }),
-  );
+  fireEvent.click(await rowAction("Edit service for GitHub"));
   await presetsReady();
   fireEvent.click(screen.getByRole("button", { name: "More options" }));
   fireEvent.click(screen.getByLabelText("Refuse other paths on these hosts"));
@@ -90,9 +92,7 @@ async function restrictGithub() {
 
 async function deleteOpenai() {
   render(<EgressBroker />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "Delete service for OpenAI" }),
-  );
+  fireEvent.click(await rowAction("Delete service for OpenAI"));
   await pressInDialog("Delete");
 }
 

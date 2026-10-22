@@ -4758,10 +4758,10 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
+        question_text="Which role should I use?",
+        selection_key="🧭",
+        selected_label="Department head",
+        selected_value="department_head",
         thread_id="$thread-root:localhost",
     )
 
@@ -4775,7 +4775,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 
     assert len(harness.gateway.sent) == 1
     ack_request = harness.gateway.sent[0]
-    assert ack_request.response_text.startswith("You selected: 1 Option 1")
+    assert ack_request.response_text.startswith("You selected: 🧭 Department head\n")
     assert ack_request.target.resolved_thread_id == selection.thread_id
     assert ack_request.target.reply_to_event_id == selection.question_event_id
     assert ack_request.reply_write is not None

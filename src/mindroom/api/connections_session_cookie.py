@@ -5,7 +5,9 @@ import hmac
 import secrets
 from typing import NamedTuple
 
-CONNECTIONS_SESSION_COOKIE = "__Host-mindroom_connections_session"
+_HTTPS_SESSION_COOKIE = "__Host-mindroom_connections_session"
+# Browsers keep a `__Host-` cookie only when it is Secure, which they refuse to store over plain HTTP.
+_PLAIN_HTTP_SESSION_COOKIE = "mindroom_connections_session"
 CONNECTIONS_SESSION_SECONDS = 3600
 # A new key per process, so a restart signs every portal user out; reopening the portal from Chat signs them in again.
 _SESSION_KEY = secrets.token_bytes(32)
@@ -16,6 +18,11 @@ class _ConnectionsSession(NamedTuple):
 
     matrix_user_id: str
     dashboard: bool
+
+
+def connections_session_cookie(origin: str | None) -> str:
+    """Name the session cookie for the portal at `origin`, which is plain HTTP only on a local address."""
+    return _PLAIN_HTTP_SESSION_COOKIE if origin is not None and origin.startswith("http://") else _HTTPS_SESSION_COOKIE
 
 
 def _signature(payload: str) -> str:

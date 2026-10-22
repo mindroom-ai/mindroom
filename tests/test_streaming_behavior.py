@@ -3771,7 +3771,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
         )
-        streaming.accumulated_text = "Ping @helper"
+        streaming.accumulated_text = "Ping @helper now"
         streaming._warmup_state.apply_event(
             WorkerProgressEvent(
                 tool_name="shell",
@@ -3788,8 +3788,8 @@ class TestStreamingBehavior:
         await streaming._send_or_edit_message(mock_client)
 
         content = mock_client.room_send.call_args.kwargs["content"]
-        assert content["body"].startswith("Ping @mindroom_helper:localhost")
-        assert content[STREAM_VISIBLE_BODY_KEY] == "Ping @mindroom_helper:localhost"
+        assert content["body"].startswith("Ping @mindroom_helper:localhost now")
+        assert content[STREAM_VISIBLE_BODY_KEY] == "Ping @mindroom_helper:localhost now"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

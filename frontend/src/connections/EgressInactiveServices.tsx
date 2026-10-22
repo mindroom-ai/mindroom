@@ -3,7 +3,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "./ConfirmDialog";
+import {
+  SERVICE_CELL,
+  SERVICE_ROW,
+  ServiceGroupHeading,
+} from "./EgressServiceTable";
 import { errorText } from "./request";
+import { STACKED } from "./stackedTable";
+import { ItemName } from "./ToolRow";
 import type { EgressInactiveReason, EgressInactiveService } from "./types";
 
 const REASON_TEXT: Record<EgressInactiveReason, string> = {
@@ -45,56 +52,59 @@ function InactiveServiceRow({
   };
 
   return (
-    <li
-      aria-label={`Inactive service ${service.name}`}
-      className="border-t border-border/60 px-5 py-3 first:border-t-0"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0 space-y-0.5">
-          <span className="font-mono text-sm">{service.name}</span>
+    <tr aria-label={`Inactive service ${service.name}`} className={SERVICE_ROW}>
+      <th scope="row" className={SERVICE_CELL.name}>
+        <ItemName
+          names={[service.name]}
+          title={<span className="font-mono text-sm">{service.name}</span>}
+        >
           <p className="text-xs text-muted-foreground">
             {REASON_TEXT[service.reason]}
           </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline" className="font-normal">
-            Inactive
-          </Badge>
-          {onDelete && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || disabled}
-              aria-label={`Delete inactive service ${service.name}`}
-              onClick={() => setConfirming(true)}
-            >
-              {busy ? "Deleting…" : "Delete"}
-            </Button>
-          )}
-        </div>
-      </div>
-      {error && (
-        <Alert variant="destructive" className="mt-3 p-2">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-      {onDelete && (
-        <ConfirmDialog
-          open={confirming}
-          title={`Delete inactive ${service.name}?`}
-          description={DELETE_TEXT[service.reason]}
-          confirmLabel="Delete"
-          onCancel={() => setConfirming(false)}
-          onConfirm={() => void remove()}
-        />
-      )}
-    </li>
+        </ItemName>
+      </th>
+      <td className="px-4 py-3 max-sm:hidden" />
+      <td data-label="Status" className={SERVICE_CELL.status}>
+        <Badge variant="outline" className="font-normal">
+          Inactive
+        </Badge>
+      </td>
+      <td className={SERVICE_CELL.actions}>
+        {onDelete && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || disabled}
+            aria-label={`Delete inactive service ${service.name}`}
+            onClick={() => setConfirming(true)}
+          >
+            {busy ? "Deleting…" : "Delete"}
+          </Button>
+        )}
+        {error && (
+          <Alert variant="destructive" className="mt-2 p-2 text-left">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {onDelete && (
+          <ConfirmDialog
+            open={confirming}
+            title={`Delete inactive ${service.name}?`}
+            description={DELETE_TEXT[service.reason]}
+            confirmLabel="Delete"
+            onCancel={() => setConfirming(false)}
+            onConfirm={() => void remove()}
+          />
+        )}
+      </td>
+    </tr>
   );
 }
 
 /**
  * Entries in the agent's own store that the broker ignores, with why, so they
- * do not sit there unseen while still counting toward the caps.
+ * do not sit there unseen while still counting toward the caps; a row group
+ * of an `EgressServiceTable`.
  *
  * Without `onDelete` the entries are listed only: the viewer cannot manage them.
  */
@@ -111,23 +121,16 @@ export function InactiveServices({
 }) {
   if (services.length === 0) return null;
   return (
-    <section
-      aria-label="Inactive services"
-      className="border-t border-border/60 bg-muted/10"
-    >
-      <h3 className="px-5 pt-3 text-xs font-medium text-muted-foreground">
-        Inactive
-      </h3>
-      <ul>
-        {services.map((service) => (
-          <InactiveServiceRow
-            key={service.name}
-            service={service}
-            disabled={disabled}
-            onDelete={onDelete}
-          />
-        ))}
-      </ul>
-    </section>
+    <tbody aria-label="Inactive services" className={STACKED.body}>
+      <ServiceGroupHeading label="Inactive" />
+      {services.map((service) => (
+        <InactiveServiceRow
+          key={service.name}
+          service={service}
+          disabled={disabled}
+          onDelete={onDelete}
+        />
+      ))}
+    </tbody>
   );
 }

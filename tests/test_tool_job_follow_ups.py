@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import TurnContinuationRunState, TurnRunState
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -365,6 +366,20 @@ async def _runner_runtime(bot: AgentBot, tmp_path: Path) -> ToolJobRuntime:
     return runtime
 
 
+def _wait_for_next_turn(runner: ResponseRunner, key: ConversationKey, *, requester_id: str) -> None:
+    """Leave a message of ``requester_id`` waiting in ``key``'s conversation, as one that arrived while a reply ran."""
+    lifecycle = runner._lifecycle_coordinator
+    target = _target(thread_id=key.thread_id, reply_to_event_id="$waiting")
+    signal = lifecycle._get_or_create_queued_signal(target)
+    signal.begin_response_turn()
+    envelope = replace(
+        _envelope(target, source_event_id="$waiting"),
+        origin=message_origin(sender_id=requester_id, requester_id=requester_id),
+    )
+    assert lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope) is not None
+    signal.finish_response_turn()
+
+
 async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: Path) -> None:
     """A follow-up runs an ordinary turn that posts a new reply, asking the model to collect what ended."""
     bot = _bot(tmp_path)
@@ -468,6 +483,60 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         await runtime.shutdown()
 
 
+async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path) -> None:
+    """A follow-up posts nothing while a message waits for its conversation, whose reply reports the jobs instead."""
+    bot = _bot(tmp_path)
+    await bot._reply_runtime.start()
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    owner = _runner_owner(key)
+    runtime = await _runner_runtime(bot, tmp_path)
+    prompts: list[str] = []
+
+    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
+        prompts.append(str(kwargs["prompt"]))
+        yield "The job finished."
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=owner)
+        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        _wait_for_next_turn(runner, key, requester_id=key.requester_id)
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner._run_job_follow_up(event)
+        assert prompts == []
+        assert await bot._reply_runtime.store.replies.for_sources(("job-follow-up:1",)) is None
+        assert not await bot.journal_principal().is_pending("job-follow-up:1")
+        # The jobs wait for the waiting message's reply to collect them.
+        assert [job.job_id for job in await runtime.ended_jobs(key)] == ["work"]
+    finally:
+        await runtime.shutdown()
+
+
+async def test_a_follow_up_does_not_give_way_to_another_persons_message(tmp_path: Path) -> None:
+    """Another person's waiting message gets a reply that lists only their jobs, so the follow-up still reports these."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
+        _wait_for_next_turn(runner, key, requester_id="@other:localhost")
+        request = runner._job_follow_up_request(
+            key,
+            "job-follow-up:1",
+            claimed=asyncio.Event(),
+            handoff=asyncio.Event(),
+        )
+        assert await runner._follow_up_due(request)
+    finally:
+        await runtime.shutdown()
+
+
 async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) -> None:
     """Under the lock, a follow-up whose own job was collected does not report jobs the limit holds back."""
     bot = _bot(tmp_path)
@@ -525,6 +594,8 @@ async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> 
         assert claimed.reply is not None
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
+        # Its own unfinished reply answers before a waiting message of the same requester does.
+        _wait_for_next_turn(runner, key, requester_id=key.requester_id)
         request = runner._job_follow_up_request(
             key,
             "job-follow-up:1",

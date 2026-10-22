@@ -21,6 +21,7 @@ from mindroom.oauth.providers import (
     oauth_connect_url_requires_host_browser,
 )
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.origins import local_api_origin
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -178,8 +179,7 @@ def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider |
             if parsed.scheme and parsed.netloc:
                 return f"{parsed.scheme}://{parsed.netloc}"
 
-    port = runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
-    return f"http://localhost:{port}"
+    return local_api_origin(runtime_paths)
 
 
 def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:

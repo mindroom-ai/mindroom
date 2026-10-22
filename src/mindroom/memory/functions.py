@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
+from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory
 from ._prompting import format_memories_as_context
 from ._shared import MemoryEntrypointContext, MemorySearchOutcome
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from ._backend import ResolvedMemoryBackend
+    from ._entrypoint_snapshots import ConversationRef
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
@@ -183,29 +187,83 @@ async def delete_agent_memory(
     )
 
 
-def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config) -> str:
-    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
+def _render_entrypoint_body(entrypoint: MemoryEntrypointContext, config: Config, *, kept_copy: bool) -> str:
+    """Frame the preloaded memory entrypoint as already-inlined context, without its truncation marker.
 
-    A file whose preloaded head is blank still reports its truncation, so the
-    cap never withholds lines silently.
+    A ``kept_copy`` body, one a conversation may keep while entries are added, says newer entries may be missing.
     """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
         memory_path=entrypoint.source_path,
     )
-    truncation_notice = (
-        render_prompt_template(
-            config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-            included_lines=entrypoint.included_lines,
-            total_lines=entrypoint.total_lines,
-            max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
-            max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
-            memory_path=entrypoint.source_path,
-        )
-        if entrypoint.omitted_lines
+    kept_copy_notice = config.get_prompt("FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE") if kept_copy else ""
+    return "\n".join(part for part in (header, kept_copy_notice, entrypoint.text) if part)
+
+
+def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Config) -> str:
+    """Report what the caps withheld, even when the preloaded head is blank, so the cap never withholds lines silently."""
+    if not entrypoint.omitted_lines:
+        return ""
+    return render_prompt_template(
+        config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
+        included_lines=entrypoint.included_lines,
+        total_lines=entrypoint.total_lines,
+        max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
+        max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
+        memory_path=entrypoint.source_path,
+    )
+
+
+async def _entrypoint_preamble(
+    backend: ResolvedMemoryBackend,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
+) -> str:
+    """Render the agent's `MEMORY.md` preamble, or the copy ``conversation`` keeps of it."""
+    # The file backend reads the scoped MEMORY.md from disk; keep it off the
+    # event loop (#1260).
+    entrypoint = await asyncio.to_thread(
+        backend.load_entrypoint_context,
+        agent_name,
+        storage_path,
+        config,
+        execution_identity=execution_identity,
+    )
+    body = (
+        _render_entrypoint_body(entrypoint, config, kept_copy=conversation is not None)
+        if entrypoint.text or entrypoint.omitted_lines
         else ""
     )
-    return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
+    preamble = "\n".join(part for part in (body, _render_truncation_notice(entrypoint, config)) if part)
+    if conversation is None or entrypoint.source_path is None:
+        return preamble
+    return stable_entrypoint_preamble(
+        agent_name,
+        conversation,
+        entrypoint.source_path,
+        body,
+        preamble,
+        now=time.monotonic(),
+    )
+
+
+async def conversation_entrypoint_preamble(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    conversation: ConversationRef,
+) -> str:
+    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted."""
+    backend = resolve_memory_backend(agent_name, config, runtime_paths)
+    if backend is None:
+        return ""
+    return await _entrypoint_preamble(backend, agent_name, storage_path, config, execution_identity, conversation)
 
 
 @timed("system_prompt_assembly.memory_enhancement")
@@ -216,8 +274,14 @@ async def build_memory_prompt_parts(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    conversation: ConversationRef | None = None,
 ) -> MemoryPromptParts:
-    """Split stable entrypoint context from turn-local searched memories."""
+    """Split stable entrypoint context from turn-local searched memories.
+
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while entries are only added and its
+    prompt cache may be warm.
+    """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemoryPromptParts()
@@ -234,18 +298,14 @@ async def build_memory_prompt_parts(
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    session_preamble = ""
-    # The file backend reads the scoped MEMORY.md from disk; keep it off the
-    # event loop (#1260).
-    agent_entrypoint = await asyncio.to_thread(
-        backend.load_entrypoint_context,
+    session_preamble = await _entrypoint_preamble(
+        backend,
         agent_name,
         storage_path,
         config,
-        execution_identity=execution_identity,
+        execution_identity,
+        conversation,
     )
-    if agent_entrypoint.text or agent_entrypoint.omitted_lines:
-        session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
 
     # The automatic per-turn path must not silently drop the degradation
     # signal: a broken embedder would otherwise look like an agent with no
