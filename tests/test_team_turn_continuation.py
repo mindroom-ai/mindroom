@@ -19,7 +19,7 @@ from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
-from mindroom.llm.runs import RunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.attempt import TeamAttempt
@@ -137,6 +137,36 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
     assert team.recorder.assistant_text.endswith("Finished the task.")
     # The turn's trace still carries the first attempt's model switch.
     assert "switch_thread_model" in _completed_tool_names(team)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_attempt_from_its_new_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """The first attempt gives the scope its first session; the continuation stores into it and replays that attempt."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
+        general=[calls(_switch("next-turn"))],
+    )
+    assert team.storage.load_session(SESSION_ID, "team") is None
+    run_ids: list[str] = []
+
+    await team.reply(stream=stream, message=PROMPT, run_id_callback=run_ids.append)
+
+    first, *_, continued = team.models["default"].requests
+    contents = [str(message.content) for message in continued.messages]
+    assert contents[1] == str(first.messages[1].content)
+    assert "Switching." in contents
+    assert CONTINUATION_MARK in contents[-1]
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    assert [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)] == run_ids
 
 
 @pytest.mark.asyncio
