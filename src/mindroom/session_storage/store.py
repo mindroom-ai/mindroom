@@ -14,7 +14,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import time
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.history.summary_rows_schema import (
     NON_VISIBLE_RUN_STATUS_VALUES,
@@ -38,11 +38,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.schema import TableNames
-    from mindroom.session_storage.types import SaveOutcome, SessionField, SessionKind
+    from mindroom.session_storage.types import Refusal, SaveOutcome, SessionField, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
-
-# Why a run save wrote no row: a cut removed the run, or it is folded behind its scope's latest summary row.
-type _Refusal = Literal["removed", "frozen"]
 
 _BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
@@ -372,7 +369,7 @@ class _SavedRun:
 
     run_id: str
     row_type: SessionKind
-    row: _WrittenRow | _Refusal
+    row: _WrittenRow | Refusal
 
     @property
     def outcome(self) -> SaveOutcome:
@@ -380,20 +377,22 @@ class _SavedRun:
 
 
 def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
-    """Make ``session``'s copies of the saved runs what the store holds, in the order a load returns them.
+    """Make ``session``'s copies of the saved runs what the store holds.
 
     A written run's copy is its row decoded afresh, never the record the caller handed over: it replaces the
-    session's copy in place, or goes last when the session holds none or the row took the log's next position (a
-    new run, or one saved visible over its paused, cancelled, or errored row). Member runs keep their own copies. A
-    removed run leaves the session with every run below it. A frozen run's row did not change, so neither does the
-    session's copy, nor its absence when the session holds none. ``session.runs`` becomes a new list, so a reader
-    of the old one is unaffected.
+    session's copy in place, or goes last when the row took the log's next position (a new run, or one saved visible
+    over its paused, cancelled, or errored row). A written run the session holds no copy of also goes last, even
+    when its row kept an earlier place, so only then can the session's order differ from a load's. Member runs keep
+    their own copies. A removed run leaves the session with every run below it. A frozen run's row did not change,
+    so neither does the session's copy, nor its absence when the session holds none.
     """
     runs = list(session.runs)
     for save in saved:
         if save.row == "removed":
             runs = runs_without(runs, [save.run_id])
         elif isinstance(save.row, _WrittenRow):
+            # Unlike a load, this keeps any message a mid-turn fold's segment holds: a fold rewrites its run's live
+            # messages when the segment row commits, so a record handed over after the fold holds none of them.
             stored = run_from_row(save.row_type, save.row.run_data)
             assert stored is not None
             place = next((index for index, run in enumerate(runs) if run.run_id == save.run_id), None)
@@ -401,6 +400,9 @@ def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None
                 runs = [*(run for run in runs if run.run_id != save.run_id), stored]
             else:
                 runs[place] = stored
+    # A new list, so a reader of the old one is unaffected. A save in the database's lane assigns it from the lane's
+    # worker thread, so event-loop code must not assign ``session.runs`` while a save of this session is in flight,
+    # or one of the two assignments is lost.
     session.runs = runs
 
 
@@ -500,7 +502,7 @@ def _write_run_row(
     *,
     row_type: str,
     session_id: str,
-) -> _WrittenRow | _Refusal:
+) -> _WrittenRow | Refusal:
     """Upsert one run row under the conversation log's rules; return the row as written, or why none was."""
     run_id, parent_run_id = data["run_id"], data.get("parent_run_id")
     runs, summaries, removed = (quote_identifier(name) for name in (names.runs, names.summaries, names.removed_runs))
