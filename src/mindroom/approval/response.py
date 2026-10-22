@@ -127,11 +127,13 @@ def identify_approval_tools(
         if requirement.tool_execution is not None and requirement.member_agent_id
     }
     identified: list[tuple[ToolExecution, str, str, str]] = []
+    seen_call_ids: set[str] = set()
     for tool in paused.tools:
         # An approval names its call by id alone, so two members' pending calls sharing one cannot be told apart.
-        if not tool.tool_call_id or not tool.tool_name or any(tool.tool_call_id == entry[1] for entry in identified):
+        if not tool.tool_call_id or not tool.tool_name or tool.tool_call_id in seen_call_ids:
             msg = "Paused approval tool is missing its exact identity"
             raise RuntimeError(msg)
+        seen_call_ids.add(tool.tool_call_id)
         identified.append(
             (
                 tool,
