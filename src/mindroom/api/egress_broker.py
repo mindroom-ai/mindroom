@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated
 
@@ -29,6 +30,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    load_concurrently,
     oauth_provider_of_service,
     presets_response,
     require_egress_broker_enabled,
@@ -133,7 +135,10 @@ async def _load_service_statuses_for_target(
         )
 
     # Like the personal listing, the services load concurrently so the panel does not wait for each hop in turn.
-    return list(await asyncio.gather(*(load_status(name, service) for name, service in scope_services.items())))
+    return await load_concurrently(
+        (functools.partial(load_status, name, service) for name, service in scope_services.items()),
+        limited=True,
+    )
 
 
 def _resolve_scope_and_service(

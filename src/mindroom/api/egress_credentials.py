@@ -9,6 +9,7 @@ unscoped agent the caller manages.
 from __future__ import annotations
 
 import asyncio
+import functools
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -35,6 +36,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    load_concurrently,
     oauth_provider_of_service,
     presets_response,
     require_egress_broker_enabled,
@@ -344,9 +346,10 @@ async def egress_services_for_agent(
             **asdict(sources),
         )
 
-    # Each row awaits several thread and OAuth store hops; one after another, a page waits for every hop of every
-    # row behind the event loop's other work, so the rows load concurrently, in the services' order.
-    return list(await asyncio.gather(*(row(name, service) for name, service in services.items())))
+    return await load_concurrently(
+        (functools.partial(row, name, service) for name, service in services.items()),
+        limited=True,
+    )
 
 
 async def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
@@ -379,10 +382,11 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             return None
         is_shared, can_manage = eligibility
         target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
-        services, inactive = await asyncio.gather(
-            egress_services_for_agent(request, agent_name, human_requester, eligibility=eligibility),
-            asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target),
-        )
+        async with asyncio.TaskGroup() as group:
+            inactive = group.create_task(
+                asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target),
+            )
+            services = await egress_services_for_agent(request, agent_name, human_requester, eligibility=eligibility)
         if services is None:
             return None
         return EgressCredentialAgent(
@@ -394,11 +398,14 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             scope_agents=list(user_store_agents) if scope == "user" else [],
             managers=list(agent.credential_managers) if is_shared else [],
             services=services,
-            inactive_services=inactive,
+            inactive_services=inactive.result(),
         )
 
     # Agents load concurrently, like their rows, so the page waits for the slowest agent instead of all of them.
-    listed = await asyncio.gather(*(listed_agent(name, agent) for name, agent in config.agents.items()))
+    # Only rows take the shared limit: an agent waits on its rows, so an agent holding a slot could starve them.
+    listed = await load_concurrently(
+        functools.partial(listed_agent, name, agent) for name, agent in config.agents.items()
+    )
     return [agent for agent in listed if agent is not None]
 
 

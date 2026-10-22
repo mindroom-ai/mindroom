@@ -1654,6 +1654,130 @@ def test_listing_loads_the_rows_of_every_agent_at_once(
     assert sorted(started) == ["github", "github", "openai", "openai"]
 
 
+def track_concurrent_calls(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> list[int]:
+    """Hold each call of the async `module.name` briefly and return `[running, peak]` concurrent calls."""
+    real = getattr(module, name)
+    counts = [0, 0]
+
+    async def tracked(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        counts[0] += 1
+        counts[1] = max(counts)
+        try:
+            await asyncio.sleep(0.02)
+            return await real(*args, **kwargs)
+        finally:
+            counts[0] -= 1
+
+    monkeypatch.setattr(module, name, tracked)
+    return counts
+
+
+@pytest.mark.asyncio
+async def test_overlapping_listings_share_one_limit_on_status_loads(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two listings on one loop load at most `_STATUS_LOAD_LIMIT` service statuses at once between them, in order."""
+    monkeypatch.setattr(egress_status, "_STATUS_LOAD_LIMIT", 3)
+    counts = track_concurrent_calls(monkeypatch, egress_credentials, "egress_service_status")
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://portal.example.org") as client:
+        responses = await asyncio.gather(
+            *(
+                client.get("/api/connections/egress", headers=egress_portal["headers"][user])
+                for user in ("alice", "bob")
+            ),
+        )
+    for response in responses:
+        assert response.status_code == 200, response.text
+        agents = response.json()["agents"]
+        assert [agent["agent_name"] for agent in agents] == ["personal", "shared_dev"]
+        assert [[row["name"] for row in agent["services"]] for agent in agents] == [["github", "openai"]] * 2
+    assert counts == [0, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_row_cancels_the_rows_still_loading(
+    egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first failing row fails the listing with its own error, only after every other row stopped loading."""
+    blocked: set[str] = set()
+    others_blocked: list[asyncio.Event] = []
+    cancelled: list[str] = []
+    real_load = egress_credentials._load_egress_agents
+    unfinished_when_failed: list[set[str]] = []
+
+    async def status(_manager: object, target: Any, _service: object, name: str, _oauth: object) -> Never:  # noqa: ANN401
+        if not others_blocked:
+            others_blocked.append(asyncio.Event())
+        row = f"{target.routing_agent_name}/{name}"
+        if row == "shared_dev/openai":
+            await others_blocked[0].wait()
+            msg = "store unreadable"
+            raise RuntimeError(msg)
+        blocked.add(row)
+        if len(blocked) == 3:
+            others_blocked[0].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(row)
+            raise
+        finally:
+            blocked.discard(row)
+        raise AssertionError
+
+    async def load(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        try:
+            return await real_load(*args, **kwargs)
+        except Exception:
+            unfinished_when_failed.append(set(blocked))
+            raise
+
+    monkeypatch.setattr(egress_credentials, "egress_service_status", status)
+    monkeypatch.setattr(egress_credentials, "_load_egress_agents", load)
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://portal.example.org") as client:
+        with pytest.raises(RuntimeError, match="store unreadable"):
+            await client.get("/api/connections/egress", headers=egress_portal["headers"]["alice"])
+    assert unfinished_when_failed == [set()]
+    assert sorted(cancelled) == ["personal/github", "personal/openai", "shared_dev/github"]
+
+
+@pytest.mark.asyncio
+async def test_load_concurrently_keeps_order_and_raises_the_first_failure() -> None:
+    """Results keep the loads' order; a failure is raised as itself once the loads still running are cancelled."""
+
+    async def after(delay: float, value: int) -> int:
+        await asyncio.sleep(delay)
+        return value
+
+    assert await egress_status.load_concurrently(
+        [lambda: after(0.02, 1), lambda: after(0, 2), lambda: after(0.01, 3)],
+        limited=True,
+    ) == [1, 2, 3]
+
+    cancelled: list[str] = []
+
+    async def stuck() -> int:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append("stuck")
+            raise
+        raise AssertionError
+
+    async def failing() -> int:
+        await asyncio.sleep(0)
+        msg = "boom"
+        raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="boom"):
+        await egress_status.load_concurrently([stuck, failing])
+    assert cancelled == ["stuck"]
+
+
 def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
     oauth_egress_portal: dict[str, Any],
 ) -> None:
