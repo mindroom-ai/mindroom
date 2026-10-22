@@ -4,7 +4,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from agno.exceptions import ModelAuthenticationError, ModelProviderError
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
 from openai import OpenAIError
@@ -17,7 +16,8 @@ from mindroom.error_handling import (
     is_model_safeguard_refusal,
     minimal_mode_failure_message,
 )
-from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
+from mindroom.providers.openai.errors import missing_api_key_error
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
 
@@ -104,7 +104,7 @@ def test_rate_limit_error() -> None:
 
 def test_typed_rate_limit_error_uses_status_code() -> None:
     """Typed 429 errors remain rate limits even when their message is generic."""
-    error = ModelProviderError(message="upstream unavailable", status_code=429)
+    error = ProviderError("upstream unavailable", provider="OpenAI", status_code=429)
 
     message = get_user_friendly_error_message(error)
 
@@ -153,7 +153,7 @@ def test_json_provider_error_is_case_insensitive() -> None:
 
 def test_typed_model_provider_error_is_user_friendly() -> None:
     """Typed provider errors use their status instead of message substrings."""
-    error = ModelProviderError(message="upstream unavailable", status_code=503)
+    error = ProviderError("upstream unavailable", provider="OpenAI", status_code=503)
 
     message = get_user_friendly_error_message(error)
 
@@ -207,9 +207,7 @@ def test_extract_provider_from_error() -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        ModelAuthenticationError(
-            message="OPENROUTER_API_KEY not set. Please set the OPENROUTER_API_KEY environment variable.",
-        ),
+        missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter"),
         OpenAIError(
             "The api_key client option must be set either by passing api_key to the client "
             "or by setting the OPENAI_API_KEY environment variable",
@@ -242,7 +240,7 @@ def test_missing_provider_key_points_to_dashboard_setup(error: Exception, tmp_pa
 
 def test_missing_provider_key_without_public_url_names_dashboard() -> None:
     """Without a known dashboard URL the message still points at the dashboard setup step."""
-    error = ModelAuthenticationError(message="OPENROUTER_API_KEY not set.")
+    error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
 
     message = get_user_friendly_error_message(error)
 

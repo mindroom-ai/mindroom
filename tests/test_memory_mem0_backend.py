@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from agno.run.agent import RunOutput
+    from mindroom.llm.runs import RunRecord
 
 
 async def _search_memory_results(*args: object, **kwargs: object) -> list:
@@ -763,10 +763,10 @@ def _mem0_memory_reporting_usage(
     return from_config
 
 
-def _recorder() -> tuple[list[tuple[RunOutput, dict[str, object]]], Callable[..., Awaitable[None]]]:
-    recorded: list[tuple[RunOutput, dict[str, object]]] = []
+def _recorder() -> tuple[list[tuple[RunRecord, dict[str, object]]], Callable[..., Awaitable[None]]]:
+    recorded: list[tuple[RunRecord, dict[str, object]]] = []
 
-    async def record(response: RunOutput, **kwargs: object) -> None:
+    async def record(response: RunRecord, **kwargs: object) -> None:
         recorded.append((response, kwargs))
 
     return recorded, record
