@@ -64,13 +64,13 @@ export function EgressServiceTable({
 /** The heading row that opens a group of service rows. */
 export function ServiceGroupHeading({ label }: { label: string }) {
   return (
-    <tr className={`border-t border-border/60 ${STACKED.row}`}>
+    <tr className={STACKED.row}>
       <th
         colSpan={4}
         scope="rowgroup"
-        className={`bg-muted/20 px-5 py-2 text-left font-normal ${STACKED_CELL}`}
+        className={`px-5 pb-2 pt-5 text-left font-normal ${STACKED_CELL} max-sm:px-4`}
       >
-        <h3 className="text-xs font-medium text-muted-foreground">{label}</h3>
+        <h3 className="text-xs font-semibold text-muted-foreground">{label}</h3>
       </th>
     </tr>
   );

@@ -147,18 +147,28 @@ describe("egress credentials page", () => {
       within(table)
         .getAllByRole("row")
         .slice(1)
-        .map((row) =>
-          within(row)
-            .getAllByRole("cell")
-            .map((cell) => cell.textContent),
-        ),
+        .map((row) => {
+          const [agent, keys] = within(row).getAllByRole("cell");
+          const button = within(agent).getByRole("button");
+          // The agent's type sits under its name and is read with its button.
+          return [
+            button.getAttribute("aria-label"),
+            button.getAttribute("aria-describedby") &&
+              document.getElementById(button.getAttribute("aria-describedby")!)
+                ?.textContent,
+            keys.textContent,
+          ];
+        }),
     ).toEqual([
       // A limit is neither a key nor an account.
-      ["Personal Mind", "Personal", "1 of 2 set"],
-      ["Shared Dev", "Shared", "0 of 1 set"],
-      ["Bare Agent", "Personal", "None"],
+      ["Expand Personal Mind", "Personal", "1 of 2 set"],
+      ["Expand Shared Dev", "Shared", "0 of 1 set"],
+      ["Expand Bare Agent", "Personal", "None"],
     ]);
     expect(screen.queryByRole("region")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Expand Shared Dev" }),
+    ).toHaveAccessibleDescription("Shared");
     fireEvent.click(
       screen.getByRole("button", { name: "Expand Personal Mind" }),
     );
@@ -793,7 +803,7 @@ describe("egress services on the personal page", () => {
     expect(screen.getByLabelText("My API")).toBeInTheDocument();
   });
 
-  it("shows the administrator's services read-only, without a badge on the row", async () => {
+  it("shows the administrator's services read-only, without a source label on the row", async () => {
     await renderPage();
     const row = await screen.findByLabelText("GitHub");
     expect(within(row).queryByText(/administrator/)).toBeNull();

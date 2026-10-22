@@ -78,6 +78,11 @@ def _graph_event(**overrides: object) -> dict[str, object]:
     }
 
 
+def _organizer_route() -> dict[tuple[str, str], httpx.Response]:
+    """Answer the organizer lookup a response makes before it is sent."""
+    return {("GET", f"/me/events/{EVENT_ID}"): httpx.Response(200, json={"organizer": _graph_event()["organizer"]})}
+
+
 EVENT_SUMMARY = {
     "id": EVENT_ID,
     "subject": "Design review",
@@ -405,7 +410,8 @@ def test_an_event_id_that_changes_the_path_is_refused(
 
     assert _payload(tools.outlook_calendar_get_event(event_id))["code"] == "invalid_argument"
     assert _payload(tools.outlook_calendar_delete_event(event_id))["code"] == "invalid_argument"
-    assert _payload(tools.outlook_calendar_respond_to_event(event_id, "accept"))["code"] == "invalid_argument"
+    result = tools.outlook_calendar_respond_to_event(event_id, "alex@contoso.com", "accept")
+    assert _payload(result)["code"] == "invalid_argument"
     assert _payload(tools.outlook_calendar_update_event(event_id, subject="x"))["code"] == "invalid_argument"
     assert graph.requests == []
 
@@ -654,10 +660,12 @@ def test_respond_to_event_posts_the_matching_action(
     response: str,
     action: str,
 ) -> None:
-    routes = {("POST", f"/me/events/{EVENT_ID}/{action}"): httpx.Response(202)}
+    routes = {**_organizer_route(), ("POST", f"/me/events/{EVENT_ID}/{action}"): httpx.Response(202)}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, response, comment="See you"))  # type: ignore[arg-type]
+    result = _payload(
+        tools.outlook_calendar_respond_to_event(EVENT_ID, "Alex@Contoso.com", response, comment="See you"),  # type: ignore[arg-type]
+    )
 
     assert result == {
         "status": "ok",
@@ -666,17 +674,38 @@ def test_respond_to_event_posts_the_matching_action(
         "response": response,
         "response_sent": True,
     }
-    assert _body(graph.requests[0]) == {"sendResponse": True, "comment": "See you"}
+    assert [request.method for request in graph.requests] == ["GET", "POST"]
+    assert graph.requests[0].url.params["$select"] == "organizer"
+    assert _body(graph.requests[1]) == {"sendResponse": True, "comment": "See you"}
+
+
+@pytest.mark.parametrize("address", ["alex@contoso.com", None])
+def test_respond_to_another_organizer_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    address: str | None,
+) -> None:
+    organizer = {"emailAddress": {"name": "Alex Example", "address": address}}
+    routes = {("GET", f"/me/events/{EVENT_ID}"): httpx.Response(200, json={"organizer": organizer})}
+    tools, graph = _tools(tmp_path, monkeypatch, routes)
+
+    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, "sam@contoso.com", "decline", comment="No"))
+
+    assert result["code"] == "target_mismatch"
+    assert result["organizer"] == {"name": "Alex Example", "email": address}
+    assert [request.method for request in graph.requests] == ["GET"]
 
 
 def test_respond_without_sending_omits_the_comment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    routes = {("POST", f"/me/events/{EVENT_ID}/decline"): httpx.Response(202)}
+    routes = {**_organizer_route(), ("POST", f"/me/events/{EVENT_ID}/decline"): httpx.Response(202)}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, "decline", send_response=False))
+    result = _payload(
+        tools.outlook_calendar_respond_to_event(EVENT_ID, "alex@contoso.com", "decline", send_response=False),
+    )
 
     assert result["response_sent"] is False
-    assert _body(graph.requests[0]) == {"sendResponse": False}
+    assert _body(graph.requests[1]) == {"sendResponse": False}
 
 
 @pytest.mark.parametrize(
@@ -685,6 +714,7 @@ def test_respond_without_sending_omits_the_comment(tmp_path: Path, monkeypatch: 
         {"response": "maybe"},
         {"response": "accept", "comment": "Sorry", "send_response": False},
         {"response": "accept", "send_response": "yes"},
+        {"response": "accept", "expected_organizer": "  "},
     ],
 )
 def test_respond_refuses_bad_arguments_before_any_request(
@@ -694,12 +724,14 @@ def test_respond_refuses_bad_arguments_before_any_request(
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch)
 
-    assert _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, **kwargs))["code"] == "invalid_argument"
+    arguments = {"expected_organizer": "alex@contoso.com", **kwargs}
+    assert _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, **arguments))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
 def test_an_organizer_response_failure_reports_the_graph_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     routes = {
+        **_organizer_route(),
         ("POST", f"/me/events/{EVENT_ID}/accept"): httpx.Response(
             400,
             json={"error": {"code": "ErrorInvalidRequest", "message": "You can't respond to your own meeting."}},
@@ -707,7 +739,7 @@ def test_an_organizer_response_failure_reports_the_graph_code(tmp_path: Path, mo
     }
     tools, _graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, "accept"))
+    result = _payload(tools.outlook_calendar_respond_to_event(EVENT_ID, "alex@contoso.com", "accept"))
 
     assert (result["code"], result["status_code"], result["graph_code"]) == ("graph_error", 400, "ErrorInvalidRequest")
 

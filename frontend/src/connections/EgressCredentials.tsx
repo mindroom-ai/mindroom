@@ -11,7 +11,7 @@ import {
   removeLimitWarning,
   sharedAgentNote,
 } from "./accountCopy";
-import { AgentAvatar } from "./AgentAvatar";
+import { AgentIdentity } from "./AgentAvatar";
 import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
@@ -435,7 +435,7 @@ function AgentSection({
     <section
       id={`egress-agent-panel-${agent.agent_name}`}
       aria-labelledby={`egress-agent-${agent.agent_name}`}
-      className="border-l-2 border-primary/30 bg-background"
+      className="bg-background"
     >
       {(scopeLine || agent.can_manage) && (
         <div className="flex flex-wrap items-center gap-3 px-5 py-3">
@@ -561,6 +561,7 @@ function AgentRow({
             type="button"
             className="flex w-full items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label={`${open ? "Collapse" : "Expand"} ${agent.agent_display_name}`}
+            aria-describedby={`egress-agent-${agent.agent_name}-type`}
             aria-expanded={open}
             aria-controls={`egress-agent-panel-${agent.agent_name}`}
             onClick={onToggle}
@@ -576,28 +577,16 @@ function AgentRow({
                 aria-hidden="true"
               />
             )}
-            <AgentAvatar
+            <AgentIdentity
               agent={{ agent_name: agent.agent_name, is_shared: agent.shared }}
+              displayName={agent.agent_display_name}
+              nameId={`egress-agent-${agent.agent_name}`}
             />
-            <span
-              id={`egress-agent-${agent.agent_name}`}
-              className="font-medium"
-            >
-              {agent.agent_display_name}
-            </span>
           </button>
         </td>
         <td
-          data-label="Type"
-          className={`px-5 py-4 ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
-        >
-          <Badge variant="secondary" className="font-normal">
-            {agent.shared ? "Shared" : "Personal"}
-          </Badge>
-        </td>
-        <td
           data-label="Keys and accounts"
-          className={`px-5 py-4 text-muted-foreground ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
+          className={`px-5 py-4 text-muted-foreground tabular-nums ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1.5`}
         >
           {keysSetText(agent.services)}
         </td>
@@ -606,7 +595,7 @@ function AgentRow({
           and lets a write under way finish. */}
       <tr className={STACKED.row} hidden={!open}>
         <td
-          colSpan={3}
+          colSpan={2}
           className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
         >
           <AgentSection agent={agent} onChanged={onChanged} />
@@ -708,7 +697,7 @@ export function EgressCredentials() {
                   className={`bg-muted/30 text-left text-xs text-muted-foreground ${STACKED.head}`}
                 >
                   <tr>
-                    {["Agent", "Type", "Keys and accounts"].map((column) => (
+                    {["Agent", "Keys and accounts"].map((column) => (
                       <th
                         key={column}
                         scope="col"
@@ -732,9 +721,6 @@ export function EgressCredentials() {
                 </tbody>
               </table>
             </div>
-            <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-              Expand an agent to manage its keys and accounts.
-            </p>
           </div>
         )}
       </div>

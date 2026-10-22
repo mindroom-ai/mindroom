@@ -71,16 +71,26 @@ _INVALID_FIELDS = (
     "fields must be a non-empty object that maps column names from microsoft_sharepoint_get_list to text, "
     "a number, true, false, null, or a list of text or numbers."
 )
+_TARGET_MISMATCH = "The list is not at expected_web_url; tell the requester its real web_url before trying again."
+
+
+@dataclass(frozen=True)
+class _Target:
+    """The list a write changes and the web_url the call expects that list at."""
+
+    list_path: str
+    web_url: str
 
 
 @dataclass(frozen=True)
 class _Request:
-    """One validated Graph request; every SharePoint function sends exactly one."""
+    """One validated Graph request; a write's target list is read and checked before it."""
 
     method: str
     path: str
     params: dict[str, str] | None = None
     body: dict[str, object] | None = None
+    target: _Target | None = None
 
 
 def _site_path(site_id: object) -> str:
@@ -89,6 +99,14 @@ def _site_path(site_id: object) -> str:
 
 def _list_path(site_id: object, list_id: object) -> str:
     return f"{_site_path(site_id)}/lists/{path_segment(list_id, 'list_id')}"
+
+
+def _target(site_id: object, list_id: object, expected_web_url: object) -> _Target:
+    list_path = _list_path(site_id, list_id)
+    if not isinstance(expected_web_url, str) or not expected_web_url.strip():
+        msg = "expected_web_url must be the web_url of the list this call writes to."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return _Target(list_path, expected_web_url.strip())
 
 
 def _site_url_path(url: object) -> str:
@@ -297,7 +315,10 @@ class MicrosoftSharePointTools(Toolkit):
         build: Callable[[], _Request],
         result: Callable[[dict[str, Any]], Mapping[str, object]],
     ) -> str:
-        """Refuse malformed arguments before any request, then send the request and render its result."""
+        """Refuse malformed arguments before any request, then send the request and render its result.
+
+        A write is sent only after reading its list and finding it at the web_url the call expects.
+        """
         try:
             request = build()
         except MicrosoftGraphError as exc:
@@ -311,6 +332,10 @@ class MicrosoftSharePointTools(Toolkit):
                 self._worker_target,
                 self._config,
             ) as session:
+                if (target := request.target) is not None:
+                    web_url = session.json("GET", target.list_path, params={"$select": "webUrl"}).get("webUrl")
+                    if web_url != target.web_url:
+                        raise MicrosoftGraphError(code="target_mismatch", message=_TARGET_MISMATCH, web_url=web_url)
                 return result(session.json(request.method, request.path, params=request.params, json=request.body))
 
         return graph_tool_result(_TOOL_NAME, run)
@@ -442,12 +467,12 @@ class MicrosoftSharePointTools(Toolkit):
     # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
     # `fields` as `dict[str, Any]`.
     # Coverage: tests/test_microsoft_sharepoint_tool.py::test_write_schemas_accept_column_values
-    def microsoft_sharepoint_create_item(self, site_id: str, list_id: str, fields: dict) -> str:
+    def microsoft_sharepoint_create_item(self, site_id: str, list_id: str, fields: dict, expected_web_url: str) -> str:
         """Add one item to a SharePoint list with the given column values.
 
-        Before calling, tell the requester the list's name and the values to add, because an approval prompt may
-        show only IDs. Read the list's column names with microsoft_sharepoint_get_list first. This does not add
-        files to a document library; upload files with the microsoft_files tool.
+        The write fails with target_mismatch unless expected_web_url is the list's web_url. Read the list's column
+        names with microsoft_sharepoint_get_list first. This does not add files to a document library; upload
+        files with the microsoft_files tool.
 
         Args:
             site_id: The site's id from microsoft_sharepoint_search_sites or microsoft_sharepoint_get_site.
@@ -456,16 +481,16 @@ class MicrosoftSharePointTools(Toolkit):
                 {"Title": "Widget", "Quantity": 3}. A lookup or person column takes its name plus LookupId and the
                 lookup ID. A multi-value column takes a list, with "<name>@odata.type" set to
                 "Collection(Edm.String)" for text or "Collection(Edm.Int32)" for lookup IDs.
+            expected_web_url: The list's web_url from microsoft_sharepoint_list_lists or
+                microsoft_sharepoint_get_list; required.
 
         """
-        return self._send(
-            lambda: _Request(
-                "POST",
-                f"{_list_path(site_id, list_id)}/items",
-                body={"fields": _field_values(fields)},
-            ),
-            lambda payload: {"item": _item(payload)},
-        )
+
+        def build() -> _Request:
+            target = _target(site_id, list_id, expected_web_url)
+            return _Request("POST", f"{target.list_path}/items", body={"fields": _field_values(fields)}, target=target)
+
+        return self._send(build, lambda payload: {"item": _item(payload)})
 
     # AGNO_COMPAT: Agno renders Any in tool parameter types as an empty closed object.
     # Reason: Agno 3.0.9 turns the values of `dict[str, Any]` into
@@ -476,13 +501,20 @@ class MicrosoftSharePointTools(Toolkit):
     # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
     # `fields` as `dict[str, Any]`.
     # Coverage: tests/test_microsoft_sharepoint_tool.py::test_write_schemas_accept_column_values
-    def microsoft_sharepoint_update_item(self, site_id: str, list_id: str, item_id: str, fields: dict) -> str:
+    def microsoft_sharepoint_update_item(
+        self,
+        site_id: str,
+        list_id: str,
+        item_id: str,
+        fields: dict,
+        expected_web_url: str,
+    ) -> str:
         """Change column values of one SharePoint list item; columns not given stay unchanged.
 
-        Before calling, tell the requester the list's name, which item changes, and the new values, because an
-        approval prompt may show only IDs. Read the list's column names with microsoft_sharepoint_get_list first.
-        This changes a document library file's column values only; change the file itself with the
-        microsoft_files tool.
+        Before calling, tell the requester which item changes and its new values. The write fails with
+        target_mismatch unless expected_web_url is the list's web_url. Read the list's column names with
+        microsoft_sharepoint_get_list first. This changes a document library file's column values only; change the
+        file itself with the microsoft_files tool.
 
         Args:
             site_id: The site's id from microsoft_sharepoint_search_sites or microsoft_sharepoint_get_site.
@@ -490,12 +522,15 @@ class MicrosoftSharePointTools(Toolkit):
             item_id: The item's id from microsoft_sharepoint_list_items.
             fields: The new column values keyed by column name, as for microsoft_sharepoint_create_item; null
                 clears a value.
+            expected_web_url: The list's web_url from microsoft_sharepoint_list_lists or
+                microsoft_sharepoint_get_list; required.
 
         """
 
         def build() -> _Request:
-            path = f"{_list_path(site_id, list_id)}/items/{path_segment(item_id, 'item_id')}/fields"
-            return _Request("PATCH", path, body=_field_values(fields))
+            target = _target(site_id, list_id, expected_web_url)
+            path = f"{target.list_path}/items/{path_segment(item_id, 'item_id')}/fields"
+            return _Request("PATCH", path, body=_field_values(fields), target=target)
 
         return self._send(build, lambda payload: {"item": _fields(item_id, payload)})
 

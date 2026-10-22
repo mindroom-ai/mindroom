@@ -74,11 +74,12 @@ export function ConnectionsHeader({
     return () => controller.abort();
   }, []);
 
+  // Tabs underline the page they are on, resting on the rule below them.
   const linkClass = (active: boolean) =>
-    `rounded-md px-2.5 py-1.5 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+    `-mb-px border-b-2 px-1 pb-3 pt-1 font-medium transition-colors focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
       active
-        ? "bg-primary/10 text-primary"
-        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+        ? "border-primary text-foreground"
+        : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
     }`;
   return (
     <header className="space-y-4">
@@ -132,10 +133,11 @@ export function ConnectionsHeader({
           </AlertDescription>
         </Alert>
       )}
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b pb-3 text-sm">
+      {/* When the name does not fit beside the tabs it wraps above them, so the tabs stay on the rule. */}
+      <div className="flex flex-wrap-reverse items-end justify-between gap-x-4 gap-y-1 border-b text-sm">
         <nav
           aria-label="Connections pages"
-          className="-ml-2.5 flex flex-wrap items-center gap-1"
+          className="flex flex-wrap items-end gap-5"
         >
           {links.map(({ page, href, label }) => (
             <a
@@ -155,7 +157,8 @@ export function ConnectionsHeader({
         </nav>
         {identity && (
           <span
-            className="break-all text-muted-foreground"
+            // The same box as a tab, so its text lines up with theirs.
+            className="-mb-px break-all border-b-2 border-transparent pb-3 pt-1 text-muted-foreground"
             title={identity.matrix_user_id}
           >
             {`Signed in as ${identity.display_name}`}

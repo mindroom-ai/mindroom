@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
@@ -50,14 +51,17 @@ _CHAT_PARAMS = {"$expand": "members,lastMessagePreview", "$orderby": "lastMessag
 
 @dataclass(frozen=True)
 class _Request:
-    """One validated Graph request."""
+    """One validated Graph request, sent only once its check passes."""
 
     method: str
     path: str
     params: dict[str, str] | None = None
     body: dict[str, object] | None = None
+    check: Callable[[GraphSession], None] | None = None
 
     def send(self, session: GraphSession) -> dict[str, Any]:
+        if self.check is not None:
+            self.check(session)
         return session.json(self.method, self.path, params=self.params, json=self.body)
 
 
@@ -103,8 +107,8 @@ def _text_body(text: object) -> dict[str, object]:
     return {"body": {"contentType": "html", "content": content}}
 
 
-def _entries(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [entry for entry in payload.get("value") or [] if isinstance(entry, dict)]
+def _entries(payload: Mapping[str, Any], field: str = "value") -> list[dict[str, Any]]:
+    return [entry for entry in payload.get(field) or [] if isinstance(entry, dict)]
 
 
 def _sender(message: Mapping[str, Any]) -> str | None:
@@ -159,20 +163,61 @@ def _message_page(payload: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
+def _members(members: list[dict[str, Any]]) -> list[dict[str, object]]:
+    """Return the name and email address of each chat member; either can be missing."""
+    return [{"name": member.get("displayName"), "email": member.get("email")} for member in members]
+
+
 def _chat(chat: Mapping[str, Any]) -> dict[str, Any]:
-    members = chat.get("members")
     last_message = chat.get("lastMessagePreview")
     return {
         "id": chat.get("id"),
         "topic": chat.get("topic"),
         "chat_type": chat.get("chatType"),
-        "members": [
-            member["displayName"]
-            for member in (members if isinstance(members, list) else [])
-            if isinstance(member, dict) and isinstance(member.get("displayName"), str) and member["displayName"]
-        ],
+        "members": _members(_entries(chat, "members")),
         "last_message_at": last_message.get("createdDateTime") if isinstance(last_message, dict) else None,
     }
+
+
+def _addresses(recipients: object) -> frozenset[str]:
+    if isinstance(recipients, list):
+        addresses = [address.casefold() for address in recipients if isinstance(address, str)]
+        if len(addresses) == len(recipients):
+            return frozenset(addresses)
+    raise MicrosoftGraphError(code="invalid_argument", message="recipients must be a list of email addresses.")
+
+
+def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSession) -> None:
+    """Refuse a chat send when a member has no email address or one not in addresses, compared without case.
+
+    It also refuses an empty member list, since the requester is always a member, and members that come with a next
+    link, which Graph does not document here, as later pages go unread.
+    """
+    payload = session.json("GET", f"{_chat_path(chat_id)}/members")
+    members = _members(_entries(payload))
+    if (
+        not members
+        or "@odata.nextLink" in payload
+        or any(not isinstance(email := member["email"], str) or email.casefold() not in addresses for member in members)
+    ):
+        msg = "The chat has members recipients does not list; every member is listed here, and nothing was sent."
+        raise MicrosoftGraphError(code="recipients_mismatch", message=msg, members=members)
+
+
+def _check_channel(
+    team_id: object,
+    channel_id: object,
+    expected_team: object,
+    expected_channel: object,
+    session: GraphSession,
+) -> None:
+    """Refuse a channel post unless its team and channel have the display names the call expects."""
+    select = {"$select": "displayName"}
+    team = session.json("GET", _team_path(team_id), params=select).get("displayName")
+    channel = session.json("GET", _channel_path(team_id, channel_id), params=select).get("displayName")
+    if (team, channel) != (expected_team, expected_channel):
+        msg = "The team or channel has another name; the real names are listed here, and nothing was sent."
+        raise MicrosoftGraphError(code="target_mismatch", message=msg, team=team, channel=channel)
 
 
 class MicrosoftTeamsTools(Toolkit):
@@ -348,7 +393,7 @@ class MicrosoftTeamsTools(Toolkit):
         )
 
     def microsoft_teams_list_chats(self, limit: int = 20, page_token: str | None = None) -> str:
-        """List the requester's Teams chats, one-on-one, group, and meeting, with their members' names.
+        """List the requester's Teams chats, one-on-one, group, and meeting, with their members' names and emails.
 
         Chats come with the most recent message first, and last_message_at is that message's time. Each chat names
         at most 25 members.
@@ -396,21 +441,36 @@ class MicrosoftTeamsTools(Toolkit):
             _message_page,
         )
 
-    def microsoft_teams_send_channel_message(self, team_id: str, channel_id: str, text: str) -> str:
+    def microsoft_teams_send_channel_message(
+        self,
+        team_id: str,
+        channel_id: str,
+        expected_team: str,
+        expected_channel: str,
+        text: str,
+    ) -> str:
         """Post a new message in one Teams channel, as the requester and visible to everyone in the channel.
 
-        Before calling, tell the requester the team and channel names and the exact text, because an approval
-        prompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to
-        28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
+        Before calling, tell the requester the team and channel names and the exact text. Unless the team and
+        channel have the names expected_team and expected_channel, nothing is posted and it fails with
+        target_mismatch, which names the real ones. Any HTML in the text shows literally, and the text keeps its
+        line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
 
         Args:
             team_id: The team's id from microsoft_teams_list_teams.
             channel_id: The channel's id from microsoft_teams_list_channels.
+            expected_team: The team's name from microsoft_teams_list_teams.
+            expected_channel: The channel's name from microsoft_teams_list_channels.
             text: The message text.
 
         """
         return self._call(
-            lambda: _Request("POST", f"{_channel_path(team_id, channel_id)}/messages", body=_text_body(text)),
+            lambda: _Request(
+                "POST",
+                f"{_channel_path(team_id, channel_id)}/messages",
+                body=_text_body(text),
+                check=partial(_check_channel, team_id, channel_id, expected_team, expected_channel),
+            ),
             lambda payload: {"message": _message(payload)},
         )
 
@@ -419,19 +479,24 @@ class MicrosoftTeamsTools(Toolkit):
         team_id: str,
         channel_id: str,
         message_id: str,
+        expected_team: str,
+        expected_channel: str,
         text: str,
     ) -> str:
         """Reply in the thread of one Teams channel post, as the requester and visible to everyone in the channel.
 
         Before calling, tell the requester the team and channel names, which post the reply answers, and the exact
-        text, because an approval prompt may show only IDs. Any HTML in the text shows literally, and the text
-        keeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count
-        extra.
+        text. Unless the team and channel have the names expected_team and expected_channel, nothing is posted and
+        it fails with target_mismatch, which names the real ones. Any HTML in the text shows literally, and the
+        text keeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks
+        count extra.
 
         Args:
             team_id: The team's id from microsoft_teams_list_teams.
             channel_id: The channel's id from microsoft_teams_list_channels.
             message_id: The top-level post's id from microsoft_teams_list_channel_messages.
+            expected_team: The team's name from microsoft_teams_list_teams.
+            expected_channel: The channel's name from microsoft_teams_list_channels.
             text: The reply text.
 
         """
@@ -440,23 +505,33 @@ class MicrosoftTeamsTools(Toolkit):
                 "POST",
                 f"{_post_path(team_id, channel_id, message_id)}/replies",
                 body=_text_body(text),
+                check=partial(_check_channel, team_id, channel_id, expected_team, expected_channel),
             ),
             lambda payload: {"message": _message(payload)},
         )
 
-    def microsoft_teams_send_chat_message(self, chat_id: str, text: str) -> str:
+    def microsoft_teams_send_chat_message(self, chat_id: str, recipients: list[str], text: str) -> str:
         """Send a message in one existing Teams chat, as the requester and visible to every chat member.
 
-        Before calling, tell the requester the chat's topic or members and the exact text, because an approval
-        prompt may show only IDs. Any HTML in the text shows literally, and the text keeps its line breaks, up to
-        28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count extra.
+        Before calling, tell the requester the chat's members and the exact text. When the chat has a member whose
+        email address recipients does not list, or one without an email address, nothing is sent and it fails
+        with recipients_mismatch, which lists every member. Any HTML in the text shows literally, and the text
+        keeps its line breaks, up to 28,000 bytes once HTML-escaped, so <, >, &, quotes, and line breaks count
+        extra.
 
         Args:
             chat_id: The chat's id from microsoft_teams_list_chats.
+            recipients: The email address of every chat member, the requester's own included, such as
+                sam@contoso.com.
             text: The message text.
 
         """
         return self._call(
-            lambda: _Request("POST", f"{_chat_path(chat_id)}/messages", body=_text_body(text)),
+            lambda: _Request(
+                "POST",
+                f"{_chat_path(chat_id)}/messages",
+                body=_text_body(text),
+                check=partial(_check_members, chat_id, _addresses(recipients)),
+            ),
             lambda payload: {"message": _message(payload)},
         )

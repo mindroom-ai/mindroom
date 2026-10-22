@@ -12696,6 +12696,7 @@ The tool covers sites, lists, list items, and pages; files and the files in docu
 List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_get_list` reports next to the display name.
 A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
 A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
+Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_list_lists` or `microsoft_sharepoint_get_list` as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
 Site addresses must be the site itself, without a page, list, or library path after it.
 Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
 Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
@@ -12750,6 +12751,7 @@ Each occurrence of a recurring meeting has its own ID, and changing or deleting 
 Responding to the series master, whose ID each occurrence carries as `series_master_id`, answers the whole series.
 Changing or deleting the series master changes or deletes every occurrence.
 Deleting a meeting the requester only attends removes it from their calendar without telling the organizer; declining it tells the organizer.
+Responding to a meeting also takes the organizer's email from the event as `expected_organizer`, so an approval card shows who receives the response, and fails with `target_mismatch`, naming the real organizer, when it differs.
 A new event can invite at most 100 attendees.
 The description of an online meeting cannot be replaced, because that would remove its join link; edit it in Outlook instead.
 
@@ -12777,7 +12779,7 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
 | `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
 | `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
-| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names, most recent message first. |
+| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
@@ -12788,6 +12790,8 @@ Deleted messages and system events, such as members joining, come back labeled, 
 Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Sent messages appear under the requester's name and keep their line breaks, and HTML in the text shows literally instead of as formatting.
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
+A chat message takes the email address of every chat member, the requester's own included, as `recipients`, and a channel post or reply takes the team and channel names as `expected_team` and `expected_channel`, so an approval card shows who reads the message.
+When a member's email address is missing or not listed, or a name differs, nothing is sent and the call fails with `recipients_mismatch`, listing every member, or `target_mismatch`, naming the real team and channel.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
@@ -12825,6 +12829,7 @@ Sections inside section groups are not listed either.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
 Listings and page text return a `next_page_token` while more follows; passing it back with the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
+Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
 ## People
 

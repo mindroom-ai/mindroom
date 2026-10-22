@@ -438,6 +438,7 @@ export function EgressServiceItem({
             <>
               <Button
                 size="sm"
+                variant="outline"
                 disabled={busy !== null}
                 aria-label={`Connect ${oauth.display_name} for Agent Keys for ${name}`}
                 onClick={() =>
@@ -478,6 +479,7 @@ export function EgressServiceItem({
           ) : canUseAccount ? (
             <Button
               size="sm"
+              variant="outline"
               disabled={busy !== null}
               aria-label={`Use my ${oauth.display_name} account for ${name}`}
               onClick={() => setConfirm("reuse")}

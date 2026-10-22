@@ -33,6 +33,7 @@ SITE = "contoso.sharepoint.com,da60e844-ba1d-49bc-b4d4-d5e36bae9019,712a596e-90a
 SITE_SEGMENT = SITE.replace(",", "%2C")
 LIST = "243bca4b-4e5e-45af-b37d-25f6135a740d"
 ITEM = "20"
+LIST_URL = "https://contoso.sharepoint.com/sites/team/Lists/Inventory"
 PAGE = "df69e386-6c58-4df2-afc0-ab6327d5b202"
 GRAPH = "https://graph.microsoft.com/v1.0"
 LISTS_PATH = f"/v1.0/sites/{SITE_SEGMENT}/lists"
@@ -96,6 +97,15 @@ def _answer(payload: dict[str, object] | None = None, status: int = 200) -> Call
     return lambda _request: httpx.Response(status, json=payload) if payload is not None else httpx.Response(status)
 
 
+def _list_then(payload: dict[str, object], status: int = 200) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer the list read a write starts with, then the write itself."""
+    return lambda request: (
+        httpx.Response(200, json={"webUrl": LIST_URL})
+        if request.method == "GET"
+        else httpx.Response(status, json=payload)
+    )
+
+
 def _tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -155,13 +165,15 @@ def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest
     assert set(tools.functions) == set(TOOL_METADATA["microsoft_sharepoint"].function_names)
 
 
-def test_write_descriptions_ask_the_agent_to_name_the_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_descriptions_bind_the_list_and_point_to_its_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     for name in WRITE_FUNCTIONS:
         description = _description(tools, name)
-        assert "Before calling, tell the requester" in description, name
-        assert "because an approval prompt may show only IDs" in description, name
+        assert "fails with target_mismatch unless expected_web_url is the list's web_url" in description, name
         assert "microsoft_sharepoint_get_list" in description, name
 
 
@@ -447,8 +459,14 @@ FIELDS = {
 @pytest.mark.parametrize(
     ("function", "arguments"),
     [
-        ("microsoft_sharepoint_create_item", {"site_id": SITE, "list_id": LIST, "fields": FIELDS}),
-        ("microsoft_sharepoint_update_item", {"site_id": SITE, "list_id": LIST, "item_id": ITEM, "fields": FIELDS}),
+        (
+            "microsoft_sharepoint_create_item",
+            {"site_id": SITE, "list_id": LIST, "fields": FIELDS, "expected_web_url": LIST_URL},
+        ),
+        (
+            "microsoft_sharepoint_update_item",
+            {"site_id": SITE, "list_id": LIST, "item_id": ITEM, "fields": FIELDS, "expected_web_url": LIST_URL},
+        ),
     ],
 )
 def test_write_schemas_accept_column_values(
@@ -463,11 +481,12 @@ def test_write_schemas_accept_column_values(
 
 
 def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _answer(_item(), status=201))
+    tools, graph = _tools(tmp_path, monkeypatch, _list_then(_item(), status=201))
 
-    result = _payload(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS))
+    result = _payload(tools.microsoft_sharepoint_create_item(SITE, LIST, FIELDS, LIST_URL))
 
-    [request] = graph.requests
+    read, request = graph.requests
+    assert (read.method, _raw_path(read), dict(read.url.params)) == ("GET", LIST_PATH, {"$select": "webUrl"})
     assert (request.method, _raw_path(request), request.url.query) == ("POST", ITEMS_PATH, b"")
     assert json.loads(request.content) == {"fields": FIELDS}
     assert result["status"] == "ok"
@@ -477,11 +496,13 @@ def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_update_item_patches_only_the_given_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     answer = {"@odata.etag": '"abc,4"', "Title": "Widget", "Color": "Fuchsia", "Quantity": 934}
-    tools, graph = _tools(tmp_path, monkeypatch, _answer(answer))
+    tools, graph = _tools(tmp_path, monkeypatch, _list_then(answer))
 
-    result = _payload(tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Color": "Fuchsia", "Quantity": 934}))
+    result = _payload(
+        tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Color": "Fuchsia", "Quantity": 934}, LIST_URL),
+    )
 
-    [request] = graph.requests
+    _read, request = graph.requests
     assert (request.method, _raw_path(request), request.url.query) == ("PATCH", f"{ITEMS_PATH}/{ITEM}/fields", b"")
     assert json.loads(request.content) == {"Color": "Fuchsia", "Quantity": 934}
     assert result["status"] == "ok"
@@ -515,13 +536,41 @@ def test_writes_refuse_malformed_fields_before_any_request(
     function: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_item()))
-    args = (SITE, LIST, fields) if function == "microsoft_sharepoint_create_item" else (SITE, LIST, ITEM, fields)
+    args = (
+        (SITE, LIST, fields, LIST_URL)
+        if function == "microsoft_sharepoint_create_item"
+        else (SITE, LIST, ITEM, fields, LIST_URL)
+    )
 
     result = _payload(getattr(tools, function)(*args))
 
     assert (result["status"], result["code"]) == ("error", "invalid_argument")
     assert "fields" in result["message"]
     assert graph.requests == []
+
+
+_BOUND_WRITES: dict[str, Callable[[MicrosoftSharePointTools, str], str]] = {
+    "create": lambda tools, url: tools.microsoft_sharepoint_create_item(SITE, LIST, {"Title": "x"}, url),
+    "update": lambda tools, url: tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Title": "x"}, url),
+}
+
+
+@pytest.mark.parametrize("write", list(_BOUND_WRITES))
+def test_writes_run_only_on_the_list_whose_web_url_was_passed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _list_then(_item()))
+    call = _BOUND_WRITES[write]
+
+    assert _payload(call(tools, " "))["code"] == "invalid_argument"
+    assert graph.requests == []
+    refused = _payload(call(tools, "https://contoso.sharepoint.com/sites/hr/Lists/Inventory"))
+    assert (refused["code"], refused["web_url"]) == ("target_mismatch", LIST_URL)
+    assert [request.method for request in graph.requests] == ["GET"]
+    assert _payload(call(tools, LIST_URL))["status"] == "ok"
+    assert graph.requests[-1].method in {"POST", "PATCH"}
 
 
 def test_list_pages_lists_the_site_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -761,11 +810,11 @@ _ID_CALLS: list[tuple[str, Callable[[MicrosoftSharePointTools, object], str]]] =
     ("list_id", lambda tools, value: tools.microsoft_sharepoint_get_list(SITE, value)),
     ("site_id", lambda tools, value: tools.microsoft_sharepoint_list_items(value, LIST)),
     ("list_id", lambda tools, value: tools.microsoft_sharepoint_list_items(SITE, value)),
-    ("site_id", lambda tools, value: tools.microsoft_sharepoint_create_item(value, LIST, {"Title": "x"})),
-    ("list_id", lambda tools, value: tools.microsoft_sharepoint_create_item(SITE, value, {"Title": "x"})),
-    ("site_id", lambda tools, value: tools.microsoft_sharepoint_update_item(value, LIST, ITEM, {"Title": "x"})),
-    ("list_id", lambda tools, value: tools.microsoft_sharepoint_update_item(SITE, value, ITEM, {"Title": "x"})),
-    ("item_id", lambda tools, value: tools.microsoft_sharepoint_update_item(SITE, LIST, value, {"Title": "x"})),
+    ("site_id", lambda tools, value: tools.microsoft_sharepoint_create_item(value, LIST, FIELDS, LIST_URL)),
+    ("list_id", lambda tools, value: tools.microsoft_sharepoint_create_item(SITE, value, FIELDS, LIST_URL)),
+    ("site_id", lambda tools, value: tools.microsoft_sharepoint_update_item(value, LIST, ITEM, FIELDS, LIST_URL)),
+    ("list_id", lambda tools, value: tools.microsoft_sharepoint_update_item(SITE, value, ITEM, FIELDS, LIST_URL)),
+    ("item_id", lambda tools, value: tools.microsoft_sharepoint_update_item(SITE, LIST, value, FIELDS, LIST_URL)),
     ("site_id", lambda tools, value: tools.microsoft_sharepoint_list_pages(value)),
     ("site_id", lambda tools, value: tools.microsoft_sharepoint_get_page(value, PAGE)),
     ("page_id", lambda tools, value: tools.microsoft_sharepoint_get_page(SITE, value)),
@@ -801,7 +850,7 @@ def test_list_titles_are_escaped_as_one_path_segment(tmp_path: Path, monkeypatch
 def test_graph_refusals_keep_their_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"error": {"code": "accessDenied"}}, status=403))
 
-    result = _payload(tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Title": "x"}))
+    result = _payload(tools.microsoft_sharepoint_update_item(SITE, LIST, ITEM, {"Title": "x"}, LIST_URL))
 
     assert (result["status"], result["code"], result["graph_code"]) == ("error", "forbidden", "accessDenied")
 

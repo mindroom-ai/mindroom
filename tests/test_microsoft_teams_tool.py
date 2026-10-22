@@ -31,6 +31,13 @@ TEAM = "172b0cce-e65d-44ce-9a49-91d9f2e8493a"
 CHANNEL = "19:4a95f7d8db4c4e7fae857bcebe0623e6@thread.tacv2"
 CHAT = "19:2da4c29f6d7041eca70b638b43d45437@thread.v2"
 MESSAGE = "1616965872395"
+TEAM_NAME = "Contoso Team"
+CHANNEL_NAME = "General"
+MEMBERS: list[dict[str, object]] = [
+    {"displayName": "Alex Example", "email": "Alex@contoso.com"},
+    {"displayName": "Sam Example", "email": "sam@contoso.com"},
+]
+RECIPIENTS = ["alex@contoso.com", "SAM@contoso.com"]
 GRAPH = "https://graph.microsoft.com/v1.0"
 NEXT_CHANNELS = f"/teams/{TEAM}/channels?$skiptoken=channels2"
 NEXT_CHANNEL_MESSAGES = f"/teams/{TEAM}/channels/{CHANNEL}/messages?$skiptoken=posts2"
@@ -74,6 +81,23 @@ def _message(
 
 def _answer(payload: dict[str, object], status: int = 200) -> Callable[[httpx.Request], httpx.Response]:
     return lambda _request: httpx.Response(status, json=payload)
+
+
+def _send_answer(
+    posted: dict[str, object],
+    members: list[dict[str, object]] = MEMBERS,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer a send's reads with the chat members or the team and channel names, and its post with posted."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        path = _raw_path(request)
+        if request.method == "POST":
+            return httpx.Response(201, json=posted)
+        if path.endswith("/members"):
+            return httpx.Response(200, json={"value": members})
+        return httpx.Response(200, json={"displayName": TEAM_NAME if path == f"/v1.0/teams/{TEAM}" else CHANNEL_NAME})
+
+    return answer
 
 
 def _tools(
@@ -282,7 +306,7 @@ def test_messages_from_apps_name_the_app(tmp_path: Path, monkeypatch: pytest.Mon
     assert [message["from"] for message in messages] == ["Build Bot", None, None]
 
 
-def test_list_chats_expands_member_names_most_recent_message_first(
+def test_list_chats_expands_member_names_and_emails_most_recent_message_first(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -291,7 +315,7 @@ def test_list_chats_expands_member_names_most_recent_message_first(
         "topic": "Launch",
         "chatType": "group",
         "lastUpdatedDateTime": "2026-10-01T09:00:00Z",
-        "members": [{"displayName": "Alex Example"}, {"displayName": "Sam Example"}, {"displayName": None}],
+        "members": [{"displayName": "Alex Example", "email": "alex@contoso.com"}, {"displayName": "Guest"}],
         "lastMessagePreview": {"id": MESSAGE, "createdDateTime": "2026-10-20T09:00:00Z"},
     }
     silent = {"id": "19:silent@thread.v2", "topic": None, "chatType": "oneOnOne", "lastMessagePreview": None}
@@ -304,7 +328,7 @@ def test_list_chats_expands_member_names_most_recent_message_first(
             "id": CHAT,
             "topic": "Launch",
             "chat_type": "group",
-            "members": ["Alex Example", "Sam Example"],
+            "members": [{"name": "Alex Example", "email": "alex@contoso.com"}, {"name": "Guest", "email": None}],
             "last_message_at": "2026-10-20T09:00:00Z",
         },
         {
@@ -491,41 +515,148 @@ def test_listings_refuse_a_foreign_page_token_before_any_request(
     assert graph.requests == []
 
 
+CHANNEL_READS = [f"/v1.0/teams/{TEAM}", f"/v1.0/teams/{TEAM}/channels/{CHANNEL}"]
+
+
 @pytest.mark.parametrize(
-    ("function", "args", "path"),
+    ("function", "args", "reads", "path"),
     [
         (
             "microsoft_teams_send_channel_message",
-            (TEAM, CHANNEL),
+            (TEAM, CHANNEL, TEAM_NAME, CHANNEL_NAME),
+            CHANNEL_READS,
             f"/v1.0/teams/{TEAM}/channels/{CHANNEL}/messages",
         ),
         (
             "microsoft_teams_reply_to_channel_message",
-            (TEAM, CHANNEL, MESSAGE),
+            (TEAM, CHANNEL, MESSAGE, TEAM_NAME, CHANNEL_NAME),
+            CHANNEL_READS,
             f"/v1.0/teams/{TEAM}/channels/{CHANNEL}/messages/{MESSAGE}/replies",
         ),
-        ("microsoft_teams_send_chat_message", (CHAT,), f"/v1.0/chats/{CHAT}/messages"),
+        (
+            "microsoft_teams_send_chat_message",
+            (CHAT, RECIPIENTS),
+            [f"/v1.0/chats/{CHAT}/members"],
+            f"/v1.0/chats/{CHAT}/messages",
+        ),
     ],
 )
 def test_sends_post_escaped_text_with_line_breaks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     function: str,
-    args: tuple[str, ...],
+    args: tuple[object, ...],
+    reads: list[str],
     path: str,
 ) -> None:
     text = "Ship it <b>today</b> & tell <at>everyone</at>\r\nThen rest"
     stored = "Ship it &lt;b&gt;today&lt;/b&gt; &amp; tell &lt;at&gt;everyone&lt;/at&gt;<br>Then rest"
-    tools, graph = _tools(tmp_path, monkeypatch, _answer(_message(content=stored, content_type="html"), status=201))
+    tools, graph = _tools(tmp_path, monkeypatch, _send_answer(_message(content=stored, content_type="html")))
 
     result = _payload(getattr(tools, function)(*args, text))
 
-    [request] = graph.requests
+    *audience, request = graph.requests
+    assert [(read.method, _raw_path(read)) for read in audience] == [("GET", read) for read in reads]
     assert (request.method, _raw_path(request)) == ("POST", path)
     assert json.loads(request.content) == {"body": {"contentType": "html", "content": stored}}
     assert result["status"] == "ok"
     assert result["message"]["id"] == MESSAGE
     assert result["message"]["body"] == "Ship it <b>today</b> & tell <at>everyone</at>\nThen rest"
+
+
+@pytest.mark.parametrize(
+    "member",
+    [{"displayName": "Eve Outside", "email": "eve@fabrikam.com"}, {"displayName": "Guest"}],
+    ids=["unlisted", "no-email"],
+)
+def test_chat_send_reaching_a_member_not_in_recipients_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member: dict[str, object],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _send_answer(_message(), [*MEMBERS, member]))
+
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, "hi"))
+
+    assert (result["status"], result["code"]) == ("error", "recipients_mismatch")
+    assert result["members"] == [
+        {"name": "Alex Example", "email": "Alex@contoso.com"},
+        {"name": "Sam Example", "email": "sam@contoso.com"},
+        {"name": member["displayName"], "email": member.get("email")},
+    ]
+    assert [request.method for request in graph.requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    ("page", "read"),
+    [
+        ({"value": MEMBERS, "@odata.nextLink": f"{GRAPH}/chats/{CHAT}/members?$skiptoken=members2"}, 2),
+        ({"value": []}, 0),
+        ({}, 0),
+    ],
+    ids=["next-link", "empty", "missing"],
+)
+def test_chat_send_with_an_incomplete_member_list_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    page: dict[str, object],
+    read: int,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _answer(page))
+
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, "hi"))
+
+    assert (result["code"], len(result["members"])) == ("recipients_mismatch", read)
+    assert [request.method for request in graph.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("recipients", ["alex@contoso.com", [None], None])
+def test_chat_recipients_that_are_not_a_list_of_addresses_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recipients: object,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
+
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, recipients, "hi"))
+
+    assert (result["code"], result["message"]) == ("invalid_argument", "recipients must be a list of email addresses.")
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("team", "channel"),
+    [("Fabrikam Team", CHANNEL_NAME), (TEAM_NAME, "Random")],
+    ids=["other-team", "other-channel"],
+)
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tools, team, channel: tools.microsoft_teams_send_channel_message(TEAM, CHANNEL, team, channel, "hi"),
+        lambda tools, team, channel: tools.microsoft_teams_reply_to_channel_message(
+            TEAM,
+            CHANNEL,
+            MESSAGE,
+            team,
+            channel,
+            "hi",
+        ),
+    ],
+    ids=["send", "reply"],
+)
+def test_channel_post_outside_the_expected_team_and_channel_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    team: str,
+    channel: str,
+    call: Callable[[MicrosoftTeamsTools, str, str], str],
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _send_answer(_message()))
+
+    result = _payload(call(tools, team, channel))
+
+    assert (result["code"], result["team"], result["channel"]) == ("target_mismatch", TEAM_NAME, CHANNEL_NAME)
+    assert [request.method for request in graph.requests] == ["GET", "GET"]
 
 
 _ID_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, str], str]]] = [
@@ -536,10 +667,26 @@ _ID_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, str], str]]] = [
     ("channel_id", lambda tools, value: tools.microsoft_teams_list_channel_message_replies(TEAM, value, MESSAGE)),
     ("message_id", lambda tools, value: tools.microsoft_teams_list_channel_message_replies(TEAM, CHANNEL, value)),
     ("chat_id", lambda tools, value: tools.microsoft_teams_list_chat_messages(value)),
-    ("team_id", lambda tools, value: tools.microsoft_teams_send_channel_message(value, CHANNEL, "hi")),
-    ("channel_id", lambda tools, value: tools.microsoft_teams_send_channel_message(TEAM, value, "hi")),
-    ("message_id", lambda tools, value: tools.microsoft_teams_reply_to_channel_message(TEAM, CHANNEL, value, "hi")),
-    ("chat_id", lambda tools, value: tools.microsoft_teams_send_chat_message(value, "hi")),
+    (
+        "team_id",
+        lambda tools, value: tools.microsoft_teams_send_channel_message(value, CHANNEL, TEAM_NAME, CHANNEL_NAME, "hi"),
+    ),
+    (
+        "channel_id",
+        lambda tools, value: tools.microsoft_teams_send_channel_message(TEAM, value, TEAM_NAME, CHANNEL_NAME, "hi"),
+    ),
+    (
+        "message_id",
+        lambda tools, value: tools.microsoft_teams_reply_to_channel_message(
+            TEAM,
+            CHANNEL,
+            value,
+            TEAM_NAME,
+            CHANNEL_NAME,
+            "hi",
+        ),
+    ),
+    ("chat_id", lambda tools, value: tools.microsoft_teams_send_chat_message(value, RECIPIENTS, "hi")),
 ]
 
 
@@ -598,9 +745,16 @@ def test_limits_outside_one_to_fifty_are_refused(
 @pytest.mark.parametrize(
     "call",
     [
-        lambda tools, text: tools.microsoft_teams_send_channel_message(TEAM, CHANNEL, text),
-        lambda tools, text: tools.microsoft_teams_reply_to_channel_message(TEAM, CHANNEL, MESSAGE, text),
-        lambda tools, text: tools.microsoft_teams_send_chat_message(CHAT, text),
+        lambda tools, text: tools.microsoft_teams_send_channel_message(TEAM, CHANNEL, TEAM_NAME, CHANNEL_NAME, text),
+        lambda tools, text: tools.microsoft_teams_reply_to_channel_message(
+            TEAM,
+            CHANNEL,
+            MESSAGE,
+            TEAM_NAME,
+            CHANNEL_NAME,
+            text,
+        ),
+        lambda tools, text: tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, text),
     ],
 )
 def test_empty_or_oversized_text_is_refused_before_sending(
@@ -617,12 +771,13 @@ def test_empty_or_oversized_text_is_refused_before_sending(
 
 
 def test_text_at_the_size_limit_is_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _answer(_message(), status=201))
+    tools, graph = _tools(tmp_path, monkeypatch, _send_answer(_message()))
 
-    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, "x" * microsoft_teams._MAX_MESSAGE_BYTES))
+    text = "x" * microsoft_teams._MAX_MESSAGE_BYTES
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, text))
 
     assert result["status"] == "ok"
-    assert len(graph.requests) == 1
+    assert [request.method for request in graph.requests] == ["GET", "POST"]
 
 
 def test_graph_refusals_keep_their_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -640,6 +795,6 @@ def test_throttling_reports_the_retry_delay(tmp_path: Path, monkeypatch: pytest.
         lambda _request: httpx.Response(429, headers={"Retry-After": "7"}, json={"error": {"code": "TooManyRequests"}}),
     )
 
-    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, "hi"))
+    result = _payload(tools.microsoft_teams_send_chat_message(CHAT, RECIPIENTS, "hi"))
 
     assert (result["code"], result["retry_after_seconds"]) == ("throttled", 7)

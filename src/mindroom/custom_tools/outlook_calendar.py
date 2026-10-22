@@ -369,6 +369,21 @@ def _refuse_online_meeting_body(event_id: str) -> _Prepare:
     return prepare
 
 
+def _refuse_another_organizer(event_id: str, expected_organizer: str) -> _Prepare:
+    """A response and its comment go to the event's organizer, so refuse an organizer the call does not name."""
+
+    def prepare(session: GraphSession, request: _GraphRequest) -> _GraphRequest:
+        event = session.json("GET", _event_path(event_id), params={"$select": "organizer"})
+        organizer = _person(event.get("organizer"))
+        email = organizer["email"]
+        if not isinstance(email, str) or email.casefold() != expected_organizer.casefold():
+            msg = "The meeting's organizer is not expected_organizer; tell the requester the real organizer first."
+            raise MicrosoftGraphError(code="target_mismatch", message=msg, organizer=organizer)
+        return request
+
+    return prepare
+
+
 def _add_online_meeting_provider(calendar: object) -> _Prepare:
     """Name the calendar's default online meeting provider, refusing a calendar that has none."""
 
@@ -732,19 +747,22 @@ class OutlookCalendarTools(Toolkit):
     def outlook_calendar_respond_to_event(
         self,
         event_id: str,
+        expected_organizer: str,
         response: Literal["accept", "tentative", "decline"],
         comment: str | None = None,
         send_response: bool = True,
     ) -> str:
         """Accept, tentatively accept, or decline a meeting the requester was invited to.
 
-        Before calling, tell the requester the meeting's subject, time, and organizer, the response, and any comment,
-        because an approval prompt may show only IDs. With send_response, the organizer receives the response and
-        comment by email. Responding to the series master answers the whole series; an occurrence's
-        series_master_id names it.
+        Before calling, tell the requester the meeting's subject, time, and organizer, the response, and any comment.
+        With send_response, the organizer receives the response and comment by email. When the meeting's organizer is
+        not expected_organizer, nothing is sent and it fails with target_mismatch, which names the real organizer.
+        Responding to the series master answers the whole series; an occurrence's series_master_id names it.
 
         Args:
             event_id: An event id from outlook_calendar_list_events.
+            expected_organizer: The organizer's email as outlook_calendar_list_events or outlook_calendar_get_event
+                returns it.
             response: accept, tentative, or decline.
             comment: A note to the organizer, sent with the response.
             send_response: Whether to email the response to the organizer; a comment needs it.
@@ -759,6 +777,9 @@ class OutlookCalendarTools(Toolkit):
             if not isinstance(send_response, bool):
                 msg = "send_response must be true or false."
                 raise _invalid(msg)
+            if not isinstance(expected_organizer, str) or not expected_organizer.strip():
+                msg = "expected_organizer must be the organizer's email as outlook_calendar_list_events returns it."
+                raise _invalid(msg)
             payload: dict[str, Any] = {"sendResponse": send_response}
             if comment is not None:
                 if not send_response:
@@ -770,4 +791,5 @@ class OutlookCalendarTools(Toolkit):
         return self._send(
             build,
             lambda _payload: {"event_id": event_id, "response": response, "response_sent": send_response},
+            prepare=_refuse_another_organizer(event_id, expected_organizer),
         )
