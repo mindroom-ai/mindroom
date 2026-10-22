@@ -334,10 +334,13 @@ async def _stream_turn(
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
     already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
-    before whatever ended the stream reaches the run's terminal handling.
+    before whatever ended the stream reaches the run's terminal handling. A turn that completed but was never taken
+    by the consumer, such as one cancelled while a pipeline stage finishes the stream, is cut off the same way with
+    the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that usage instead.
     """
     identity = model.identity
     turn: TurnCompleted | None = None
+    handed_off = False
     reported = ReportedUsage()
     try:
         stream = model.stream(request)
@@ -351,18 +354,22 @@ async def _stream_turn(
                     reported.observe(event)
                 elif isinstance(event, TurnCompleted):
                     turn = event
+        if turn is None:
+            msg = "The provider stream ended without completing the turn"
+            raise ProviderError(msg, provider=identity.provider_name, code="incomplete_stream")
+        yield turn
+        # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
+        handed_off = True
     finally:
-        # A cut-off request settles exactly what was billed: the final reports plus a partial none replaced.
-        received = reported.received
-        if turn is None and received is not None and received.to_dict():
-            cut_off = Message(role="assistant", metrics=received)
-            _stamp_model(cut_off, identity)
-            messages.append(cut_off)
-            _count_request(metrics, received, identity)
-    if turn is None:
-        msg = "The provider stream ended without completing the turn"
-        raise ProviderError(msg, provider=identity.provider_name, code="incomplete_stream")
-    yield turn
+        if not handed_off:
+            # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
+            # plus a partial none replaced.
+            billed = turn.message.metrics if turn is not None else reported.received
+            if billed is not None and billed.to_dict():
+                cut_off = Message(role="assistant", metrics=billed)
+                _stamp_model(cut_off, identity)
+                messages.append(cut_off)
+                _count_request(metrics, billed, identity)
 
 
 def _stamp_model(message: Message, identity: ModelIdentity) -> None:
