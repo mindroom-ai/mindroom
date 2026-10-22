@@ -55,7 +55,6 @@ logger = get_logger(__name__)
 MEMBER_RESULTS_HEADING = "Member results after human-in-the-loop resolution:"
 MEMBER_RESULT_LINE = "[{name}]: {content}"
 MEMBER_TASK_COMPLETED = "Task completed"
-TEAM_PAUSED = "Team run paused."
 
 type MemberLoopEvent = ContentDelta | ReasoningDelta | ToolStarted | ToolCompleted | RequestCompleted
 
@@ -217,21 +216,16 @@ def continue_team(
 
 
 def team_paused_content(record: TeamRunRecord) -> str:
-    """Return Agno's text for a team run paused without text of its own: who waits for what."""
-    active = [requirement for requirement in record.requirements or () if not requirement.is_resolved()]
-    if not active:
-        return TEAM_PAUSED
+    """Return Agno's text for a team run paused without text of its own: who waits for which confirmation.
+
+    The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
+    """
     parts: list[str] = []
-    for requirement in active:
-        tool = requirement.tool_execution
-        if tool.external_execution_silent:
-            continue
-        member = requirement.member_agent_name or "team"
-        name = tool.tool_name or "unknown"
+    for requirement in record.requirements or ():
         if requirement.needs_confirmation:
+            member = requirement.member_agent_name or "team"
+            name = requirement.tool_execution.tool_name or "unknown"
             parts.append(f"- {member}: {name} requires confirmation")
-        elif requirement.needs_external_execution:
-            parts.append(f"- {member}: {name} requires external execution")
     if not parts:
         return ""
     return "Team run paused. The following require input:\n" + "\n".join(parts)
@@ -515,7 +509,6 @@ __all__ = [
     "MEMBER_RESULTS_HEADING",
     "MEMBER_RESULT_LINE",
     "MEMBER_TASK_COMPLETED",
-    "TEAM_PAUSED",
     "Emit",
     "MemberEvent",
     "MemberLoopEvent",
