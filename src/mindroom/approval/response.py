@@ -22,7 +22,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
-from mindroom.delegation.state import member_delegation_call
+from mindroom.delegation.state import member_delegation_card
 from mindroom.delivery_gateway import DeliveryStage
 from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -160,6 +160,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
     }
     is_team_presentation = paused.response_presentation_state.get("kind") == "team_stream"
     config_names_by_provider_id = _team_config_names_by_provider_id(paused.response_presentation_state)
+    member_names = config_names_by_provider_id.values()
     for tool in paused.tools:
         call_id = tool.tool_call_id
         if call_id is None:
@@ -168,7 +169,7 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         requirement = requirements_by_call_id.get(call_id)
         member_id = requirement.member_agent_id if requirement is not None else None
         anchor_id = call_id
-        if member_id is None and (card := member_delegation_call(call_id, config_names_by_provider_id.values())):
+        if requirement is not None and (card := member_delegation_card(requirement, member_names)):
             member_id, anchor_id = card
         matches = [
             entry

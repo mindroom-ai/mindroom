@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -218,11 +219,15 @@ def delegation_card_id(member_id: str | None, call_id: str) -> str:
     return f"{member_id}:{call_id}" if member_id else call_id
 
 
-def member_delegation_call(card_id: str, member_ids: Collection[str]) -> tuple[str, str] | None:
-    """Return the member and its own call id when ``card_id`` is the card of a delegation call one of ``member_ids`` made.
+def member_delegation_card(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str, str] | None:
+    """Return the member and its own call id when ``requirement`` is the card of a delegation call a member made.
 
-    A child's projected tool id, ``delegation_id:call_id``, names no member, so it is not such a card.
+    The team holds such a card, so its requirement names no member and its call id is ``member_id:call_id`` for one
+    of ``member_ids``. A child's projected tool id, ``delegation_id:call_id``, names no member, so it is not such a card.
     """
+    card_id = requirement.tool_execution.tool_call_id
+    if requirement.member_agent_id is not None or not card_id:
+        return None
     member_id, _, call_id = card_id.partition(":")
     return (member_id, call_id) if call_id and member_id in member_ids else None
 
