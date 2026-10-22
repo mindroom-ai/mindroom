@@ -517,6 +517,66 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_the_resu
     assert record.requirements == []
 
 
+async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_the_member() -> None:
+    """A member's paused call with the id of the leader's completed delegation resumes, and that delegation stays.
+
+    Call ids come from separate provider requests, so nothing keeps a member's ids apart from the leader's; the
+    member's call belongs to the member's run and never stands in for the leader's tool entry.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Multiply 6 by 7."),
+            tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Multiply 7 by 6."),
+            metrics=usage(10, 2),
+        ),
+        answer("Both say 42.", usage(10, 2)),
+    )
+    writer = scripted("writer-model", answer("Writer: 42", usage(5, 1)))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-w", a=7, b=6), metrics=usage(5, 1)),
+        answer("Checker: 42", usage(5, 1)),
+    )
+    team = squad(leader, writer, checker)
+    _, paused = await collect(
+        run_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    assert paused.requirements is not None
+    assert [(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements] == [("checker", "call-w")]
+    assert paused.tools is not None
+    assert [(tool.tool_call_id, tool.result) for tool in paused.tools] == [
+        ("call-w", "Writer: 42"),
+        ("call-c", MEMBER_PAUSED_RESULT.format(name="Checker")),
+    ]
+
+    events, record = await collect(
+        continue_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-w"): approval("call-w", "multiply", {"a": 7, "b": 6}, agent="checker")},
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "Both say 42.")
+    [member] = member_records(events)
+    assert (member.agent_id, member.status) == ("checker", RunStatus.completed)
+    assert checker.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+    resumed = "Member results after human-in-the-loop resolution:\n[Checker]: Checker: 42"
+    assert record.tools is not None
+    assert [(tool.tool_call_id, tool.tool_name, tool.result) for tool in record.tools] == [
+        ("call-w", "delegate_task_to_member", "Writer: 42"),
+        ("call-c", "delegate_task_to_member", resumed),
+    ]
+    assert [message.content for message in leader.requests[-1].messages if message.role == "tool"] == [
+        "Writer: 42",
+        resumed,
+    ]
+    assert record.requirements == []
+
+
 async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the_leader_the_member_s_result() -> None:
     """A mixed resume answers the delegation with the member's result and runs the leader's own approved call.
 
