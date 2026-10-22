@@ -7797,8 +7797,6 @@ depends_on = [
     "mindroom.matrix.event_types",
     "mindroom.matrix_openid",
     "mindroom.orchestration.computer_runtime",
-    "mindroom.runtime_env_policy",
-    "mindroom.worker_computer.sessions",
 ]
 visibility = ["mindroom.bot"]
 

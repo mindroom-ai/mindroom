@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix import client_room_admin
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
-from mindroom.orchestration import server_state
+from mindroom.orchestration import computer_runtime
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
 from mindroom.worker_computer.sessions import ComputerError
 from tests.conftest import make_matrix_client_mock
@@ -66,7 +66,12 @@ def test_content_names_the_origin_chat_binds_tokens_to(
     content: dict[str, object],
 ) -> None:
     """The published origin is the OpenID audience, so a Chat token bound to it verifies here."""
-    assert server_state_content("helper", CONFIG, _paths(tmp_path, **env)) == content
+    assert server_state_content("helper", CONFIG, _paths(tmp_path, **env), api_enabled=True) == content
+
+
+def test_nothing_is_published_without_the_api(tmp_path: Path) -> None:
+    """`mindroom run --no-api` serves no Connections or Computers, so Chat must not be pointed at it."""
+    assert server_state_content("helper", CONFIG, _paths(tmp_path), api_enabled=False) == {}
 
 
 @pytest.mark.parametrize(
@@ -89,9 +94,9 @@ def test_content_says_whether_the_entity_has_a_worker_computer(
 ) -> None:
     """Chat shows the Computer button only for an agent the Computers API would serve."""
     provider = MagicMock(return_value="browser", side_effect=provider_error)
-    monkeypatch.setattr(server_state, "computer_browser_provider", provider)
+    monkeypatch.setattr(computer_runtime, "_computer_browser_provider", provider)
     env = {"MINDROOM_WORKER_COMPUTER_ENABLED": "true"} if computers_on else {}
-    assert server_state_content(entity, CONFIG, _paths(tmp_path, **env))["computer"] is computer
+    assert server_state_content(entity, CONFIG, _paths(tmp_path, **env), api_enabled=True)["computer"] is computer
 
 
 @pytest.mark.asyncio
@@ -157,18 +162,32 @@ def test_managed_rooms_let_every_entity_publish_its_server() -> None:
 
 
 @pytest.mark.asyncio
-async def test_every_entity_publishes_its_server_in_each_joined_room(
+@pytest.mark.parametrize(
+    ("target", "changed", "published"),
+    [("join", True, True), ("join", False, False), ("leave", True, False)],
+    ids=["joined", "join-failed", "left"],
+)
+async def test_every_successful_join_publishes_the_entitys_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    changed: bool,
+    published: bool,
 ) -> None:
-    """Agents publish too, not only the router, because Chat reads the server of the agents in the room."""
+    """Configured, invited, and personal rooms all join through one command, which publishes for every entity."""
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    # Lightweight test bots swap this command for a mock transport, so call the real one with a stand-in session.
+    monkeypatch.setattr(bot, "_ingestion_session", MagicMock())
+    monkeypatch.setattr(bot_module, "change_local_membership", AsyncMock(return_value=changed))
     publish = AsyncMock()
     monkeypatch.setattr(bot_module, "publish_server_state", publish)
-    await bot._post_join_room_setup("!room:localhost")
-    publish.assert_awaited_once_with(
-        bot.client,
-        "!room:localhost",
-        server_state_content("code", bot.config, bot.runtime_paths),
-    )
+    assert await bot_module.AgentBot.change_local_membership(bot, "!room:localhost", target) is changed
+    if published:
+        publish.assert_awaited_once_with(
+            bot.client,
+            "!room:localhost",
+            server_state_content("code", bot.config, bot.runtime_paths, api_enabled=True),
+        )
+    else:
+        publish.assert_not_awaited()

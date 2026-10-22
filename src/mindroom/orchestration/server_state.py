@@ -9,9 +9,7 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
 from mindroom.matrix_openid import openid_audience
-from mindroom.orchestration.computer_runtime import computer_browser_provider
-from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
-from mindroom.worker_computer.sessions import ComputerError
+from mindroom.orchestration.computer_runtime import worker_computer_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -20,25 +18,22 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def server_state_content(entity_name: str, config: Config, runtime_paths: RuntimePaths) -> dict[str, object]:
+def server_state_content(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    api_enabled: bool,
+) -> dict[str, object]:
     """Return the origin Chat must open, which is the OpenID audience, and whether the entity has a worker computer.
 
-    Without a usable origin the content is empty, which clears what an earlier process published.
+    Without a usable origin, or with the API off (`mindroom run --no-api`), the content is empty, which also clears
+    what an earlier process published.
     """
     origin = openid_audience(runtime_paths)
-    if origin is None:
+    if origin is None or not api_enabled:
         return {}
-    return {"api_origin": origin, "computer": _has_computer(entity_name, config, runtime_paths)}
-
-
-def _has_computer(entity_name: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    if entity_name not in config.agents or not runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
-        return False
-    try:
-        computer_browser_provider(entity_name, config, runtime_paths)
-    except ComputerError:
-        return False
-    return True
+    return {"api_origin": origin, "computer": worker_computer_provider(entity_name, config, runtime_paths) is not None}
 
 
 async def publish_server_state(client: nio.AsyncClient, room_id: str, content: dict[str, object]) -> None:

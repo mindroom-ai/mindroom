@@ -1298,9 +1298,6 @@ class AgentBot:
     async def _post_join_room_setup(self, room_id: str) -> None:
         """Run room setup that should happen after joins and across restarts."""
         self._request_call_reconciliation(room_id)
-        if self.client is not None:
-            content = server_state_content(self.agent_name, self.config, self.runtime_paths)
-            await publish_server_state(self.client, room_id, content)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
 
@@ -1337,13 +1334,17 @@ class AgentBot:
         *,
         is_authorized: Callable[[], bool] | None = None,
     ) -> bool:
-        """Serialize one local membership command while ingestion keeps draining."""
+        """Serialize one local membership command while ingestion keeps draining.
+
+        Every join, including configured, invited, and personal rooms and the rejoin at startup, publishes the entity's
+        MindRoom server in the room, so MindRoom Chat can find it.
+        """
         session = self._ingestion_session
         if session is None:
             message = "owned Matrix ingestion session is missing"
             raise PermanentMatrixStartupError(message)
         async with self._local_membership_lock:
-            return await change_local_membership(
+            changed = await change_local_membership(
                 session,
                 account_id=self.agent_user.user_id,
                 room_id=room_id,
@@ -1352,6 +1353,11 @@ class AgentBot:
                 admission_progress=self._ingestion_admission_progress,
                 is_authorized=is_authorized,
             )
+        if changed and target_membership == "join" and self.client is not None:
+            api_enabled = self.orchestrator is None or self.orchestrator.api_enabled
+            content = server_state_content(self.agent_name, self.config, self.runtime_paths, api_enabled=api_enabled)
+            await publish_server_state(self.client, room_id, content)
+        return changed
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
