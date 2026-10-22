@@ -3,7 +3,7 @@
 Each request emits one ``LLM usage`` log line once it ends, completed or not, attributed to the turn
 its request context names. With ``debug.log_llm_requests`` the request (messages, tools, model
 settings) and its usage are appended to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by
-``request_log_id``.
+``request_log_id`` and attributed to the same turn.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.llm.provider import TurnCompleted, UsageReported
-from mindroom.llm.request_context import current_llm_request_log_context, json_safe
+from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_data
@@ -39,16 +39,6 @@ logger = get_logger(__name__)
 _NON_API_MESSAGE_FIELDS = frozenset(
     {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
 )
-# Request-context fields that attribute a request to its turn, which the usage line repeats; prompts stay out of it.
-_ATTRIBUTION_FIELDS = (
-    "agent_id",
-    "session_id",
-    "room_id",
-    "thread_id",
-    "reply_to_event_id",
-    "requester_id",
-    "correlation_id",
-)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -62,6 +52,11 @@ class RequestLog:
     configured_provider: str
     debug: DebugConfig
     default_log_dir: Path
+
+
+def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the fields of the request context that attribute a request to its turn, leaving its prompts out."""
+    return {name: context[name] for name in REQUEST_ATTRIBUTION_FIELDS if name in context}
 
 
 def _system_prompt(messages: Sequence[Message]) -> str:
@@ -126,7 +121,7 @@ def _log_usage(
     }
     if served_provider is not None:
         payload["served_provider"] = served_provider
-    payload |= {field: context[field] for field in _ATTRIBUTION_FIELDS if field in context}
+    payload |= _attribution(context)
     if usage is not None:
         context_tokens = context_input_tokens_from_counts(
             input_tokens=usage.input_tokens,
@@ -196,6 +191,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     "record": "response",
                     "request_log_id": request_log_id,
                     "agent_id": log.model_name,
+                    **_attribution(context),
                     "model_id": inner.identity.id,
                     "usage": {
                         "input_tokens": usage.input_tokens,
@@ -204,8 +200,6 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                         "cache_write_tokens": usage.cache_write_tokens,
                     },
                 }
-                if (correlation_id := context.get("correlation_id")) is not None:
-                    response["correlation_id"] = correlation_id
                 await asyncio.to_thread(_write_line, log_path, response)
         except Exception:
             logger.exception(
