@@ -722,7 +722,7 @@ class _TeamTurn:
         record = self.terminal_record(attempt)
         if record.status is RunStatus.paused:
             return self.resolve_paused(attempt, record)
-        return self.resolve_completed(run, attempt, record, blocking=True)
+        return self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
         self,
@@ -731,6 +731,7 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state, stream=True)
+        emitted_output = False
         try:
             async with closing_async_stream(events):
                 async for event in events:
@@ -739,6 +740,7 @@ class _TeamTurn:
                     self.sync_live_turn_recorder(run, attempt)
                     chunk = attempt.chunk()
                     if chunk is not None:
+                        emitted_output = True
                         yield chunk
         except Exception as error:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
@@ -757,7 +759,9 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False))
+        # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
+        # carries the trigger either, so the next turn still reads it.
+        yield AttemptResolved(self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output))
 
     def terminal_record(self, attempt: TeamAttempt) -> TeamRunRecord:
         """Return the record the attempt's run ended with; the loop always hands one over before it finishes."""
@@ -813,9 +817,13 @@ class _TeamTurn:
         record: TeamRunRecord,
         *,
         blocking: bool,
+        mark_seen: bool,
     ) -> CompletedAttempt:
-        """Return the completed attempt: its rendered body, what replays, and the turn's metadata."""
-        if self.ctx.reply_to_event_id:
+        """Return the completed attempt: its rendered body, what replays, and the turn's metadata.
+
+        ``mark_seen`` records the Matrix events the turn consumed as seen on the stored session row.
+        """
+        if mark_seen and self.ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
                 scope_context=run.scope_context,
                 session_id=self.ctx.session_id,
