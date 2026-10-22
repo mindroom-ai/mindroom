@@ -16,7 +16,7 @@ from mindroom.error_handling import (
     is_model_safeguard_refusal,
     minimal_mode_failure_message,
 )
-from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import InvalidRequest, ModelSafeguardRefusal, ProviderError, ProviderUnavailable, RateLimited
 from mindroom.providers.openai.errors import missing_api_key_error
 
 _MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
@@ -156,14 +156,19 @@ _OAUTH_HOST_UNREACHABLE = (
             id="typed-401",
         ),
         pytest.param(
-            Exception(_OAUTH_HOST_UNREACHABLE),
-            f"❌ Authentication failed: {_OAUTH_HOST_UNREACHABLE}",
+            InvalidRequest("API key not valid. Please pass a valid API key.", provider="Gemini", status_code=400),
+            "❌ Authentication failed (Gemini): API key not valid. Please pass a valid API key.",
+            id="typed-400-keeps-keywords",
+        ),
+        pytest.param(
+            Exception("401 Unauthorized"),
+            "❌ Authentication failed: 401 Unauthorized",
             id="untyped-keeps-keywords",
         ),
     ],
 )
 def test_typed_provider_errors_are_decided_by_type_before_keywords(error: Exception, expected: str) -> None:
-    """A typed transient, rate-limit, or 401/403 error picks its message by type; untyped errors match keywords."""
+    """A typed transient, rate-limit, or 401/403 error picks its message by type; other errors match keywords."""
     assert get_user_friendly_error_message(error) == expected
 
 
