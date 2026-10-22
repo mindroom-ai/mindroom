@@ -4710,9 +4710,10 @@ def test_runtime_chart_chain_renders_broker_cache_peer() -> None:
     proxy = _resource(docs, "Deployment", _EGRESS_PROXY_NAME)
     proxy_container = _container(proxy, "approved-egress-proxy")
 
-    # Squid never goes direct for credentialed requests, so declaring its only parent dead after a restart of the
-    # primary (which runs the broker) would only refuse the first requests once it is back.
-    assert f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000" in conf
+    assert (
+        f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000"
+        in conf
+    )
     assert f"cache_peer_access {_EGRESS_BROKER_HOST} allow egress_has_token" in conf
     assert f"cache_peer_access {_EGRESS_BROKER_HOST} deny all" in conf
     assert "acl egress_has_token req_header Proxy-Authorization ." in conf
