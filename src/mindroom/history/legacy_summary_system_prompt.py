@@ -28,7 +28,7 @@ _LEGACY_SUMMARY_BLOCK = re.compile(
 # of that resumed request folds the paused tool call anyway, so it also removes the block from the system message;
 # the approval receipt projects its copy after compaction, so the stored message is the one stripped.
 # Coverage: tests/test_history_request_messages.py::test_resuming_a_pause_whose_system_message_embeds_the_summary_adds_no_second_summary;
-# tests/test_history_summary_message.py::test_resuming_a_pre_release_pause_keeps_its_single_summary;
+# tests/test_history_summary_message.py::test_resuming_a_pre_release_team_pause_keeps_its_single_summary;
 # tests/test_mid_turn_compaction.py::test_legacy_resume_then_mid_turn_compaction_leaves_one_summary;
 # tests/test_agent_turn_runtime.py::test_the_hooks_of_a_reply_are_installed_in_their_documented_order.
 def system_message_embeds_summary(messages: Sequence[Message]) -> bool:
