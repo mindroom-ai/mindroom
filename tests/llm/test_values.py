@@ -34,7 +34,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -88,6 +88,18 @@ def test_file_text_content_round_trips_by_mime_type() -> None:
     assert binary.to_dict()["content"] == "AAE="
     assert File.from_dict(looks_like_base64.to_dict()).content == b"TestData"
     assert File.from_dict(binary.to_dict()).content == b"\x00\x01"
+
+
+def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
+    # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
+    assert File(content="plain text").to_dict()["content"] == "plain text"
+    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content.
+    assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
+
+
+def test_stored_content_that_is_not_base64_reads_as_its_utf8_bytes() -> None:
+    # Agno's reader fell back to the text's UTF-8 bytes when the stored content was not valid base64.
+    assert Image.from_dict({"content": "abc"}).content == b"abc"
 
 
 def test_media_to_dict_without_content_keeps_scalars() -> None:
@@ -231,6 +243,19 @@ def test_team_run_record_defaults() -> None:
     assert record.member_responses == []
     assert record.parent_run_id is None
     assert "agent_id" not in record.to_dict()
+
+
+# --- usage -----------------------------------------------------------------------------------------------------
+
+
+def test_run_metrics_sum_keeps_the_cost_only_one_run_reported() -> None:
+    # A team turn sums its member runs, and only some providers, such as OpenRouter, report a request's cost.
+    priced = RunMetrics(input_tokens=10, cost=0.25, duration=2.0)
+    unpriced = RunMetrics(input_tokens=5, duration=1.0)
+
+    total = priced + unpriced
+    assert (total.input_tokens, total.cost, total.duration) == (15, 0.25, 3.0)
+    assert (unpriced + priced).cost == 0.25
 
 
 # --- provider --------------------------------------------------------------------------------------------------
