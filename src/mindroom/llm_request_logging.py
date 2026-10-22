@@ -116,9 +116,10 @@ def _model_params(model: Model) -> dict[str, _JSONValue]:
 
 def _write_jsonl_line(path: Path, payload: dict[str, _JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # One write per record: a record larger than the file buffer is flushed before a separate newline write,
+    # so a concurrent model call's record could land between them on the same line.
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(payload)))
-        handle.write("\n")
+        handle.write(json.dumps(redact_sensitive_data(payload)) + "\n")
 
 
 def _json_safe(value: object) -> _JSONValue:
