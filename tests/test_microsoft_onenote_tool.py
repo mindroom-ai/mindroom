@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -33,6 +34,45 @@ PAGE_CONTENT_PATH = f"/v1.0/me/onenote/pages/{PAGE}/content"
 NOTEBOOKS_URL = "https://contoso-my.sharepoint.com/personal/alex_contoso_com/Documents/Notebooks"
 WEB_URL = f"{NOTEBOOKS_URL}/Notebook%200"
 TEXT_CHUNK = 30_000
+TEAM = "172b0cce-e65d-44ce-9a49-91d9f2e8493a"
+SITE = "contoso.sharepoint.com,da60e844-ba1d-49bc-b4d4-d5e36bae9019,712a596e-90a1-49e3-9b48-bfa80bee8740"
+PERSON = "sam@contoso.com"
+# The OneNote root each container reaches, as Graph receives the path.
+CONTAINER_ROOTS = {
+    None: "/v1.0/me/onenote",
+    TEAM: f"/v1.0/groups/{TEAM}/onenote",
+    SITE: f"/v1.0/sites/{SITE.replace(',', '%2C')}/onenote",
+    PERSON: f"/v1.0/users/{PERSON}/onenote",
+}
+BAD_CONTAINERS = [
+    "",
+    " ",
+    "me",
+    "Notebook 0",
+    f"{NOTEBOOK}-0",
+    f" {TEAM}",
+    f"{TEAM}\n",
+    f"{TEAM}/members",
+    TEAM[:-1],
+    f"{TEAM},{TEAM}",
+    "contoso.sharepoint.com",
+    f"contoso.sharepoint.com,{TEAM}",
+    f"contoso,{TEAM},{TEAM}",
+    f"contoso.sharepoint.com/sites/team,{TEAM},{TEAM}",
+    f"contoso.sharepoint.com,{TEAM},{TEAM},{TEAM}",
+    "sam@",
+    "@contoso.com",
+    "sam@contoso",
+    "sam@@contoso.com",
+    "sam@contoso.com ",
+    "sam@contoso.com/onenote",
+    "../sam@contoso.com",
+    "sam?x@contoso.com",
+    "sam#EXT#@contoso.com",
+    "sam\x00@contoso.com",
+    5,
+    [PERSON],
+]
 READ_FUNCTIONS = (
     "microsoft_onenote_list_notebooks",
     "microsoft_onenote_list_sections",
@@ -101,11 +141,24 @@ def _in_notebook(write: Callable[[httpx.Request], httpx.Response]) -> Callable[[
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method != "GET":
             return write(request)
-        if request.url.path.startswith("/v1.0/me/onenote/notebooks/"):
+        if re.search(r"/onenote/notebooks/[^/]+$", request.url.path):
             return _ok(_notebook())(request)
         return _ok({"parentNotebook": {"id": f"{NOTEBOOK}-0", "displayName": "Notebook 0"}})(request)
 
     return handler
+
+
+def _any_call(request: httpx.Request) -> httpx.Response:
+    """Answer any OneNote call: listings, page text, a write's lookups, and the write itself."""
+    if request.url.path.endswith("/content") and request.method == "GET":
+        return _html("<p>Text</p>")(request)
+    if request.url.path.endswith("/pages") and request.method == "POST":
+        return _ok(_page(), status=201)(request)
+    if request.method == "PATCH":
+        return _ok(status=204)(request)
+    if "$expand" in request.url.params or re.search(r"/onenote/notebooks/[^/]+$", request.url.path):
+        return _in_notebook(_ok())(request)
+    return _ok({"value": []})(request)
 
 
 def _tools(
@@ -192,6 +245,7 @@ def test_list_notebooks_summarizes_each_notebook(tmp_path: Path, monkeypatch: py
         "$skip": "0",
     }
     assert result["status"] == "ok"
+    assert result["container"] is None
     assert result["notebooks"] == [
         {
             "id": f"{NOTEBOOK}-0",
@@ -498,40 +552,55 @@ def test_append_to_page_refuses_empty_or_non_text_content_before_any_request(
     assert graph.requests == []
 
 
-_NOTEBOOK_BOUND_WRITES: dict[str, tuple[Callable[[MicrosoftOneNoteTools, str], str], str, str]] = {
+_NOTEBOOK_BOUND_WRITES: dict[str, tuple[Callable[[MicrosoftOneNoteTools, str, str | None], str], str, str]] = {
     "create": (
-        lambda tools, web_url: tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", web_url),
-        f"/v1.0/me/onenote/sections/{SECTION}",
+        lambda tools, web_url, container: tools.microsoft_onenote_create_page(
+            SECTION,
+            "Agenda",
+            "text",
+            web_url,
+            container=container,
+        ),
+        f"/sections/{SECTION}",
         "POST",
     ),
     "append": (
-        lambda tools, web_url: tools.microsoft_onenote_append_to_page(PAGE, "text", web_url),
-        f"/v1.0/me/onenote/pages/{PAGE}",
+        lambda tools, web_url, container: tools.microsoft_onenote_append_to_page(
+            PAGE,
+            "text",
+            web_url,
+            container=container,
+        ),
+        f"/pages/{PAGE}",
         "PATCH",
     ),
 }
 
 
+@pytest.mark.parametrize("container", list(CONTAINER_ROOTS))
 @pytest.mark.parametrize("write", list(_NOTEBOOK_BOUND_WRITES))
 def test_writes_run_only_in_the_notebook_whose_web_url_was_passed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     write: str,
+    container: str | None,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _in_notebook(_ok(_page(), status=201)))
     call, lookup_path, method = _NOTEBOOK_BOUND_WRITES[write]
+    root = CONTAINER_ROOTS[container]
 
-    assert _payload(call(tools, " "))["code"] == "invalid_argument"
+    assert _payload(call(tools, " ", container))["code"] == "invalid_argument"
     assert graph.requests == []
     same_name_elsewhere = WEB_URL.replace("alex_contoso_com", "sam_contoso_com")
-    refused = _payload(call(tools, same_name_elsewhere))
+    refused = _payload(call(tools, same_name_elsewhere, container))
     assert (refused["code"], refused["web_url"]) == ("target_mismatch", WEB_URL)
     assert [(request.method, _raw_path(request), dict(request.url.params)) for request in graph.requests] == [
-        ("GET", lookup_path, {"$expand": "parentNotebook"}),
-        ("GET", f"/v1.0/me/onenote/notebooks/{NOTEBOOK}-0", {"$select": "links"}),
+        ("GET", f"{root}{lookup_path}", {"$expand": "parentNotebook"}),
+        ("GET", f"{root}/notebooks/{NOTEBOOK}-0", {"$select": "links"}),
     ]
-    assert _payload(call(tools, f" {WEB_URL} "))["status"] == "ok"
+    assert _payload(call(tools, f" {WEB_URL} ", container))["status"] == "ok"
     assert [request.method for request in graph.requests] == ["GET", "GET", "GET", "GET", method]
+    assert _raw_path(graph.requests[-1]).startswith(f"{root}{lookup_path}")
 
 
 def test_ids_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -580,3 +649,109 @@ def test_a_full_section_reports_graphs_refusal(tmp_path: Path, monkeypatch: pyte
     result = _payload(tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", WEB_URL))
 
     assert (result["code"], result["status_code"]) == ("graph_error", 507)
+
+
+def test_every_function_takes_a_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, _ok({}))
+
+    for name in (*READ_FUNCTIONS, *WRITE_FUNCTIONS):
+        parameters = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]
+        assert "container" in parameters["properties"], name
+        assert "container" not in parameters.get("required", []), name
+
+
+@pytest.mark.parametrize("container", list(CONTAINER_ROOTS))
+def test_every_function_reaches_the_notebooks_its_container_names_and_echoes_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container: str | None,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _any_call)
+    root = CONTAINER_ROOTS[container]
+    calls: list[tuple[Callable[[], str], list[tuple[str, str]]]] = [
+        (
+            lambda: tools.microsoft_onenote_list_notebooks(container=container),
+            [("GET", f"{root}/notebooks")],
+        ),
+        (
+            lambda: tools.microsoft_onenote_list_sections(NOTEBOOK, container=container),
+            [("GET", f"{root}/notebooks/{NOTEBOOK}/sections")],
+        ),
+        (
+            lambda: tools.microsoft_onenote_list_pages(SECTION, container=container),
+            [("GET", f"{root}/sections/{SECTION}/pages")],
+        ),
+        (
+            lambda: tools.microsoft_onenote_get_page(PAGE, container=container),
+            [("GET", f"{root}/pages/{PAGE}/content")],
+        ),
+        (
+            lambda: tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", WEB_URL, container=container),
+            [
+                ("GET", f"{root}/sections/{SECTION}"),
+                ("GET", f"{root}/notebooks/{NOTEBOOK}-0"),
+                ("POST", f"{root}/sections/{SECTION}/pages"),
+            ],
+        ),
+        (
+            lambda: tools.microsoft_onenote_append_to_page(PAGE, "text", WEB_URL, container=container),
+            [
+                ("GET", f"{root}/pages/{PAGE}"),
+                ("GET", f"{root}/notebooks/{NOTEBOOK}-0"),
+                ("PATCH", f"{root}/pages/{PAGE}/content"),
+            ],
+        ),
+    ]
+
+    for call, expected in calls:
+        start = len(graph.requests)
+        result = _payload(call())
+        assert (result["status"], result["container"]) == ("ok", container)
+        assert [(request.method, _raw_path(request)) for request in graph.requests[start:]] == expected
+
+
+@pytest.mark.parametrize(
+    ("container", "path"),
+    [
+        (TEAM.upper(), f"/v1.0/groups/{TEAM.upper()}/onenote/notebooks"),
+        ("O'Brien@Contoso.com", "/v1.0/users/O%27Brien@Contoso.com/onenote/notebooks"),
+        ("sam.lee@eu.contoso.co.uk", "/v1.0/users/sam.lee@eu.contoso.co.uk/onenote/notebooks"),
+    ],
+)
+def test_containers_are_escaped_as_single_path_segments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container: str,
+    path: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
+
+    assert _payload(tools.microsoft_onenote_list_notebooks(container=container))["status"] == "ok"
+    assert _raw_path(graph.requests[0]) == path
+
+
+@pytest.mark.parametrize("container", BAD_CONTAINERS)
+def test_every_function_refuses_a_container_of_no_known_kind_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container: object,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _any_call)
+
+    results = [
+        tools.microsoft_onenote_list_notebooks(container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_list_sections(NOTEBOOK, container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_list_pages(SECTION, container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_get_page(PAGE, container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_create_page(SECTION, "Agenda", "text", WEB_URL, container=container),  # type: ignore[arg-type]
+        tools.microsoft_onenote_append_to_page(PAGE, "text", WEB_URL, container=container),  # type: ignore[arg-type]
+    ]
+
+    assert [(_payload(result)["code"], _payload(result)["message"]) for result in results] == [
+        (
+            "invalid_argument",
+            "container must be a Teams team id, a SharePoint site id (host,guid,guid), or a person's sign-in email "
+            "address; leave it empty for the requester's own notebooks.",
+        ),
+    ] * len(results)
+    assert graph.requests == []

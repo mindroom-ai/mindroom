@@ -9274,7 +9274,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "List, read, create, and append to pages in the connected user's OneNote notebooks",
+      "description": "List, read, create, and append to pages in OneNote notebooks the connected user owns or can open",
       "display_name": "Microsoft OneNote",
       "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
       "executes_code": false,

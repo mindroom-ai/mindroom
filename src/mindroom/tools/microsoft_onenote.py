@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="microsoft_onenote",
     display_name="Microsoft OneNote",
-    description="List, read, create, and append to pages in the connected user's OneNote notebooks",
+    description="List, read, create, and append to pages in OneNote notebooks the connected user owns or can open",
     category=ToolCategory.PRODUCTIVITY,
     file_access=ToolFileAccess.NONE,
     status=ToolStatus.REQUIRES_CONFIG,
