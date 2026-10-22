@@ -3,14 +3,16 @@
 # ruff: noqa: D103
 from __future__ import annotations
 
+import sys
+import threading
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.agent_cli.bash import MinimalBashTools
-from mindroom.agent_cli.checkpoint import BatchCheckpoint
+from mindroom.agent_cli.checkpoint import BatchCheckpoint, save_cli_session
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopState
 from mindroom.agent_loop.tools import PlannedCall
 from mindroom.history.run_visibility import is_model_history_visible_run
@@ -19,6 +21,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolValue
 from tests.test_agent_tool_calls import _catalog
@@ -218,3 +221,47 @@ async def test_a_checkpoint_without_session_storage_refuses_the_bash_call(tmp_pa
     await _capture(checkpoint, _record(), [_assistant("bash-1")])
     with pytest.raises(RuntimeError, match="persisted session storage"):
         await checkpoint.persist("bash-1")
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(tmp_path: Path) -> None:
+    """The checkpoint copies the live state in one step while a sync tool's thread changes a nested dict in it.
+
+    A copy that walks the state in Python, even after a shallow copy of its top level, fails with "dictionary changed
+    size during iteration" once the interpreter hands over mid-walk; the tiny switch interval makes it do so.
+    """
+    store = create_state_storage("helper", tmp_path, session_table="sessions")
+    nested: dict[str, Any] = {f"key-{index}": [index] for index in range(2_000)}
+    live: dict[str, Any] = {"nested": nested}
+    session = ConversationSession(session_id="session", kind="agent", owner_id="helper", session_state=live)
+    record = _record()
+    stop = threading.Event()
+
+    def churn() -> None:
+        # One change per pass, so the thread can hand the interpreter over with the extra key present.
+        while not stop.is_set():
+            if nested.pop("churn", None) is None:
+                nested["churn"] = True
+
+    switch_interval = sys.getswitchinterval()
+    changer = threading.Thread(target=churn)
+    sys.setswitchinterval(1e-6)
+    changer.start()
+    try:
+        for _ in range(3):
+            await save_cli_session(
+                store,
+                session,
+                live,
+                lambda opened, saved: opened.save_run(saved, record, record_usage=False),
+            )
+            fields = store.read_session_fields("session")
+            assert fields is not None
+            assert session.stored_session_state == fields.session_state
+    finally:
+        stop.set()
+        changer.join()
+        sys.setswitchinterval(switch_interval)
+
+    assert session.stored_session_state is not live
+    assert session.stored_session_state["nested"] is not nested

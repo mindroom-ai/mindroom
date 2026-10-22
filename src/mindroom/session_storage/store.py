@@ -29,7 +29,7 @@ from mindroom.session_storage.codec import run_from_row, run_type
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_runs, move_blob_runs_to_rows
 from mindroom.session_storage.schema import run_log_sql, schema_sql
-from mindroom.session_storage.types import ConversationSession, SessionFields
+from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
 from mindroom.usage.storage import TOKEN_FIELDS, project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
@@ -487,17 +487,6 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     return persist
 
 
-def session_state_snapshot(state: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a private copy of a live ``session_state``, as its row would hold it.
-
-    Tools change the live state in place, on the event loop and in the threads sync tools run in, while saves run in
-    the database's lane, so a copy that walks the dict in Python, as ``copy.deepcopy`` does, can fail with
-    "dictionary changed size during iteration". The C JSON encoder reads the whole state without running Python code,
-    so no other thread changes it mid-read.
-    """
-    return json.loads(json.dumps(state))
-
-
 def _tables(connection: sqlite3.Connection) -> set[str]:
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
@@ -821,5 +810,4 @@ __all__ = [
     "open_conversation_store",
     "persist_to",
     "runs_without",
-    "session_state_snapshot",
 ]

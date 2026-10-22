@@ -21,6 +21,7 @@ from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import toolkit_authority
 from mindroom.tool_jobs.background_after import (
@@ -308,10 +309,13 @@ async def _owned_by_job(call: JobCall | None, run: Callable[[], Awaitable[object
 
 
 def _detached(call: JobCall) -> JobCall:
-    """Return the call a job runs: its application arguments, on copies of the run's session state and metadata."""
+    """Return the call a job runs: its application arguments, on copies of the run's session state and metadata.
+
+    The state is live: a sync tool of the same batch may be changing it from its executor thread.
+    """
     context = replace(
         call.context,
-        session_state=deepcopy(call.context.session_state),
+        session_state=session_state_snapshot(call.context.session_state),
         metadata=deepcopy(call.context.metadata),
     )
     return replace(call, arguments=application_arguments(deepcopy(dict(call.arguments))) or {}, context=context)
@@ -349,7 +353,7 @@ async def _run_managed_call(
         "authority": dict(job_call.tool.authority),
     }
     detached = _detached(job_call)
-    baseline = deepcopy(call.context.session_state)
+    baseline = session_state_snapshot(call.context.session_state)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(call.function.name, dict(detached.arguments))
     reference = resources.acquire()

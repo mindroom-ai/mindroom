@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from time import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -16,6 +17,17 @@ type Refusal = Literal["removed", "frozen"]
 # What a run save did: wrote the row, or refused it.
 type SaveOutcome = Literal["written"] | Refusal
 type SessionField = Literal["metadata", "session_state"]
+
+
+def session_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    """Return a private copy of a live ``session_state``, as its row would hold it.
+
+    Tools change the live state in place, on the event loop and in the threads sync tools run in, while saves run in
+    the database's lane and a managed tool job copies the state it starts from, so a copy that walks the dict in
+    Python, as ``copy.deepcopy`` does, can fail with "dictionary changed size during iteration". The C JSON encoder
+    reads the whole state without running Python code, so no other thread changes it mid-read.
+    """
+    return json.loads(json.dumps(state))
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,4 +73,5 @@ __all__ = [
     "SessionField",
     "SessionFields",
     "SessionKind",
+    "session_state_snapshot",
 ]

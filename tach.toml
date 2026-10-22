@@ -197,7 +197,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.llm",
     "mindroom.session_storage.lanes",
-    "mindroom.session_storage.store",
+    "mindroom.session_storage.types",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -8405,6 +8405,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.custom_tools.job",
     "mindroom.approval.tool_approval",
+    "mindroom.session_storage.types",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.toolkit_connections",

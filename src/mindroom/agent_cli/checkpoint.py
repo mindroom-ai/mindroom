@@ -11,12 +11,12 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.tools import tool_result_message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import session_state_snapshot
+from mindroom.session_storage.types import session_state_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -147,7 +147,7 @@ class BatchCheckpoint:
 async def save_cli_session(
     store: ConversationStore | None,
     session: ConversationSession,
-    session_state: Mapping[str, object],
+    session_state: dict[str, Any],
     write: Callable[[ConversationStore, ConversationSession], object],
 ) -> None:
     """Save the session's current state, then ``write``'s runs, in the store's lane; failures propagate.
