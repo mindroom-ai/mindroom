@@ -2,8 +2,8 @@
 
 ``with_job_admission`` admits each call one actor makes: it runs in its reply, as a managed job the reply waits for
 within the call's ``background_after`` budget, or not at all when a job-gated call cannot become a job, which also
-asks for that call's approval as the job's first phase. Inside a managed job every call, a nested agent's included,
-keeps its synchronous leaf owned by the job and is checked as its own call.
+asks for that call's approval as the job's first phase. Inside a managed job every call admitted here, a nested
+MindRoom agent's included, keeps its synchronous leaf owned by the job and has its grant checked again.
 ``job_definitions_hook`` offers the budget on the definitions of the functions whose calls can become jobs.
 """
 
