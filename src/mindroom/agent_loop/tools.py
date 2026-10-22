@@ -25,12 +25,12 @@ from mindroom.tool_system.invocation import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_system.invocation import ToolMiddleware, ToolOutcome
-    from mindroom.tool_system.tool_function import ToolFunction, ToolValue
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
 
 logger = get_logger(__name__)
 
@@ -51,23 +51,33 @@ class PreparedTools:
         return tuple(sorted((function.definition() for function in self.functions.values()), key=lambda s: s.name))
 
 
-def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
-    """Flatten the agent's toolkits into the functions a run offers.
+def offered_functions(spec: AgentSpec) -> Iterator[tuple[AdaptedToolkit, ToolFunction]]:
+    """Yield each function a run of ``spec`` offers, in offer order, with the toolkit it belongs to.
 
     The filter runs first; among the functions it keeps, the first of a repeated name wins and the rest are logged
-    and dropped, as Agno did. A toolkit's instructions are kept whenever Agno would have added them to the prompt,
-    once per toolkit identity, which Agno keyed by name, instructions, and function surface.
+    and dropped, as Agno did.
     """
-    functions: dict[str, ToolFunction] = {}
-    instructions: dict[tuple[str, str, frozenset[str]], str] = {}
+    names: set[str] = set()
     for toolkit in spec.toolkits:
         for function in toolkit.functions:
             if spec.tool_filter is not None and not spec.tool_filter(function):
                 continue
-            if function.name in functions:
+            if function.name in names:
                 logger.warning("duplicate_tool_name", agent=spec.id, tool_name=function.name, toolkit=toolkit.name)
                 continue
-            functions[function.name] = function
+            names.add(function.name)
+            yield toolkit, function
+
+
+def prepare_run_tools(spec: AgentSpec) -> PreparedTools:
+    """Flatten the agent's toolkits into the functions a run offers, as ``offered_functions`` selects them.
+
+    A toolkit's instructions are kept whenever Agno would have added them to the prompt, once per toolkit identity,
+    which Agno keyed by name, instructions, and function surface.
+    """
+    functions = {function.name: function for _toolkit, function in offered_functions(spec)}
+    instructions: dict[tuple[str, str, frozenset[str]], str] = {}
+    for toolkit in spec.toolkits:
         if toolkit.instructions is not None:
             key = (toolkit.name, toolkit.instructions, frozenset(function.name for function in toolkit.functions))
             instructions.setdefault(key, toolkit.instructions)
@@ -283,6 +293,7 @@ __all__ = [
     "ToolBatch",
     "dispatch_tool_calls",
     "media_follow_up",
+    "offered_functions",
     "plan_tool_batch",
     "prepare_run_tools",
     "tool_result_message",

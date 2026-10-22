@@ -41,6 +41,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import ModelMetrics, RunMetrics
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
+    CallAgentTooling,
     _call_agent_run_state,
     _CallAgentCache,
     _CallAgentRunState,
@@ -1440,15 +1441,11 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
     await tooling.close()
 
 
-@pytest.mark.asyncio
-async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_close_it_with_the_call(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A toolkit that holds a connection for one run is connected once for the call and closed when the call ends."""
-    config = _config()
-    runtime_paths = test_runtime_paths(tmp_path)
-    log: list[str] = []
+def _connected_build(log: list[str], **entrypoints: tuple[str, Callable[..., Awaitable[str]]]) -> AgentBuild:
+    """Return a build offering one toolkit per name, each holding a connection whose connect and close ``log`` records.
+
+    Each keyword names a toolkit and gives the name and entrypoint of its one function, which takes ``value``.
+    """
 
     def connecting(toolkit: AdaptedToolkit) -> AdaptedToolkit:
         async def close() -> None:
@@ -1460,19 +1457,21 @@ async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_clo
 
         return replace(toolkit, connect=connect)
 
-    async def lookup(value: str) -> str:
-        return f"found {value}"
-
-    async def query(value: str) -> str:
-        return f"rows for {value}"
-
     schema = {"type": "object", "properties": {"value": {"type": "string"}}}
-    server, database = Toolkit(name="server"), Toolkit(name="database")
-    server.functions = {"lookup": _function(lookup, schema, name="lookup")}
-    database.functions = {"query": _function(query, schema, name="query")}
-    build = _build(server, database)
-    toolkits = tuple(connecting(toolkit) for toolkit in build.spec.toolkits)
-    build = replace(build, spec=replace(build.spec, toolkits=toolkits))
+    toolkits = []
+    for toolkit_name, (function_name, entrypoint) in entrypoints.items():
+        toolkit = Toolkit(name=toolkit_name)
+        toolkit.functions = {function_name: _function(entrypoint, schema, name=function_name)}
+        toolkits.append(toolkit)
+    build = _build(*toolkits)
+    connected = tuple(connecting(adapted) for adapted in build.spec.toolkits)
+    return replace(build, spec=replace(build.spec, toolkits=connected))
+
+
+async def _call_tools_over(build: AgentBuild, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CallAgentTooling:
+    """Build a realtime call's tools for an agent whose ``create_agent`` returns ``build``."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=build))
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
@@ -1486,8 +1485,7 @@ async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_clo
         ),
         build_execution_identity=lambda **_kwargs: MagicMock(),
     )
-
-    tooling = await build_call_tools(
+    return await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
@@ -1496,6 +1494,24 @@ async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_clo
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
     )
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_close_it_with_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that holds a connection for one run is connected once for the call and closed when the call ends."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    async def query(value: str) -> str:
+        return f"rows for {value}"
+
+    build = _connected_build(log, server=("lookup", lookup), database=("query", query))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
     tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
 
     assert log == []
@@ -1505,6 +1521,74 @@ async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_clo
     await tooling.close()
     # A call the provider sends after the call ended connects nothing, even to a toolkit no call has used yet.
     assert await tools["query"]({"value": "x"}) == "rows for x"
+    assert log == ["server connect", "server close"]
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_call_connects_the_toolkit_of_the_function_it_offers_under_a_shared_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the build's filter hides one toolkit's function of a name, the call connects the toolkit it offers."""
+    log: list[str] = []
+
+    async def hidden_lookup(value: str) -> str:
+        return f"hidden {value}"
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    build = _connected_build(log, hidden=("lookup", hidden_lookup), server=("lookup", lookup))
+    hidden = build.spec.toolkits[0].functions[0]
+    build = replace(build, spec=replace(build.spec, tool_filter=lambda function: function is not hidden))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    assert await tools["lookup"]({"value": "a"}) == "found a"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+    assert log == ["server connect", "server close"]
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_tool_call_cancelled_while_connecting_leaves_the_connect_to_the_next_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call interrupted during its toolkit's connect does not count as connecting it for the rest of the call."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    build = _connected_build(log, server=("lookup", lookup))
+    server = build.spec.toolkits[0]
+    assert server.connect is not None
+    connecting = asyncio.Event()
+
+    async def interrupted() -> None:
+        connecting.set()
+        await asyncio.Event().wait()
+
+    attempts = iter([interrupted, server.connect])
+
+    async def connect() -> Callable[[], Awaitable[None]] | None:
+        return await next(attempts)()
+
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(server, connect=connect),)))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    (tool,) = tooling.tools
+    first = asyncio.create_task(tool({"value": "a"}))
+    await asyncio.wait_for(connecting.wait(), timeout=5)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert await tool({"value": "b"}) == "found b"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
     assert log == ["server connect", "server close"]
 
 

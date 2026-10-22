@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
-from mindroom.agent_loop.tools import prepare_run_tools
+from mindroom.agent_loop.tools import offered_functions
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -638,13 +638,8 @@ async def build_call_tools(
     # The call is one run for its tools, which share its session state the way one chat turn's tools do.
     call_context = ToolCallContext(run_id=f"{session_id}:voice", session_id=session_id, user_id=requester_id)
     connections = _CallConnections()
-    # The first function of a name is the one the call offers, as in a chat turn.
-    owners: dict[str, AdaptedToolkit] = {}
-    for toolkit in build.spec.toolkits:
-        for function in toolkit.functions:
-            owners.setdefault(function.name, toolkit)
     tools: list[RawFunctionTool] = []
-    for function in prepare_run_tools(build.spec).functions.values():
+    for toolkit, function in offered_functions(build.spec):
         # The build applied the call's function filter to the functions it built, not to ones added beside them.
         if _function_requires_text_chat(function, config):
             logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
@@ -658,7 +653,7 @@ async def build_call_tools(
                 agent_name=agent_name,
                 authorize_operation=authorize_operation,
                 usage_owner=usage_owner,
-                connect=functools.partial(connections.connect, owners[function.name]),
+                connect=functools.partial(connections.connect, toolkit),
             ),
         )
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
@@ -689,8 +684,9 @@ class _CallConnections:
         async with self._lock:
             if self._closed or any(connected is toolkit for connected in self._connected):
                 return
-            self._connected.append(toolkit)
+            # A tool call cancelled while connecting leaves the connect to the next call that needs it.
             await connect_toolkits((toolkit,), self._closes)
+            self._connected.append(toolkit)
 
     async def close(self) -> None:
         """Close what the call's tools connected once the call ends."""
