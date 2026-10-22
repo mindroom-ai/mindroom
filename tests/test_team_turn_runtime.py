@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock
@@ -31,7 +31,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import MessageEnvelope
+from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta
 from mindroom.llm.provider import TextDelta, UsageReported
@@ -405,6 +405,46 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
+
+
+@pytest.mark.asyncio
+async def test_the_team_s_transient_turn_context_reaches_the_leader_but_is_never_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Turn context sent but never stored follows the prompt in the leader's request and stays out of the team row."""
+    del probe
+    team = _team(tmp_path, monkeypatch, leader=[answer("Noted.", usage(50, 5))])
+    note = "Current location: Amsterdam"
+    ctx = replace(_ctx(team), transient_enrichment_items=(EnrichmentItem(key="location", text=note),))
+
+    with tool_runtime_context(team.runtime):
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=team.member_ids(),
+                message="Hello",
+                orchestrator=team.orchestrator,
+                execution_identity=team.identity,
+                ctx=ctx,
+                mode=TeamMode.COORDINATE,
+                user_id=REQUESTER_ID,
+                configured_team_name="squad",
+                turn_recorder=team.recorder,
+            )
+        ]
+
+    assert chunks
+    [request] = team.leader.requests
+    *_, prompt, transient = [str(message.content) for message in request.messages if message.role == "user"]
+    assert "Hello" in prompt
+    assert note not in prompt
+    assert note in transient
+    record, _ = _stored_runs(team)
+    stored = [str(message.content) for message in record.messages]
+    assert prompt in stored
+    assert not any(note in content for content in stored)
 
 
 @pytest.mark.asyncio
