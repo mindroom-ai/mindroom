@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -208,6 +209,57 @@ def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
     else:
         with pytest.raises(RuntimeError, match="ordered presentation"):
             require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+
+def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their_own_slot() -> None:
+    """Providers number call ids per member, so two members' pending calls may share one; each slot shows its own."""
+    card = ToolExecution(tool_call_id="test_agent:call-1", tool_name="run_subagent", requires_confirmation=True)
+    gated = ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True)
+    gated_requirement = RunRequirement(tool_execution=gated)
+    gated_requirement.member_agent_id = "other"
+    card_anchor = ToolTraceEntry(
+        type="tool_call_started",
+        tool_name="run_subagent",
+        tool_call_id="call-1",
+        scope_key="agent:test-agent",
+    )
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(card, gated),
+        requirements=(RunRequirement(tool_execution=card), gated_requirement),
+        response_text="🔧 `run_subagent` [1] ⏳\n\n🔧 `dangerous` [2] ⏳",
+        tool_trace=(
+            card_anchor,
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="dangerous",
+                tool_call_id="call-1",
+                scope_key="agent:other",
+            ),
+        ),
+        response_presentation_state={
+            "kind": "team_stream",
+            "version": 2,
+            "members": [
+                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+            ],
+            "consensus": "",
+        },
+        toolkit_owners={("test_agent", "run_subagent"): "delegate", ("other", "dangerous"): "test_toolkit"},
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+    # A second pending marker of the call id in the card's own slot leaves the card without a unique anchor.
+    doubled = replace(
+        paused,
+        response_text=f"{paused.response_text}\n\n🔧 `run_subagent` [3] ⏳",
+        tool_trace=(*paused.tool_trace, replace(card_anchor)),
+    )
+    with pytest.raises(RuntimeError, match="ordered presentation"):
+        require_ordered_pause_presentation(doubled, show_tool_calls=True)
 
 
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
