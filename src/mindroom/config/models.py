@@ -783,12 +783,6 @@ class ModelConfig(BaseModel):
         description="Provider prices in USD per million tokens, used to measure spend against budgets",
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def drop_retired_fields(cls, data: object) -> object:
-        """Ignore Agno model fields that older configs still set in ``extra_kwargs``, with a warning."""
-        return drop_retired_model_settings(data)
-
     @field_validator("display_name")
     @classmethod
     def _normalize_display_name(cls, value: str | None) -> str | None:
@@ -810,6 +804,14 @@ class ModelConfig(BaseModel):
     def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
         return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def drop_retired_fields(cls, value: dict[str, Any] | None, info: ValidationInfo) -> dict[str, Any] | None:
+        """Ignore Agno model fields that older configs still set in ``extra_kwargs``, with a warning."""
+        if value is None or "provider" not in info.data:
+            return value
+        return drop_retired_model_settings(info.data["provider"], value)
 
     @field_validator("icon")
     @classmethod

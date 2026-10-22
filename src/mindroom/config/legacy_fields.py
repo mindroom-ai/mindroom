@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
-from typing import cast
+from typing import Any
 
 from mindroom.logging_config import get_logger
 from mindroom.providers.names import canonical_provider
@@ -256,15 +256,8 @@ _RETIRED_MODEL_SETTINGS = (
 )
 
 
-def drop_retired_model_settings(value: object) -> object:
-    """Drop Agno model fields that a model's ``extra_kwargs`` still sets, warning once per field."""
-    if not isinstance(value, dict):
-        return value
-    model = cast("dict[str, object]", value)
-    provider = model.get("provider")
-    extra_kwargs = model.get("extra_kwargs")
-    if not isinstance(provider, str) or not isinstance(extra_kwargs, dict):
-        return value
+def drop_retired_model_settings(provider: str, extra_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop the Agno model fields that a ``provider`` model's ``extra_kwargs`` still sets, warning once per field."""
     canonical = canonical_provider(provider)
     reasons = {
         field: retired.reason
@@ -273,10 +266,10 @@ def drop_retired_model_settings(value: object) -> object:
         for field in retired.fields & extra_kwargs.keys()
     }
     if not reasons:
-        return value
+        return extra_kwargs
     for field in sorted(reasons):
         _warn_retired_field(f"extra_kwargs.{field}", reasons[field])
-    return {**model, "extra_kwargs": {key: item for key, item in extra_kwargs.items() if key not in reasons}}
+    return {key: item for key, item in extra_kwargs.items() if key not in reasons}
 
 
 # LEGACY_COMPAT: Retired website tool knowledge option.
