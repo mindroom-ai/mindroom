@@ -1571,7 +1571,7 @@ describe("rows with an agent's wording", () => {
     });
   });
 
-  it("shows no administrator badge when no label is given", () => {
+  it("shows no administrator source label when no label is given", () => {
     renderRows([{ ...github, source: "config" }], {
       serviceEditing: editing(),
     });

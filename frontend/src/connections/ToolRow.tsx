@@ -45,7 +45,7 @@ export function ItemName({
 
 const STATUS_DOT = {
   set: "bg-primary",
-  attention: "bg-amber-500",
+  attention: "bg-amber-600 dark:bg-amber-500",
   unset: "border border-muted-foreground/70",
 } as const;
 

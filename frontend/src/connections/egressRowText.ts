@@ -83,7 +83,7 @@ function keySavedLabel(saved: string | null): string {
     : "Key saved";
 }
 
-/** What the row's badge says about where the service's credential comes from. */
+/** What the row's status label says about where the service's credential comes from. */
 export function statusLabel(service: EgressCredentialService): string {
   const oauth = service.oauth;
   if (oauth) {
@@ -92,7 +92,7 @@ export function statusLabel(service: EgressCredentialService): string {
       return oauth.unavailable_reason === null
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
-    // The row names the account below the badge.
+    // The row names the account below the status label.
     if (service.active_source === "oauth") return "Connected";
     return oauth.reset_required ? "Reset required" : "Not set";
   }

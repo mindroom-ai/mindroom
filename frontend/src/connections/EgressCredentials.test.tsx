@@ -744,7 +744,7 @@ describe("egress services on the personal page", () => {
     expect(screen.getByLabelText("My API")).toBeInTheDocument();
   });
 
-  it("shows the administrator's services read-only, without a badge on the row", async () => {
+  it("shows the administrator's services read-only, without a source label on the row", async () => {
     await renderPage();
     const row = await screen.findByLabelText("GitHub");
     expect(within(row).queryByText(/administrator/)).toBeNull();

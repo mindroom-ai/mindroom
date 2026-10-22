@@ -190,8 +190,9 @@ export function ConnectionServiceRows({
                   status && (
                     <>
                       <StatusLabel
+                        // Someone who cannot manage the account is told only whether it is there, and the dot says the same.
                         tone={
-                          status.reset_required
+                          status.reset_required && service.can_manage
                             ? "attention"
                             : status.connected
                               ? "set"
