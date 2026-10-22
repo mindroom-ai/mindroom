@@ -55,6 +55,7 @@ from mindroom.providers.pipeline.refusal import refusal_stream
 from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
 from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import AGGREGATE_USAGE_KEY, WrappedProvider
+from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -65,7 +66,7 @@ if TYPE_CHECKING:
 _PROMPT = "Use the attached image."
 _FALLBACK_PROMPT = "Media was not inspected."
 
-type _Step = StreamEvent | Exception | float
+type _Step = StreamEvent | Exception | float | Await
 
 
 _IDENTITY = ModelIdentity(id="scripted", provider="Scripted", provider_name="Scripted Chat")
@@ -74,7 +75,7 @@ _CAPABILITIES = Capabilities()
 
 @dataclass
 class _ScriptedProvider:
-    """Answer each request with the next scripted attempt; an exception step raises, a float step waits."""
+    """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits."""
 
     attempts: list[list[_Step]]
     identity: ModelIdentity = _IDENTITY
@@ -94,6 +95,9 @@ class _ScriptedProvider:
                     raise step
                 if isinstance(step, float):
                     await asyncio.sleep(step)
+                    continue
+                if isinstance(step, Await):
+                    await step.run()
                     continue
                 yield cast("StreamEvent", step)
         finally:
@@ -962,3 +966,57 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
     assert record.status is RunStatus.error
     assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
     assert (record.metrics.input_tokens, record.metrics.cache_read_tokens) == (11, 80)
+
+
+@pytest.mark.asyncio
+async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attempts_partial_usage() -> None:
+    """The cancelled run settles the failed attempt's partial input and cache tokens beside the retry's own report."""
+    streaming = asyncio.Event()
+    saved: list[RunRecord] = []
+
+    async def persist(record: RunRecord) -> None:
+        saved.append(record)
+
+    async def wait_to_be_cancelled() -> None:
+        streaming.set()
+        await asyncio.get_running_loop().create_future()
+
+    started = MessageMetrics(input_tokens=12, total_tokens=12, cache_read_tokens=900, cache_write_tokens=40)
+    restarted = MessageMetrics(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), _transient()],
+            [UsageReported(restarted, final=False), Await(wait_to_be_cancelled)],
+        ],
+    )
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
+        system_message=None,
+    )
+
+    async def consume() -> None:
+        async for _ in run_agent(spec, [_user()], ctx=RunContext(run_id="run", session_id="session"), persist=persist):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(streaming.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    [record] = saved
+    assert record.status is RunStatus.cancelled
+    assert record.messages[-1].metrics.to_dict() == {
+        "input_tokens": 24,
+        "output_tokens": 1,
+        "total_tokens": 25,
+        "cache_read_tokens": 1840,
+        "cache_write_tokens": 40,
+    }
+    assert (record.metrics.input_tokens, record.metrics.cache_read_tokens, record.metrics.cache_write_tokens) == (
+        24,
+        1840,
+        40,
+    )
