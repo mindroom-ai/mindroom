@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix import client_room_admin
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
-from mindroom.orchestration import computer_runtime
+from mindroom.orchestration import computer_runtime, server_state
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
 from mindroom.worker_computer.sessions import ComputerError
 from tests.conftest import make_matrix_client_mock
@@ -147,18 +148,28 @@ async def test_publish_writes_only_what_the_room_does_not_hold(
 
 
 @pytest.mark.asyncio
-async def test_publish_failures_never_stop_room_setup() -> None:
-    """A homeserver that refuses or fails the write only leaves Chat without the address."""
+async def test_publish_failures_never_stop_room_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A homeserver that refuses, fails, or never answers the write only leaves Chat without the address."""
     content = {"api_origin": "http://localhost:8765", "computer": False}
     refused = _client(_NOT_FOUND)
     refused.room_put_state.return_value = nio.RoomPutStateError("Forbidden", status_code="M_FORBIDDEN")
     failing = _client(_NOT_FOUND)
-    failing.room_get_state_event.side_effect = TimeoutError
+    failing.room_get_state_event.side_effect = ConnectionError
+    # nio retries an unreachable homeserver without limit, so the write gives up instead of holding the join.
+    hanging = _client(_NOT_FOUND)
+
+    async def never_answers(*_args: object) -> None:
+        await asyncio.Event().wait()
+
+    hanging.room_get_state_event.side_effect = never_answers
+    monkeypatch.setattr(server_state, "_PUBLISH_TIMEOUT_SECONDS", 0.05)
     with capture_logs() as logs:
         await publish_server_state(refused, ROOM, content)
         await publish_server_state(failing, ROOM, content)
+        await publish_server_state(hanging, ROOM, content)
     assert [log["event"] for log in logs] == [
         "MindRoom server state was refused",
+        "Publishing the MindRoom server state failed",
         "Publishing the MindRoom server state failed",
     ]
 
