@@ -1,6 +1,5 @@
 -- Conversation database written by Agno 3.0.9 through MindRoom's storage path, dumped with iterdump and
--- normalized (see tests/fixtures/agno_parity/README.md). Regenerate with
--- `python -m tests.agno_parity.capture_storage`; never edit by hand.
+-- normalized (see tests/fixtures/agno_parity/README.md); never edit by hand.
 BEGIN TRANSACTION;
 CREATE TABLE agno_schema_versions (
 	table_name VARCHAR NOT NULL,

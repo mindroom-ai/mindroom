@@ -2,8 +2,7 @@
 
 Helper call sites, Matrix replies, and voice calls send their requests through the owned provider layer, so one
 recorder compares every request they send, byte for byte, with the golden, beside whatever a voice call exports to
-the realtime model. The goldens of the entry points that do not run on the owned path yet are listed with the step
-that will compare them.
+the realtime model. The team goldens are compared in ``tests/team_runtime/test_prompt_parity.py``.
 """
 
 from __future__ import annotations
