@@ -136,6 +136,8 @@ def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
         "Your API keys are expiring soon: 1 API key for Acme.",
         "Send a bearer token with each request, as bearer tokens expire.",
         "permissions:\n  contents: read\n  id-token: write",
+        "permissions:\n  id-token: write  # federate the OIDC token",
+        "Never give that job `id-token: write`, since any ref could run it.",
     ],
 )
 def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
@@ -153,6 +155,7 @@ def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
         ("API key AbCdEfGhIjKlMnOp", f"API key {REDACTED}"),
         ("Bearer abcdefghIJKLmnop", f"Bearer {REDACTED}"),
         ("id-token: eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id-token: {REDACTED}"),
+        ("id-token: writeAbCdEf", f"id-token: {REDACTED}"),
     ],
 )
 def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: str, expected: str) -> None:
