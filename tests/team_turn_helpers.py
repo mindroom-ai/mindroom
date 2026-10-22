@@ -203,7 +203,8 @@ class TeamTurn:
     config: Config
     runtime_paths: RuntimePaths
     models: dict[str, ScriptedModel]
-    identity: ToolExecutionIdentity
+    # The execution identity every entry passes; None runs the turn without one.
+    identity: ToolExecutionIdentity | None
     runtime: ToolRuntimeContext
     orchestrator: SimpleNamespace
     member_names: tuple[str, ...]

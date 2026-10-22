@@ -35,6 +35,7 @@ from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, 
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.team_turn_helpers import (
+    REQUESTER_ID,
     SESSION_ID,
     delegate,
     squad_turn,
@@ -310,7 +311,7 @@ async def test_a_team_turn_keeps_its_member_runs_in_its_loaded_session(
         run_id="team-0",
         team_id="squad",
         session_id=SESSION_ID,
-        user_id=team.identity.requester_id,
+        user_id=REQUESTER_ID,
         status=RunStatus.completed,
         content="Earlier.",
     )
