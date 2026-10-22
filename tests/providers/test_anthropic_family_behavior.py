@@ -401,11 +401,12 @@ async def test_an_assistant_turn_with_nothing_to_replay_is_left_out(tmp_path: Pa
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", True),
         ("global.anthropic.claude-opus-4-6-v1:0", False),
         ("claude-sonnet-4@20250514", True),
+        ("anthropic/claude-opus-4-6", False),
         ("claude-sonnet-4-6", False),
     ],
 )
-def test_prefill_support_reads_the_model_behind_bedrock_and_vertex_ids(model_id: str, *, prefill: bool) -> None:
-    """Bedrock's region prefix and version suffix and Vertex's snapshot suffix do not hide which model answers."""
+def test_prefill_support_reads_the_model_behind_route_decorated_ids(model_id: str, *, prefill: bool) -> None:
+    """Bedrock's region prefix and version suffix, Vertex's snapshot, and a gateway's provider path hide no model."""
     assert supports_prefill(model_id) is prefill
 
 
