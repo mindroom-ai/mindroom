@@ -27,7 +27,7 @@ from tests.delegation_helpers import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, squad_probe, squad_turn  # noqa: F401 - fixture
+from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, squad_turn
 
 if TYPE_CHECKING:
     from pathlib import Path
