@@ -21,11 +21,17 @@ from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
+from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
+from mindroom.providers.extra_kwargs import settings_params
+from mindroom.providers.gemini.adapter import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.ollama_adapter import OllamaSettings
 from mindroom.providers.openai.build import ProviderRuntime
 from mindroom.providers.openai.build import build_provider as build_openai_provider
+from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
+from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.startup_errors import PermanentStartupError
 from tests.providers.anthropic_family_support import claude_turn, json_reply, route_provider
 from tests.providers.golden_support import Wire
@@ -87,6 +93,73 @@ def test_extra_kwargs_load_from_yaml(tmp_path: Path) -> None:
         "temperature": 0.7,
         "max_tokens": 4096,
     }
+
+
+# --- Model params ---------------------------------------------------------------------------------------------
+
+# Each route family's settings type, one request setting it records, and every field holding a credential, a
+# client, or headers or a query string that can carry one.
+_ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
+    (
+        ChatSettings,
+        {"temperature": 0.3},
+        frozenset(
+            {
+                "api_key",
+                "azure_ad_token",
+                "azure_ad_token_provider",
+                "client_params",
+                "default_headers",
+                "default_query",
+                "extra_headers",
+                "extra_query",
+            },
+        ),
+    ),
+    (
+        ResponsesSettings,
+        {"temperature": 0.3},
+        frozenset({"api_key", "client_params", "default_headers", "default_query", "extra_headers", "extra_query"}),
+    ),
+    (
+        ClaudeSettings,
+        {"temperature": 0.3},
+        frozenset(
+            {
+                "api_key",
+                "auth_token",
+                "aws_access_key",
+                "aws_secret_key",
+                "aws_session_token",
+                "client_params",
+                "default_headers",
+                "session",
+            },
+        ),
+    ),
+    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params", "credentials"})),
+    (OllamaSettings, {"options": {"num_ctx": 8192}}, frozenset({"api_key", "client_params"})),
+    (SyntheticSettings, {"seed": 7}, frozenset()),
+]
+
+
+@pytest.mark.parametrize(
+    ("settings_type", "request_settings", "credential_fields"),
+    _ROUTE_SETTINGS,
+    ids=[settings_type.__name__ for settings_type, _, _ in _ROUTE_SETTINGS],
+)
+def test_model_params_record_no_credential_of_any_route_family(
+    settings_type: type[Any],
+    request_settings: dict[str, Any],
+    credential_fields: frozenset[str],
+) -> None:
+    """Run metadata and the request log record a route's request settings, never a credential, even a JSON-safe one."""
+    credentials = {name: f"secret-{name}" for name in credential_fields}
+
+    params = settings_params(settings_type(**request_settings, **credentials))
+
+    assert params == settings_params(settings_type(**request_settings))
+    assert params.items() >= request_settings.items()
 
 
 # --- The Claude prompt-cache ladder ---------------------------------------------------------------------------
@@ -586,6 +659,35 @@ def test_bedrock_claude_installs_boto3_on_demand(tmp_path: Path, monkeypatch: py
     build_claude_provider(model_config, _runtime_paths(tmp_path))
 
     assert calls == [(["boto3"], "aws_bedrock")]
+
+
+def test_bedrock_claude_records_none_of_the_aws_keys_it_reads_from_the_runtime_env(tmp_path: Path) -> None:
+    """Static AWS keys from the runtime ``.env`` authenticate requests but stay out of the route's model params."""
+    (tmp_path / ".env").write_text(
+        "AWS_ACCESS_KEY_ID=env-access\nAWS_SECRET_ACCESS_KEY=env-secret\nAWS_SESSION_TOKEN=env-session\n",
+        encoding="utf-8",
+    )
+    model_config = ModelConfig(
+        provider="bedrock_claude",
+        id="anthropic.claude-opus-5",
+        extra_kwargs={"aws_region": "us-east-1"},
+    )
+
+    provider = build_claude_provider(model_config, _runtime_paths(tmp_path))
+
+    settings = provider.settings
+    assert (settings.aws_access_key, settings.aws_secret_key, settings.aws_session_token) == (
+        "env-access",
+        "env-secret",
+        "env-session",
+    )
+    assert provider.model_params == {
+        "max_tokens": 8192,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+        "timeout": 3600.0,
+        "aws_region": "us-east-1",
+    }
 
 
 _COMPLETION = {

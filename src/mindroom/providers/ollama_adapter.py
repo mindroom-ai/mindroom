@@ -37,7 +37,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking
 from mindroom.providers.errors import classify_provider_error, transport_error
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 
@@ -63,9 +63,9 @@ _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 class OllamaSettings:
     """The ``extra_kwargs`` an Ollama model accepts, named as Agno's ``Ollama`` fields."""
 
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
-    client_params: Mapping[str, Any] | None = None
+    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     format: str | Mapping[str, Any] | None = None
     options: Mapping[str, Any] | None = None
     keep_alive: float | str | None = None

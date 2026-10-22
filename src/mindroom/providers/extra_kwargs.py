@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import fields
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -16,10 +17,10 @@ if TYPE_CHECKING:
 
     from _typeshed import DataclassInstance
 
-# Settings that hold credentials or clients rather than request parameters.
-_SECRET_SETTINGS = frozenset(
-    {"api_key", "azure_ad_token", "azure_ad_token_provider", "client_params", "default_headers", "default_query"},
-)
+_METADATA_KEY = "secret"
+# Field metadata marking a setting that holds a credential, a client, or headers or a query string that can
+# carry one, rather than a request parameter; model params never record it.
+SECRET = MappingProxyType({_METADATA_KEY: True})
 
 
 def _copied(value: Any) -> Any:  # noqa: ANN401 - arbitrary authored value
@@ -61,11 +62,12 @@ def settings_from_extra_kwargs[T: DataclassInstance](
 def settings_params(settings: DataclassInstance) -> dict[str, Any]:
     """Return copies of a route's JSON-safe, non-secret settings, as run metadata and the request log record them.
 
-    Secret fields are skipped before their values are read, so credentials and SDK clients are never copied.
+    Fields marked ``SECRET`` are skipped before their values are read, so credentials and SDK clients are never
+    copied.
     """
     params: dict[str, Any] = {}
     for field in fields(settings):
-        if field.name in _SECRET_SETTINGS:
+        if field.metadata.get(_METADATA_KEY):
             continue
         value = getattr(settings, field.name)
         if value is None:
@@ -78,4 +80,4 @@ def settings_params(settings: DataclassInstance) -> dict[str, Any]:
     return params
 
 
-__all__ = ["settings_from_extra_kwargs", "settings_params"]
+__all__ = ["SECRET", "settings_from_extra_kwargs", "settings_params"]

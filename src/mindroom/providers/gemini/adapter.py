@@ -25,7 +25,7 @@ from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, T
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.errors import classify_provider_error, transport_error
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
     GeminiReply,
@@ -58,13 +58,13 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 class GeminiSettings:
     """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
 
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False
     project_id: str | None = None
     location: str | None = None
     # A google.auth credentials object; only programmatic callers can supply one.
-    credentials: object | None = None
-    client_params: Mapping[str, Any] | None = None
+    credentials: object | None = field(default=None, metadata=SECRET)
+    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
     generation_config: Mapping[str, Any] | None = None
     generative_model_kwargs: Mapping[str, Any] | None = None
