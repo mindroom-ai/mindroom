@@ -3512,7 +3512,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         else:
             assert result == "$response1"
             assert any("Useful answer" in body for body in bodies)
-        # The reply's own records settle its sources, so the no-reply callback never runs.
+        # The no-reply callback is only for a turn that fails before its reply span opens; none of these does.
         assert no_reply_callbacks == []
         assert len(model.requests) == expected_model_requests
         assert len(typesafe_calls) == (1 if backend == "typesafe" else 0)
