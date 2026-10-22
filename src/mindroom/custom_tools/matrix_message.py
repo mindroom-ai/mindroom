@@ -237,9 +237,10 @@ class MatrixMessageTools(Toolkit):
         if (rate_error := self._check_rate_limit(context, room_id, weight=1 + len(attachments))) is not None:
             return self._payload("error", room_id=room_id, message=rate_error)
         recipient_user_id = None
+        # A team member posts from the team's account, so its message follows the team's thread mode.
         room_mode = (
             context.config.get_entity_thread_mode(
-                context.agent_name,
+                context.recipient,
                 context.runtime_paths,
                 room_id=room_id,
             )
