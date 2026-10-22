@@ -289,7 +289,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
-        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
@@ -408,7 +407,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
-        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -467,7 +465,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
         bot.client.rooms = {room.room_id: room}
@@ -536,7 +533,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
-        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -599,7 +595,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = AsyncMock()
-        bot.client.rooms = {}
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -3310,7 +3305,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
     """Exercise quiet participation through the real agent and Matrix lifecycle."""
 
     @staticmethod
-    def _participation_request(bot: AgentBot, *, reaction: str | None, backend: str) -> ResponseRequest:
+    def _participation_request(
+        bot: AgentBot,
+        *,
+        reaction: str | None,
+        backend: str,
+        on_no_response_handled: Callable[[], Awaitable[None]] | None = None,
+    ) -> ResponseRequest:
         """Return one reply request whose participation the model or a judgment backend decides."""
         return ResponseRequest(
             prompt="Any thoughts?",
@@ -3338,6 +3339,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                     else None,
                 },
             ),
+            on_no_response_handled=on_no_response_handled,
         )
 
     @staticmethod
@@ -3345,14 +3347,14 @@ class TestAdaptiveResponse(AgentBotTestBase):
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
-        processes_env: dict[str, str] | None = None,
+        process_env: dict[str, str] | None = None,
     ) -> AgentBot:
         """Build the agent's bot for an online requester, with unique event IDs from its mocked homeserver."""
         config = AgentBotTestBase._config_for_storage(tmp_path)
         config.memory.backend = "none"
         # Keep background summaries out of foreground participation call counts.
         config.defaults.thread_summary_first_threshold = 100
-        paths = replace(runtime_paths_for(config), process_env=processes_env or {})
+        paths = replace(runtime_paths_for(config), process_env=process_env or {})
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
@@ -3381,7 +3383,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         reaction: str | None,
     ) -> None:
         """A silent decision must not send placeholders, typing, retry notices, or a Stop button."""
-        bot = self._participation_bot(mock_agent_user, tmp_path, processes_env={"TYPESAFE_API_KEY": "test-key"})
+        bot = self._participation_bot(mock_agent_user, tmp_path, process_env={"TYPESAFE_API_KEY": "test-key"})
 
         async def fail() -> None:
             if action == "sync_restart":
@@ -3445,7 +3447,17 @@ class TestAdaptiveResponse(AgentBotTestBase):
         elif backend == "llm":
             monkeypatch.setattr("mindroom.judgment.llm.build_model_provider", lambda *_: judge)
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
-        request = self._participation_request(bot, reaction=reaction, backend=backend)
+        no_reply_callbacks: list[str] = []
+
+        async def record_no_response() -> None:
+            no_reply_callbacks.append("called")
+
+        request = self._participation_request(
+            bot,
+            reaction=reaction,
+            backend=backend,
+            on_no_response_handled=record_no_response,
+        )
         try:
             result = await bot._response_runner.generate_response(request)
         except asyncio.CancelledError:
@@ -3500,6 +3512,8 @@ class TestAdaptiveResponse(AgentBotTestBase):
         else:
             assert result == "$response1"
             assert any("Useful answer" in body for body in bodies)
+        # The reply's own records settle its sources, so the no-reply callback never runs.
+        assert no_reply_callbacks == []
         assert len(model.requests) == expected_model_requests
         assert len(typesafe_calls) == (1 if backend == "typesafe" else 0)
         assert len(judge.requests) == (1 if backend == "llm" else 0)
