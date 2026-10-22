@@ -34,10 +34,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.teams.envelope import team_response, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.events import StructuredStreamChunk
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -55,6 +52,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -126,30 +124,12 @@ class ProbeToolkit(Toolkit):
 @contextmanager
 def registered_probe() -> Iterator[type[ProbeToolkit]]:
     """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the registries afterwards."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name=PROBE_TOOL,
-        file_access=ToolFileAccess.NONE,
-        display_name="Team Turn Probe",
-        description="Records the calls a team member makes.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def probe_factory() -> type[ProbeToolkit]:
-        return ProbeToolkit
-
     ProbeToolkit.calls.clear()
     ProbeToolkit.scopes.clear()
     ProbeToolkit.active_models.clear()
     ProbeToolkit.waiting = asyncio.Event()
-    try:
+    with registered_toolkit(PROBE_TOOL, ProbeToolkit):
         yield ProbeToolkit
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
 
 
 def install_team_models(monkeypatch: pytest.MonkeyPatch, models: Mapping[str, ScriptedModel]) -> None:

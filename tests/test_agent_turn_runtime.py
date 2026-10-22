@@ -60,9 +60,6 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, quote_identifier
 from tests.access_schema_support import with_current_room_member_access
@@ -85,6 +82,7 @@ from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -147,38 +145,10 @@ class _ExternalProbeToolkit(_ProbeToolkit):
 
 @pytest.fixture
 def probe() -> Iterator[type[_ProbeToolkit]]:
-    """Register the probe toolkit for the test and restore the registries afterwards."""
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name=PROBE_TOOL,
-        file_access=ToolFileAccess.NONE,
-        display_name="Agent Turn Probe",
-        description="Records the calls an agent turn makes.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def probe_factory() -> type[_ProbeToolkit]:
-        return _ProbeToolkit
-
-    @register_tool_with_metadata(
-        name=EXTERNAL_PROBE_TOOL,
-        file_access=ToolFileAccess.NONE,
-        display_name="Agent Turn External Probe",
-        description="Pauses an agent turn for execution outside the loop.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def external_probe_factory() -> type[_ExternalProbeToolkit]:
-        return _ExternalProbeToolkit
-
+    """Register the probe toolkits for the test and restore the registries afterwards."""
     _ProbeToolkit.calls.clear()
-    try:
+    with registered_toolkit(PROBE_TOOL, _ProbeToolkit), registered_toolkit(EXTERNAL_PROBE_TOOL, _ExternalProbeToolkit):
         yield _ProbeToolkit
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
 
 
 @dataclass

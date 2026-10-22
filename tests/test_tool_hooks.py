@@ -47,10 +47,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, ToolCategory
-from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -71,6 +68,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
 
 if TYPE_CHECKING:
@@ -1761,19 +1759,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         async def echo(self, text: str) -> str:
             return text.upper()
 
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Tool Hooks Runtime Event Tool",
-        description="Test tool for runtime hook event delivery.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def demo_tool_factory() -> type[DemoToolkit]:
-        return DemoToolkit
-
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(ctx: ToolBeforeCallContext) -> None:
         before_seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
@@ -1807,12 +1792,12 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         encoding="utf-8",
     )
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
-    config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
-    bot = _agent_bot(tmp_path, config=config)
-    bot.hook_registry = HookRegistry.from_plugins(plugins)
-    bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
+    with registered_toolkit(tool_name, DemoToolkit):
+        config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
+        bot = _agent_bot(tmp_path, config=config)
+        bot.hook_registry = HookRegistry.from_plugins(plugins)
+        bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 
-    try:
         with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
             target = MessageTarget.resolve(
                 room_id="!room:localhost",
@@ -1860,11 +1845,6 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
                 "tool-policy",
             ),
         ]
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
 
 
 @pytest.mark.asyncio
@@ -2052,19 +2032,6 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path:
             self.calls.append(text)
             return text
 
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-
-    @register_tool_with_metadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Tool Hooks Test Tool",
-        description="Test tool for tool hook interception.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def demo_tool_factory() -> type[DemoToolkit]:
-        return DemoToolkit
-
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def block_all(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("blocked in create_agent")
@@ -2074,10 +2041,10 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path:
         after_seen.append((ctx.config, ctx.runtime_paths, str(ctx.state_root), ctx.blocked))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [block_all, after])])
-    config = _config(tmp_path, tools=[tool_name])
-    plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
+    with registered_toolkit(tool_name, DemoToolkit):
+        config = _config(tmp_path, tools=[tool_name])
+        plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
 
-    try:
         with patch("mindroom.agents._build_agent_model_provider", return_value=ScriptedModel([])):
             build = create_agent(
                 "code",
@@ -2103,8 +2070,3 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(tmp_path:
         )
         assert DemoToolkit.calls == []
         assert after_seen == [(config, runtime_paths_for(config), str(plugin_state_root), True)]
-    finally:
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
