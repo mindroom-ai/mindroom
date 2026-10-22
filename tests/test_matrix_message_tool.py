@@ -36,7 +36,10 @@ from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
+from mindroom.teams.members import _as_member
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -94,6 +97,7 @@ def _make_context(
     agent_thread_mode: str = "thread",
     membership: object | None = None,
     membership_turn_id: str | None = None,
+    client_user_id: str = "@mindroom_general:localhost",
 ) -> ToolRuntimeContext:
     runtime_root = storage_path or Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
@@ -109,7 +113,7 @@ def _make_context(
         ),
         test_runtime_paths(runtime_root),
     )
-    client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
+    client = make_matrix_client_mock(user_id=client_user_id)
     room = nio.MatrixRoom(room_id, client.user_id)
     room.add_member(client.user_id, "General Agent", None)
     room.members_synced = True
@@ -692,20 +696,21 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
         ),
         test_runtime_paths(tmp_path),
     )
-    context = _make_context(
-        storage_path=tmp_path,
-        attachment_ids=("att_member",),
-        thread_id="$ctx-thread:localhost",
-        resolved_thread_id=None,
-    )
-    # A member's tool call runs under the team's turn context with the member named as the running agent.
-    member_call = replace(
-        context,
-        agent_name="general",
+    # The team's turn context, as the team's bot builds it; the member's tool calls run through the member step.
+    team_turn = replace(
+        _make_context(
+            storage_path=tmp_path,
+            attachment_ids=("att_member",),
+            thread_id="$ctx-thread:localhost",
+            resolved_thread_id=None,
+            client_user_id="@mindroom_squad:localhost",
+        ),
+        agent_name="squad",
         transport_agent_name="squad",
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
+    [send] = [function for function in adapt_toolkit(tool).functions if function.name == "matrix_message"]
 
     with (
         patch(
@@ -716,9 +721,16 @@ async def test_matrix_message_team_member_send_follows_the_teams_thread_mode(tmp
             "mindroom.custom_tools.attachments.send_file_message",
             new=AsyncMock(return_value="$file_evt"),
         ) as mock_send_file,
-        tool_runtime_context(member_call),
+        tool_runtime_context(team_turn),
     ):
-        payload = json.loads(await tool.matrix_message(action="send", message="hello", attachments=["att_member"]))
+        result = await run_tool_call(
+            send,
+            {"action": "send", "message": "hello", "attachments": ["att_member"]},
+            ToolCallContext(run_id="run-1", session_id="session-1"),
+            middleware=(_as_member("general", "default"),),
+        )
+
+    payload = json.loads(str(result))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$evt"
