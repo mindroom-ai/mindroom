@@ -67,7 +67,6 @@ from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.providers.pipeline.request_log import provider_model_params
 from mindroom.providers.registry import build_model_provider
 from mindroom.response_turn import (
     AttemptResolved,
@@ -500,7 +499,7 @@ async def prepare_materialized_team_execution(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        model_params=provider_model_params(spec.model),
+        model_params=spec.model.model_params,
         extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     return PreparedTeamExecution(

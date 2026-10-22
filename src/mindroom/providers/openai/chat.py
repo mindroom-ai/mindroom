@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.provider import (
     ReasoningDelta,
@@ -20,6 +20,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
     ChatStream,
@@ -52,6 +53,14 @@ class ChatAdapter:
     wire: ChatWire
     settings: ChatSettings
     clients: SDKClients
+    # Chat Completions keeps no history of its own, and its replayed history is sized canonically.
+    native_compaction: ClassVar[None] = None
+    replay_estimator: ClassVar[None] = None
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = chat_request_kwargs(

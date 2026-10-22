@@ -752,7 +752,6 @@ depends_on = [
     "mindroom.memory",
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
-    "mindroom.providers.pipeline",
     "mindroom.response_turn",
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.store",
@@ -2610,11 +2609,9 @@ depends_on = [
     "mindroom.history.replay",
     "mindroom.history.types",
     "mindroom.native_compaction",
-    "mindroom.providers.pipeline",
 ]
 visibility = [
     "mindroom.approval.resume",
-    "mindroom.history.mid_turn_compaction",
     "mindroom.history.runtime",
     "mindroom.teams",
 ]
@@ -2691,6 +2688,7 @@ depends_on = [
     "mindroom.providers.anthropic.wire",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.errors",
+    "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
@@ -3263,7 +3261,6 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
-    "mindroom.providers.pipeline",
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.session_storage.agent_storage",
@@ -9346,7 +9343,6 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.helper_usage",
     "mindroom.history.legacy_summary_system_prompt",
-    "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
     "mindroom.history.run_visibility",

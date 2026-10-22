@@ -116,6 +116,9 @@ class _ToolLoopModel:
     ) -> None:
         self.identity = _TEST_MODEL
         self.capabilities = Capabilities()
+        self.native_compaction = None
+        self.replay_estimator = None
+        self.model_params: dict[str, Any] = {}
         self.tool_rounds = tool_rounds
         self.calls_per_round = calls_per_round
         self.usage = usage
@@ -428,7 +431,6 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
         session=None,
         scope=None,
         native_compaction=None,
-        replay_estimator=None,
         deferred_tool_names=deferred_tool_names,
         prompt_id=None,
         lifecycle=None,

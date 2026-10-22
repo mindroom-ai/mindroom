@@ -26,19 +26,11 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
-    from mindroom.providers.anthropic.messages import ClaudeProvider
-    from mindroom.providers.gemini.adapter import GeminiProvider
-    from mindroom.providers.ollama_adapter import OllamaProvider
-    from mindroom.providers.openai.chat import ChatAdapter
-    from mindroom.providers.openai.responses import ResponsesAdapter
-    from mindroom.providers.synthetic_adapter import SyntheticProvider
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = ["build_model_provider"]
 
 logger = get_logger(__name__)
-
-type _Adapter = ChatAdapter | ResponsesAdapter | ClaudeProvider | GeminiProvider | OllamaProvider | SyntheticProvider
 
 _CLAUDE_PROVIDERS = frozenset(get_args(ClaudeRouteKind.__value__))
 _GEMINI_PROVIDERS = frozenset({"google", "gemini"})
@@ -50,7 +42,7 @@ def _build_adapter(
     *,
     execution_identity: ToolExecutionIdentity | None,
     codex_default_instructions: str,
-) -> _Adapter:
+) -> ModelProvider:
     """Return the bare adapter of the family that serves ``model_config.provider``."""
     provider = canonical_provider(model_config.provider)
     if provider in OPENAI_FAMILY_PROVIDERS:
@@ -114,7 +106,6 @@ def build_model_provider(
         configured_provider=model_config.provider,
         debug=config.debug,
         default_log_dir=runtime_paths.storage_root / "logs" / "llm_requests",
-        settings=adapter.settings,
     )
     return wrap_provider(
         adapter,

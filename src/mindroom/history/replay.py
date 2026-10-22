@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.history.message_content import (
     HISTORY_VIEWED_IMAGE_FALLBACK_TOKENS,
@@ -24,24 +24,12 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.llm.provider import PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
 
 
 logger = get_logger(__name__)
-
-
-@runtime_checkable
-class PortableReplayEstimator(Protocol):
-    """A provider route that sizes explicitly replayed history the way its requests send it."""
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether the estimate prices images by their visual cost instead of their transport bytes."""
-        ...
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
-        """Return the route's estimate of ``messages`` as one explicit replay, or None to size them canonically."""
-        ...
 
 
 class HistorySummaryBudgetError(RuntimeError):

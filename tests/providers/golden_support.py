@@ -26,12 +26,13 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
-    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay, StopReason, StreamEvent
+    from mindroom.llm.provider import ModelProvider, NativeCompaction, StopReason, StreamEvent
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "providers"
 
@@ -345,16 +346,13 @@ def with_background_after(tools: Sequence[ToolSpec], managed: frozenset[str]) ->
     return projected
 
 
-def golden_request(
-    case_input: dict[str, Any],
-    *,
-    native_compaction_settings: Callable[..., NativeCompactionReplay | None] | None = None,
-) -> ModelRequest:
+def golden_request(case_input: dict[str, Any], *, native: NativeCompaction | None = None) -> ModelRequest:
     """Return the owned request a golden's input describes.
 
     Deferred tool names always travel on the request: the portable tool-search stage hides them behind
     ``call_tool`` on routes without native tool search, and the adapters defer them server-side elsewhere.
-    A native-compaction input becomes the adapter's replay settings, as history planning asks for them.
+    A native-compaction input becomes the replay settings of the route's ``native`` history, as history planning
+    asks for them.
     """
     unhandled = set(case_input) - _HANDLED_INPUT_KEYS
     assert not unhandled, f"the harness does not know how to send golden input {sorted(unhandled)}"
@@ -364,11 +362,11 @@ def golden_request(
     if case_input.get("provider_tools_disabled"):
         assert case_input["tool_choice"] == "none", "decision requests disable tool selection through tool_choice"
     native_compaction = None
-    if (native := case_input.get("native_compaction")) is not None:
-        assert native_compaction_settings is not None, "the golden's route has no native compaction"
-        native_compaction = native_compaction_settings(
-            threshold=native["threshold"],
-            history_generation=native["history_generation"],
+    if (asked := case_input.get("native_compaction")) is not None:
+        assert native is not None, "the golden's route has no native compaction"
+        native_compaction = native.native_compaction_settings(
+            threshold=asked["threshold"],
+            history_generation=asked["history_generation"],
             allow_authored=True,
         )
         assert native_compaction is not None, "the golden's route supports native compaction"
@@ -396,18 +394,23 @@ def pipeline_provider(adapter: ModelProvider, *, idle_timeout_seconds: float | N
     )
 
 
+def bare_adapter(provider: ModelProvider) -> ModelProvider:
+    """Return the adapter inside the pipeline stages the registry or ``pipeline_provider`` put around it."""
+    while isinstance(provider, WrappedProvider):
+        provider = provider.inner
+    return provider
+
+
 async def replay_through_pipeline(
     adapter: ModelProvider,
     case_input: dict[str, Any],
     recorded: list[httpx.Request],
-    *,
-    native_compaction_settings: Callable[..., NativeCompactionReplay | None] | None = None,
 ) -> Replay:
     """Send a golden's request through the pipeline around ``adapter`` and return what it sent and produced.
 
     A decision request runs inside ``without_provider_tools()``, as participation decisions and judgments do.
     """
-    request = golden_request(case_input, native_compaction_settings=native_compaction_settings)
+    request = golden_request(case_input, native=adapter.native_compaction)
     decision = without_provider_tools() if case_input.get("provider_tools_disabled") else nullcontext()
     with decision:
         events = [event async for event in pipeline_provider(adapter).stream(request)]

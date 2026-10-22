@@ -12,7 +12,7 @@ its finished turn's metrics, and a consumer settling a stream that never complet
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, TurnCompleted
 from mindroom.usage.storage import has_token_usage
@@ -20,14 +20,21 @@ from mindroom.usage.storage import has_token_usage
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
+    from mindroom.llm.provider import (
+        Capabilities,
+        ModelIdentity,
+        ModelProvider,
+        ModelRequest,
+        NativeCompaction,
+        PortableReplayEstimator,
+        StreamEvent,
+    )
     from mindroom.llm.usage import MessageMetrics
 
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "WrappedProvider",
     "add_usage",
-    "bare_adapter",
     "is_visible_output",
     "with_carried_usage",
 ]
@@ -54,16 +61,24 @@ class WrappedProvider:
         """The wrapped provider's capabilities."""
         return self.inner.capabilities
 
+    @property
+    def native_compaction(self) -> NativeCompaction | None:
+        """The wrapped provider's native history."""
+        return self.inner.native_compaction
+
+    @property
+    def replay_estimator(self) -> PortableReplayEstimator | None:
+        """The wrapped provider's replay estimator."""
+        return self.inner.replay_estimator
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The wrapped provider's recorded settings."""
+        return self.inner.model_params
+
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Run the stage around the wrapped provider's stream."""
         return self.stage(self.inner, request)
-
-
-def bare_adapter(provider: ModelProvider) -> ModelProvider:
-    """Return the adapter inside every pipeline stage around ``provider``, which carries the route's own settings."""
-    while isinstance(provider, WrappedProvider):
-        provider = provider.inner
-    return provider
 
 
 def is_visible_output(event: StreamEvent) -> bool:

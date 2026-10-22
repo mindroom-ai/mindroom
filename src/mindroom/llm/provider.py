@@ -192,6 +192,37 @@ class ModelTurn:
         return self.message.metrics
 
 
+class NativeCompaction(Protocol):
+    """A route whose provider manages history of its own, by continuing state it stored or by compacting it."""
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay | None:
+        """Return the replay settings of a request that wants compaction at ``threshold`` input tokens.
+
+        None runs the request without native compaction. ``history_generation`` binds the replayed checkpoints to the
+        history the requests carry, and ``allow_authored`` lets a route without MindRoom-managed compaction keep the
+        compaction policy its model config authored.
+        """
+        ...
+
+
+class PortableReplayEstimator(Protocol):
+    """A route that sizes explicitly replayed history the way its requests send it."""
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Return whether the estimate prices images by their visual cost instead of their transport bytes."""
+        ...
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        """Return the route's estimate of ``messages`` as one explicit replay, or None to size them canonically."""
+        ...
+
+
 class ModelProvider(Protocol):
     """A model behind one provider route."""
 
@@ -203,6 +234,21 @@ class ModelProvider(Protocol):
     @property
     def capabilities(self) -> Capabilities:
         """What this route supports."""
+        ...
+
+    @property
+    def native_compaction(self) -> NativeCompaction | None:
+        """The route's provider-managed history, or None when its requests carry no native history settings."""
+        ...
+
+    @property
+    def replay_estimator(self) -> PortableReplayEstimator | None:
+        """How the route sizes explicitly replayed history, or None to size it canonically."""
+        ...
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings, which run metadata and the request log record."""
         ...
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -229,7 +275,9 @@ __all__ = [
     "ModelProvider",
     "ModelRequest",
     "ModelTurn",
+    "NativeCompaction",
     "NativeCompactionReplay",
+    "PortableReplayEstimator",
     "ReasoningDelta",
     "RequestOverrides",
     "StopReason",

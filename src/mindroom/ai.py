@@ -63,7 +63,6 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts, build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
-from mindroom.providers.pipeline.request_log import provider_model_params
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingAttemptResolution,
@@ -1251,7 +1250,7 @@ async def _prepare_agent_run_context(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        model_params=provider_model_params(build.spec.model),
+        model_params=build.spec.model.model_params,
         extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     if ctx.agent_mode == "minimal":

@@ -14,7 +14,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import httpx
 from pydantic import ValidationError
@@ -25,7 +25,7 @@ from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, T
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.errors import classify_provider_error, transport_error
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
     GeminiReply,
@@ -97,6 +97,14 @@ class GeminiProvider:
     settings: GeminiSettings
     vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
+    # Gemini keeps no history of its own, and its replayed history is sized canonically.
+    native_compaction: ClassVar[None] = None
+    replay_estimator: ClassVar[None] = None
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.

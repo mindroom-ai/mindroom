@@ -13,7 +13,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import anthropic
 import httpx
@@ -84,6 +84,7 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import canonical_provider
@@ -101,7 +102,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import StopReason
+    from mindroom.llm.provider import NativeCompaction, StopReason
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -191,6 +192,18 @@ class ClaudeProvider:
     settings: ClaudeSettings
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
+    # Claude sizes replayed history canonically.
+    replay_estimator: ClassVar[None] = None
+
+    @property
+    def native_compaction(self) -> NativeCompaction:
+        """Claude compacts history on the provider side where the route supports it or the model config authored it."""
+        return self
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     def native_compaction_settings(
         self,

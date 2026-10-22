@@ -30,6 +30,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.llm.usage import MessageMetrics
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.providers.openai.responses_wire import responses_request_kwargs
+from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
 from tests.conftest import seed_session
 from tests.fakes.summary_model import summary_model
@@ -42,6 +43,7 @@ from tests.history_helpers import (
     compact_runs,
 )
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.golden_support import bare_adapter
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.history.runtime import HistoryPreparationInputs
     from mindroom.history.types import NativeHistory
+    from mindroom.llm.provider import ModelProvider
     from mindroom.providers.openai.responses import ResponsesAdapter
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
@@ -674,3 +677,42 @@ def test_native_route_identity_hashes_the_rendered_summary(tmp_path: Path, summa
     assert configured.native_compaction.route == route_for(rendered)
     if summary:
         assert configured.native_compaction.route != route_for(summary)
+
+
+def test_history_reads_the_routes_native_settings_through_the_request_pipeline(tmp_path: Path) -> None:
+    """The provider the registry builds hands history planning its route's native history and replay estimator."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(threshold_tokens=120000),
+        models={
+            "default": ModelConfig(
+                provider="openai",
+                id="gpt-6-astra",
+                api="responses",
+                context_window=200000,
+                extra_kwargs={"store": False},
+            ),
+            "chat": ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", context_window=200000),
+        },
+    )
+    resolved = _inputs(config)
+
+    def configured(model: ModelProvider) -> NativeHistory | None:
+        return configure_native_history(
+            model,
+            plan=resolved.execution_plan,
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=True,
+        )
+
+    provider = build_model_provider(config, paths, "default")
+    adapter = bare_adapter(provider)
+
+    native = configured(provider)
+    assert native is not None
+    assert native.native_compaction is not None
+    assert native == configured(adapter)
+    assert provider.replay_estimator is adapter
+    chat = build_model_provider(config, paths, "chat")
+    assert (configured(chat), chat.replay_estimator) == (None, None)

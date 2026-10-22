@@ -4348,6 +4348,8 @@ class TestTeamCompletion:
         )
         runtime_paths = _runtime_paths()
         _members, built, _mode = _scripted_team(members=[("general", "GeneralAgent", ScriptedModel([]))])
+        leader = ScriptedModel([], model_params={"temperature": 0.7})
+        built = replace(built, spec=replace(built.spec, model=leader))
         prior_response_id = "prior-openai-team-response"
 
         def notice(marker: object) -> Message:
@@ -4443,7 +4445,6 @@ class TestTeamCompletion:
                     "mindroom.execution_preparation._prepare_bound_team_execution_context",
                     new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
                 ),
-                patch("mindroom.teams.envelope.provider_model_params", return_value={"temperature": 0.7}),
             ):
                 prepared = await openai_compat._prepare_openai_team_execution(
                     scope_context=scope_context,

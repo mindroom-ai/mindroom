@@ -100,6 +100,9 @@ class _ScriptedModel:
     script: list[_Call | list[_Call]] = field(default_factory=list)
     identity: ModelIdentity = _SCRIPTED
     capabilities: Capabilities = field(default_factory=Capabilities)
+    native_compaction: None = None
+    replay_estimator: None = None
+    model_params: dict[str, Any] = field(default_factory=dict)
     received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
     input_tokens: list[int] = field(default_factory=list)
