@@ -31,12 +31,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
-    from agno.tools.function import Function
-
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
+    from mindroom.tool_system.agno_toolkits import Function
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"

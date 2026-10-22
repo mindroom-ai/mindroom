@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
-
+from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue  # noqa: TC001 - Agno resolves tool annotations

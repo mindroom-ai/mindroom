@@ -15,12 +15,10 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from agno.tools.function import Function
-
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.tool_function import AdaptedToolkit
 
 if TYPE_CHECKING:

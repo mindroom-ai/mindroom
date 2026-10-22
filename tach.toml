@@ -176,6 +176,7 @@ expose = [
 [[modules]]
 path = "mindroom.agent_cli.bash"
 depends_on = [
+    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_access",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.invocation",
