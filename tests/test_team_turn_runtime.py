@@ -46,6 +46,9 @@ from mindroom.teams import envelope
 from mindroom.teams.runtime import MemberRunEnded
 from mindroom.teams.spec import TeamMode
 from mindroom.teams.storage import TeamRunRecords, under_team_scope
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -79,6 +82,7 @@ from tests.team_turn_helpers import (
     member_approval,
     squad_turn,
 )
+from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -497,6 +501,36 @@ async def test_a_member_s_claude_sessions_are_the_member_s_own(
 
     await team.stream()
 
+    _, [member] = team.stored_runs()
+    assert member.tools is not None
+    assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."
+
+
+@pytest.mark.asyncio
+async def test_a_member_s_call_that_runs_as_a_tool_job_keeps_the_member_s_claude_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With background tool jobs on, a member's call runs as a managed job and still reaches the member's session."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Check Claude"), answer("Checked.", usage(50, 5))],
+        writer=[calls(tool_call("claude_session_status", "call-claude"), metrics=usage(10, 1)), answer("None yet.")],
+    )
+    team.config.agents["writer"].tools = [PROBE_TOOL, "claude_agent"]
+    team.config.background_tool_jobs.enabled = True
+    pin_background_tool_jobs(team.config, team.runtime_paths)
+    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+    register_background_runtime(team.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await team.stream()
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    assert (job.tool_name, job.status, job.owner.agent_name) == ("claude_session_status", "completed", "writer")
     _, [member] = team.stored_runs()
     assert member.tools is not None
     assert member.tools[0].result == f"No active Claude session for `writer:{SESSION_ID}`."

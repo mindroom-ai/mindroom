@@ -211,13 +211,16 @@ def job_definitions_hook(actor: JobActor) -> BeforeRequestHook:
     return project
 
 
-def with_job_admission(actor: JobActor, inner: Sequence[ToolMiddleware]) -> tuple[ToolMiddleware, ...]:
+def with_job_admission(actor: JobActor | None, inner: Sequence[ToolMiddleware]) -> tuple[ToolMiddleware, ...]:
     """Return the actor's tool-call policy ``inner`` with job admission outermost, the policy the loop runs.
 
     A managed job runs its call through ``inner`` again in the job's own task, on a copy of the call's session
-    state, so the reply's state changes only when the reply reads the job's result.
+    state, so the reply's state changes only when the reply reads the job's result. Without an ``actor``, whose
+    calls never run as jobs, the loop runs ``inner`` as it is.
     """
     rest = tuple(inner)
+    if actor is None:
+        return rest
 
     async def admit(call: ToolCall, call_next: ToolNext) -> object:
         return await _admit(actor, rest, call, call_next)
