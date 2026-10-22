@@ -48,7 +48,8 @@ def cli_dispatch_active() -> bool:
 
 
 @contextmanager
-def _inner_cli_dispatch() -> Iterator[None]:
+def cli_dispatch_scope() -> Iterator[None]:
+    """Mark this context as executing a CLI-dispatched tool call, which ``cli_dispatch_active`` reports."""
     token = _INNER.set(True)
     try:
         yield
@@ -451,7 +452,7 @@ async def _execute_agent_tool_call(
         # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
         tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
         try:
-            with catalog.execution_context(), track_sync_tool_completion(tracker), _inner_cli_dispatch():
+            with catalog.execution_context(), track_sync_tool_completion(tracker), cli_dispatch_scope():
                 outcome = await execute_tool_call(
                     function,
                     arguments,
@@ -488,6 +489,7 @@ __all__ = [
     "PreparedAgentToolBinding",
     "PreparedAgentToolCatalog",
     "cli_dispatch_active",
+    "cli_dispatch_scope",
     "execute_agent_shell_call",
     "execute_agent_tool_call",
 ]
