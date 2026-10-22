@@ -21,7 +21,7 @@ from mindroom.native_compaction import native_replay_messages, record_native_che
 from mindroom.providers.openai.chat_wire import function_definition, with_sdk_options
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.errors import responses_event_error
-from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay, split_combined_tool_results
+from mindroom.providers.openai.legacy_replay import repair_legacy_tool_replay
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
 from mindroom.providers.openai.prompt_cache import formatted_input_with_shared_system_prefix
 from mindroom.providers.openai.response_replay import (
@@ -157,7 +157,7 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
 
 def _agno_input(messages: Sequence[Message], *, store: bool | None) -> list[Any]:
     """Convert canonical messages to Responses input items, continuing after the last stored response."""
-    canonical = reformat_tool_call_ids(split_combined_tool_results(messages), "responses")
+    canonical = reformat_tool_call_ids(messages, "responses")
     to_format, continued = _continued_messages(canonical, store=store)
     call_ids = _call_ids(canonical)
     items: list[Any] = []

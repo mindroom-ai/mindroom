@@ -27,17 +27,7 @@ __all__ = ["portable_tool_search_stream"]
 
 def _wrapped_call(call: dict[str, Any], deferred: frozenset[str]) -> dict[str, Any]:
     function = call.get("function")
-    if not isinstance(function, dict):
-        # LEGACY_COMPAT: Combined Gemini tool-result messages.
-        # Legacy format: one role="tool" message with tool_call_id=None whose tool_calls entries each carry
-        # tool_call_id, tool_name, and content; selected here when an entry has no "function" key.
-        # Last legacy release: v2026.4.35 stored them through Agno 2.4.7's Gemini adapter; v2026.4.36
-        # (Agno 2.5.13) writes one canonical tool message per result.
-        # Handling: entries naming a deferred function are renamed to call_tool, so the results the wire
-        # formatter splits from the combined message match the wrapped calls; stored history is unchanged.
-        # Coverage: tests/providers/test_provider_pipeline.py::test_portable_tool_search_renames_combined_gemini_results
-        return {**call, "tool_name": CALL_TOOL_NAME} if call.get("tool_name") in deferred else call
-    if function.get("name") not in deferred:
+    if not isinstance(function, dict) or function.get("name") not in deferred:
         return call
     arguments = arguments_object(function.get("arguments")) or {}
     wrapped = json.dumps({"name": function["name"], "arguments": arguments}, ensure_ascii=False)
