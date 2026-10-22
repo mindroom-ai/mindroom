@@ -15,7 +15,11 @@ from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
+from mindroom.matrix.personal_rooms import (
+    PersonalRoomRosterMismatchError,
+    PersonalRoomService,
+    PersonalRoomValidationError,
+)
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -225,6 +229,45 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
     join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", previous)
     await coordination.lifecycle.baseline_join(join)
     assert coordination.owner.ensure.await_count == (previous != "join")
+
+
+@pytest.mark.asyncio
+async def test_unfixable_personal_room_settles_its_owners_membership_event(coordination: Coordination) -> None:
+    """A raising member callback holds the room's event lane, so the agent would answer nothing there until a repair."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    room = nio.MatrixRoom("!personal:localhost", "@mindroom_helper:localhost")
+    # A profile change is a join after a join, which the owner's client sends to every room it is in.
+    profile_change = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$profile",
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join", "displayname": "Alice A."},
+            "unsigned": {"prev_content": {"membership": "join", "displayname": "Alice"}},
+        },
+    )
+    coordination.local.owner_membership_event.side_effect = PersonalRoomRosterMismatchError(
+        room.room_id,
+        {"@mindroom_other:localhost"},
+    )
+    with capture_logs() as logs:
+        await lifecycle.member_event(room, profile_change)
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("Personal-room validation failed for an owner membership event", "warning"),
+    ]
+    coordination.local.guest_membership_event.assert_awaited_once_with(room, "@alice:localhost", "join")
+    # A failure a retry can pass still raises, so the journal keeps the event and retries it.
+    coordination.local.owner_membership_event.side_effect = RuntimeError("Personal-room ownership state unavailable")
+    with pytest.raises(RuntimeError, match="state unavailable"):
+        await lifecycle.member_event(room, profile_change)
+    # Every check no retry passes settles, not only the roster mismatch.
+    coordination.local.owner_membership_event.side_effect = PersonalRoomValidationError(
+        "Personal-room directory must remain private",
+    )
+    await lifecycle.member_event(room, profile_change)
 
 
 @pytest.mark.asyncio
