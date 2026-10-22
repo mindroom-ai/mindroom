@@ -284,6 +284,7 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
             ],
         ),
         tools=[tools],
+        telemetry=False,
     )
     with tool_runtime_context(context):
         response = await parent.arun(
