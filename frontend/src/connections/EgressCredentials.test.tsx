@@ -147,16 +147,20 @@ describe("egress credentials page", () => {
       within(table)
         .getAllByRole("row")
         .slice(1)
-        .map((row) =>
-          within(row)
-            .getAllByRole("cell")
-            .map((cell) => cell.textContent),
-        ),
+        .map((row) => {
+          const [agent, keys] = within(row).getAllByRole("cell");
+          // The agent's type sits under its name.
+          return [
+            within(agent).getByRole("button").getAttribute("aria-label"),
+            within(agent).getByText(/^(Shared|Personal)$/).textContent,
+            keys.textContent,
+          ];
+        }),
     ).toEqual([
       // A limit is neither a key nor an account.
-      ["Personal Mind", "Personal", "1 of 2 set"],
-      ["Shared Dev", "Shared", "0 of 1 set"],
-      ["Bare Agent", "Personal", "None"],
+      ["Expand Personal Mind", "Personal", "1 of 2 set"],
+      ["Expand Shared Dev", "Shared", "0 of 1 set"],
+      ["Expand Bare Agent", "Personal", "None"],
     ]);
     expect(screen.queryByRole("region")).toBeNull();
     fireEvent.click(

@@ -43,6 +43,31 @@ export function ItemName({
   );
 }
 
+const STATUS_DOT = {
+  set: "bg-primary",
+  attention: "bg-amber-500",
+  unset: "border border-muted-foreground/70",
+} as const;
+
+/** A state as a dot and its label: set or connected, waiting on someone, or not set. */
+export function StatusLabel({
+  tone,
+  children,
+}: {
+  tone: keyof typeof STATUS_DOT;
+  children: ReactNode;
+}) {
+  return (
+    <span className="inline-flex items-start gap-2 text-sm tabular-nums">
+      <span
+        aria-hidden="true"
+        className={`mt-[0.45em] h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[tone]}`}
+      />
+      <span>{children}</span>
+    </span>
+  );
+}
+
 export function ToolName({ tool }: { tool: ConnectionTool }) {
   return (
     <ItemName

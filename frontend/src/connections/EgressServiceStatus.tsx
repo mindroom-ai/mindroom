@@ -6,6 +6,7 @@ import {
   sharesAccount,
   statusLabel,
 } from "./egressRowText";
+import { StatusLabel } from "./ToolRow";
 import type { EgressCredentialService } from "./types";
 
 /** The row's status badge and the notes about the account it uses, in the order they are shown. */
@@ -25,12 +26,17 @@ export function ServiceStatus({
     oauth?.unavailable_reason === "shared_sandbox" && !service.key_configured;
   return (
     <>
-      <Badge
-        variant={service.configured ? "secondary" : "outline"}
-        className="max-w-full font-normal"
+      <StatusLabel
+        tone={
+          oauth?.reset_required && !service.configured
+            ? "attention"
+            : service.configured
+              ? "set"
+              : "unset"
+        }
       >
         {statusLabel(service)}
-      </Badge>
+      </StatusLabel>
       {service.active_source === "oauth" && oauth?.account_label && (
         <span className="break-all text-xs">{oauth.account_label}</span>
       )}

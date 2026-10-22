@@ -352,6 +352,7 @@ export function EgressServiceItem({
             <>
               <Button
                 size="sm"
+                variant="outline"
                 disabled={busy !== null}
                 aria-label={`Connect ${oauth.display_name} for ${name}`}
                 onClick={() =>

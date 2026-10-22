@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +13,7 @@ import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import { errorText, requestConnection } from "./request";
 import { SharedAccountDialog } from "./SharedAccountDialog";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
-import { ToolName, ToolExposure } from "./ToolRow";
+import { StatusLabel, ToolName, ToolExposure } from "./ToolRow";
 import type {
   AgentConnections,
   ConnectionService,
@@ -189,13 +189,15 @@ export function ConnectionServiceRows({
                 ) : (
                   status && (
                     <>
-                      <span className="flex items-center gap-1.5 text-sm">
-                        {status.connected && (
-                          <CheckCircle2
-                            className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
-                            aria-hidden="true"
-                          />
-                        )}
+                      <StatusLabel
+                        tone={
+                          status.reset_required
+                            ? "attention"
+                            : status.connected
+                              ? "set"
+                              : "unset"
+                        }
+                      >
                         {sharedConnected
                           ? sharedAccountStatus(
                               status.account_label,
@@ -210,7 +212,7 @@ export function ConnectionServiceRows({
                               : status.connected
                                 ? "Connected"
                                 : "Not connected"}
-                      </span>
+                      </StatusLabel>
                       {status.account_label && !sharedConnected && (
                         <p className="mt-1 max-w-56 break-all text-xs text-muted-foreground">
                           {status.account_label}
@@ -276,6 +278,7 @@ export function ConnectionServiceRows({
                     ) : (
                       <Button
                         size="sm"
+                        variant="outline"
                         disabled={busy !== null || !status.can_connect}
                         aria-label={`Connect ${service.display_name}`}
                         onClick={() =>

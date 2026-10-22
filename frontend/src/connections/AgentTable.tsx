@@ -9,11 +9,10 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { AgentTools } from "./AgentTools";
-import { AgentAvatar } from "./AgentAvatar";
+import { AgentIdentity } from "./AgentAvatar";
 import { keyCounts, keysSetText } from "./egressRowText";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type { AgentConnections, ConnectionStatus } from "./types";
@@ -97,22 +96,14 @@ const columns: ColumnDef<AgentTableRow>[] = [
               aria-hidden="true"
             />
           )}
-          <AgentAvatar key={agent.agent_name} agent={agent} />
-          <span id={`agent-${agent.agent_name}`} className="font-medium">
-            {agent.agent_display_name}
-          </span>
+          <AgentIdentity
+            agent={agent}
+            displayName={agent.agent_display_name}
+            nameId={`agent-${agent.agent_name}`}
+          />
         </button>
       );
     },
-  },
-  {
-    id: "type",
-    header: "Type",
-    cell: ({ row }) => (
-      <Badge variant="secondary" className="font-normal">
-        {row.original.is_shared ? "Shared" : "Personal"}
-      </Badge>
-    ),
   },
   {
     id: "tools",
@@ -130,7 +121,7 @@ const columns: ColumnDef<AgentTableRow>[] = [
           ? "account"
           : "accounts";
       return (
-        <span className="text-muted-foreground">
+        <span className="text-muted-foreground tabular-nums">
           {/* An agent with no accounts or keys to set only counts its tools. */}
           {total === 0 ? tools : `${tools} / ${set} of ${total} ${counted} set`}
         </span>
@@ -200,7 +191,7 @@ function AgentEgress({ agent }: { agent: AgentConnections }) {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/60 px-5 py-3">
       <h3 className="text-sm font-medium">API keys and accounts</h3>
-      <span className="text-sm text-muted-foreground">
+      <span className="text-sm text-muted-foreground tabular-nums">
         {keysSetText(services)}
       </span>
       <a
@@ -381,7 +372,7 @@ export function AgentTable({
                       <section
                         id={`agent-tools-${row.original.agent_name}`}
                         aria-labelledby={`agent-${row.original.agent_name}`}
-                        className="border-l-2 border-primary/30 bg-background"
+                        className="bg-background"
                       >
                         <AgentTools
                           agent={row.original}
@@ -410,10 +401,13 @@ export function AgentTable({
           </tbody>
         </table>
       </div>
-      <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-        {table.getRowModel().rows.length} of {agents.length} agents · Expand an
-        agent to manage its connections and tools.
-      </p>
+      {/* Only a search or filter leaves agents out, so only then is there a count to give. */}
+      {table.getRowModel().rows.length > 0 &&
+        table.getRowModel().rows.length < agents.length && (
+          <p className="border-t px-5 py-3 text-xs text-muted-foreground tabular-nums">
+            Showing {table.getRowModel().rows.length} of {agents.length} agents
+          </p>
+        )}
     </section>
   );
 }

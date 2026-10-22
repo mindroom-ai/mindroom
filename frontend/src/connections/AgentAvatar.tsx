@@ -15,3 +15,28 @@ export function AgentAvatar({
     />
   );
 }
+
+/** An agent's avatar and name, with whether it is shared beneath the name; `nameId` lets a panel be labelled by the name. */
+export function AgentIdentity({
+  agent,
+  displayName,
+  nameId,
+}: {
+  agent: Pick<AgentConnections, "agent_name" | "is_shared">;
+  displayName: string;
+  nameId: string;
+}) {
+  return (
+    <>
+      <AgentAvatar key={agent.agent_name} agent={agent} />
+      <span className="min-w-0">
+        <span id={nameId} className="block font-medium">
+          {displayName}
+        </span>
+        <span className="block text-xs text-muted-foreground">
+          {agent.is_shared ? "Shared" : "Personal"}
+        </span>
+      </span>
+    </>
+  );
+}
