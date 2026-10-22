@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.event_journal import ApprovalCall
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -493,24 +494,19 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
 
     async def continue_saved_run(
         attempt: PausedAttempt,
-        approval_calls_now: tuple[object, ...],
+        approval_calls_now: tuple[ApprovalCall, ...],
     ) -> CompletedApprovalRun | PausedAttempt:
         return await resume(
             executor,
             attempt,
-            approval_calls_now,  # type: ignore[arg-type]
+            approval_calls_now,
             agent_name="general",
             identity=identity,
             config=config,
             runtime_paths=paths,
-            decisions={
-                call.tool_call_id: approved and call.tool_call_id in _APPROVABLE  # type: ignore[attr-defined]
-                for call in approval_calls_now
-            },
+            decisions={call.tool_call_id: approved and call.tool_call_id in _APPROVABLE for call in approval_calls_now},
             denial_reasons={
-                call.tool_call_id: None  # type: ignore[attr-defined]
-                if approved and call.tool_call_id in _APPROVABLE  # type: ignore[attr-defined]
-                else "Declined by requester"
+                call.tool_call_id: None if approved and call.tool_call_id in _APPROVABLE else "Declined by requester"
                 for call in approval_calls_now
             },
             approval_id="approval-example",

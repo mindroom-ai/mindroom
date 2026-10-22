@@ -50,7 +50,7 @@ TIMED = ["duration", "end_time", "start_time"]
 # The capture's agents and models, as far as the ``code`` agent's resumes reach them.
 CONFIG: dict[str, Any] = {
     "timezone": "UTC",
-    "defaults": {"tools": [], "learning": False},
+    "defaults": {"tools": []},
     "memory": {"backend": "none"},
     "agents": {
         "code": {
@@ -322,11 +322,11 @@ async def test_a_resume_refuses_tampered_or_incomplete_decisions_before_anything
     assert run.stored().status is RunStatus.paused
 
 
-async def test_a_waiting_call_marked_confirmed_in_the_store_still_needs_the_requester(
+async def test_a_waiting_call_marked_confirmed_in_the_store_is_refused_even_when_the_requester_approves(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stored row whose waiting call someone marked confirmed is refused: the decision must come from the card."""
+    """A stored row whose waiting call someone marked confirmed is refused, even with the requester's approval."""
     code = scripted("code-model")
     run = await _setup(tmp_path, monkeypatch, thread="$approved", run_id="run-approved", code=code)
     [call] = run.calls()

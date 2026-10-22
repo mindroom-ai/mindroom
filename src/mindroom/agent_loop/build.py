@@ -65,8 +65,9 @@ class AgentBuild:
 
     ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
     ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
-    settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
-    authored toolkit it came from, None for a generated one, which approvals check. ``tool_middleware`` is the
+    settings of every request of a run, such as the deferred tool names; ``tool_owners``, which approvals check, maps
+    each configured function to the authored toolkit it came from, None for one without an authored toolkit, and
+    leaves out the functions generated for the agent, such as the knowledge search. ``tool_middleware`` is the
     tool-call policy the loop runs around every call, outermost first: tool-job admission, the binding through which
     a scheduled call runs one of the build's functions (for a build that offers the scheduler), plugin before and
     after hooks, call recording, and the computer announcement. ``tool_jobs`` is the agent as tool jobs see it while
