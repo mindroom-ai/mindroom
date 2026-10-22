@@ -253,15 +253,15 @@ class PersonalRoomLifecycle:
     async def member_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
         """Finish local welcomes and route definite joins without bypassing baseline admission.
 
-        An owner's event in a room no retry can fix, such as an imported room holding someone outside its attested
-        roster, is logged and settles: raising would hold the room's event lane, so this agent would answer nothing
-        there until someone repaired the room. Reconciliation, which runs at startup and after a configuration
-        reload, retries the room after doubling delays up to hourly.
+        An owner's event in an imported room holding someone outside its attested roster is logged and settles:
+        raising would hold the room's event lane, so this agent would answer nothing there until someone removed
+        them. Reconciliation, which runs at startup and after a configuration reload, retries the room after doubling
+        delays up to hourly.
         """
         if event.membership in {"join", "leave", "ban"}:
             try:
                 await self.service.owner_membership_event(room.room_id, event.state_key, event.membership)
-            except PersonalRoomValidationError as error:
+            except PersonalRoomRosterMismatchError as error:
                 logger.warning(
                     "Personal-room validation failed for an owner membership event",
                     user_id=event.state_key,

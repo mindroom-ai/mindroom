@@ -15,7 +15,11 @@ from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
+from mindroom.matrix.personal_rooms import (
+    PersonalRoomRosterMismatchError,
+    PersonalRoomService,
+    PersonalRoomValidationError,
+)
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
@@ -258,6 +262,12 @@ async def test_unfixable_personal_room_settles_its_owners_membership_event(coord
     # A failure a retry can pass still raises, so the journal keeps the event and retries it.
     coordination.local.owner_membership_event.side_effect = RuntimeError("Personal-room ownership state unavailable")
     with pytest.raises(RuntimeError, match="state unavailable"):
+        await lifecycle.member_event(room, profile_change)
+    # Only the roster mismatch settles; other ownership failures still hold the event.
+    coordination.local.owner_membership_event.side_effect = PersonalRoomValidationError(
+        "Personal-room directory must remain private",
+    )
+    with pytest.raises(PersonalRoomValidationError, match="must remain private"):
         await lifecycle.member_event(room, profile_change)
 
 
