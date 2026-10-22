@@ -12,6 +12,7 @@ from mindroom.api.auth import (
     dashboard_host_public_origin,
     login_redirect_for_request,
     request_has_frontend_access,
+    request_path_with_query,
     sanitize_next_path,
 )
 from mindroom.api.config_lifecycle import api_runtime_paths
@@ -68,7 +69,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
     # Connections sign-in, account links, and MCP consent belong to the public origin, so their pages move there.
     if first_segment == "connections" and (public := dashboard_host_public_origin(request)) is not None:
-        return RedirectResponse(f"{public}{request.url.path}{f'?{request.url.query}' if request.url.query else ''}")
+        return RedirectResponse(f"{public}{request_path_with_query(request)}")
 
     # The Agent Keys page is absent for everyone while the broker is off, before any login redirect.
     if first_segment == "connections" and not _connections_frontend_enabled(api_runtime_paths(request), path):

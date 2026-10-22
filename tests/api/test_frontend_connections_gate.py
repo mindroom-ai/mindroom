@@ -156,10 +156,3 @@ def test_dashboard_on_another_port_of_the_public_host_moves_only_its_own_request
     moved = dashboard.get("/connections")
     assert moved.status_code == 307
     assert moved.headers["location"] == "http://localhost:3000/connections"
-
-
-def test_a_dashboard_url_equal_to_the_public_url_moves_nothing(gate_client: Callable[..., TestClient]) -> None:
-    """Setting both URLs to one origin keeps Connections pages where they are instead of redirecting to themselves."""
-    env = {"MINDROOM_PUBLIC_URL": "https://chat.example.org", "MINDROOM_DASHBOARD_URL": "https://chat.example.org"}
-    client = gate_client(trusted_upstream=True, extra_env=env, base_url="https://chat.example.org")
-    assert client.get("/connections").status_code == 200

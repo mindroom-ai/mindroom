@@ -5105,6 +5105,16 @@ def test_dashboard_url_without_trusted_upstream_auth_fails_startup(tmp_path: Pat
         )
 
 
+@pytest.mark.parametrize("public_url", [None, "https://admin.example.org", "https://admin.example.org/mindroom"])
+def test_dashboard_url_on_the_public_host_fails_startup(tmp_path: Path, public_url: str | None) -> None:
+    """The dashboard host must be another host or port than a set `MINDROOM_PUBLIC_URL`."""
+    env = {**trusted_upstream_env(), "MINDROOM_DASHBOARD_URL": "https://admin.example.org"}
+    if public_url is not None:
+        env["MINDROOM_PUBLIC_URL"] = public_url
+    with pytest.raises(ValueError, match="must name another host or port than MINDROOM_PUBLIC_URL"):
+        auth._build_auth_settings(_runtime_paths(tmp_path, process_env=env))
+
+
 def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:
     """A dashboard URL that is not an HTTPS origin, or HTTP on a local address, is a setup error."""
     with pytest.raises(ValueError, match="Browser origin must be explicit HTTPS"):

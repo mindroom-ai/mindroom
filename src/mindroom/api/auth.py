@@ -165,6 +165,10 @@ def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None 
     if dashboard is not None and not trusted_upstream.enabled:
         msg = "MINDROOM_DASHBOARD_URL requires trusted upstream auth (MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED)"
         raise ValueError(msg)
+    public = normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
+    if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
+        msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
+        raise ValueError(msg)
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
@@ -638,7 +642,8 @@ def _is_offsite_candidate(candidate: str) -> bool:
     return candidate.replace("\\", "/").startswith("//")
 
 
-def _request_path_with_query(request: Request) -> str:
+def request_path_with_query(request: Request) -> str:
+    """Return this request's path with its query string, for a redirect back to it."""
     path = request.url.path
     query = request.url.query
     return f"{path}?{query}" if query else path
@@ -691,7 +696,7 @@ def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings,
     origin = normalized_origin(auth_settings.public_url)
     if origin is None:
         return str(request.url)
-    path = sanitize_next_path(next_path or _request_path_with_query(request))
+    path = sanitize_next_path(next_path or request_path_with_query(request))
     return f"{origin}{path}"
 
 
@@ -708,7 +713,7 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
         redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_sso_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
-        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        login_target = sanitize_next_path(next_path or request_path_with_query(request))
         return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
     return None
 
@@ -1044,15 +1049,11 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[s
 
 
 def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> bool:
-    """Return whether this request reached the dashboard's own host, a different one from the public origin's."""
-    dashboard = settings.dashboard_origin
-    public = normalized_origin(settings.public_url)
-    if dashboard is None or public is None:
-        return False
+    """Return whether this request reached the dashboard's own host, which startup keeps apart from the public one."""
     # Behind a TLS-terminating proxy the request's scheme may differ from the browser's, but its Host header,
     # port included, does not.
-    dashboard_host = urlsplit(dashboard).netloc
-    return dashboard_host != urlsplit(public).netloc and request.url.netloc.lower() == dashboard_host
+    dashboard = settings.dashboard_origin
+    return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
 
 
 def dashboard_host_public_origin(request: Request) -> str | None:
