@@ -540,9 +540,8 @@ function keyCounts(agent: EgressCredentialAgent) {
 function linkedAgent(): string | null {
   const prefix = "#egress-agent-";
   const { hash } = window.location;
-  return hash.startsWith(prefix)
-    ? decodeURIComponent(hash.slice(prefix.length))
-    : null;
+  // Agent names are letters, digits, and underscores, so nothing in them is escaped.
+  return hash.startsWith(prefix) ? hash.slice(prefix.length) : null;
 }
 
 /** One agent's row, with its services below it while it is open. */

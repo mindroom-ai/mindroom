@@ -192,6 +192,19 @@ describe("egress credentials page", () => {
     }
   });
 
+  it("opens nothing for a link that names no agent, even a malformed one", async () => {
+    window.location.hash = "#egress-agent-%E0%A4%A";
+    try {
+      render(<EgressCredentials />);
+      expect(
+        await screen.findByRole("table", { name: "Agents" }),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("region")).toBeNull();
+    } finally {
+      window.location.hash = "";
+    }
+  });
+
   it("explains when no agent is available", async () => {
     vi.mocked(fetch).mockImplementation(async () => json({ agents: [] }));
     render(<EgressCredentials />);
