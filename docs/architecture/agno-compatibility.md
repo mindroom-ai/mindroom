@@ -1,10 +1,11 @@
 # Agno compatibility boundaries
 
-This page maps each known Agno weakness to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
+MindRoom uses Agno only as its tool library, through the toolkit adapter in `tool_system/agno_toolkits.py`, and for the knowledge readers and chunkers in `knowledge/readers.py`.
+This page maps each known weakness of that library to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
 The policy lives in the Agno Compatibility Policy in `AGENTS.md`.
 Each `# AGNO_COMPAT:` source comment owns its workaround's reason, exact upstream links, removal condition, and test coverage; `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists them.
 The Boundary column of both tables below is the boundary inventory; paths are relative to `src/mindroom/`, and one row can group several markers that share a weakness.
-Workarounds adapt Agno mechanics only: approval outcomes, storage ownership, retry limits, provider configuration, request-log context, canonical replay, and OAuth policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
+Workarounds adapt Agno toolkit mechanics only: file access, network destination, output size, and credential policy stay with their MindRoom owners, so removing a workaround keeps that product behavior.
 
 ## Upstream work
 
