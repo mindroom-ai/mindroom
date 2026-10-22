@@ -57,6 +57,7 @@ def url_safe_member_id(input_string: str) -> str:
 
 _TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
 _TEAM_HEADER_END = "):\n\n"
+_NO_CONSENSUS_NOTE = "\n*No team consensus - showing individual responses only*"
 NO_TEAM_RESPONSE = "No team response generated."
 
 
@@ -78,7 +79,7 @@ def strip_team_display(text: str) -> str:
     if text.startswith(_TEAM_HEADER_PREFIX):
         _header, separator, body = text.partition(_TEAM_HEADER_END)
         text = body if separator else text
-    return text.removesuffix(_format_no_consensus_note()).rstrip()
+    return text.removesuffix(_NO_CONSENSUS_NOTE).rstrip()
 
 
 def _format_member_contribution(agent_name: str, content: str) -> str:
@@ -88,11 +89,6 @@ def _format_member_contribution(agent_name: str, content: str) -> str:
     own_paragraph = is_visible_tool_marker_line(first_line) or opens_with_markdown_block(content)
     separator = "\n\n" if own_paragraph else " "
     return f"**{agent_name}**:{separator}{content}"
-
-
-def _format_no_consensus_note() -> str:
-    """Return the note a reply without a consensus ends with."""
-    return "\n*No team consensus - showing individual responses only*"
 
 
 def render_team_member_slots(
@@ -111,7 +107,7 @@ def render_team_member_slots(
     if consensus.strip():
         parts.extend(("\n**Team Consensus**:", consensus.strip()))
     elif parts:
-        parts.append(_format_no_consensus_note())
+        parts.append(_NO_CONSENSUS_NOTE)
     return parts
 
 

@@ -1182,10 +1182,11 @@ def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
 
 
 @pytest.mark.parametrize(
-    ("private_targets", "sender_visible", "expected_reason"),
+    ("private_targets", "room_members", "sender_visible", "expected_reason"),
     [
         (
             ["research"],
+            ["code"],
             None,
             "Team request cannot be satisfied: "
             "agent 'code' reaches private agent 'research' via delegation and private delegation is not supported for "
@@ -1193,6 +1194,7 @@ def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
         ),
         (
             ["research", "vault"],
+            ["code", "general"],
             ["code"],
             "Team request cannot be satisfied: "
             "agent 'code' reaches private agents 'research', 'vault' via delegation and private delegation is not "
@@ -1202,6 +1204,7 @@ def test_a_team_request_names_every_agent_missing_from_the_room() -> None:
 )
 def test_a_mixed_reject_explains_private_delegation_and_unavailability_per_member(
     private_targets: list[str],
+    room_members: list[str],
     sender_visible: list[str] | None,
     expected_reason: str,
 ) -> None:
@@ -1218,7 +1221,6 @@ def test_a_mixed_reject_explains_private_delegation_and_unavailability_per_membe
             for name in private_targets
         },
     )
-    room_members = ["code", *private_targets] if sender_visible is None else ["code", "general", *private_targets]
 
     result = _decide(config, room_members=room_members, tagged=["code", "general"], sender_visible=sender_visible)
 
