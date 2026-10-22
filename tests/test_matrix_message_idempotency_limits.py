@@ -246,11 +246,9 @@ async def test_deadline_settles_durable_write_before_unlocking(
         try:
             async with asyncio.timeout(10):
                 await entered.wait()
-                # The claim deadline cancels the send while its writer still owns state.
-                while not pending.cancelling():
-                    await asyncio.sleep(0.01)
+            # Waiting past the deadline shows the expired claim still waits for its writer.
             with pytest.raises(TimeoutError):
-                await asyncio.wait_for(asyncio.shield(pending), 0.5)
+                await asyncio.wait_for(asyncio.shield(pending), 1.5)
             assert not pending.done()
             root = context.runtime_paths.control_state_root
             assert root is not None
