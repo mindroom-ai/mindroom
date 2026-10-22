@@ -51,11 +51,7 @@ def _decode_base64(text: str) -> bytes:
 
 def _bytes_from(data: Mapping[str, Any]) -> bytes | None:
     content = data.get("content")
-    if isinstance(content, bytes):
-        return content
-    if isinstance(content, str):
-        return _decode_base64(content)
-    return None
+    return _decode_base64(content) if isinstance(content, str) else None
 
 
 def _finish(scalars: dict[str, Any], *, content: str | None, metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -305,13 +301,9 @@ class File:
         """Rebuild from a stored dict; text content decodes by ``mime_type`` as Agno wrote it."""
         mime_type = data.get("mime_type")
         raw = data.get("content")
-        content: bytes | None
-        if isinstance(raw, bytes):
-            content = raw
-        elif isinstance(raw, str):
+        content: bytes | None = None
+        if isinstance(raw, str):
             content = raw.encode("utf-8") if _is_text(mime_type) else _decode_base64(raw)
-        else:
-            content = None
         return cls(
             id=_id_from(data),
             url=data.get("url"),
