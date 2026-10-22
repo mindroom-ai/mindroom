@@ -355,7 +355,7 @@ def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     return {"function_declarations": declarations} if declarations else None
 
 
-def without_tool_selection(config: object, *, vertexai: bool) -> GenerateContentConfig:
+def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> GenerateContentConfig:
     """Return the config of a decision request: function schemas kept, native tools gone, JSON output requested.
 
     ``config`` is the request dict this adapter builds. JSON output is requested except on Vertex AI when the
@@ -369,7 +369,7 @@ def without_tool_selection(config: object, *, vertexai: bool) -> GenerateContent
         ToolConfig,
     )
 
-    generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
+    generation_config = GenerateContentConfig.model_validate(config)
     if generation_config.cached_content:
         # Cached content may contain native tools that this request cannot inspect.
         msg = "Participation decisions cannot inspect tools in Gemini cached content"
