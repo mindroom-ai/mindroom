@@ -180,48 +180,21 @@ const closeMenus = () => {
 };
 
 /**
- * Opens the ⋯ menu of the service row named `service`, once it is shown, and
- * returns it. `scope` picks the row when several tables have one with that name.
- */
-export async function openRowMenu(
-  service: string,
-  scope: HTMLElement = document.body,
-) {
-  return openMenu(
-    await within(scope).findByRole("button", {
-      name: `More actions for ${service}`,
-    }),
-  );
-}
-
-/**
  * The item of a row's ⋯ menu that an action such as "Edit service for GitHub"
- * names, with that menu open.
+ * names, with that menu open once the row is shown. `scope` picks the row
+ * when several tables have one with that name.
  */
 export async function rowAction(
   action: string,
   scope: HTMLElement = document.body,
 ) {
   const service = action.slice(action.lastIndexOf(" for ") + " for ".length);
-  return (await openRowMenu(service, scope)).getByRole("menuitem", {
-    name: action,
-  });
-}
-
-/** The names of a row's ⋯ menu items, in order; none when the row has no menu. */
-export async function rowActions(
-  service: string,
-  scope: HTMLElement = document.body,
-) {
-  const trigger = within(scope).queryByRole("button", {
-    name: `More actions for ${service}`,
-  });
-  if (!trigger) return [];
-  const names = (await openMenu(trigger))
-    .getAllByRole("menuitem")
-    .map((item) => item.getAttribute("aria-label") ?? "");
-  closeMenus();
-  return names;
+  const menu = await openMenu(
+    await within(scope).findByRole("button", {
+      name: `More actions for ${service}`,
+    }),
+  );
+  return menu.getByRole("menuitem", { name: action });
 }
 
 /**
