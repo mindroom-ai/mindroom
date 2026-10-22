@@ -113,14 +113,15 @@ def leader_loop_hooks(
 ) -> LoopHooks:
     """Return the hooks of one team leader's turn or resume.
 
-    The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity for an ad hoc
-    team, under the team's ``history_settings``. It has no participation gate, deferred tools, job definitions, or
-    skill-review capture; it owns the turn's queued-message notices and hears of its team's ended ``jobs``.
+    The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity when it is None
+    for an ad hoc team, under the team's ``history_settings``. It has no participation gate, deferred tools, job
+    definitions, or skill-review capture; it owns the turn's queued-message notices and hears of its team's ended
+    ``jobs``.
     """
     return _loop_hooks(
         turn,
         model=model,
-        entity_name=entity_name if entity_name in turn.config.teams else None,
+        entity_name=entity_name,
         scope_id=scope_id,
         is_team=True,
         history_settings=history_settings,

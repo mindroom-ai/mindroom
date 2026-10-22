@@ -91,9 +91,18 @@ def persist_into(records: TeamRunRecords | None, storage: TeamStorage | None) ->
     return persist
 
 
+def configured_team(config: Config, team_name: str | None) -> str | None:
+    """Return the configured team ``team_name`` names, or None for an ad hoc team.
+
+    A saved approval names the team as the entity whose account handles it, which for an ad hoc team is a member;
+    an ad hoc team compacts and stores as no configured entity, under the defaults.
+    """
+    return team_name if team_name in config.teams else None
+
+
 def team_history_settings(config: Config, team_name: str | None) -> ResolvedHistorySettings:
     """Return the history settings of the configured team, or the defaults for an ad hoc one."""
-    return config.resolve_entity(team_name if team_name in config.teams else None).history_settings
+    return config.resolve_entity(configured_team(config, team_name)).history_settings
 
 
 def register_team_notice_storage(
@@ -134,6 +143,7 @@ def under_team_scope(
 __all__ = [
     "TeamRunRecords",
     "TeamStorage",
+    "configured_team",
     "persist_into",
     "register_team_notice_storage",
     "scope_storage",

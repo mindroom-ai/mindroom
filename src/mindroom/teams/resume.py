@@ -42,6 +42,7 @@ from mindroom.teams.presentation import (
 )
 from mindroom.teams.runtime import MemberEvent, continue_team
 from mindroom.teams.storage import (
+    configured_team,
     persist_into,
     register_team_notice_storage,
     scope_storage,
@@ -79,17 +80,17 @@ if TYPE_CHECKING:
 
 def _approval_history_scope(
     member_names: tuple[str, ...],
-    configured_team_name: str,
+    team_name: str | None,
     config: Config,
     execution_identity: ToolExecutionIdentity,
     retained_scope: HistoryScope | None,
 ) -> HistoryScope | None:
-    """Resolve retained team storage before reconstructing member executables."""
+    """Resolve retained team storage before reconstructing member executables; ``team_name`` is None for an ad hoc team."""
     if retained_scope is not None:
         return retained_scope
     scope_id = (
-        configured_team_name
-        if configured_team_name in config.teams
+        team_name
+        if team_name is not None
         else ad_hoc_team_scope_id(member_names, config.agents, requester_user_id=execution_identity.requester_id)
     )
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
@@ -393,16 +394,18 @@ async def continue_paused_team_run(
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
-    ``progress``, when given, shows the resumed document live in the reply being continued; the terminal delivery
-    stays with the caller.
+    ``configured_team_name`` is the entity the approval was saved under: the configured team, or for an ad hoc team
+    the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
+    being continued; the terminal delivery stays with the caller.
     """
+    team_name = configured_team(config, configured_team_name)
     with open_resolved_scope_session_context(
         agent_name=min(member_names, default=configured_team_name),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        scope=_approval_history_scope(member_names, configured_team_name, config, execution_identity, history_scope),
+        scope=_approval_history_scope(member_names, team_name, config, execution_identity, history_scope),
     ) as scope:
         try:
             if scope is None:
@@ -445,7 +448,7 @@ async def continue_paused_team_run(
                 scope_context=scope,
                 execution_identity=execution_identity,
                 model_name=model_name,
-                configured_team_name=configured_team_name,
+                configured_team_name=team_name,
             )
             toolkit_owners = tool_owners_by_agent(*members.builds)
             native = restore_native_history(built.spec.model, persisted_run=persisted, session=scope.session)
@@ -466,7 +469,7 @@ async def continue_paused_team_run(
                 prepared_history=None,
                 canonical_per_member=dict.fromkeys(presentation.member_ids, ""),
             )
-            settings = team_history_settings(config, configured_team_name)
+            settings = team_history_settings(config, team_name)
             resume = TeamResume(
                 spec=built.spec,
                 storage=storage,
@@ -483,7 +486,7 @@ async def continue_paused_team_run(
                         native_compaction=native.native_compaction if native is not None else None,
                         prompt_id=None,
                     ),
-                    entity_name=configured_team_name,
+                    entity_name=team_name,
                     scope_id=built.spec.id,
                     model=built.spec.model,
                     history_settings=settings,

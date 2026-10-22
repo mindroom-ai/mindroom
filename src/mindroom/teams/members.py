@@ -437,10 +437,11 @@ def build_team_spec(
 
     The leader prompt holds each member's roster role, the leader's tool instructions in offer order, the provider
     family's note, and the date context with ``system_enrichment`` appended; the team's own history settings and
-    call budget come from the configured team, or the defaults for an ad hoc one.
+    call budget come from the configured team ``configured_team_name``, or the defaults when it is None for an ad
+    hoc one.
     """
     model = build_model_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
-    team_view = config.resolve_entity(configured_team_name if configured_team_name in config.teams else None)
+    team_view = config.resolve_entity(configured_team_name)
     team_id = _resolve_team_instance_id(
         member_names=members.requested_agent_names,
         config=config,
