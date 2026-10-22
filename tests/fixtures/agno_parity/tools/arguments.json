@@ -362,11 +362,28 @@
     "arguments": {
       "count": 1,
       "enabled": false,
-      "label": false,
+      "label": "false",
       "ratio": 1.0
     },
-    "error_text": "1 validation error for probe_scalars\nlabel\n  Input should be a valid string [type=string_type, input_value=False, input_type=bool]\n    For further information visit https://errors.pydantic.dev/<PYDANTIC_VERSION>/v/string_type",
     "function": "probe_scalars",
+    "kwargs": {
+      "count": {
+        "type": "int",
+        "value": 1
+      },
+      "enabled": {
+        "type": "bool",
+        "value": false
+      },
+      "label": {
+        "type": "str",
+        "value": "false"
+      },
+      "ratio": {
+        "type": "float",
+        "value": 1.0
+      }
+    },
     "raw_arguments": "{\"count\": 1, \"ratio\": 1.0, \"enabled\": false, \"label\": \"false\"}"
   },
   "scalars_fractional_float_for_int": {

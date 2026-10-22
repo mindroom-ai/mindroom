@@ -1,9 +1,10 @@
 """Decode a model's tool-call arguments and run one tool call to its outcome.
 
-``parse_tool_arguments`` reproduces how Agno 3.0.9 read a provider's arguments string, and ``execute_tool_call`` runs
-the entrypoint the way Agno's loop did: framework parameters injected, synchronous bodies off the event loop under
-the completion-ownership helpers, generators drained, and a raised exception turned into the error text the model
-reads.
+``parse_tool_arguments`` reads a provider's arguments string as Agno 3.0.9 did, except that a parameter whose schema
+admits a string may keep the words none, null, true, and false, which Agno always turned into values.
+``execute_tool_call`` runs the entrypoint the way Agno's loop did: framework parameters injected, synchronous bodies
+off the event loop under the completion-ownership helpers, generators drained, and a raised exception turned into the
+error text the model reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
@@ -22,7 +23,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -40,6 +41,9 @@ _DECODE_ERROR_TEXT = (
     "Error while decoding function arguments: {error}\n\nPlease make sure we can json.loads() the arguments and retry."
 )
 _NOT_AN_OBJECT_ERROR_TEXT = "Function arguments are not a valid JSON object.\n\n Please fix and retry."
+_LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": True, "false": False}
+# Bounds the walk through a parameter schema whose references loop.
+_MAX_SCHEMA_DEPTH = 32
 # The session id of a call that belongs to no conversation, such as an MCP gateway or script-run call. Tools that key
 # state by session, such as ``claude_agent``, share one session across those calls, the one they used when Agno's
 # runners called them without a run context.
@@ -97,18 +101,53 @@ def current_tool_call() -> ToolCall | None:
     return _CURRENT_CALL.get()
 
 
-def _literal_strings_to_values(value: object) -> object:
-    # Agno reads the strings "none", "null", "true", and "false" (any case, padded) at the top level as values.
-    if not isinstance(value, str):
+def _argument_value(value: object, schema: object, root: Mapping[str, Any]) -> object:
+    """Return the value a top-level argument reaches the tool as, given its parameter's ``schema``.
+
+    Models send the strings none, null, true, and false (any case, padded) to mean null or a boolean, so those read
+    as values, except for a parameter whose schema admits a string: it keeps the model's string when the string is
+    exactly one of its choices, or when it takes free text and the word is a boolean or the parameter does not admit
+    null. An optional string, and a choice parameter for words that are not its choices, read none and null as left
+    out, because models send those to leave an optional parameter out (Agno renders ``Literal[...] | None``
+    without null).
+    """
+    if not isinstance(value, str) or (word := value.strip().lower()) not in _LITERAL_WORDS:
         return value
-    lowered = value.strip().lower()
-    if lowered in {"none", "null"}:
-        return None
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    return value
+    converted = _LITERAL_WORDS[word]
+    free_text = nullable = False
+    choices: list[object] = []
+    for option in _schema_options(schema, root):
+        declared = option.get("type")
+        types = {kind for kind in (_items(declared) or [declared]) if isinstance(kind, str)}
+        values = [*_items(option.get("enum")), *((option["const"],) if "const" in option else ())]
+        free_text = free_text or ("string" in types and not values)
+        nullable = nullable or "null" in types or None in values
+        choices.extend(values)
+    if value in choices or (free_text and (converted is not None or not nullable)):
+        return value
+    return converted
+
+
+def _schema_options(schema: object, root: Mapping[str, Any], depth: int = 0) -> Iterator[Mapping[str, Any]]:
+    """Yield ``schema`` and every schema its anyOf, oneOf, and allOf options and its local ``$ref`` lead to."""
+    if not isinstance(schema, dict) or depth > _MAX_SCHEMA_DEPTH:
+        return
+    schema = cast("dict[str, Any]", schema)
+    yield schema
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/"):
+        target: Any = root
+        for part in reference[2:].split("/"):
+            target = target.get(part) if isinstance(target, dict) else None
+        yield from _schema_options(target, root, depth + 1)
+    for key in ("anyOf", "oneOf", "allOf"):
+        for option in _items(schema.get(key)):
+            yield from _schema_options(option, root, depth + 1)
+
+
+def _items(value: object) -> list[Any]:
+    # Schemas from MCP servers arrive as written, so a keyword may hold the wrong JSON type.
+    return value if isinstance(value, list) else []
 
 
 def parse_tool_arguments(
@@ -119,6 +158,8 @@ def parse_tool_arguments(
 
     JSON first, then a Python literal; ``[]`` means the call has no arguments and decodes to None; any other
     non-object is an error the model reads.
+    Top-level strings none, null, true, and false read as ``_argument_value`` decides; a paused call stores the
+    result and resumes with it, so a resumed call receives the same values.
     Values the model sent for parameters the framework supplies are dropped.
     """
     if not raw_arguments:
@@ -134,7 +175,10 @@ def parse_tool_arguments(
         return None
     if not isinstance(decoded, dict):
         return ToolArgumentError(_NOT_AN_OBJECT_ERROR_TEXT)
-    cleaned = {name: _literal_strings_to_values(value) for name, value in decoded.items()}
+    parameters = function.parameters
+    properties = parameters.get("properties")
+    schemas = properties if isinstance(properties, dict) else {}
+    cleaned = {name: _argument_value(value, schemas.get(name), parameters) for name, value in decoded.items()}
     return model_arguments(cleaned, function)
 
 

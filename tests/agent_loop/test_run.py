@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
@@ -545,6 +545,46 @@ async def test_an_external_result_resumes_into_agno_s_delegation_approved_row() 
 
     assert _comparable(record.to_dict(), paused=paused) == _comparable(expected, paused=paused)
     assert not any(isinstance(event, ToolStarted | ToolCompleted) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_resumes_with_the_string_arguments_it_paused_with() -> None:
+    received: list[dict[str, object]] = []
+
+    def note(
+        text: str,
+        scope: Literal["none", "all"] | None = None,
+        title: str | None = None,
+        pinned: bool = False,
+    ) -> str:
+        """Record a note.
+
+        Args:
+            text: The note.
+            scope: Who sees it.
+            title: An optional title.
+            pinned: Whether it stays on top.
+
+        """
+        received.append({"text": text, "scope": scope, "title": title, "pinned": pinned})
+        return "noted"
+
+    sent = {"text": "None", "scope": "none", "title": "null", "pinned": "true"}
+    stored = {"text": "None", "scope": "none", "title": None, "pinned": True}
+    paused_model = ScriptedModel([calls(tool_call("note", "c1", **sent), metrics=usage(1, 1))])
+    _, paused = await collect(run_agent(spec(paused_model, gated(note)), _prompt(), ctx=context()))
+    assert paused.status is RunStatus.paused
+    assert paused.tools is not None
+    assert paused.tools[0].tool_args == stored
+
+    _, record, _ = await _resume(
+        spec(ScriptedModel([answer("Noted.")]), gated(note)),
+        paused,
+        approved=[_approval("c1", "note", stored)],
+    )
+
+    assert record.status is RunStatus.completed
+    assert received == [stored]
 
 
 @pytest.mark.parametrize("second_decision", ["approve", "deny"])

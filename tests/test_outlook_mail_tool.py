@@ -11,7 +11,6 @@ from urllib.parse import unquote
 import httpx
 import pytest
 from agno.tools.function import Function
-from agno.utils.functions import get_function_call
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
@@ -1360,33 +1359,3 @@ def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
 
     assert _payload(tools.outlook_mail_set_automatic_replies(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
     assert graph.requests == []
-
-
-def _enum_values(schema: object) -> list[object]:
-    if isinstance(schema, dict):
-        return [*schema.get("enum", []), *(value for item in schema.values() for value in _enum_values(item))]
-    if isinstance(schema, list):
-        return [value for item in schema for value in _enum_values(item)]
-    return []
-
-
-def test_every_choice_reaches_the_tool_through_agnos_argument_parsing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Agno turns an argument such as "none", "null", "true", or "false" into None or a boolean before the tool runs.
-    tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
-    choices = [
-        (name, parameter, value)
-        for name in tools.functions
-        for parameter, schema in Function.from_callable(getattr(tools, name))
-        .to_dict()["parameters"]["properties"]
-        .items()
-        for value in _enum_values(schema)
-    ]
-
-    assert ("outlook_mail_set_automatic_replies", "external_audience", "internal_only") in choices
-    for name, parameter, value in choices:
-        call = get_function_call(name, json.dumps({parameter: value}), functions=tools.functions)
-        assert call is not None
-        assert call.arguments == {parameter: value}, (name, parameter, value)
