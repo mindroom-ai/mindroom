@@ -2,7 +2,9 @@
 
 An agent turn, an approval resume, a team turn with its members, and a delegation driver's parent run each hand
 their records to the store; after each save the loaded session's runs are the runs a fresh load of the store
-returns, also when the store refuses a save because a cut removed the run or a summary froze it.
+returns, also when the store refuses a save because a cut removed the run. A save a summary froze leaves the
+session's copy of the run as it was, or its absence: the row did not change, though a fresh load, which starts
+after the summary, no longer returns it.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history import session_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from mindroom.agent_loop.run import Persist
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord
@@ -293,6 +296,19 @@ async def test_an_approval_resume_whose_run_a_cut_removed_leaves_it_out_of_its_l
 # --- team turns --------------------------------------------------------------------------------------------------
 
 
+def _seed_team(store: ConversationStore) -> None:
+    """Seed the squad's session with one earlier team run."""
+    earlier = TeamRunRecord(
+        run_id="team-0",
+        team_id="squad",
+        session_id=SESSION_ID,
+        user_id=REQUESTER_ID,
+        status=RunStatus.completed,
+        content="Earlier.",
+    )
+    seed_session(store, ConversationSession(session_id=SESSION_ID, kind="team", owner_id="squad", runs=[earlier]))
+
+
 @pytest.mark.usefixtures("squad_probe")
 async def test_a_team_turn_keeps_its_member_runs_in_its_loaded_session(
     tmp_path: Path,
@@ -307,15 +323,7 @@ async def test_a_team_turn_keeps_its_member_runs_in_its_loaded_session(
         writer=[answer("Drafted.")],
     )
     store = team.storage
-    earlier = TeamRunRecord(
-        run_id="team-0",
-        team_id="squad",
-        session_id=SESSION_ID,
-        user_id=REQUESTER_ID,
-        status=RunStatus.completed,
-        content="Earlier.",
-    )
-    seed_session(store, ConversationSession(session_id=SESSION_ID, kind="team", owner_id="squad", runs=[earlier]))
+    _seed_team(store)
 
     await team.respond()
 
@@ -325,6 +333,36 @@ async def test_a_team_turn_keeps_its_member_runs_in_its_loaded_session(
     assert [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)] == ["team-0", "run-1"]
     assert member_runs[0].parent_run_id == "run-1"
     assert _as_stored(session) == _reloaded(store, SESSION_ID, "team")
+
+
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_team_turn_whose_run_a_cut_removed_leaves_it_and_its_members_out_of_its_loaded_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opened_scopes: list[ScopeSessionContext],
+) -> None:
+    """A redaction that cuts the running team run after a member answered takes both out of the session it loaded."""
+    held_before_cut: list[str | None] = []
+
+    async def redact() -> None:
+        held_before_cut.extend(run.parent_run_id for run in _loaded_session(opened_scopes, "squad").runs)
+        _cut(team.storage, "run-1", SESSION_ID)
+
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Draft it"), [Await(redact), *answer("Late answer.")]],
+        writer=[answer("Drafted.")],
+    )
+    _seed_team(team.storage)
+
+    await team.respond()
+
+    # The writer's run had joined the session under the team run before the cut.
+    assert held_before_cut == [None, "run-1"]
+    session = _loaded_session(opened_scopes, "squad")
+    assert [run.run_id for run in session.runs] == ["team-0"]
+    assert _as_stored(session) == _reloaded(team.storage, SESSION_ID, "team")
 
 
 # --- delegation ---------------------------------------------------------------------------------------------------
@@ -350,10 +388,21 @@ async def test_a_delegating_turn_leaves_its_parent_run_in_its_loaded_session_as_
     monkeypatch: pytest.MonkeyPatch,
     opened_scopes: list[ScopeSessionContext],
 ) -> None:
-    """The driver's pause, child-state, continuation, and final-state saves leave the parent run as the store holds it."""
+    """The driver's pause, child-state, continuation, and final-state saves leave the parent run as the store holds it.
+
+    The delegated child runs in a session of its own that it opens empty, so its turn's first session holds its run
+    as the child's store does.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
     _delegating_leader(monkeypatch)
+    persisted: list[ConversationSession] = []
+
+    def recording_persist_to(store: ConversationStore, session: ConversationSession) -> Persist[AnyRunRecord]:
+        persisted.append(session)
+        return persist_to(store, session)
+
+    monkeypatch.setattr(ai, "persist_to", recording_persist_to)
     store = _store("leader", config, paths)
     _seed(store, "leader", _completed("run-0", "leader", "Earlier."))
 
@@ -363,6 +412,12 @@ async def test_a_delegating_turn_leaves_its_parent_run_in_its_loaded_session_as_
     assert [run.run_id for run in session.runs] == ["run-0", "parent-run"]
     assert DELEGATION_STATE_KEY in (session.runs[1].metadata or {})
     assert _as_stored(session) == _reloaded(store)
+    [child_scope] = [scope_context for scope_context in opened_scopes if scope_context.scope.scope_id == "code"]
+    assert child_scope.session is None
+    [child] = [persisted_into for persisted_into in persisted if persisted_into.owner_id == "code"]
+    assert child.session_id == child_scope.session_id
+    assert [run.content for run in child.runs] == ["Report written."]
+    assert _as_stored(child) == _reloaded(_store("code", config, paths), child.session_id)
 
 
 async def test_a_delegating_turn_keeps_the_stored_parent_when_a_summary_froze_it_before_the_final_state(
