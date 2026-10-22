@@ -255,8 +255,8 @@ class PersonalRoomLifecycle:
 
         An owner's event in a room no retry can fix, such as an imported room holding someone outside its attested
         roster, is logged and settles: raising would hold the room's event lane, so this agent would answer nothing
-        there until someone repaired the room. Reconciliation, which runs at startup and after a configuration
-        reload, retries the room after doubling delays up to hourly.
+        there until someone repaired the room. A room whose reconciliation is still failing keeps retrying after
+        doubling delays up to hourly; otherwise the room is checked again on restart or configuration reload.
         """
         if event.membership in {"join", "leave", "ban"}:
             try:
