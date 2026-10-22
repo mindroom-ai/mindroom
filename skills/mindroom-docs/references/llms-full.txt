@@ -12557,7 +12557,7 @@ OAuth connection mechanics shared with other providers are on [OAuth Integration
 | `outlook_mail` | The requester's Outlook mailbox | `outlook_mail` | `Mail.ReadWrite`, `Mail.Send` |
 | `outlook_calendar` | The requester's Outlook calendars and events | `outlook_calendar` | `Calendars.ReadWrite` |
 | `microsoft_todo` | The requester's Microsoft To Do lists and tasks | `microsoft_todo` | `Tasks.ReadWrite` |
-| `microsoft_teams` | Teams channels and chats the requester belongs to | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.Read`, `ChatMessage.Send` |
+| `microsoft_teams` | Teams channels and chats the requester belongs to, new chats, and people's presence | `microsoft_teams` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `ChatMessage.Send`, `Presence.Read.All`, `User.Read.All` |
 | `microsoft_meetings` | Transcripts of Teams meetings the requester organized or was invited to | `microsoft_meetings` | `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` |
 | `microsoft_onenote` | The requester's OneNote notebooks, sections, and pages | `microsoft_onenote` | `Notes.ReadWrite.All` |
 | `microsoft_people` | People, managers, and direct reports in the requester's organization directory | `microsoft_people` | `User.Read.All` |
@@ -12575,7 +12575,7 @@ An administrator registers one app in Microsoft Entra for the MindRoom installat
 5. Under **API permissions**, add the **Delegated** Microsoft Graph permissions from the table above for the tools you enable, plus `User.Read` and `offline_access`, and choose **Grant admin consent** if your tenant does not let users consent themselves.
 6. On **Overview**, copy the application (client) ID and the directory (tenant) ID.
 
-`ChannelMessage.Read.All`, which `microsoft_teams` requests, always needs administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
+`ChannelMessage.Read.All` and `User.Read.All`, which `microsoft_teams` requests, always need administrator consent, so nobody can connect Teams until an administrator chooses **Grant admin consent** on the app's **API permissions** page.
 `OnlineMeetingTranscript.Read.All`, which `microsoft_meetings` requests, likewise always needs administrator consent.
 `User.Read.All`, which `microsoft_people` requests, likewise always needs administrator consent before anyone can connect the people directory.
 
@@ -12632,7 +12632,7 @@ agents:
 | `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, and moving messages; with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
-| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages; with `false`, those functions are not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats; with `false`, those functions are not offered. |
 | `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
@@ -12781,9 +12781,11 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
 | `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
+| `microsoft_teams_get_presence` | no | Read the availability, activity, and status message of up to 20 people. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
 | `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
+| `microsoft_teams_start_chat` | yes, creates a chat and posts to it | Start a chat with up to 20 people and send its first message. |
 
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
@@ -12792,7 +12794,12 @@ Sent messages appear under the requester's name and keep their line breaks, and 
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
 A chat message takes the email address of every chat member, the requester's own included, as `recipients`, and a channel post or reply takes the team and channel names as `expected_team` and `expected_channel`, so an approval card shows who reads the message.
 When a member's email address is missing or not listed, or a name differs, nothing is sent and the call fails with `recipients_mismatch`, listing every member, or `target_mismatch`, naming the real team and channel.
-The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
+Starting a chat takes the other people's sign-in addresses (userPrincipalName), usually their email addresses, so its approval card shows who reads the first message.
+One person gives a one-on-one chat, and Teams keeps one per pair, so the message lands in the existing one-on-one chat when there is one; two or more people give a new group chat, which can have a topic.
+Before posting, it reads the chat's members and sends nothing, failing with `recipients_mismatch` and the `chat_id`, when a member's email address is missing or differs from the addresses given.
+Presence looks up each person's user id by sign-in address, reports a person Microsoft Graph cannot find or show with `not_found` or `forbidden` without failing the others, and returns status messages as plain text.
+Connections made before `microsoft_teams` requested `Chat.ReadWrite`, `Presence.Read.All`, and `User.Read.All` ask their users to connect again once.
+The tool sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
 ## Teams Meetings
@@ -12888,6 +12895,8 @@ tool_approval:
     - match: microsoft_teams_reply_to_channel_message
       action: require_approval
     - match: microsoft_teams_send_chat_message
+      action: require_approval
+    - match: microsoft_teams_start_chat
       action: require_approval
     - match: microsoft_onenote_create_page
       action: require_approval
