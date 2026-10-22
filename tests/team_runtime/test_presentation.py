@@ -6,8 +6,10 @@ from __future__ import annotations
 import pytest
 from agno.utils.string import url_safe_string
 
+from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ContentDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
+from mindroom.response_turn import PausedAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
@@ -140,3 +142,163 @@ def test_a_snapshot_for_other_members_is_refused() -> None:
             state=presentation.to_state(),
             tool_trace=(),
         )
+
+
+def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
+    """Slots are keyed by member id, so equal display names share neither text nor tools."""
+    presentation = TeamStreamPresentation.new(["member_a", "member_b"], ["Same", "Same"], show_tool_calls=True)
+
+    presentation.append_member("member-a", "First answer.")
+    presentation.append_member("member-b", "Second answer.")
+    presentation.start_member_tool("member-b", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+
+    assert presentation.per_member == {
+        "member-a": "First answer.",
+        "member-b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
+    }
+    assert presentation.tool_trace[0].scope_key == "agent:member-b"
+    assert presentation.render_body().count("**Same**:") == 2
+
+
+def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
+    """The trace and the markers follow the slots' order, not the order the calls started in."""
+    presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
+    first = ToolExecution(tool_call_id="call-first", tool_name="inspect_first", requires_confirmation=True)
+    second = ToolExecution(tool_call_id="call-second", tool_name="inspect_second", requires_confirmation=True)
+    presentation.start_member_tool("second", second)
+    presentation.start_member_tool("first", first)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(first, second),
+        requirements=(
+            RunRequirement(first, member_agent_id="first"),
+            RunRequirement(second, member_agent_id="second"),
+        ),
+        response_text=presentation.render_body(),
+        tool_trace=tuple(presentation.tool_trace),
+        response_presentation_state=presentation.to_state(),
+        toolkit_owners={("first", "inspect_first"): "test_toolkit", ("second", "inspect_second"): "test_toolkit"},
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
+
+    assert [entry.tool_call_id for entry in presentation.tool_trace] == ["call-first", "call-second"]
+    assert "🔧 `inspect_first` [1] ⏳" in presentation.per_member["first"]
+    assert "🔧 `inspect_second` [2] ⏳" in presentation.per_member["second"]
+    presentation.complete_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done"),
+    )
+    assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
+    assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
+
+
+def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
+    """With tool calls hidden, the restored document completes its pending call by id and still shows no marker."""
+    presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
+    presentation.append_member("general", "Before.")
+    presentation.start_member_tool(
+        "general",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}),
+    )
+
+    restored = TeamStreamPresentation.restore(
+        config_names=["general"],
+        show_tool_calls=False,
+        state=presentation.to_state(),
+        tool_trace=presentation.tool_trace,
+    )
+    restored.complete_member_tool("general", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"))
+    restored.append_member("general", " After.")
+
+    assert "🔧" not in restored.render_body()
+    assert (restored.tool_trace[0].tool_call_id, restored.tool_trace[0].type) == ("call-1", "tool_call_completed")
+
+
+def test_two_members_may_reuse_one_call_id() -> None:
+    """Members' providers number calls independently; a call id is scoped to its member's slot."""
+    presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
+    presentation.start_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}),
+    )
+    presentation.start_member_tool(
+        "second",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}),
+    )
+    presentation.complete_member_tool(
+        "first",
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done"),
+    )
+
+    assert [(entry.scope_key, entry.type) for entry in presentation.tool_trace] == [
+        ("agent:first", "tool_call_completed"),
+        ("agent:second", "tool_call_started"),
+    ]
+    assert "🔧 `inspect` [1]" in presentation.per_member["first"]
+    assert "🔧 `inspect` [2] ⏳" in presentation.per_member["second"]
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_a_hidden_leader_call_separates_the_consensus_that_follows_it(*, restored: bool) -> None:
+    """The consensus after a hidden leader call starts a new paragraph, also when a resume restored the pause."""
+    presentation = TeamStreamPresentation.new([], [], show_tool_calls=False)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
+    apply_team_event(presentation, ContentDelta("Before approval."))
+    apply_team_event(presentation, ToolStarted(tool))
+    if restored:
+        presentation = TeamStreamPresentation.restore(
+            config_names=[],
+            show_tool_calls=False,
+            state=presentation.to_state(),
+            tool_trace=presentation.tool_trace,
+        )
+    apply_team_event(
+        presentation,
+        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
+    )
+    apply_team_event(presentation, ContentDelta("After approval."))
+
+    assert presentation.consensus == "Before approval.\n\nAfter approval."
+
+
+def test_a_chained_pause_keeps_the_hidden_separators_of_every_slot() -> None:
+    """A pause in one member's slot keeps the pending separator another member's finished call left."""
+    prior = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=False)
+    prior.append_member("first", "Before tool.")
+    prior.start_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+    prior.complete_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done"))
+    prior.append_member("second", "Waiting.")
+    prior.start_member_tool("second", ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}))
+
+    restored = TeamStreamPresentation.restore(
+        config_names=["first", "second"],
+        show_tool_calls=False,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+    )
+    restored.append_member("first", "After tool.")
+
+    assert restored.per_member["first"] == "Before tool.\n\nAfter tool."
+
+
+def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensus() -> None:
+    """Completing a restored leader marker and continuing the consensus adds no second blank paragraph."""
+    prior = TeamStreamPresentation.new([], [], show_tool_calls=True)
+    prior.append_consensus("Before approval.")
+    prior.start_tool("team", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}))
+    presentation = TeamStreamPresentation.restore(
+        config_names=[],
+        show_tool_calls=True,
+        state=prior.to_state(),
+        tool_trace=prior.tool_trace,
+    )
+
+    apply_team_event(
+        presentation,
+        ToolCompleted(ToolExecution(tool_call_id="call-1", tool_name="inspect", result="ok")),
+    )
+    apply_team_event(presentation, ContentDelta("After approval."))
+
+    assert presentation.consensus == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
