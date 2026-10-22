@@ -16,7 +16,11 @@ export function AgentAvatar({
   );
 }
 
-/** An agent's avatar and name, with whether it is shared beneath the name; `nameId` lets a panel be labelled by the name. */
+/**
+ * An agent's avatar and name, with whether it is shared beneath the name.
+ * `nameId` lets a panel be labelled by the name, and `${nameId}-type` lets
+ * the button around it be described by the type.
+ */
 export function AgentIdentity({
   agent,
   displayName,
@@ -33,7 +37,10 @@ export function AgentIdentity({
         <span id={nameId} className="block font-medium">
           {displayName}
         </span>
-        <span className="block text-xs text-muted-foreground">
+        <span
+          id={`${nameId}-type`}
+          className="block text-xs text-muted-foreground"
+        >
           {agent.is_shared ? "Shared" : "Personal"}
         </span>
       </span>

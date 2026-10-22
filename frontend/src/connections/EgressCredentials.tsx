@@ -561,6 +561,7 @@ function AgentRow({
             type="button"
             className="flex w-full items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label={`${open ? "Collapse" : "Expand"} ${agent.agent_display_name}`}
+            aria-describedby={`egress-agent-${agent.agent_name}-type`}
             aria-expanded={open}
             aria-controls={`egress-agent-panel-${agent.agent_name}`}
             onClick={onToggle}

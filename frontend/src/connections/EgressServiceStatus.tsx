@@ -1,4 +1,3 @@
-import { Badge } from "@/components/ui/badge";
 import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
   type RowAgent,
@@ -9,7 +8,7 @@ import {
 import { StatusLabel } from "./ToolRow";
 import type { EgressCredentialService } from "./types";
 
-/** The row's status badge and the notes about the account it uses, in the order they are shown. */
+/** The row's status and the notes about the account it uses, in the order they are shown. */
 export function ServiceStatus({
   service,
   agent,
@@ -52,9 +51,7 @@ export function ServiceStatus({
         </span>
       )}
       {sourceLabel && (
-        <Badge variant="outline" className="font-normal">
-          {sourceLabel}
-        </Badge>
+        <span className="text-xs text-muted-foreground">{sourceLabel}</span>
       )}
       {/* A service account serves the provider's tools, but the broker never injects it. */}
       {oauth?.service_account && service.active_source !== "key" && (

@@ -1118,6 +1118,13 @@ describe("MCP agent selection", () => {
       name: "Search agents, tools, or services",
     });
     const filter = screen.getByRole("combobox", { name: "Filter agents" });
+    // Each agent's type is read with its button.
+    expect(
+      screen.getByRole("button", { name: "Expand Research Team" }),
+    ).toHaveAccessibleDescription("Shared");
+    expect(
+      screen.getByRole("button", { name: "Expand Personal assistant" }),
+    ).toHaveAccessibleDescription("Personal");
     // The count shows only while the search or filter leaves agents out.
     expect(screen.queryByText(/^Showing /)).toBeNull();
     fireEvent.change(search, { target: { value: "WEB SEARCH" } });

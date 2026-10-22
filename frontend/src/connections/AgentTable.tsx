@@ -79,6 +79,7 @@ const columns: ColumnDef<AgentTableRow>[] = [
           type="button"
           className="flex w-full items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           aria-label={`${row.getIsExpanded() ? "Collapse" : "Expand"} ${agent.agent_display_name}`}
+          aria-describedby={`agent-${agent.agent_name}-type`}
           aria-expanded={row.getIsExpanded()}
           aria-controls={
             row.getIsExpanded() ? `agent-tools-${agent.agent_name}` : undefined
@@ -329,7 +330,8 @@ export function AgentTable({
                   <th
                     key={header.id}
                     scope="col"
-                    className="px-5 py-3 font-medium"
+                    // The Agent column is as wide as an open agent's Tool column, so the columns after it line up.
+                    className={`px-5 py-3 font-medium ${header.column.id === "agent" ? "w-[44%]" : ""}`}
                   >
                     {flexRender(
                       header.column.columnDef.header,

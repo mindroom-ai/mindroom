@@ -149,10 +149,13 @@ describe("egress credentials page", () => {
         .slice(1)
         .map((row) => {
           const [agent, keys] = within(row).getAllByRole("cell");
-          // The agent's type sits under its name.
+          const button = within(agent).getByRole("button");
+          // The agent's type sits under its name and is read with its button.
           return [
-            within(agent).getByRole("button").getAttribute("aria-label"),
-            within(agent).getByText(/^(Shared|Personal)$/).textContent,
+            button.getAttribute("aria-label"),
+            button.getAttribute("aria-describedby") &&
+              document.getElementById(button.getAttribute("aria-describedby")!)
+                ?.textContent,
             keys.textContent,
           ];
         }),
@@ -163,6 +166,9 @@ describe("egress credentials page", () => {
       ["Expand Bare Agent", "Personal", "None"],
     ]);
     expect(screen.queryByRole("region")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Expand Shared Dev" }),
+    ).toHaveAccessibleDescription("Shared");
     fireEvent.click(
       screen.getByRole("button", { name: "Expand Personal Mind" }),
     );
