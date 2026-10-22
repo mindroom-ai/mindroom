@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -33,6 +32,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     cli_window,
     install_scripted_shell,
     offered_tools,
+    settled_receipt,
     shell_cli_owner,
 )
 from tests.test_delegation_direct_audit import _identity
@@ -363,8 +363,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
                 call_id=call_id,
             ),
         )
-        while (receipt := await owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110 - actual CLI receipt protocol
-            await asyncio.sleep(0.01)
+        receipt = await settled_receipt(owner, str(call_id))
         assert receipt["status"] == "completed", json.dumps(receipt, default=str)
         return str(receipt["outcome"])
 

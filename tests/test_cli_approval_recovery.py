@@ -72,6 +72,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     cli_window,
     install_scripted_shell,
     offered_tools,
+    settled_receipt,
     shell_cli_owner,
 )
 from tests.response_runner_helpers import _bot
@@ -769,12 +770,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
                 ),
             )
             async with asyncio.timeout(5):
-                while (receipt := await owner.get_call(queued["call_id"]))["status"] in {  # noqa: ASYNC110 - poll the public receipt API
-                    "queued",
-                    "running",
-                    "waiting",
-                }:
-                    await asyncio.sleep(0)
+                receipt = await settled_receipt(owner, queued["call_id"])
             if nested != "suspend":
                 assert receipt["status"] == "completed"
         return "fresh shell result"

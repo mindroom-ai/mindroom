@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -66,6 +67,13 @@ def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:
     owner = registry.resolve("Bearer " + shell_env.token, now_ns=time.time_ns())
     assert isinstance(owner, LiveTurnTools)
     return owner
+
+
+async def settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, object]:
+    """Poll the call's receipt until it is no longer queued, running, or waiting, as `mindroom-agent` waits for it."""
+    while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110 - poll the CLI receipt protocol
+        await asyncio.sleep(0.001)
+    return receipt
 
 
 PLUGIN = """from hashlib import sha256
