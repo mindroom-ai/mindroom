@@ -925,6 +925,33 @@ async def test_persist_to_writes_back_a_session_state_restored_after_an_earlier_
     assert _loaded_ids(store) == ["r1", "r2", "r3"]
 
 
+@pytest.mark.asyncio
+async def test_persist_to_retries_a_changed_session_state_whose_write_failed(store: ConversationStore) -> None:
+    """A state write that fails is written by the next save of the same state, so a lost write is never taken as done."""
+    _seed(store, [_run("r1")])
+    session = _loaded(store)
+    session.session_state = {"cwd": "/repo"}
+    store.save_session_fields(session, "session_state")
+    persist = persist_to(store, session)
+    _execute(
+        store,
+        "CREATE TRIGGER refuse_state BEFORE UPDATE OF session_data ON code_sessions "
+        "WHEN json_extract(NEW.session_data, '$.session_state.cwd') = '/repo/sub' "
+        "BEGIN SELECT RAISE(ABORT, 'state refused'); END",
+    )
+    session.session_state["cwd"] = "/repo/sub"
+
+    with pytest.raises(sqlite3.IntegrityError, match="state refused"):
+        await persist(_run("r2"))
+    assert _loaded(store).session_state == {"cwd": "/repo"}
+
+    _execute(store, "DROP TRIGGER refuse_state")
+    await persist(_run("r3"))
+
+    assert _loaded(store).session_state == {"cwd": "/repo/sub"}
+    assert _loaded_ids(store) == ["r1", "r2", "r3"]
+
+
 def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
     """Agno 2 columns encoded twice load, and a field save writes them encoded once."""
     store.save_session_fields(_session())

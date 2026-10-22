@@ -12,14 +12,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.provider import (
-    ReasoningDelta,
     StreamProgress,
-    TextDelta,
     ToolCallReady,
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.assistant_turn import finished_assistant_message, whole_turn_deltas
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.chat_wire import (
@@ -118,10 +116,9 @@ class ChatAdapter:
             else:
                 parts = parse_chat_completion(await client.chat.completions.create(**kwargs), self.wire)
                 first_token = time.monotonic()
-                if parts.reasoning:
-                    yield ReasoningDelta(parts.reasoning)
-                if parts.content:
-                    yield TextDelta(parts.content)
+                # Tool calls are yielded after the branch for both paths, so the whole reply contributes none here.
+                for event in whole_turn_deltas(reasoning=parts.reasoning, content=parts.content, tool_calls=()):
+                    yield event
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
         message = finished_assistant_message(

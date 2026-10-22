@@ -282,7 +282,7 @@ async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     stream: bool,
 ) -> None:
     """The Claude adapter's answer becomes the consensus whether the leader's reply streams or arrives whole."""
-    blocks = [{"type": "text", "text": "General response"}]
+    blocks = [{"type": "text", "text": "Leader synthesis"}]
     team = _team(tmp_path, monkeypatch)
     leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks) if stream else json_reply(blocks)))
     install_team_models(monkeypatch, {**team.models, "default": leader})
@@ -290,7 +290,7 @@ async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     with isolated_provider_environment():
         text = await team.reply(stream=stream)
 
-    assert text == f"{HEADER}\n**Team Consensus**:\n\nGeneral response"
+    assert text == f"{HEADER}\n**Team Consensus**:\n\nLeader synthesis"
 
 
 # ---------------------------------------------------------------------------
