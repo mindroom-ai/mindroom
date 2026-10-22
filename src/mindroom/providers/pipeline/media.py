@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import MediaKind, ModelIdentity, ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["FALLBACK_MARKER", "forget_learned_media_limits", "media_fallback_stream"]
+__all__ = ["FALLBACK_MARKER", "media_fallback_stream"]
 
 logger = get_logger(__name__)
 
@@ -45,7 +45,6 @@ _UNSUPPORTED_VIEW_MESSAGE = (
 # A retried media-free request must not repeat a failure the media cannot have caused.
 _NOT_MEDIA_RELATED_CODES = frozenset({INCOMPLETE_STREAM, SAFEGUARD_REFUSAL, MALFORMED_TOOL_CALL})
 _PAYLOAD_TOO_LARGE_STATUS = 413
-_RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_STATUS = 500
 # Rejections naming one input's size or type prove only that this input failed, not the whole media kind.
 _INPUT_SPECIFIC_ERROR_MARKERS = ("exceed", "too large", "media_type", "mime type", "mime_type")
@@ -68,11 +67,6 @@ class _Route:
 
 # Learned limits live for the process only; a provider may add a capability at any time.
 _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
-
-
-def forget_learned_media_limits() -> None:
-    """Clear the media limits learned from provider rejections, for isolated tests."""
-    _LEARNED_UNSUPPORTED.clear()
 
 
 def _route(identity: ModelIdentity) -> _Route:
@@ -156,9 +150,8 @@ def _names_capability_gap(error: ProviderError, kinds: frozenset[MediaKind]) -> 
     if len(kinds) != 1 or isinstance(error, ContextWindowExceeded):
         return False
     status = error.status_code
-    if status is not None and (
-        status in {_PAYLOAD_TOO_LARGE_STATUS, _RATE_LIMIT_STATUS} or status >= _SERVER_ERROR_STATUS
-    ):
+    # A 413 or a server error says nothing about the model; rate limits are retryable and never reach the retry.
+    if status is not None and (status == _PAYLOAD_TOO_LARGE_STATUS or status >= _SERVER_ERROR_STATUS):
         return False
     text = str(error).lower()
     if f"error code: {_PAYLOAD_TOO_LARGE_STATUS}" in text or any(

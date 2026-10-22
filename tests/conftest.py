@@ -143,7 +143,7 @@ from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
-from mindroom.providers.pipeline.media import forget_learned_media_limits
+from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -3263,11 +3263,9 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_model_media_capabilities() -> Generator[None, None, None]:
+def _reset_model_media_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep process-local learned media support isolated per test."""
-    forget_learned_media_limits()
-    yield
-    forget_learned_media_limits()
+    monkeypatch.setattr(media_pipeline, "_LEARNED_UNSUPPORTED", {})
 
 
 @pytest.fixture(autouse=True)
