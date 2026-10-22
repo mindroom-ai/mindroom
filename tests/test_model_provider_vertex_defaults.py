@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.anthropic.messages import ClaudeProvider, native_compaction_endpoint
 from mindroom.providers.registry import build_model_provider
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -18,7 +18,8 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.registry import build_model_provider
-from tests.providers.golden_support import Wire, bare_adapter
+from tests.providers.bare_adapter import bare_adapter
+from tests.providers.golden_support import Wire
 
 if TYPE_CHECKING:
     from pathlib import Path

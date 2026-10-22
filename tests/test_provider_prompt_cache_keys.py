@@ -21,7 +21,7 @@ from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path

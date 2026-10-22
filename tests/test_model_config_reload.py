@@ -27,7 +27,7 @@ from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml
 from tests.identity_helpers import entity_ids
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

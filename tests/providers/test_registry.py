@@ -36,10 +36,10 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticProvider
+from tests.providers.bare_adapter import bare_adapter
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
-    bare_adapter,
     encoded_response,
     expected_parsed,
     expected_stop_reason,

@@ -43,7 +43,7 @@ from tests.history_helpers import (
     compact_runs,
 )
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:

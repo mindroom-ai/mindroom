@@ -26,7 +26,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
-from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.tool_policy import without_provider_tools
 from mindroom.tool_jobs.execution import project_definitions
 
@@ -370,13 +369,6 @@ def pipeline_provider(adapter: ModelProvider, *, idle_timeout_seconds: float | N
         media_fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT,
         request_log=None,
     )
-
-
-def bare_adapter(provider: ModelProvider) -> ModelProvider:
-    """Return the adapter inside the pipeline stages the registry or ``pipeline_provider`` put around it."""
-    while isinstance(provider, WrappedProvider):
-        provider = provider.inner
-    return provider
 
 
 async def replay_through_pipeline(

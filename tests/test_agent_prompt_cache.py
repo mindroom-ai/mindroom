@@ -24,7 +24,7 @@ from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prep
 from mindroom.system_prompt import render_session_context
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path

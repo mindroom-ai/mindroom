@@ -12,7 +12,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.providers.golden_support import bare_adapter
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
