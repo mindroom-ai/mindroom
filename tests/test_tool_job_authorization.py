@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING, cast
 
 import mcp.types as mcp_types
 import pytest
-from agno.agent import Agent
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 import mindroom.tool_jobs.authorization as authorization_module
 from mindroom.agents import build_agent_toolkit
@@ -22,11 +19,10 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.tool_jobs.authorization import (
     _configured_tool_allowed,
     authority_snapshot,
-    bind_actor_authority,
-    bind_toolkit_authority,
-    function_authority,
     locally_allowed,
+    toolkit_authority,
 )
+from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
@@ -57,17 +53,15 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    bind_toolkit_authority(toolkit, authored_name=entry.name)
-    function = toolkit.get_async_functions()["list_workflows"]
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
-    authority = function_authority(function)
+    assert "list_workflows" in toolkit.get_async_functions()
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
         return locally_allowed(
             config,
             _OWNER,
-            tool_name=function.name,
-            toolkit_name=function.owning_toolkit,
+            tool_name="list_workflows",
+            toolkit_name=entry.name,
             origin={},
             depth=0,
             authority=authority,
@@ -98,17 +92,15 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    bind_toolkit_authority(toolkit, authored_name=entry.name)
-    function = toolkit.get_functions()["add"]
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
-    authority = function_authority(function)
+    assert "add" in toolkit.get_functions()
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
         return locally_allowed(
             config,
             _OWNER,
-            tool_name=function.name,
-            toolkit_name=function.owning_toolkit,
+            tool_name="add",
+            toolkit_name=entry.name,
             origin={},
             depth=0,
             authority=authority,
@@ -135,12 +127,9 @@ def test_constructor_identity_is_a_digest_with_separate_function_filters() -> No
 
 def _calculator_authority(config: Config) -> dict[str, object]:
     toolkit = Toolkit(name="calculator", auto_register=False)
-    function = Function(name="add", entrypoint=lambda: None)
-    toolkit.functions["add"] = function
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
-    return function_authority(function)
+    return toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
 
 def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
@@ -419,12 +408,9 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
     )
     owner = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
     toolkit = Toolkit(name="calculator", auto_register=False)
-    function = Function(name="add", entrypoint=lambda: None)
-    toolkit.functions["add"] = function
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
     bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
-    bind_toolkit_authority(toolkit, authored_name="calculator")
-    function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
-    snapshot = function_authority(function)
+    snapshot = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
         return locally_allowed(

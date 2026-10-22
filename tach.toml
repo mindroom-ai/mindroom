@@ -889,9 +889,8 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.timing",
     "mindroom.approval.tool_approval",
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.notices",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.catalog",
@@ -1290,6 +1289,8 @@ depends_on = [
     "mindroom.history.mid_turn_compaction",
     "mindroom.participation_hook",
     "mindroom.skill_learning.capture",
+    "mindroom.tool_jobs.execution",
+    "mindroom.tool_jobs.notices",
 ]
 visibility = ["mindroom.ai", "mindroom.approval.resume"]
 
@@ -1391,7 +1392,7 @@ visibility = [
     # These tell a gated call that asks for its approval as its job from other calls.
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.skill_learning.reviewer",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.approvals",
 ]
 
@@ -2065,7 +2066,7 @@ path = "mindroom.tool_system.dedicated_threads"
 depends_on = []
 visibility = [
     "mindroom.api.sandbox_runner",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.sandbox_proxy",
 ]
@@ -3315,6 +3316,7 @@ depends_on = [
     "mindroom.thread_models",
     "mindroom.timing",
     "mindroom.tool_jobs.consumption",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
@@ -5156,9 +5158,8 @@ visibility = [
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.providers.openai",
     "mindroom.providers.pipeline",
 ]
@@ -5396,7 +5397,7 @@ depends_on = []
 visibility = [
     "mindroom.delegation.execution",
     "mindroom.reply_scope",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -8321,7 +8322,6 @@ visibility = [
     "mindroom.providers.portable_tool_search",
     "mindroom.skill_learning.capture",
     "mindroom.skill_learning.reviewer",
-    "mindroom.tool_jobs.notices",
     "mindroom.history.mid_turn_compaction",
 ]
 
@@ -8329,7 +8329,6 @@ visibility = [
 from = ["mindroom.agno_compat_model_hooks"]
 expose = [
     "install_message_projection",
-    "install_tool_result_callback",
     "install_async_invocation_hooks",
     "install_stream_invocation_hooks",
     "temporary_async_invocation_hooks",
@@ -8494,8 +8493,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
-    "mindroom.tool_jobs.agno_compat_execution",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.execution_authority",
     "mindroom.delegation.job_approvals",
@@ -8522,7 +8520,7 @@ visibility = [
     "mindroom.tool_jobs.runtime",
     "mindroom.response_lifecycle",
     "mindroom.tool_system.tool_hooks",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.approvals",
     "mindroom.api.sandbox_runner",
@@ -8553,14 +8551,15 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.tool_jobs.agno_execution"
+path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.agent_cli.agno_compat_cli_checkpoint",
-    "mindroom.cancellation",
+    "mindroom.agent_loop",
     "mindroom.custom_tools.job",
     "mindroom.approval.tool_approval",
+    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.call_record",
-    "mindroom.tool_jobs.agno_compat_functions",
+    "mindroom.tool_system.invocation",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.consumption",
@@ -8574,16 +8573,16 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.construction",
-    "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.dedicated_threads",
 ]
 visibility = [
-    # Agent assembly asks which gated functions can ask for their approval as their job.
+    # Agent and team assembly admit their actors' calls as jobs, and the loop hooks offer their wait budget.
     "mindroom.agents",
-    "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.loop_hooks",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -8591,9 +8590,9 @@ path = "mindroom.tool_jobs.consumption"
 depends_on = [
     "mindroom.llm",
     "mindroom.session_storage.agent_storage",
-    "mindroom.tool_jobs.agno_compat_functions",
     "mindroom.tool_jobs.execution_authority",
     "mindroom.tool_jobs.results",
+    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.runtime_context",
     "mindroom.session_storage.lanes",
 ]
@@ -8602,7 +8601,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.response_turn",
     "mindroom.teams",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.custom_tools.job",
 ]
@@ -8614,7 +8613,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
 ]
 visibility = [
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_system.tool_hooks",
 ]
@@ -8640,36 +8639,25 @@ visibility = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.turn",
     "mindroom.ai",
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.history.session_context",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.runtime",
 ]
 
 [[modules]]
 path = "mindroom.tool_jobs.results"
-depends_on = []
+depends_on = ["mindroom.llm", "mindroom.tool_jobs.legacy_results", "mindroom.tool_system.agno_toolkits"]
 visibility = [
     "mindroom.delegation.background",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
 ]
 
 [[modules]]
-path = "mindroom.tool_jobs.agno_compat_execution"
-depends_on = [
-    "mindroom.tool_jobs.background_after",
-    "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.resources",
-    "mindroom.tool_system.context_bound_streams",
-    "mindroom.custom_tools.job",
-    "mindroom.tool_jobs.runtime",
-    "mindroom.tool_system.runtime_context",
-]
-visibility = [
-    "mindroom.agents",
-]
+path = "mindroom.tool_jobs.legacy_results"
+depends_on = []
+visibility = ["mindroom.tool_jobs.results"]
 
 [[modules]]
 path = "mindroom.knowledge.collection_lifetime"
@@ -8712,7 +8700,7 @@ visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
 ]
 
 [[modules]]
@@ -8813,14 +8801,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.custom_tools.job"
-depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_jobs.conversation", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime", "mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
+depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_jobs.conversation", "mindroom.tool_system.agno_toolkits", "mindroom.tool_system.runtime_context", "mindroom.tool_jobs.runtime", "mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
 
 visibility = [
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agents",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.agno_compat_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.approval.tool_owners",
 ]
 
@@ -8833,13 +8820,12 @@ depends_on = [
     "mindroom.tool_system.filters",
     "mindroom.tool_system.registry_state",
     "mindroom.agent_policy",
-    "mindroom.tool_jobs.agno_compat_functions",
 ]
 
 visibility = [
     "mindroom.agents",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
 ]
 
 [[modules]]
@@ -8849,6 +8835,7 @@ depends_on = [
     "mindroom.approval.response",
     "mindroom.background_tasks",
     "mindroom.event_journal",
+    "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
@@ -8857,7 +8844,7 @@ depends_on = [
 visibility = [
     "mindroom.delegation.job_approvals",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
 ]
 
 [[modules]]
@@ -8884,7 +8871,6 @@ visibility = ["mindroom.orchestration.tool_job_runtime"]
 [[modules]]
 path = "mindroom.tool_jobs.notices"
 depends_on = [
-    "mindroom.agno_compat_model_hooks",
     "mindroom.hooks.types",
     "mindroom.logging_config",
     "mindroom.tool_jobs.conversation",
@@ -8894,6 +8880,7 @@ depends_on = [
 visibility = [
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.loop_hooks",
     "mindroom.teams",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.follow_ups",
@@ -8942,7 +8929,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.notices",
 ]
@@ -8951,7 +8938,7 @@ visibility = [
 path = "mindroom.tool_jobs.provenance"
 depends_on = ["mindroom.mcp.toolkit"]
 visibility = [
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.orchestration.tool_job_runtime",
 ]
 
@@ -8961,7 +8948,7 @@ depends_on = []
 visibility = [
     "mindroom.agents",
     "mindroom.tool_jobs.authorization",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.tool_system.metadata",
 ]
 
@@ -8969,9 +8956,8 @@ visibility = [
 path = "mindroom.tool_jobs.background_after"
 depends_on = []
 visibility = [
-    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.runtime",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
     "mindroom.delegation.execution",
 ]
 
@@ -9344,14 +9330,6 @@ from = ["mindroom.custom_tools.google_service"]
 expose = ["GoogleCloudToolkit"]
 
 [[modules]]
-path = "mindroom.tool_jobs.agno_compat_functions"
-depends_on = []
-visibility = [
-    "mindroom.tool_jobs.agno_execution",
-    "mindroom.tool_jobs.consumption",
-    "mindroom.tool_jobs.authorization",
-]
-[[modules]]
 path = "mindroom.tool_jobs.settings"
 depends_on = ["mindroom.tool_jobs.instances"]
 visibility = [
@@ -9367,7 +9345,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.orchestration.config_lifecycle",
     "mindroom.teams",
-    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.execution",
 ]
 
 # Knowledge graph: one store per runtime, fed by background ingestion and read by the knowledge_graph tool.

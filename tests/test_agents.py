@@ -4087,14 +4087,9 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
         runtime_paths,
     )
 
-    agent = _create_agent_for_test("helper", config, delegation_depth=depth)
+    build = _create_agent_for_test("helper", config, delegation_depth=depth)
 
-    functions = {
-        name: function
-        for toolkit in agent.tools
-        if isinstance(toolkit, Toolkit)
-        for name, function in (*toolkit.functions.items(), *toolkit.async_functions.items())
-    }
+    functions = {function.name: function for toolkit in build.spec.toolkits for function in toolkit.functions}
     expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
     assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
     shell = functions["run_shell_command"]

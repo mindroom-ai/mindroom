@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
     from mindroom.tool_system.invocation import ToolMiddleware
 
@@ -49,8 +50,10 @@ class AgentBuild:
     ``additional_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names; ``tool_owners`` maps each function to the
     authored toolkit it came from, None for a generated one, which approvals check. ``tool_middleware`` is the
-    tool-call policy the loop runs around every call, outermost first: the binding through which a scheduled call
-    runs one of the build's functions, plugin before and after hooks, call recording, and the computer announcement.
+    tool-call policy the loop runs around every call, outermost first: tool-job admission, the binding through which
+    a scheduled call runs one of the build's functions, plugin before and after hooks, call recording, and the
+    computer announcement. ``tool_jobs`` is the agent as tool jobs see it while the instance runs them, which the
+    loop's hooks offer the wait budget of its managed calls and the notices of its ended jobs for.
     """
 
     spec: AgentSpec
@@ -61,6 +64,7 @@ class AgentBuild:
     tool_owners: Mapping[str, str | None]
     surface: AgentSurface
     tool_middleware: tuple[ToolMiddleware, ...] = ()
+    tool_jobs: JobActor | None = None
 
 
 def prompt_for_turn(build: AgentBuild, *context: str) -> Message:

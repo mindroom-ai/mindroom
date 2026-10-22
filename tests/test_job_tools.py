@@ -8,11 +8,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.team import Team
-from agno.tools import Toolkit
-from agno.tools.function import ToolResult
 
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
@@ -21,36 +16,51 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_outcome
 from mindroom.event_journal import ToolJobStore
+from mindroom.llm.media import Image
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import consumption as consumption_module
-from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.consumption import set_consumption_storage
+from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit, ToolValue
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import DelegationModel, _call, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
+    call_job_tool,
     completed_delegation_job,
+    job_actor,
     lookup,
     pending_outcome,
     pending_outcomes,
+    run_job_turn,
     start_job,
     tool_job_runtime,
+    toolkit_job_tools,
     wait_for_status,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-    from agno.run.agent import RunOutput
-    from agno.run.team import TeamRunOutput
-
+    from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_jobs.runtime import BackgroundJob, EncodedResultPayload, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def _controls(paths: RuntimePaths, owner: ToolExecutionIdentity, *, team: bool = False) -> JobActor:
+    """The actor whose only tool is its job controls, as an agent or a team leader offers them."""
+    tools = toolkit_job_tools(JobTools(paths, owner), authored_name="job")
+    return job_actor(*tools.values(), name=owner.recipient if team else owner.agent_name, team=team)
+
 
 _NO_SUCH_JOB = (
     "No job with this ID is available to you in this conversation. The ID may be wrong or incomplete, the job may "
@@ -96,7 +106,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
             "completed",
             "answer",
             result_payload=encode_result_payload(
-                ToolResultPayload(value=ToolResult(content="answer", metadata={"proof": 1})),
+                ToolResultPayload(value=ToolValue(content="answer", images=(Image(content=b"proof"),))),
             ),
         )
 
@@ -109,8 +119,8 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
             assert not pending.done()
             gate.set()
             result = await pending
-            assert isinstance(result, ToolResult)
-            assert result.metadata == {"proof": 1}
+            assert isinstance(result, ToolValue)
+            assert [image.content for image in result.images] == [b"proof"]
             assert result.content == "answer"
             assert json.loads(await tools.job("list"))[0]["job_id"] == "ordinary"
             assert set(tools.get_async_functions()) == {"job"}
@@ -137,9 +147,11 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
-        agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
-        names = [name for toolkit in agent.tools for name in toolkit.get_async_functions()]
+        build = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
+        names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1
+        assert build.tool_jobs is not None
+        assert "job" in build.tool_jobs.tools
     finally:
         await runtime.shutdown()
 
@@ -202,8 +214,9 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path: Path) -> None:
-    """A real Team driver routes list and wait back through the job's owning member."""
+@pytest.mark.parametrize("saved_kind", ["team", "agent"])
+async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(tmp_path: Path, saved_kind: str) -> None:
+    """A team leader's job wait counts as read only when the team's own run saved the call, never an agent's."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), agent_name="squad", transport_agent_name="squad")
@@ -211,58 +224,37 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-
-    def storage_factory() -> BaseDb:
-        return create_session_storage("leader", config, paths, owner)
+    store = create_session_storage("leader", config, paths, owner)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved member answer")
 
-    storage = storage_factory()
     try:
         await start_job(runtime, "member-job", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("member-job", owner=owner, depth=0)
         await runtime.release_wait("member-job", waited.claim)
-        member_model = DelegationModel(
-            id="test",
-            responses=[
-                ModelResponse(tool_calls=[_call("job", "list", action="list")]),
-                ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="member-job")]),
-                ModelResponse(content="Member consumed result"),
-            ],
+        claims = ConsumptionOwner(storage_factory=lambda: store)
+        async with execution_resources():
+            with tool_runtime_context(context), consumption_context(claims):
+                outcome = await call_job_tool(
+                    _controls(paths, owner, team=True),
+                    "job",
+                    {"action": "wait", "job_id": "member-job"},
+                    call_id="wait-call",
+                    run_id="team-run",
+                    session_id=context.session_id,
+                )
+        assert outcome.content == "saved member answer"
+        saved_call = ToolExecution(tool_call_id="wait-call", tool_name="job", result=outcome.content)
+        run = (
+            TeamRunRecord(run_id="team-run", session_id=context.session_id, team_id="squad", tools=[saved_call])
+            if saved_kind == "team"
+            else RunRecord(run_id="team-run", session_id=context.session_id, agent_id="squad", tools=[saved_call])
         )
-        team_model = DelegationModel(
-            id="test",
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        _call(
-                            "delegate_task_to_member",
-                            "route",
-                            member_id="leader",
-                            task="Find jobs and retrieve result",
-                        ),
-                    ],
-                ),
-                ModelResponse(content="Team done"),
-            ],
-        )
-        install_tool_job_execution(member_model)
-        install_tool_job_execution(team_model)
-        member = Agent(id="leader", model=member_model, tools=[JobTools(paths, owner)], db=storage)
-        team = Team(id="squad", model=team_model, members=[member], db=storage)
-
-        @owned_tool_execution()
-        async def run() -> TeamRunOutput:
-            set_consumption_storage(storage_factory)
-            return await team.arun("Follow up", session_id=context.session_id, user_id=context.requester_id)
-
-        with tool_runtime_context(context):
-            response = await run()
-        results = response.member_responses[0].tools
-        assert json.loads(results[0].result)[0]["job_id"] == "member-job"
-        assert results[1].result == "saved member answer"
-        assert (await lookup(runtime, "member-job", owner=owner, depth=0)).consumed
+        session = ConversationSession(session_id=context.session_id, kind=saved_kind, owner_id="squad")
+        store.save_run(session, replace(run, status=RunStatus.completed), record_usage=False)
+        await claims.finalize()
+        assert (await lookup(runtime, "member-job", owner=owner, depth=0)).consumed is (saved_kind == "team")
     finally:
         await runtime.shutdown()
 
@@ -272,18 +264,18 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
     ("status", "value", "stored_error", "expected_result"),
     [
         ("failed", None, "controlled HTTP 500 failure", "controlled HTTP 500 failure"),
-        ("failed", ToolResult(content="rich failure"), None, "rich failure"),
+        ("failed", ToolValue(content="rich failure"), None, "rich failure"),
         ("completed", None, None, "None"),
     ],
 )
-async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
+async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
     tmp_path: Path,
     status: Literal["completed", "failed"],
-    value: ToolResult | None,
+    value: ToolValue | None,
     stored_error: str | None,
     expected_result: str,
 ) -> None:
-    """The reserved Agno control retains failure state while consuming exact saved evidence."""
+    """The job controls report a failed job as the call's failure while consuming exact saved evidence."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
@@ -292,14 +284,14 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    def storage_factory() -> BaseDb:
+    def storage_factory() -> ConversationStore:
         return create_session_storage("leader", config, paths, owner)
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome(
             status,
             "None",
-            result_payload=encode_result_payload(ToolResultPayload(value=value, error=stored_error, elapsed=0.1)),
+            result_payload=encode_result_payload(ToolResultPayload(value=value, error=stored_error)),
         )
 
     storage = storage_factory()
@@ -307,20 +299,18 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         waited = await runtime.wait("ordinary", owner=owner, depth=0)
         await runtime.release_wait("ordinary", waited.claim)
-        model = DelegationModel(
-            id="test",
-            responses=[
-                ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="ordinary")]),
-                ModelResponse(content="done"),
-            ],
-        )
-        install_tool_job_execution(model)
-        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
+        model = ScriptedModel([calls(tool_call("job", "wait", action="wait", job_id="ordinary")), answer("done")])
 
         @owned_tool_execution()
-        async def run() -> RunOutput:
+        async def run() -> RunRecord:
             set_consumption_storage(storage_factory)
-            return await agent.arun("wait", session_id=context.session_id, user_id=context.requester_id)
+            return await run_job_turn(
+                _controls(paths, owner),
+                model,
+                "wait",
+                session_id=context.session_id,
+                store=storage,
+            )
 
         with tool_runtime_context(context):
             response = await run()
@@ -503,18 +493,12 @@ async def test_cancel_returns_at_once_and_leaves_the_outcome_to_the_notice(tmp_p
 
     try:
         await start_job(runtime, "cancelled", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
-        model = DelegationModel(
-            id="test",
-            responses=[
-                ModelResponse(tool_calls=[_call("job", "cancel", action="cancel", job_id="cancelled")]),
-                ModelResponse(content="stopped"),
-            ],
+        model = ScriptedModel(
+            [calls(tool_call("job", "cancel", action="cancel", job_id="cancelled")), answer("stopped")],
         )
-        install_tool_job_execution(model)
-        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)])
         with tool_runtime_context(context):
-            response = await agent.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
-        assert json.loads(response.tools[0].result)["status"] == "cancel_requested"
+            response = await run_job_turn(_controls(paths, owner), model, "cancel", session_id=context.session_id)
+        assert json.loads(str(response.tools[0].result))["status"] == "cancel_requested"
         await wait_for_status(runtime, "cancelled", "cancelled")
         assert not (await lookup(runtime, "cancelled", owner=owner, depth=0)).consumed
     finally:
@@ -560,7 +544,7 @@ async def _collect_in_a_run(
     outcomes: dict[str, BackgroundOutcome | None],
     *,
     kind: str = "tool",
-) -> tuple[RunOutput, ToolJobRuntime, JobTools, ToolExecutionIdentity, object]:
+) -> tuple[RunRecord, ToolJobRuntime, JobTools, ToolExecutionIdentity, object]:
     """Start jobs with the given outcomes (``None`` keeps one running), then collect them in one saved agent run."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
@@ -570,7 +554,7 @@ async def _collect_in_a_run(
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
-    def storage_factory() -> BaseDb:
+    def storage_factory() -> ConversationStore:
         return create_session_storage("leader", config, paths, owner)
 
     for job_id, outcome in outcomes.items():
@@ -594,21 +578,14 @@ async def _collect_in_a_run(
         if outcome is not None:
             await wait_for_status(runtime, job_id, outcome.status)
     storage = storage_factory()
-    model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("job", "collect", action="collect")]),
-            ModelResponse(content="done"),
-        ],
-    )
-    install_tool_job_execution(model)
+    model = ScriptedModel([calls(tool_call("job", "collect", action="collect")), answer("done")])
     tools = JobTools(paths, owner)
-    agent = Agent(id="leader", model=model, tools=[tools], db=storage)
+    actor = job_actor(*toolkit_job_tools(tools, authored_name="job").values())
 
     @owned_tool_execution()
-    async def run() -> RunOutput:
+    async def run() -> RunRecord:
         set_consumption_storage(storage_factory)
-        return await agent.arun("collect", session_id=context.session_id, user_id=context.requester_id)
+        return await run_job_turn(actor, model, "collect", session_id=context.session_id, store=storage)
 
     with tool_runtime_context(context):
         response = await run()
