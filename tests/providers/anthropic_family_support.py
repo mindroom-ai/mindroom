@@ -141,7 +141,9 @@ def sse_reply(
             | {"stop_reason": None},
         },
     ]
-    for index, block in enumerate(blocks):
+    for index, authored in enumerate(blocks):
+        # Popping the helper-only keys below must leave the caller's blocks reusable.
+        block = dict(authored)
         kind = block["type"]
         deltas: list[dict[str, Any]]
         if kind == "text":
@@ -154,9 +156,13 @@ def sse_reply(
                 {"type": "signature_delta", "signature": block["signature"]},
             ]
         elif kind == "tool_use":
+            partial_json = block.pop("partial_json", None)
             start = {**block, "input": {}}
             deltas = [
-                {"type": "input_json_delta", "partial_json": block.pop("partial_json", json.dumps(block["input"]))},
+                {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(block["input"]) if partial_json is None else partial_json,
+                },
             ]
         else:
             # Other blocks arrive whole, unless the block names deltas of its own.

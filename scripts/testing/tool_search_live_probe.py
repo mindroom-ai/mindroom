@@ -107,13 +107,15 @@ def build_probe_provider(args: argparse.Namespace, http_client: httpx.AsyncClien
             id=args.model_id,
             api_key=os.environ.get("ANTHROPIC_API_KEY", "dry-run-key"),
         )
-    storage_root = Path(tempfile.mkdtemp(prefix="tool-search-probe-"))
-    runtime_paths = resolve_runtime_paths(
-        config_path=storage_root / "config.yaml",
-        storage_path=storage_root,
-        process_env=dict(os.environ),
-    )
-    provider = build_provider(model_config, runtime_paths)
+    # The adapter reads its credentials while it is built and keeps no path into the storage root.
+    with tempfile.TemporaryDirectory(prefix="tool-search-probe-") as storage:
+        storage_root = Path(storage)
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_root / "config.yaml",
+            storage_path=storage_root,
+            process_env=dict(os.environ),
+        )
+        provider = build_provider(model_config, runtime_paths)
     return provider if http_client is None else replace(provider, http_client=http_client)
 
 

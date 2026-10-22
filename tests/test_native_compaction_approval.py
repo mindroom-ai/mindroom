@@ -1,12 +1,13 @@
 """An approval resume sends the native replay policy the paused request ran with, when its route still holds.
 
-The team continuation still runs through Agno until the team runtime cutover; its native replay is tested with it.
+Under that policy the request replays the stored checkpoint in place of the transcript it covers.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -19,18 +20,24 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.native_compaction import _NATIVE_CHECKPOINT_KEY
+from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.llm.provider import ModelRequest
 
 pytestmark = pytest.mark.asyncio
+
+_TRANSCRIPT = "Original canonical transcript"
+_CHECKPOINT = {"type": "compaction", "id": "cmp_1", "encrypted_content": "checkpoint-bytes"}
 
 
 @dataclass(frozen=True)
@@ -87,11 +94,40 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
     )
 
 
+def _checkpointed_run() -> RunRecord:
+    """Return an earlier finished run whose answer route-a compacted natively, after the transcript it covers."""
+    checkpoint = {"route": "route-a", "threshold": 1024, "checkpoint_prefix": True, "items": [_CHECKPOINT]}
+    return RunRecord(
+        run_id="run-0",
+        agent_id="general",
+        session_id="session-1",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content=_TRANSCRIPT),
+            Message(role="assistant", content="Noted.", provider_data={_NATIVE_CHECKPOINT_KEY: checkpoint}),
+        ],
+    )
+
+
+def _responses_input(tmp_path: Path, request: ModelRequest) -> list[Any]:
+    """Return the ``input`` a Responses route sends for ``request``, the projection that replays checkpoints."""
+    adapter = responses_adapter(tmp_path)
+    kwargs = responses_request_kwargs(
+        model_id=adapter.identity.id,
+        request=request,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+    return kwargs["input"]
+
+
 async def _resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     model: ScriptedModel,
     paused: RunRecord,
+    *,
+    history: tuple[RunRecord, ...] = (),
 ) -> AgentBuild:
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -119,7 +155,8 @@ async def _resume(
     store = create_session_storage("general", config, paths, identity)
     build = agents.create_agent("general", config, paths, identity, history_storage=store)
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
-    store.save_run(session, paused, record_usage=False)
+    for run in (*history, paused):
+        store.save_run(session, run, record_usage=False)
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -142,15 +179,21 @@ async def test_a_rebuilt_approval_resumes_the_paused_requests_native_policy(
     *,
     disable_before_pause: bool,
 ) -> None:
-    """The resume compacts at the paused request's threshold; a request that ran without compaction stays without."""
+    """The resume compacts at the paused request's threshold; a request that ran without compaction stays without.
+
+    Compacting, it replays the stored checkpoint in place of the transcript it covers; without, the full transcript.
+    """
     saved = {"route": "route-a", "threshold": None if disable_before_pause else 1024}
     model = _compacting_model()
 
-    await _resume(tmp_path, monkeypatch, model, _paused_record(saved=saved))
+    await _resume(tmp_path, monkeypatch, model, _paused_record(saved=saved), history=(_checkpointed_run(),))
 
     [request] = model.requests
     expected = None if disable_before_pause else NativeCompactionReplay(route="route-a", threshold=1024)
     assert request.native_compaction == expected
+    replay = _responses_input(tmp_path, request)
+    assert (_CHECKPOINT in replay) is not disable_before_pause
+    assert (_TRANSCRIPT in json.dumps(replay)) is disable_before_pause
 
 
 async def test_a_route_change_on_rebuild_replays_without_the_stored_checkpoints(
@@ -159,11 +202,15 @@ async def test_a_route_change_on_rebuild_replays_without_the_stored_checkpoints(
 ) -> None:
     """A rebuilt model on another route cannot replay the paused route's checkpoints, so the resume sends none."""
     model = _compacting_model("route-b")
+    paused = _paused_record(saved={"route": "route-a", "threshold": 1024})
 
-    await _resume(tmp_path, monkeypatch, model, _paused_record(saved={"route": "route-a", "threshold": 1024}))
+    await _resume(tmp_path, monkeypatch, model, paused, history=(_checkpointed_run(),))
 
     [request] = model.requests
     assert request.native_compaction is None
+    replay = _responses_input(tmp_path, request)
+    assert _CHECKPOINT not in replay
+    assert _TRANSCRIPT in json.dumps(replay)
 
 
 @pytest.mark.parametrize(

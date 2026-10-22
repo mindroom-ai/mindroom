@@ -15,9 +15,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import chat_request_kwargs
 from mindroom.providers.openai.responses import ResponsesAdapter
-from mindroom.providers.openai.responses_wire import responses_request_kwargs
 from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
@@ -48,27 +46,8 @@ def identity() -> ToolExecutionIdentity:
 def _sent(provider: ModelProvider) -> dict[str, Any]:
     """Return the body fields and headers one request of ``provider`` sends beyond the SDK keywords."""
     adapter = bare_adapter(provider)
-    request = ModelRequest(messages=(Message(role="user", content="Write an introduction."),))
-    if isinstance(adapter, ResponsesAdapter):
-        kwargs = responses_request_kwargs(
-            model_id=adapter.identity.id,
-            request=request,
-            settings=adapter.settings,
-            wire=adapter.wire,
-        )
-    else:
-        assert isinstance(adapter, ChatAdapter)
-        kwargs = chat_request_kwargs(
-            model_id=adapter.identity.id,
-            messages=request.messages,
-            tools=request.tools,
-            native_tools=request.native_tools,
-            tool_choice=request.tool_choice,
-            response_format=request.response_format,
-            stream=request.stream,
-            settings=adapter.settings,
-            wire=adapter.wire,
-        )
+    assert isinstance(adapter, ChatAdapter | ResponsesAdapter)
+    kwargs = adapter._request_kwargs(ModelRequest(messages=(Message(role="user", content="Write an introduction."),)))
     return {**kwargs.get("extra_body", {}), "extra_headers": kwargs.get("extra_headers", {})}
 
 
