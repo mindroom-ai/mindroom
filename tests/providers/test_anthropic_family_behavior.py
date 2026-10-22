@@ -96,7 +96,6 @@ def test_identity_and_capabilities_per_route(
     assert capabilities.native_tool_search is native_tool_search
     assert capabilities.omitted_media == frozenset({"audio", "video"})
     assert capabilities.claude_family is True
-    assert capabilities.prompt_cache_breakpoints is True
     assert capabilities.provider_default_sampling is True
     assert capabilities.native_compaction is (route != "bedrock_claude")
 
@@ -715,13 +714,6 @@ async def test_build_provider_resolves_route_credentials_from_the_runtime_env(tm
             ).settings.region
             is None
         )
-
-
-def test_format_tool_results_appends_each_result_for_the_wire_to_merge(tmp_path: Path) -> None:
-    """Results stay separate tool messages in history; the formatter merges them into one user turn on the wire."""
-    provider = route_provider("anthropic", tmp_path, Wire(json_reply([])))
-    results = [Message(role="tool", tool_call_id="a", content="1"), Message(role="tool", tool_call_id="b", content="2")]
-    assert provider.format_tool_results(_user(), results) == results
 
 
 @pytest.mark.asyncio

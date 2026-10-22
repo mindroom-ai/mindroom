@@ -2,34 +2,18 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
-from mindroom.history.replay import PortableReplayEstimator, compaction_summary_message, current_summary_text
+from mindroom.history.replay import compaction_summary_message, current_summary_text
 from mindroom.history.types import NativeHistory
 from mindroom.native_compaction import recorded_native_settings
-from mindroom.providers.pipeline.wrapped import bare_adapter
 
 if TYPE_CHECKING:
     from mindroom.history.types import ResolvedHistoryExecutionPlan, ResolvedHistorySettings
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
-
-
-@runtime_checkable
-class SupportsNativeCompaction(Protocol):
-    """A provider adapter whose route can compact history on the provider side."""
-
-    def native_compaction_settings(
-        self,
-        *,
-        threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
-    ) -> NativeCompactionReplay | None:
-        """Return the replay settings of a request that wants compaction at ``threshold`` input tokens."""
-        ...
 
 
 def configure_native_history(
@@ -44,8 +28,8 @@ def configure_native_history(
 
     None means the provider route manages no history of its own, so the requests carry no native settings.
     """
-    adapter = bare_adapter(provider)
-    if not isinstance(adapter, SupportsNativeCompaction):
+    compaction = provider.native_compaction
+    if compaction is None:
         return None
     threshold = plan.trigger_threshold_tokens
     static_tokens = plan.static_prompt_tokens
@@ -61,7 +45,7 @@ def configure_native_history(
         and static_tokens < threshold < static_tokens + hard_budget
     )
     return NativeHistory(
-        native_compaction=adapter.native_compaction_settings(
+        native_compaction=compaction.native_compaction_settings(
             threshold=threshold if enabled else None,
             history_generation=_history_generation(session),
             allow_authored=enabled,
@@ -77,12 +61,12 @@ def restore_native_history(
     session: ConversationSession | None,
 ) -> NativeHistory | None:
     """Return the native settings a resume of ``persisted_run`` sends: the paused request's policy when its route holds."""
-    adapter = bare_adapter(provider)
-    if not isinstance(adapter, SupportsNativeCompaction):
+    compaction = provider.native_compaction
+    if compaction is None:
         return None
     latest = next((message for message in reversed(persisted_run.messages) if message.role == "assistant"), None)
     saved = recorded_native_settings(latest) if latest is not None else None
-    native = adapter.native_compaction_settings(
+    native = compaction.native_compaction_settings(
         threshold=saved.threshold if saved is not None else None,
         history_generation=_history_generation(session),
         allow_authored=saved is not None and saved.threshold is None,
@@ -126,21 +110,13 @@ def _history_generation(session: ConversationSession | None) -> str:
     return str(compaction_summary_message(summary, run_local=False).content) if summary is not None else ""
 
 
-def portable_replay_estimator(provider: ModelProvider | None) -> PortableReplayEstimator | None:
-    """Return the route that sizes explicitly replayed history the way its requests send it, or None for canonical."""
-    adapter = bare_adapter(provider) if provider is not None else None
-    return adapter if isinstance(adapter, PortableReplayEstimator) else None
-
-
 def native_history_route(native: NativeHistory | None) -> str | None:
     """Return the active projection identity, or canonical history when disabled."""
     return native.native_compaction.route if native is not None and native.native_compaction is not None else None
 
 
 __all__ = [
-    "SupportsNativeCompaction",
     "configure_native_history",
     "native_history_route",
-    "portable_replay_estimator",
     "restore_native_history",
 ]

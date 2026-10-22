@@ -14,7 +14,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
 import httpx
@@ -35,9 +35,9 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result, split_thinking
+from mindroom.providers.assistant_turn import finished_assistant_message, split_thinking
 from mindroom.providers.errors import classify_provider_error, transport_error
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 
@@ -63,9 +63,9 @@ _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 class OllamaSettings:
     """The ``extra_kwargs`` an Ollama model accepts, named as Agno's ``Ollama`` fields."""
 
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
-    client_params: Mapping[str, Any] | None = None
+    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     format: str | Mapping[str, Any] | None = None
     options: Mapping[str, Any] | None = None
     keep_alive: float | str | None = None
@@ -91,10 +91,14 @@ class OllamaProvider:
     settings: OllamaSettings
     host: str
     _client: AsyncClient | None = field(default=None, init=False, repr=False)
+    # Ollama keeps no history of its own, and its replayed history is sized canonically.
+    native_compaction: ClassVar[None] = None
+    replay_estimator: ClassVar[None] = None
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result, as Ollama's wire format takes them."""
-        return one_message_per_result(messages, results)
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one chat request, streamed unless ``request.stream`` is False, and yield its events.

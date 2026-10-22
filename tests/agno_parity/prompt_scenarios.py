@@ -90,12 +90,20 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from mindroom.agent_modes import AgentMode
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.read_protocol import SearchHit
-    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
+    from mindroom.llm.provider import (
+        Capabilities,
+        ModelIdentity,
+        ModelProvider,
+        ModelRequest,
+        NativeCompaction,
+        PortableReplayEstimator,
+        StreamEvent,
+    )
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -208,7 +216,7 @@ class Recorder:
         self._built_models += 1
         return index
 
-    def _bind_adapter(self, adapter: Any) -> _RecordingAdapter:  # noqa: ANN401 - any family's adapter
+    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
         return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter.identity, self._next_index()))
 
     @contextmanager
@@ -228,10 +236,10 @@ class _RecordingAdapter:
     """A built provider adapter whose requests the recorder answers instead of the provider.
 
     The registry wraps it in the request pipeline as it wraps the adapter, so every request is recorded as the
-    adapter would receive it, and the identity, capabilities, and settings are the configured route's own.
+    adapter would receive it, and everything but the stream is the configured route's own.
     """
 
-    adapter: Any
+    adapter: ModelProvider
     respond: Callable[[ModelRequest], ModelResponse]
 
     @property
@@ -245,9 +253,19 @@ class _RecordingAdapter:
         return self.adapter.capabilities
 
     @property
-    def settings(self) -> object:
-        """The adapter's settings, which the request log records."""
-        return self.adapter.settings
+    def native_compaction(self) -> NativeCompaction | None:
+        """The adapter's native history."""
+        return self.adapter.native_compaction
+
+    @property
+    def replay_estimator(self) -> PortableReplayEstimator | None:
+        """The adapter's replay estimator."""
+        return self.adapter.replay_estimator
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The adapter's recorded settings."""
+        return self.adapter.model_params
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Answer the request with the responder's message as one finished turn."""
@@ -256,10 +274,6 @@ class _RecordingAdapter:
             yield TextDelta(response.content)
         message = OwnedMessage(role="assistant", content=response.content, tool_calls=response.tool_calls or None)
         yield TurnCompleted(message=message, stop_reason="tool_use" if response.tool_calls else "end")
-
-    def format_tool_results(self, messages: Sequence[OwnedMessage], results: Sequence[OwnedMessage]) -> list[Any]:
-        """Format tool results the adapter's way."""
-        return self.adapter.format_tool_results(messages, results)
 
 
 @dataclass(frozen=True)

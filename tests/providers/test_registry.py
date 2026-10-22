@@ -34,12 +34,12 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama_adapter import OllamaProvider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
-from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
+    bare_adapter,
     encoded_response,
     expected_parsed,
     expected_stop_reason,
@@ -96,12 +96,6 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     return resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
-
-
-def _bare_adapter(provider: ModelProvider) -> ModelProvider:
-    while isinstance(provider, WrappedProvider):
-        provider = provider.inner
-    return provider
 
 
 def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
@@ -210,16 +204,49 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
 
 @pytest.mark.parametrize("route", sorted(_ROUTES))
 def test_every_documented_provider_value_gets_its_adapter_and_identity(route: str, runtime_paths: RuntimePaths) -> None:
-    """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry."""
+    """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry.
+
+    The pipeline hands callers the adapter's own native history (Responses and Claude), replay estimator
+    (Responses), and recorded settings, so nothing has to unwrap it.
+    """
     fields, adapter_type, provider_label, provider_name = _ROUTES[route]
     config = Config(models={"target": ModelConfig(**fields)})
 
     provider = build_model_provider(config, runtime_paths, "target")
 
-    adapter = _bare_adapter(provider)
+    adapter = bare_adapter(provider)
     assert type(adapter) is adapter_type
     assert (provider.identity.provider, provider.identity.provider_name) == (provider_label, provider_name)
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
+    native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
+    assert provider.native_compaction is native_history
+    assert provider.replay_estimator is (adapter if adapter_type is ResponsesAdapter else None)
+    assert provider.model_params == adapter.model_params
+
+
+def test_model_params_record_the_route_settings_without_credentials_or_clients(runtime_paths: RuntimePaths) -> None:
+    """Run metadata and the request log get copies of a route's request settings, never its keys, headers, or clients."""
+    extra_kwargs = {
+        "api_key": "test-key",
+        "default_headers": {"x-team": "a"},
+        "client_params": {"http_client": Wire().client},
+        "metadata": {"team": "a"},
+        "temperature": 0.3,
+    }
+    model = ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", extra_kwargs=extra_kwargs)
+
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+    params = provider.model_params
+    assert params == {
+        "metadata": {"team": "a"},
+        "temperature": 0.3,
+        "strict_output": True,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+    }
+    params["metadata"]["team"] = "b"
+    assert provider.model_params["metadata"] == {"team": "a"}
 
 
 def test_unknown_models_and_providers_are_rejected(runtime_paths: RuntimePaths) -> None:

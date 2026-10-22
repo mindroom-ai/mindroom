@@ -78,12 +78,7 @@ async def run_golden(fixture: dict[str, Any], root: Path) -> Replay:
     with isolated_provider_environment():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
             provider = provider_for(fixture["input"]["model_config"], root, http_client)
-            return await replay_through_pipeline(
-                provider,
-                fixture["input"],
-                recorded,
-                native_compaction_settings=provider.native_compaction_settings,
-            )
+            return await replay_through_pipeline(provider, fixture["input"], recorded)
 
 
 ROUTE_CONFIGS: dict[str, dict[str, Any]] = {

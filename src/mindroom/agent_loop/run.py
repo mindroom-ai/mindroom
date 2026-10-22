@@ -195,7 +195,7 @@ def resume_planned(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        entry=partial(resume_entry, spec, messages, plan.prepared, ctx, hooks, plan.decided),
+        entry=partial(resume_entry, messages, plan.prepared, ctx, hooks, plan.decided),
     )
 
 
@@ -210,7 +210,6 @@ def prepare_resume_tools(spec: AgentSpec, approved: Sequence[ApprovedCall]) -> P
 
 
 async def resume_entry(
-    spec: AgentSpec,
     messages: list[Message],
     prepared: PreparedTools,
     ctx: RunContext,
@@ -236,7 +235,7 @@ async def resume_entry(
         if requirement.external_execution_result is not None:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
-    await append_tool_results(spec.model, messages, results, ())
+    await append_tool_results(messages, results, ())
     for hook in hooks.on_resume_entry:
         await hook(messages)
 

@@ -12,18 +12,17 @@ import json
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, TurnCompleted
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Synthetic"
@@ -114,10 +113,14 @@ class SyntheticProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: SyntheticSettings
+    # The synthetic model keeps no history of its own, and its replayed history is sized canonically.
+    native_compaction: ClassVar[None] = None
+    replay_estimator: ClassVar[None] = None
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result."""
-        return one_message_per_result(messages, results)
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.

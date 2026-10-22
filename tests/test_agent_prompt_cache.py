@@ -21,10 +21,10 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prepare_request_body
-from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.system_prompt import render_session_context
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.golden_support import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path

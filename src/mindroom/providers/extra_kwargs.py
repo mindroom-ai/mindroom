@@ -1,4 +1,4 @@
-"""Parse a model's ``extra_kwargs`` into the settings dataclass of its provider adapter.
+"""Parse a model's ``extra_kwargs`` into the settings dataclass of its provider adapter, and report its parameters.
 
 Settings fields keep the Agno model field names that authored configs already use.
 Keys an adapter does not accept fail with the accepted list instead of being passed through.
@@ -6,13 +6,21 @@ Keys an adapter does not accept fail with the accepted list instead of being pas
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from dataclasses import fields
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from _typeshed import DataclassInstance
+
+_METADATA_KEY = "secret"
+# Field metadata marking a setting that holds a credential, a client, or headers or a query string that can
+# carry one, rather than a request parameter; model params never record it.
+SECRET = MappingProxyType({_METADATA_KEY: True})
 
 
 def _copied(value: Any) -> Any:  # noqa: ANN401 - arbitrary authored value
@@ -51,4 +59,25 @@ def settings_from_extra_kwargs[T: DataclassInstance](
     return settings_type(**{key: _copied(value) for key, value in values.items()})
 
 
-__all__ = ["settings_from_extra_kwargs"]
+def settings_params(settings: DataclassInstance) -> dict[str, Any]:
+    """Return copies of a route's JSON-safe, non-secret settings, as run metadata and the request log record them.
+
+    Fields marked ``SECRET`` are skipped before their values are read, so credentials and SDK clients are never
+    copied.
+    """
+    params: dict[str, Any] = {}
+    for field in fields(settings):
+        if field.metadata.get(_METADATA_KEY):
+            continue
+        value = getattr(settings, field.name)
+        if value is None:
+            continue
+        try:
+            json.dumps(value)
+        except TypeError:
+            continue
+        params[field.name] = deepcopy(value)
+    return params
+
+
+__all__ = ["SECRET", "settings_from_extra_kwargs", "settings_params"]

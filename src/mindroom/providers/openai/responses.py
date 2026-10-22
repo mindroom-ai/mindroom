@@ -21,7 +21,8 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.native_compaction import native_compaction_route
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
+from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, with_overrides
 from mindroom.providers.openai.errors import provider_error, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
@@ -40,12 +41,19 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
 
     from openai import AsyncOpenAI
 
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent
+    from mindroom.llm.provider import (
+        Capabilities,
+        ModelIdentity,
+        ModelRequest,
+        NativeCompaction,
+        PortableReplayEstimator,
+        StreamEvent,
+    )
     from mindroom.providers.openai.settings import ResponsesSettings
 
 __all__ = ["ResponsesAdapter"]
@@ -72,9 +80,20 @@ class ResponsesAdapter:
     settings: ResponsesSettings
     clients: SDKClients
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Responses takes one ``function_call_output`` per result, in order."""
-        return one_message_per_result(messages, results)
+    @property
+    def native_compaction(self) -> NativeCompaction:
+        """Responses keeps provider-side state, so every request carries its replay policy and compaction settings."""
+        return self
+
+    @property
+    def replay_estimator(self) -> PortableReplayEstimator:
+        """Responses sizes explicitly replayed history as its requests send it."""
+        return self
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     def native_compaction_settings(
         self,

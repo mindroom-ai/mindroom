@@ -213,7 +213,7 @@ def _answer(provider: ClaudeProvider, messages: list[Message]) -> tuple[ModelTur
         if not calls:
             return turn, called
         called.extend(call["function"]["name"] for call in calls)
-        messages.extend(provider.format_tool_results(messages, [_run_tool(call) for call in calls]))
+        messages.extend(_run_tool(call) for call in calls)
     return turn, called
 
 

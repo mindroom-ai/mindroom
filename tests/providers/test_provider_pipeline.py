@@ -53,7 +53,7 @@ from mindroom.providers.pipeline.retry import retrying_stream
 from mindroom.providers.pipeline.wrapped import AGGREGATE_USAGE_KEY, WrappedProvider
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.llm.provider import StreamEvent
@@ -75,6 +75,9 @@ class _ScriptedProvider:
     attempts: list[list[_Step]]
     identity: ModelIdentity = _IDENTITY
     capabilities: Capabilities = _CAPABILITIES
+    native_compaction: None = None
+    replay_estimator: None = None
+    model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)
     closed: int = 0
 
@@ -91,10 +94,6 @@ class _ScriptedProvider:
                 yield cast("StreamEvent", step)
         finally:
             self.closed += 1
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
 
 
 def _turn(text: str = "done", usage: MessageMetrics | None = None) -> TurnCompleted:
@@ -573,7 +572,7 @@ async def test_only_a_malformed_tool_call_before_output_gets_guidance(attempt: l
 @pytest.mark.asyncio
 async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> None:
     usage = MessageMetrics(input_tokens=42, output_tokens=12, total_tokens=54, cache_read_tokens=30)
-    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], model_params={"temperature": 0.2})
     log = RequestLog(
         model_name="default",
         configured_provider="openai",
@@ -589,6 +588,7 @@ async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> 
     assert request_record["system_prompt"] == "Be brief."
     assert request_record["message_count"] == 2
     assert [tool["name"] for tool in request_record["tools"]] == ["search"]
+    assert request_record["model_params"] == {"temperature": 0.2}
     assert response_record["request_log_id"] == request_record["request_log_id"]
     assert response_record["usage"] == {
         "input_tokens": 42,

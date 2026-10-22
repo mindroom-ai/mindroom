@@ -14,7 +14,7 @@ import time
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import httpx
 from pydantic import ValidationError
@@ -23,9 +23,9 @@ from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import INCOMPLETE_STREAM, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import finished_assistant_message, one_message_per_result
+from mindroom.providers.assistant_turn import finished_assistant_message
 from mindroom.providers.errors import classify_provider_error, transport_error
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.wire import (
     GeminiReply,
@@ -48,7 +48,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
 _PROVIDER = "Google"
@@ -59,13 +58,13 @@ _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 class GeminiSettings:
     """The ``extra_kwargs`` a Gemini model accepts, named as Agno's ``Gemini`` fields."""
 
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     vertexai: bool = False
     project_id: str | None = None
     location: str | None = None
     # A google.auth credentials object; only programmatic callers can supply one.
-    credentials: object | None = None
-    client_params: Mapping[str, Any] | None = None
+    credentials: object | None = field(default=None, metadata=SECRET)
+    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
     generation_config: Mapping[str, Any] | None = None
     generative_model_kwargs: Mapping[str, Any] | None = None
@@ -98,10 +97,14 @@ class GeminiProvider:
     settings: GeminiSettings
     vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
+    # Gemini keeps no history of its own, and its replayed history is sized canonically.
+    native_compaction: ClassVar[None] = None
+    replay_estimator: ClassVar[None] = None
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append one stored message per tool result; the wire format merges them into one user turn."""
-        return one_message_per_result(messages, results)
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one ``generateContent`` request, streamed unless ``request.stream`` is False, and yield its events.

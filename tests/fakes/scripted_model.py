@@ -11,6 +11,8 @@ from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
     ModelRequest,
+    NativeCompaction,
+    PortableReplayEstimator,
     StreamEvent,
     TextDelta,
     ToolCallReady,
@@ -43,8 +45,10 @@ class ScriptedModel:
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
     requests: list[ModelRequest] = field(default_factory=list)
-    # A route adapter's settings, which the registry's request log records; a scripted route has none.
-    settings: object = None
+    # A scripted route keeps no provider-side history, sizes replayed history canonically, and records no settings.
+    native_compaction: NativeCompaction | None = None
+    replay_estimator: PortableReplayEstimator | None = None
+    model_params: dict[str, Any] = field(default_factory=dict)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the next scripted turn's events."""
@@ -55,11 +59,6 @@ class ScriptedModel:
                 await step.run()
             else:
                 yield step
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message, as OpenAI-style wires do."""
-        del messages
-        return list(results)
 
 
 def usage(input_tokens: int, output_tokens: int, **counters: float) -> MessageMetrics:

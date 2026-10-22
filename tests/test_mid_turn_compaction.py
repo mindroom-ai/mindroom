@@ -116,6 +116,9 @@ class _ToolLoopModel:
     ) -> None:
         self.identity = _TEST_MODEL
         self.capabilities = Capabilities()
+        self.native_compaction = None
+        self.replay_estimator = None
+        self.model_params: dict[str, Any] = {}
         self.tool_rounds = tool_rounds
         self.calls_per_round = calls_per_round
         self.usage = usage
@@ -157,10 +160,6 @@ class _ToolLoopModel:
             yield ToolCallReady(call)
         yield UsageReported(message.metrics)
         yield TurnCompleted(message=message, stop_reason="tool_use" if message.tool_calls else "end")
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        del messages
-        return list(results)
 
 
 def probe() -> str:
@@ -431,7 +430,6 @@ def _binding(tmp_path: Path, deferred_tool_names: frozenset[str]) -> mid_turn_co
         session=None,
         scope=None,
         native_compaction=None,
-        replay_estimator=None,
         deferred_tool_names=deferred_tool_names,
         prompt_id=None,
         lifecycle=None,
