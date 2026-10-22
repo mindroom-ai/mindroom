@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
+
+import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -22,7 +25,7 @@ from mindroom.tools.file import file_tools
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
-    import pytest
+    from collections.abc import Callable
 
 _WORKER_KEY = "v1:tenant:shared:bob"
 
@@ -136,27 +139,132 @@ def test_coding_tool_reads_greps_and_lists_a_share(tmp_path: Path) -> None:
     assert tool.read_file(str(other / "secret.md")).startswith("Error")
 
 
-def test_tools_without_a_workspace_reach_only_their_shares(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without a workspace, a share stays reachable by absolute path while the working directory is refused."""
-    _workspace, share, other = _layout(tmp_path)
-    monkeypatch.chdir(other)
-    roots = (_root(share, writable=True),)
-    file_tool = file_tools()(file_access="workspace", shared_directory_roots=lambda: roots)
-    coding_tool = CodingTools(file_access="workspace", shared_directory_roots=lambda: roots)
+_RUN_DIRECTORY_TEXT = "run directory secret\n"
 
-    assert file_tool.read_file(str(share / "summary.md")) == "hello\nshared world\n"
-    assert not file_tool.replace_file_chunk(str(share / "summary.md"), 1, 1, "edited").startswith("Error")
+
+def _run_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, share_below: bool) -> tuple[Path, Path]:
+    """Make the working directory of an agent without a workspace, holding a secret, and a share it owns.
+
+    Starting MindRoom beside its config puts the default shared directories below the working directory.
+    """
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "secret.md").write_text(_RUN_DIRECTORY_TEXT, encoding="utf-8")
+    share = (run if share_below else tmp_path) / "mindroom_data" / "shared_directories" / "alice" / "report"
+    share.mkdir(parents=True)
+    (share / "summary.md").write_text("hello\nshared world\n", encoding="utf-8")
+    monkeypatch.chdir(run)
+    return run, share
+
+
+def _toolkits_without_a_workspace(share: Path) -> dict[str, Any]:
+    roots = (_root(share, writable=True),)
+    return {
+        "file": file_tools()(file_access="workspace", enable_delete_file=True, shared_directory_roots=lambda: roots),
+        "coding": CodingTools(file_access="workspace", shared_directory_roots=lambda: roots),
+    }
+
+
+@pytest.mark.parametrize("share_below", [True, False], ids=["share-below-working-directory", "share-beside-it"])
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+def test_tools_without_a_workspace_reach_their_shares(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    share_below: bool,
+    absolute: bool,
+) -> None:
+    """Without a workspace, file and coding reach a share by either spelling, even one below the working directory."""
+    run, share = _run_directory(tmp_path, monkeypatch, share_below=share_below)
+    toolkits = _toolkits_without_a_workspace(share)
+
+    def spell(path: Path) -> str:
+        return str(path) if absolute else os.path.relpath(path, run)
+
+    assert toolkits["file"].read_file(spell(share / "summary.md")) == "hello\nshared world\n"
+    assert toolkits["file"].save_file("draft", spell(share / "draft.md")) == str(share / "draft.md")
+    assert not toolkits["file"].replace_file_chunk(spell(share / "summary.md"), 1, 1, "edited").startswith("Error")
+    assert "edited" in toolkits["coding"].read_file(spell(share / "summary.md"))
+    assert toolkits["coding"].write_file(spell(share / "new.md"), "x").startswith("Wrote")
+    assert toolkits["coding"].ls(spell(share)) == "\n".join(
+        str(share / name) for name in ("draft.md", "new.md", "summary.md")
+    )
     assert (share / "summary.md").read_text(encoding="utf-8") == "hello\nedited\n"
-    assert coding_tool.write_file(str(share / "new.md"), "x").startswith("Wrote")
-    assert coding_tool.ls(str(share)) == f"{share / 'new.md'}\n{share / 'summary.md'}"
-    refusals = [
-        file_tool.read_file("secret.md"),
-        file_tool.read_file(str(other / "secret.md")),
-        file_tool.list_files(),
-        coding_tool.read_file("secret.md"),
-        coding_tool.ls(),
-    ]
-    assert all(refusal.startswith("Error: this agent has no workspace") for refusal in refusals)
+    assert (share / "draft.md").read_text(encoding="utf-8") == "draft"
+
+
+@dataclass(frozen=True, slots=True)
+class _PathCall:
+    """One path method of the file or coding toolkit, called on a file, a directory, or a glob pattern."""
+
+    toolkit: str
+    method: str
+    target: Literal["file", "directory", "pattern"]
+    call: Callable[[Any, str], str]
+
+
+_PATH_CALLS = (
+    _PathCall("file", "save_file", "file", lambda tool, path: tool.save_file("planted", path)),
+    _PathCall("file", "read_file", "file", lambda tool, path: tool.read_file(path)),
+    _PathCall("file", "read_file_chunk", "file", lambda tool, path: tool.read_file_chunk(path, 0, 0)),
+    _PathCall("file", "replace_file_chunk", "file", lambda tool, path: tool.replace_file_chunk(path, 0, 0, "planted")),
+    _PathCall("file", "delete_file", "file", lambda tool, path: tool.delete_file(path)),
+    _PathCall("file", "list_files", "directory", lambda tool, path: tool.list_files(path)),
+    _PathCall("file", "search_files", "pattern", lambda tool, path: tool.search_files(path)),
+    _PathCall("file", "search_content", "directory", lambda tool, path: tool.search_content("secret", path)),
+    _PathCall("coding", "read_file", "file", lambda tool, path: tool.read_file(path)),
+    _PathCall("coding", "edit_file", "file", lambda tool, path: tool.edit_file(path, "secret", "planted")),
+    _PathCall("coding", "write_file", "file", lambda tool, path: tool.write_file(path, "planted")),
+    _PathCall("coding", "grep", "directory", lambda tool, path: tool.grep("secret", path)),
+    _PathCall("coding", "find_files", "directory", lambda tool, path: tool.find_files("*.md", path)),
+    _PathCall("coding", "ls", "directory", lambda tool, path: tool.ls(path)),
+)
+
+
+def _tree(root: Path) -> dict[str, bytes | None]:
+    return {
+        str(path.relative_to(root)): path.read_bytes() if path.is_file() else None for path in sorted(root.rglob("*"))
+    }
+
+
+def test_path_calls_cover_every_file_and_coding_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every function the two toolkits give the model is a path method the refusal test below calls."""
+    _run, share = _run_directory(tmp_path, monkeypatch, share_below=True)
+    toolkits = _toolkits_without_a_workspace(share)
+
+    registered = {(name, function.__name__) for name, toolkit in toolkits.items() for function in toolkit.tools}
+
+    assert {(call.toolkit, call.method) for call in _PATH_CALLS} == registered
+
+
+_TARGETS = {
+    True: {"file": "secret.md", "directory": ".", "pattern": "*.md"},
+    False: {"file": "missing.md", "directory": "missing", "pattern": "missing/*.md"},
+}
+
+
+@pytest.mark.parametrize("path_call", _PATH_CALLS, ids=lambda call: f"{call.toolkit}.{call.method}")
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+@pytest.mark.parametrize("existing", [True, False], ids=["existing", "missing"])
+def test_tools_without_a_workspace_refuse_the_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path_call: _PathCall,
+    absolute: bool,
+    existing: bool,
+) -> None:
+    """Without a workspace, every path method refuses working directory paths alike, existing or not, unchanged."""
+    run, share = _run_directory(tmp_path, monkeypatch, share_below=True)
+    toolkit = _toolkits_without_a_workspace(share)[path_call.toolkit]
+    relative = _TARGETS[existing][path_call.target]
+    before = _tree(run)
+
+    spelled = str(run / relative) if absolute else relative
+
+    result = path_call.call(toolkit, spelled)
+
+    assert result.startswith(f"Error: Path '{spelled}' requires an agent workspace; file_access is 'workspace'.")
+    assert _RUN_DIRECTORY_TEXT.strip() not in result
+    assert _tree(run) == before
 
 
 def test_unrestricted_tools_ignore_share_roots(tmp_path: Path) -> None:

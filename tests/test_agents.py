@@ -2485,7 +2485,10 @@ def test_agent_without_a_workspace_cannot_read_the_run_directory(
         toolkits["file_tools"].save_file("x", "planted.txt"),
         toolkits["coding"].write_file("planted.txt", "x"),
     ]
-    assert all(result.startswith("Error: this agent has no workspace") for result in results)
+    assert all(
+        result.startswith("Error: Path '") and "requires an agent workspace; file_access is 'workspace'." in result
+        for result in results
+    )
     assert not (run_directory / "planted.txt").exists()
     assert (
         "- File access for path tools: `workspace` "

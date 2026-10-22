@@ -34,10 +34,13 @@ def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
     return ()
 
 
-_NO_WORKSPACE_ERROR = (
-    "Error: this agent has no workspace, so file_access 'workspace' allows only paths in its shared directories. "
-    "Give the agent a workspace, for example with memory_backend: file."
-)
+def _no_workspace_error(raw_path: object) -> str:
+    # A path argument left at its default names the working directory.
+    return (
+        f"Error: Path '{raw_path or '.'}' requires an agent workspace; file_access is 'workspace'. "
+        "Without one, only the agent's shared directories are reachable; "
+        "give it a workspace with memory_backend: file or a private configuration."
+    )
 
 
 class _SharedDirectoryAwareToolkit(Protocol):
@@ -48,20 +51,18 @@ class _SharedDirectoryAwareToolkit(Protocol):
     shared_directory_roots: Callable[[], tuple[SharedDirectoryRoot, ...]]
 
 
-def _matching_root(
-    raw_path: object,
-    base_dir: Path,
-    roots: Callable[[], tuple[SharedDirectoryRoot, ...]],
-) -> tuple[SharedDirectoryRoot, Path] | None:
+def _matching_root(raw_path: object, toolkit: _SharedDirectoryAwareToolkit) -> tuple[SharedDirectoryRoot, Path] | None:
     """Return the shared directory a path names and the path below it."""
     if not isinstance(raw_path, str) or not raw_path:
         return None
     requested = Path(raw_path).expanduser()
     # Lexical only: the rooted toolkit resolves links itself and refuses any that leave the root.
-    candidate = Path(os.path.normpath(requested if requested.is_absolute() else base_dir / requested))
-    if candidate.is_relative_to(base_dir):
+    candidate = Path(os.path.normpath(requested if requested.is_absolute() else toolkit.base_dir / requested))
+    # Paths inside a workspace stay the workspace's; without one, base_dir is only the process working directory,
+    # which may hold the default shared directories and must not hide them.
+    if toolkit.has_workspace and candidate.is_relative_to(toolkit.base_dir):
         return None
-    for root in roots():
+    for root in toolkit.shared_directory_roots():
         if candidate.is_relative_to(root.path):
             return root, candidate.relative_to(root.path)
     return None
@@ -83,9 +84,9 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
             if not toolkit.restrict_to_base_dir:
                 return method(*args, **kwargs)
             raw_path = bound.arguments.get(path_parameter)
-            match = _matching_root(raw_path, toolkit.base_dir, toolkit.shared_directory_roots)
+            match = _matching_root(raw_path, toolkit)
             if match is None:
-                return method(*args, **kwargs) if toolkit.has_workspace else _NO_WORKSPACE_ERROR
+                return method(*args, **kwargs) if toolkit.has_workspace else _no_workspace_error(raw_path)
             root, relative = match
             if writes and not root.writable:
                 return f"Error: {raw_path} is in a shared directory you can only read."
