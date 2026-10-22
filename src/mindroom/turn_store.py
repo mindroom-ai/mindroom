@@ -841,7 +841,7 @@ class TurnStore:
         *,
         additional_discovery_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
-        """Project one record into versioned recoverable Agno run metadata.
+        """Project one record into versioned recoverable run metadata.
 
         ``additional_discovery_event_ids`` lets one anchored run stay discoverable by
         extra triggering events, such as a numeric interactive reply whose response

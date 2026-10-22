@@ -646,7 +646,7 @@ def test_agno_records_keep_the_resolved_level_after_agno_resets_it(
     setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
     capsys.readouterr()
 
-    # Every Agent, Team, and Workflow run calls this.
+    # Agno's own Agent, Team, and Workflow runs reset its loggers to INFO this way.
     agno_log.set_log_level_to_info()
     agno_log.agent_logger.info("agno_info")
     agno_log.agent_logger.warning("agno_warning")
