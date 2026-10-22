@@ -226,6 +226,41 @@ def _fields(value: object) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
 
+def _reply_messages(
+    status: str,
+    internal_message: object,
+    external_message: object,
+    external_audience: object,
+) -> dict[str, str]:
+    """Return the automatic reply messages and audience to set.
+
+    Turning replies on must name everything senders get, so an approval card shows it instead of stored text.
+    """
+    if external_audience is not None and (
+        not isinstance(external_audience, str) or external_audience not in _EXTERNAL_AUDIENCES
+    ):
+        msg = "external_audience must be none, contactsOnly, or all."
+        raise _invalid(msg)
+    if any(value is not None and not isinstance(value, str) for value in (internal_message, external_message)):
+        msg = "internal_message and external_message must be text."
+        raise _invalid(msg)
+    if status != "disabled" and (
+        internal_message is None
+        or external_audience is None
+        or (external_message is None and external_audience != "none")
+    ):
+        msg = (
+            "Turning automatic replies on needs internal_message, external_audience, and, unless external_audience "
+            "is none, external_message; outlook_mail_get_automatic_replies returns the current ones."
+        )
+        raise _invalid(msg)
+    messages = {"internalReplyMessage": internal_message, "externalReplyMessage": external_message}
+    setting = {field: text_to_html(value) for field, value in messages.items() if isinstance(value, str)}
+    if isinstance(external_audience, str):
+        setting["externalAudience"] = external_audience
+    return setting
+
+
 def _time(value: object) -> str | None:
     """Return a Graph dateTimeTimeZone as ISO 8601, ending in Z for UTC and naming any other zone."""
     moment, zone = _fields(value).get("dateTime"), _fields(value).get("timeZone")
@@ -842,9 +877,12 @@ class OutlookMailTools(Toolkit):
         """Turn the requester's own automatic replies (out of office) off, on, or on for a period, and set their text.
 
         Before calling, tell the requester the status, the period in their time zone, both messages, and who outside
-        the organization gets the external one, because an approval prompt may show only part of them. Messages are
-        plain text and keep their line breaks. A message or external_audience left out keeps its current value.
-        Outlook schedules only a period that has not ended yet.
+        the organization gets the external one, because an approval prompt may show only part of them. Turning
+        them on, always or scheduled, needs internal_message, external_audience, and, unless external_audience is
+        none, external_message, so the call shows everything senders get; to keep the current text, read it with
+        outlook_mail_get_automatic_replies first. With status disabled, a message or external_audience left out
+        keeps its current value. Messages are plain text and keep their line breaks. Outlook schedules only a
+        period that has not ended yet.
 
         Args:
             status: disabled turns automatic replies off, alwaysEnabled turns them on until turned off, and scheduled
@@ -862,25 +900,16 @@ class OutlookMailTools(Toolkit):
         """
 
         def build() -> dict[str, Any]:
-            if status not in _AUTOMATIC_REPLY_STATUSES:
+            if not isinstance(status, str) or status not in _AUTOMATIC_REPLY_STATUSES:
                 msg = "status must be disabled, alwaysEnabled, or scheduled."
                 raise _invalid(msg)
-            setting: dict[str, Any] = {"status": status}
-            for field, value in (
-                ("internalReplyMessage", internal_message),
-                ("externalReplyMessage", external_message),
-            ):
-                if value is not None and not isinstance(value, str):
-                    msg = "internal_message and external_message must be text."
-                    raise _invalid(msg)
-                if value is not None:
-                    setting[field] = text_to_html(value)
-            if external_audience is not None:
-                if external_audience not in _EXTERNAL_AUDIENCES:
-                    msg = "external_audience must be none, contactsOnly, or all."
-                    raise _invalid(msg)
-                setting["externalAudience"] = external_audience
-            return {"automaticRepliesSetting": setting | _schedule(status, start, end, time_zone)}
+            return {
+                "automaticRepliesSetting": {
+                    "status": status,
+                    **_reply_messages(status, internal_message, external_message, external_audience),
+                    **_schedule(status, start, end, time_zone),
+                },
+            }
 
         try:
             request = build()

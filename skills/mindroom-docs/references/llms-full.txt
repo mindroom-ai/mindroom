@@ -12728,11 +12728,12 @@ Every function except the automatic replies ones takes an optional `mailbox`: th
 Exchange permissions on that mailbox decide what works: reading and changing its messages needs access to them, such as Full Access, and sending from it, as a new message or a reply, needs Full Access plus Send As or Send on Behalf.
 With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
 A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
-Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again, and results name the `mailbox` whenever a call named one.
+Message IDs and page tokens belong to the mailbox that returned them, so pass the same `mailbox` again.
 
 Automatic replies are always the requester's own.
 Their messages are plain text, and a scheduled period takes a local start and end with a time zone, like a new calendar event; Outlook schedules only a period that has not ended yet.
-Outlook Mail connections made before shared mailboxes and automatic replies were added lack their permissions, so each requester connects Outlook Mail again once.
+Turning them on names both messages and the external audience, so an approval card shows everything senders get.
+Outlook Mail asks a requester to connect again when their connection lacks any of the permissions above.
 
 Attachments are workspace files and follow the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
 Each attached file may be at most 3 MB, and all attachments of one message together about 3 MB; share larger files through OneDrive and send a link instead.

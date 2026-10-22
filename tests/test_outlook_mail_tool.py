@@ -1202,11 +1202,20 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
     ("arguments", "setting"),
     [
         ({"status": "disabled"}, {"status": "disabled"}),
+        ({"status": "disabled", "external_message": ""}, {"status": "disabled", "externalReplyMessage": ""}),
         (
             {"status": "alwaysEnabled", "internal_message": "Away", "external_audience": "none"},
             {"status": "alwaysEnabled", "internalReplyMessage": "Away", "externalAudience": "none"},
         ),
-        ({"status": "alwaysEnabled", "external_message": ""}, {"status": "alwaysEnabled", "externalReplyMessage": ""}),
+        (
+            {"status": "alwaysEnabled", "internal_message": "", "external_message": "Away", "external_audience": "all"},
+            {
+                "status": "alwaysEnabled",
+                "internalReplyMessage": "",
+                "externalReplyMessage": "Away",
+                "externalAudience": "all",
+            },
+        ),
     ],
 )
 def test_set_automatic_replies_sends_only_the_fields_given(
@@ -1225,27 +1234,36 @@ def test_set_automatic_replies_sends_only_the_fields_given(
     assert _body(request) == {"automaticRepliesSetting": setting}
 
 
+# Arguments that turn automatic replies on and name everything senders get.
+ON = {"status": "alwaysEnabled", "internal_message": "Away", "external_message": "Away", "external_audience": "all"}
+PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"status": "on"},
-        {"status": "Scheduled", "start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"},
-        {"status": "scheduled"},
-        {"status": "scheduled", "start": "2026-11-02T09:00:00"},
-        {"status": "scheduled", "start": "2026-11-02T09:00:00", "end": "2026-11-02T09:00:00"},
-        {"status": "scheduled", "start": "2026-11-02T09:00:00+01:00", "end": "2026-11-06T18:00:00"},
-        {"status": "scheduled", "start": "next monday", "end": "2026-11-06T18:00:00"},
-        {
-            "status": "scheduled",
-            "start": "2026-11-02T09:00:00",
-            "end": "2026-11-06T18:00:00",
-            "time_zone": "Mars/Base;",
-        },
-        {"status": "alwaysEnabled", "start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"},
-        {"status": "disabled", "end": "2026-11-06T18:00:00"},
-        {"status": "alwaysEnabled", "external_audience": "everyone"},
-        {"status": "alwaysEnabled", "internal_message": 3},
-        {"status": "alwaysEnabled", "external_message": ["Away"]},
+        {**ON, "status": "on"},
+        {**ON, "status": ["alwaysEnabled"]},
+        {**ON, **PERIOD, "status": "Scheduled"},
+        {**ON, "status": "scheduled"},
+        {**ON, "status": "scheduled", "start": PERIOD["start"]},
+        {**ON, "status": "scheduled", "start": PERIOD["start"], "end": PERIOD["start"]},
+        {**ON, **PERIOD, "status": "scheduled", "start": "2026-11-02T09:00:00+01:00"},
+        {**ON, **PERIOD, "status": "scheduled", "start": "next monday"},
+        {**ON, **PERIOD, "status": "scheduled", "time_zone": "Mars/Base;"},
+        {**ON, **PERIOD},
+        {"status": "disabled", "end": PERIOD["end"]},
+        {**ON, "external_audience": "everyone"},
+        {**ON, "external_audience": ["all"]},
+        {**ON, "internal_message": 3},
+        {**ON, "external_message": ["Away"]},
+        # Turning replies on names everything senders get, so an approval card shows it.
+        {"status": "alwaysEnabled"},
+        {**ON, "internal_message": None},
+        {**ON, "external_audience": None},
+        {**ON, "external_message": None},
+        {**ON, "external_audience": "contactsOnly", "external_message": None},
+        {**ON, **PERIOD, "status": "scheduled", "internal_message": None},
     ],
 )
 def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
