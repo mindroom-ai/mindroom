@@ -15,13 +15,14 @@ from structlog.testing import capture_logs
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ContentDelta, RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.provider import TextDelta, UsageReported
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
-from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT
+from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, run_team, team_paused_content, team_usage
 from mindroom.teams.spec import TeamMode
-from tests.agent_loop.helpers import echo, external, gated
+from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.team_runtime.squad import (
     PANEL,
@@ -46,6 +47,15 @@ pytestmark = pytest.mark.asyncio
 
 def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetrics) -> list[Any]:
     return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=metrics)
+
+
+# A blocking turn's leader requests do not stream, which is how Agno's team knew to run its non-stream delegation.
+_BLOCKING = ModelRequest(messages=(), stream=False)
+
+
+def _silent() -> list[Any]:
+    """A turn that ends with no text at all, not even an empty string."""
+    return [TurnCompleted(message=Message(role="assistant", content=None), stop_reason="end")]
 
 
 def _member_events(events: list[Any], member_id: str) -> list[Any]:
@@ -389,3 +399,127 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
     assert member_row["messages"][-1]["metrics"] == {"input_tokens": 50, "output_tokens": 2, "total_tokens": 52}
     assert team_row["member_responses"] == []
     assert [tool["result"] for tool in team_row["tools"]] == [None]
+
+
+@pytest.mark.parametrize(
+    ("writer_turns", "checker_turns", "expected"),
+    [
+        pytest.param(
+            [answer("Five is prime.")],
+            [answer("Five is odd.")],
+            "Agent Writer: Five is prime.Agent Checker: Five is odd.",
+            id="text",
+        ),
+        pytest.param(
+            [answer("")],
+            [_silent()],
+            f"Agent Writer: No ResponseAgent Checker: {NO_MEMBER_RESPONSE}",
+            id="empty",
+        ),
+        pytest.param(
+            [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="b")), answer("")],
+            [calls(tool_call("echo", "call-c", text="c")), _silent()],
+            "Agent Writer: a,bAgent Checker: null",
+            id="tool-only",
+        ),
+    ],
+)
+async def test_a_blocking_collaborate_run_gives_the_leader_agno_s_labeled_member_results(
+    writer_turns: list[list[Any]],
+    checker_turns: list[list[Any]],
+    expected: str,
+) -> None:
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_members", "call-all", task="Give one fact about 5."), metrics=usage(10, 2)),
+        answer("Done."),
+    )
+    team = squad(
+        leader,
+        scripted("writer-model", *writer_turns),
+        scripted("checker-model", *checker_turns),
+        mode=TeamMode.COLLABORATE,
+        writer_toolkits=(toolkit(echo),),
+        checker_toolkits=(toolkit(echo),),
+    )
+
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            request_template=_BLOCKING,
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert record.tools is not None
+    assert record.tools[0].result == expected
+    delegated = leader.requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
+
+
+async def test_a_blocking_collaborate_member_that_pauses_adds_agno_s_labeled_notice_and_pauses_the_team() -> None:
+    leader = scripted(
+        "leader-model",
+        calls(tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7."), metrics=usage(10, 2)),
+    )
+    writer = scripted("writer-model", answer("Six times seven is 42."))
+    checker = scripted("checker-model", calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)))
+    team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
+
+    events, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            request_template=_BLOCKING,
+        ),
+    )
+
+    assert record.status is RunStatus.paused
+    assert record.tools is not None
+    assert record.tools[0].result == (
+        "Agent Writer: Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    )
+    _, checker_record = member_records(events)
+    assert record.member_responses == [checker_record]
+    assert record.requirements is not None
+    [requirement] = record.requirements
+    assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
+
+
+@pytest.mark.parametrize(
+    ("stream", "writer_turns", "expected"),
+    [
+        pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
+        pytest.param(False, [answer("")], "", id="blocking-empty"),
+        pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
+        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
+    ],
+)
+async def test_a_coordinate_member_without_text_reaches_the_leader_as_agno_s_delegation_gave_it_per_mode(
+    stream: bool,
+    writer_turns: list[list[Any]],
+    expected: str,
+) -> None:
+    leader = scripted("leader-model", _delegate("call-w", "writer", "Do it", metrics=usage(10, 2)), answer("Done."))
+    team = squad(
+        leader,
+        scripted("writer-model", *writer_turns),
+        scripted("checker-model"),
+        writer_toolkits=(toolkit(echo),),
+    )
+
+    _, record = await collect(
+        run_team(
+            team,
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            request_template=ModelRequest(messages=(), stream=stream),
+        ),
+    )
+
+    assert record.tools is not None
+    assert record.tools[0].result == expected
+    assert leader.requests[1].messages[-1].content == expected

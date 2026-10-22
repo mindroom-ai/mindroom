@@ -117,7 +117,7 @@ def run_team(
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members.run)
+        leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
         await _forward(
             drive_run(
                 leader,
@@ -179,7 +179,7 @@ def continue_team(
 
     async def produce(emit: Emit) -> None:
         members = _MemberRuns(spec, record, ctx, emit, persist)
-        leader = _leader_spec(spec, record, members.run)
+        leader = _leader_spec(spec, record, members.run, stream=request_template.stream)
         prepared = prepare_run_tools(leader)
 
         async def entry() -> AsyncIterator[RunEvent]:
@@ -378,10 +378,13 @@ def _base_leader_spec(spec: TeamSpec) -> AgentSpec:
     )
 
 
-def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner) -> AgentSpec:
-    """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run."""
+def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:
+    """Return the leader as the loop runs it: the team's own tools, then the delegation tool bound to this run.
+
+    ``stream`` is whether the run's leader requests stream, as Agno's team chose its delegation's result rules by it.
+    """
     base = _base_leader_spec(spec)
-    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member)
+    delegation = delegate_functions(spec.members, spec.mode, record=record, run_member=run_member, stream=stream)
     return replace(base, toolkits=(*base.toolkits, delegation))
 
 
@@ -396,7 +399,8 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
         raise RuntimeError(msg)
 
     unbound = TeamRunRecord(run_id="", team_id=spec.id, team_name=spec.name)
-    return prepare_run_tools(_leader_spec(spec, unbound, no_member_runs)).specs()
+    # The result rules a run's ``stream`` selects do not change the definitions.
+    return prepare_run_tools(_leader_spec(spec, unbound, no_member_runs, stream=True)).specs()
 
 
 @dataclass(frozen=True, slots=True)

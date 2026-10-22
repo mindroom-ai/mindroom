@@ -519,6 +519,38 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        (False, "Agent GeneralAgent: Five is prime.Agent ResearchAgent: Five is odd."),
+        (True, "Five is prime.Five is odd."),
+    ],
+)
+async def test_a_collaborate_leader_reads_its_members_results_as_agno_s_delegation_gave_them_on_each_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+    expected: str,
+) -> None:
+    """A blocking reply labels each member's result with its name, as Agno's non-stream broadcast did."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[calls(tool_call("delegate_task_to_members", "call-all", task="One fact about 5.")), answer("Done.")],
+        general=[answer("Five is prime.")],
+        research=[answer("Five is odd.")],
+        members=("general", "research"),
+        mode=TeamMode.COLLABORATE,
+    )
+
+    await team.reply(stream=stream)
+
+    delegated = _leader(team).requests[1].messages[-1]
+    assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
+
+
+@pytest.mark.asyncio
 async def test_system_enrichment_follows_the_leader_s_and_each_member_s_configured_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
