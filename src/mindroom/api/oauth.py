@@ -1208,12 +1208,13 @@ async def connection_status(
 ) -> OAuthStatusResponse:
     """Load connection state after the caller has authorized the credential target.
 
-    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint.
+    `refresh=False` skips the token refresh, so a listing never waits on the provider's token endpoint, and reads a
+    scope that never stored anything as not connected without creating its store.
     `bootstrap_client=False` reads only the stored OAuth client and never bootstraps one over the network: `connected`
     is the same (it uses the stored client either way), and `has_client_config` stays false until a client is stored.
     """
     provider, runtime_paths = context.provider, context.runtime_paths
-    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context)
+    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context, create_store=refresh)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (

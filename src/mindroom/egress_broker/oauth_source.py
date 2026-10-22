@@ -32,6 +32,7 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot_sync,
     oauth_account_label,
+    oauth_credential_store_exists,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
     resolve_oauth_credential_context,
@@ -201,11 +202,13 @@ def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool,
     """Return whether the context's stored connection is usable and its account label, read whatever the opt-in.
 
     Only the egress pages call this, to show an account a user may allow or disconnect; the broker reads through
-    `resolve_oauth_token` and `oauth_status`, which never read a connection Agent Keys may not use.
+    `resolve_oauth_token` and `oauth_status`, which never read a connection Agent Keys may not use. A scope without a
+    store reads as not connected, and listing it creates none.
     """
     credentials = None
-    with contextlib.suppress(OAuthCredentialUnreadableError):
-        credentials = load_oauth_credentials_snapshot_sync(context).credentials
+    if oauth_credential_store_exists(context):
+        with contextlib.suppress(OAuthCredentialUnreadableError):
+            credentials = load_oauth_credentials_snapshot_sync(context).credentials
     connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
     return connected, oauth_account_label(credentials) if connected and credentials else None
 

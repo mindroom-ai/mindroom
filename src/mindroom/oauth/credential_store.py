@@ -345,6 +345,11 @@ def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Pat
     return credential_path.with_name(f"{credential_path.stem}.sqlite3")
 
 
+def oauth_credential_store_exists(context: OAuthCredentialStoreContext) -> bool:
+    """Return whether the scope has a store, without opening or creating it; blocks on the filesystem."""
+    return _oauth_credential_database_path(context).exists()
+
+
 @asynccontextmanager
 async def oauth_credential_transaction(
     context: OAuthCredentialStoreContext,

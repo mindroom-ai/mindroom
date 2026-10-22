@@ -22,7 +22,11 @@ import mindroom.durable_write as durable_write_module
 import mindroom.oauth.credential_store as credential_store_module
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    OAuthCredentialsStatus,
+    load_oauth_credentials_status,
+)
 from mindroom.oauth.credential_store import (
     _oauth_credential_database_path,
     oauth_credential_reader,
@@ -190,6 +194,34 @@ async def test_encrypted_credentials_are_atomic_and_private(tmp_path: Path) -> N
     assert snapshot.credentials == {"token": "secret-access", "refresh_token": "refresh-secret-access"}
     assert snapshot.generation == generation
     assert snapshot.connection_generation == connection_generation
+
+
+@pytest.mark.asyncio
+async def test_status_read_without_store_creation_leaves_a_missing_store_missing(tmp_path: Path) -> None:
+    """A listing reads a scope that never stored anything as empty without creating its store; other reads create it."""
+    context = _context(tmp_path)
+    database_path = _oauth_credential_database_path(context)
+
+    listed = await load_oauth_credentials_status(context, create_store=False)
+
+    assert listed == OAuthCredentialsStatus(credentials=None, reset_required=False)
+    assert not database_path.exists()
+    assert await load_oauth_credentials_status(context) == listed
+    assert database_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_status_read_without_store_creation_reads_an_existing_store(tmp_path: Path) -> None:
+    """A listing reads the credentials of a scope that has a store as any other read does."""
+    context = _context(tmp_path)
+    await _publish(context, "secret-access")
+
+    listed = await load_oauth_credentials_status(context, create_store=False)
+
+    assert listed == OAuthCredentialsStatus(
+        credentials={"token": "secret-access", "refresh_token": "refresh-secret-access"},
+        reset_required=False,
+    )
 
 
 @pytest.mark.asyncio

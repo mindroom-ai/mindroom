@@ -829,6 +829,27 @@ def test_status_with_a_service_account_matches_what_the_broker_injects(
     assert _resolve(config, runtime_paths, manager, _broker_target("@bob:example.org")) == SecretMissing()
 
 
+def test_display_read_of_a_scope_without_a_store_creates_none(
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The egress pages read a scope that never stored a connection as not connected, and leave no store behind."""
+    store = account_store("@alice:example.org")
+    context = _store_context(runtime_paths, manager, store)
+
+    assert oauth_source.oauth_connection_for_display(context) == (False, None)
+    assert not _oauth_credential_database_path(context).exists()
+
+    connect_account(
+        manager,
+        store,
+        "alice-access",
+        _oauth_claims={"email": "alice@example.org"},
+        _oauth_claims_verified=True,
+    )
+    assert oauth_source.oauth_connection_for_display(context) == (True, "alice@example.org")
+
+
 def _never(*_args: object, **_kwargs: object) -> None:
     pytest.fail("the broker must not read or refresh a connection Agent Keys may not use")
 
