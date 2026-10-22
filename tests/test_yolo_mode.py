@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
+import nio
 import pytest
 from agno.models.response import ToolExecution
 
@@ -16,7 +17,7 @@ from mindroom.approval import yolo
 from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.response import plan_approval_calls
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.approval.yolo import end_yolo, start_yolo, yolo_expires_at
+from mindroom.approval.yolo import end_yolo, room_yolo_windows, start_yolo, yolo_expires_at
 from mindroom.commands import yolo_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, command_parser, get_command_help
@@ -59,6 +60,15 @@ def test_yolo_window_is_scoped_to_room_thread_and_requester(tmp_path: Path) -> N
     ):
         assert yolo_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=requester_id) is None
 
+    other_thread = _start(runtime_paths, thread_id="$other")
+    _start(runtime_paths, room_id="!elsewhere:localhost")
+    assert [
+        (window.thread_id, window.requester_id, window.expires_at)
+        for window in room_yolo_windows(runtime_paths, ROOM_ID)
+    ] == [
+        ("$other", HUMAN, other_thread),
+        (THREAD_ID, HUMAN, expires_at),
+    ]
     assert end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is True
     assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
     assert end_yolo(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is False
@@ -75,6 +85,8 @@ def test_yolo_window_expires_and_survives_unreadable_records(tmp_path: Path) -> 
     assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
     path.write_text("not json")
     assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    path.write_text('{"not a scope": {"expires_at": "2999-01-01T00:00:00+00:00", "set_at": "now"}}')
+    assert room_yolo_windows(runtime_paths, ROOM_ID) == []
     _start(runtime_paths)
     assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
 
@@ -184,10 +196,11 @@ async def _send(
     acts_for_requester: bool = False,
     config: Config | None = None,
     room_mode: bool = False,
+    client: AsyncMock | None = None,
 ) -> tuple[str, RuntimePaths]:
     runtime_paths = test_runtime_paths(tmp_path)
     context = make_test_command_handler_context(
-        client=AsyncMock(),
+        client=client or AsyncMock(),
         config=config or Config(),
         runtime_paths=runtime_paths,
         logger=MagicMock(),
@@ -230,6 +243,40 @@ async def test_yolo_command_starts_shows_and_ends_the_thread_window(tmp_path: Pa
     assert reply.startswith("YOLO mode is off in this thread.")
     reply, _ = await _send(tmp_path, "!yolo off")
     assert reply == "YOLO mode is not on in this thread."
+
+
+@pytest.mark.asyncio
+async def test_yolo_command_publishes_the_rooms_open_windows_for_clients(tmp_path: Path) -> None:
+    """Starting and ending a window rewrite the router's room state from the stored windows."""
+    client = AsyncMock(user_id="@mindroom_router:localhost")
+    client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=ROOM_ID)
+
+    await _send(tmp_path, "!yolo 30", client=client)
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    expires_at = yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    assert expires_at is not None
+    client.room_put_state.assert_awaited_once_with(
+        room_id=ROOM_ID,
+        event_type="io.mindroom.yolo",
+        content={"windows": [{"thread_id": THREAD_ID, "requester_id": HUMAN, "expires_at": expires_at.isoformat()}]},
+        state_key="@mindroom_router:localhost",
+    )
+    client.room_put_state.reset_mock()
+    await _send(tmp_path, "!yolo off", client=client)
+    assert client.room_put_state.await_args.kwargs["content"] == {"windows": []}
+
+
+@pytest.mark.asyncio
+async def test_yolo_command_replies_when_publishing_its_state_fails(tmp_path: Path) -> None:
+    """A refused or failed state write leaves the window on and the confirmation sent."""
+    client = AsyncMock(user_id="@mindroom_router:localhost")
+    client.room_put_state.side_effect = nio.exceptions.RemoteProtocolError("connection reset")
+
+    reply, runtime_paths = await _send(tmp_path, "!yolo 30", client=client)
+
+    assert reply.startswith("⚠️ YOLO mode is on in this thread until")
+    assert yolo_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
 
 
 @pytest.mark.asyncio

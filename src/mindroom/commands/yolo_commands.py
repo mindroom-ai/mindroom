@@ -7,15 +7,17 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+import nio
+
 from mindroom.approval.inbound import handle_tool_approval_action
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.tool_approval import resolve_tool_approval_approver
-from mindroom.approval.yolo import YOLO_MAX_DURATION, end_yolo, start_yolo, yolo_expires_at
+from mindroom.approval.yolo import YOLO_MAX_DURATION, end_yolo, room_yolo_windows, start_yolo, yolo_expires_at
+from mindroom.matrix.event_types import YOLO_WINDOWS_EVENT_TYPE
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    import nio
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -37,6 +39,37 @@ def _parse_duration(text: str) -> timedelta | None:
 
 def _until(expires_at: datetime, config: Config) -> str:
     return expires_at.astimezone(ZoneInfo(config.timezone)).strftime("%Y-%m-%d %H:%M %Z")
+
+
+async def _publish_windows(
+    client: nio.AsyncClient,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    logger: structlog.stdlib.BoundLogger,
+) -> None:
+    """Publish the room's open windows as the router's state, for clients; a failed write never undoes the command."""
+    content = {
+        "windows": [
+            {
+                "thread_id": window.thread_id,
+                "requester_id": window.requester_id,
+                "expires_at": window.expires_at.isoformat(),
+            }
+            for window in room_yolo_windows(runtime_paths, room_id)
+        ],
+    }
+    try:
+        response = await client.room_put_state(
+            room_id=room_id,
+            event_type=YOLO_WINDOWS_EVENT_TYPE,
+            content=content,
+            state_key=client.user_id,
+        )
+    except Exception:
+        logger.warning("Publishing YOLO windows failed", room_id=room_id, exc_info=True)
+        return
+    if not isinstance(response, nio.RoomPutStateResponse):
+        logger.warning("YOLO windows state was refused", room_id=room_id, response=str(response))
 
 
 async def _approve_pending_cards(
@@ -79,13 +112,14 @@ async def handle_yolo_command(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    client: nio.AsyncClient,
     room: nio.MatrixRoom,
     thread_id: str | None,
     requester_user_id: str,
     logger: structlog.stdlib.BoundLogger,
     membership_index: AgentReplyMembershipIndex,
 ) -> str:
-    """Show, start, or end the requester's YOLO window in this conversation."""
+    """Show, start, or end the requester's YOLO window in this conversation, and publish the room's windows."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_user_id)
     if approver_id is None:
         return "❌ Only a person can turn on YOLO mode."
@@ -102,11 +136,10 @@ async def handle_yolo_command(
         )
 
     if requested == "off":
-        return (
-            f"✅ YOLO mode is off. Tool calls in {place} ask for approval again."
-            if end_yolo(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id)
-            else f"YOLO mode is not on in {place}."
-        )
+        if not end_yolo(runtime_paths, room_id=room.room_id, thread_id=thread_id, requester_id=approver_id):
+            return f"YOLO mode is not on in {place}."
+        await _publish_windows(client, runtime_paths, room.room_id, logger)
+        return f"✅ YOLO mode is off. Tool calls in {place} ask for approval again."
 
     duration = _parse_duration(requested)
     if duration is None or not timedelta(minutes=1) <= duration <= YOLO_MAX_DURATION:
@@ -118,6 +151,7 @@ async def handle_yolo_command(
         requester_id=approver_id,
         duration=duration,
     )
+    await _publish_windows(client, runtime_paths, room.room_id, logger)
     approved = await _approve_pending_cards(
         config=config,
         runtime_paths=runtime_paths,

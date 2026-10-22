@@ -68,6 +68,7 @@ It covers every agent and team in that thread, script rules, tools that ask for 
 Other people in the thread still approve their own calls, an agent cannot turn it on for you, and a tool call scheduled to run later still asks when it is scheduled.
 In a room that uses `thread_mode: room`, the window covers the whole room.
 `!yolo` shows when the window ends and `!yolo off` ends it early; restarts and config reloads keep it.
+MindRoom Chat shows the open window in the thread header in rooms where the router may send the `io.mindroom.yolo` state event, which the rooms MindRoom creates allow.
 
 ## Approval Card Contents
 

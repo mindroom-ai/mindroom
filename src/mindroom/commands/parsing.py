@@ -543,6 +543,7 @@ Usage: `!yolo [<minutes>|<hours>h|off]` - Run your tool calls in this thread wit
 
 How it works:
 - Every tool call you request in this thread runs without an approval card until the window ends
+- In a room without threads, the window covers the whole room
 - Approval cards already waiting for you in this thread are approved when you turn it on
 - Other people in the thread still approve their own calls"""
 

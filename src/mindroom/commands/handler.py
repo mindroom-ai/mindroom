@@ -636,6 +636,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             command.args.get("args_text", ""),
             config=context.config,
             runtime_paths=context.runtime_paths,
+            client=context.client,
             room=room,
             thread_id=effective_thread_id,
             requester_user_id=requester_user_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,15 @@ def _store_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / _YOLO_FILENAME
 
 
+@dataclass(frozen=True, slots=True)
+class _YoloWindow:
+    """One requester's open window in one conversation of a room."""
+
+    thread_id: str | None
+    requester_id: str
+    expires_at: datetime
+
+
 def _window_key(room_id: str, thread_id: str | None, requester_id: str) -> str:
     return json.dumps([room_id, thread_id, requester_id], separators=(",", ":"))
 
@@ -35,13 +45,21 @@ def _expires_at(record: OverrideRecord) -> datetime:
     return datetime.fromisoformat(record["expires_at"])
 
 
-def _is_valid_window(_key: str, record: dict[object, object]) -> bool:
-    """Return whether one persisted window has an aware expiry and a set time."""
+def _is_valid_window(key: str, record: dict[object, object]) -> bool:
+    """Return whether one persisted window names its conversation and has an aware expiry and a set time."""
     expires_at = record.get("expires_at")
     if not isinstance(expires_at, str) or not isinstance(record.get("set_at"), str):
         return False
     try:
-        return datetime.fromisoformat(expires_at).tzinfo is not None
+        scope = json.loads(key)
+        return (
+            isinstance(scope, list)
+            and len(scope) == 3
+            and isinstance(scope[0], str)
+            and isinstance(scope[1], str | None)
+            and isinstance(scope[2], str)
+            and datetime.fromisoformat(expires_at).tzinfo is not None
+        )
     except ValueError:
         return False
 
@@ -65,6 +83,16 @@ def yolo_expires_at(
     now = datetime.now(UTC)
     record = _load_active_windows(_store_path(runtime_paths), now).get(_window_key(room_id, thread_id, requester_id))
     return None if record is None else _expires_at(record)
+
+
+def room_yolo_windows(runtime_paths: RuntimePaths, room_id: str) -> list[_YoloWindow]:
+    """Return every open window in one room, ordered by thread and requester."""
+    windows = []
+    for key, record in _load_active_windows(_store_path(runtime_paths), datetime.now(UTC)).items():
+        window_room_id, thread_id, requester_id = json.loads(key)
+        if window_room_id == room_id:
+            windows.append(_YoloWindow(thread_id, requester_id, _expires_at(record)))
+    return sorted(windows, key=lambda window: (window.thread_id or "", window.requester_id))
 
 
 def start_yolo(

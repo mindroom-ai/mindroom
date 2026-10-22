@@ -4937,6 +4937,7 @@ depends_on = [
     "mindroom.approval.manager",
     "mindroom.approval.tool_approval",
     "mindroom.approval.yolo",
+    "mindroom.matrix.event_types",
 ]
 visibility = ["mindroom.commands.handler"]
 
