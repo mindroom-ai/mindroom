@@ -347,7 +347,7 @@ def test_ai_run_metadata_context_regression_cached_prefix_sample() -> None:
         status="completed",
         model="claude-sonnet-5",
         model_provider="google",
-        metrics={"input_tokens": 3_277, "cache_read_tokens": 99_772, "cache_write_tokens": 49_886},
+        metrics=RunMetrics(input_tokens=3_277, cache_read_tokens=99_772, cache_write_tokens=49_886),
         context_input_tokens=30_210,
         context_raw_input_tokens=1_777,
         context_cache_read_tokens=49_886,
