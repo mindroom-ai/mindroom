@@ -29,6 +29,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.llm.agno_dict_helpers import expected_run_dict
@@ -767,7 +768,7 @@ def _logged_request(log: list[str]) -> Await:
 
 
 @pytest.mark.asyncio
-async def test_a_run_connects_its_toolkits_first_and_closes_what_it_connected_before_reporting_its_end() -> None:
+async def test_a_run_connects_its_toolkits_first_and_closes_what_it_connected_after_reporting_its_end() -> None:
     log: list[str] = []
     model = ScriptedModel([[_logged_request(log), *answer("Done.")]])
     agent = spec(
@@ -783,8 +784,51 @@ async def test_a_run_connects_its_toolkits_first_and_closes_what_it_connected_be
             reported = list(log)
 
     # A toolkit connected before the run belongs to whoever connected it.
-    assert reported == ["database connect", "server connect", "request", "database close"]
-    assert log == reported
+    assert reported == ["database connect", "server connect", "request"]
+    assert log == [*reported, "database close"]
+
+
+@pytest.mark.parametrize("consumer", ["drains", "closes"])
+@pytest.mark.asyncio
+async def test_a_run_reports_its_end_before_a_slow_close_finishes_and_the_close_still_finishes(consumer: str) -> None:
+    """The consumer holds ``RunFinished`` while the close runs, whether it reads on or closes the stream there."""
+    log: list[str] = []
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def close() -> None:
+        log.append("close started")
+        closing.set()
+        await release.wait()
+        log.append("closed")
+
+    async def connect() -> ToolkitClose:
+        return close
+
+    store = _Store()
+    agent = spec(ScriptedModel([answer("Done.")]), replace(toolkit(add, name="database"), connect=connect))
+    stream = run_agent(agent, _prompt(), ctx=context(), persist=store)
+
+    async def consume() -> None:
+        async with closing_async_stream(stream):
+            async for event in stream:
+                if isinstance(event, RunFinished):
+                    log.append("finished")
+                    if consumer == "closes":
+                        break
+
+    task = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(closing.wait(), timeout=5)
+        assert log == ["finished", "close started"]
+        assert not task.done()
+    finally:
+        release.set()
+    await task
+
+    assert log == ["finished", "close started", "closed"]
+    # Closing the stream once it reported its end leaves the completed record as it was stored.
+    assert [saved["status"] for saved in store.saved] == ["COMPLETED"]
 
 
 @pytest.mark.parametrize("ending", ["error", "cancel"])

@@ -371,8 +371,9 @@ async def drive_run[R: AnyRunRecord](
 
     ``spec`` supplies the model and the tool-call limit; ``record`` is the agent or team run the loop fills. A run
     that ends paused without text of its own gets ``pause_content(record)`` as its content. The spec's toolkits that
-    hold a connection for one run are connected before ``entry`` and closed once the record is stored, before the
-    run reports its end.
+    hold a connection for one run are connected before ``entry`` and closed after the run reports its end, as Agno's
+    agent closed them after its completed event, once the consumer reads past ``RunFinished`` or closes the stream;
+    a run that fails or is cancelled closes them once its record is stored.
     """
     started = time.monotonic()
     paused = False
@@ -413,9 +414,11 @@ async def drive_run[R: AnyRunRecord](
     except Exception as error:
         await _store_interrupted(record, messages, started, persist, error=error)
         raise
+    else:
+        # Reported before the toolkits close, so a slow close, such as a stdio MCP server's exit, holds no consumer up.
+        yield RunFinished(record)
     finally:
         await close_toolkits(closes)
-    yield RunFinished(record)
 
 
 async def _store_interrupted[R: AnyRunRecord](
