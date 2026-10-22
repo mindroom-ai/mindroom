@@ -289,6 +289,8 @@ Tenant homeservers run MindRoom's Tuwunel fork, `ghcr.io/mindroom-ai/mindroom-tu
 Set them there to pin or upgrade Tuwunel; the script keeps them across releases, and each instance switches when it is re-provisioned.
 Instances deployed with v2026.10.461 or earlier ran Synapse, and their first re-provision on a later release replaces it with an empty Tuwunel server.
 That deletes the instance's Matrix accounts, rooms, messages, and uploaded files, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
+Deploy that release with `--instances all`, so instances held by the subscription lifecycle switch too.
+An instance a customer or admin stopped manually keeps Synapse, and starting it fails until it is re-provisioned through `POST /system/provision`, which also starts it.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
 The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.

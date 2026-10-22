@@ -499,25 +499,72 @@ def test_instance_chart_signs_owners_in_through_platform_oidc_with_bound_tokens(
 
 
 def test_instance_chart_resets_synapse_matrix_state_once(tmp_path: Path) -> None:
-    """The first start on Tuwunel drops the Synapse accounts the runtime stored; later starts keep the new ones."""
+    """The first start on Tuwunel drops the state bound to the Synapse server; later starts keep the new state."""
     deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
     reset = next(
         container
         for container in deployment["spec"]["template"]["spec"]["initContainers"]
         if container["name"] == "reset-synapse-matrix-state"
     )
-    state = tmp_path / "matrix_state.yaml"
+    bound = [
+        tmp_path / "matrix_state.yaml",
+        tmp_path / "encryption_keys" / "mindroom_router_1.mindroom.chat" / "store.db",
+        tmp_path / "sync_continuity" / "router.json",
+        tmp_path / "tracking" / "event_journal.db",
+        tmp_path / "tracking" / "event_journal.db-wal",
+        tmp_path / "tracking" / "event_journal_binding.json",
+    ]
+    kept = [tmp_path / "credentials" / "openrouter_credentials.json", tmp_path / "tracking" / "memory_auto_flush.json"]
 
     def start() -> None:
         subprocess.run([*reset["command"], *reset["args"]], env={**os.environ, "STORAGE": str(tmp_path)}, check=True)
 
-    state.write_text("accounts: synapse\n")
+    for path in [*bound, *kept]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synapse\n")
     start()
-    assert not state.exists()
-    state.write_text("accounts: tuwunel\n")
+    assert [path for path in bound if path.exists()] == []
+    assert all(path.read_text() == "synapse\n" for path in kept)
+    for path in bound:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("tuwunel\n")
     start()
-    assert state.read_text() == "accounts: tuwunel\n"
+    assert all(path.read_text() == "tuwunel\n" for path in bound)
     assert _env_by_name(reset)["STORAGE"]["value"] == "/mindroom_data"
+
+
+def test_instance_chart_runs_one_tuwunel_that_reads_its_rendered_config() -> None:
+    """Tuwunel locks its database, reads TUWUNEL_* variables as config, and must find the files its config names."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "matrixOidc.enabled=true",
+        "matrixOidc.issuer=https://api.test/oidc",
+    )
+    tuwunel = _resource(docs, "Deployment", "tuwunel-demo")
+    pod = tuwunel["spec"]["template"]["spec"]
+    container = _container(tuwunel, "tuwunel")
+    mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+    config = _tuwunel_config(docs, "demo")
+    secret_dir = mounts["mindroom-secrets"]["mountPath"]
+    secret_files = {
+        f"{secret_dir}/{item['path']}" for item in _volumes_by_name(tuwunel)["mindroom-secrets"]["secret"]["items"]
+    }
+
+    assert tuwunel["spec"]["strategy"] == {"type": "Recreate"}
+    assert pod["enableServiceLinks"] is False
+    assert _env_by_name(container)["TUWUNEL_CONFIG"]["value"] == mounts["tuwunel-config"]["mountPath"]
+    assert config["database_path"] == mounts["tuwunel-data"]["mountPath"]
+    assert {
+        config["registration_shared_secret_file"],
+        config["identity_provider"][0]["client_secret_file"],
+    } == secret_files
+    # Tuwunel reads its config only at startup, so a config change must roll the pod.
+    plain = _resource(_render_instance_chart(), "Deployment", "tuwunel-demo")
+    config_hashes = {
+        deployment["spec"]["template"]["metadata"]["annotations"]["mindroom.ai/tuwunel-config-hash"]
+        for deployment in (tuwunel, plain)
+    }
+    assert len(config_hashes) == 2
 
 
 def test_instance_chart_wires_image_pull_secrets_to_control_plane_pods() -> None:
