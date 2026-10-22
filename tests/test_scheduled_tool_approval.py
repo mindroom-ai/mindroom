@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
+from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.approval.manager import ApprovalActionResult
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
@@ -91,6 +92,7 @@ _THREAD = "$thread"
 _REQUESTER = "@human:test"
 _AGENT = "code"
 _TOOLKIT = "slack"
+_MIRRORED_TOOLKIT = "slack_mirror"
 _TASK = "task-1"
 _SCHEDULED_CARD = "$scheduled-approval:" + _TASK
 _RECEIPT = "scheduled-receipt:" + _TASK
@@ -1984,6 +1986,26 @@ class _ConfiguredSlackTools(Toolkit):
         return "sent"
 
 
+class _MirroredSlackTools(_ConfiguredSlackTools):
+    """A second configured toolkit offering a function of the same name, recording its own runs."""
+
+    runs: ClassVar[list[dict[str, object]]] = []
+
+
+def _register_toolkit(name: str, toolkit_class: type[Toolkit]) -> None:
+    """Register ``toolkit_class`` as the configured tool ``name``; the caller restores the registries afterwards."""
+
+    @register_tool_with_metadata(
+        name=name,
+        file_access=ToolFileAccess.NONE,
+        display_name=name.replace("_", " ").title(),
+        description="Posts Slack messages.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def factory() -> type[Toolkit]:
+        return toolkit_class
+
+
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
     """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
@@ -1991,22 +2013,40 @@ def configured_slack() -> Iterator[list[dict[str, object]]]:
     The name is a built-in's, so the built-in registries it overwrites are restored too.
     """
     snapshot = capture_tool_registry_snapshot()
-
-    @register_tool_with_metadata(
-        name=_TOOLKIT,
-        file_access=ToolFileAccess.NONE,
-        display_name="Slack",
-        description="Posts Slack messages.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def slack_factory() -> type[_ConfiguredSlackTools]:
-        return _ConfiguredSlackTools
-
+    _register_toolkit(_TOOLKIT, _ConfiguredSlackTools)
     _ConfiguredSlackTools.runs.clear()
     try:
         yield _ConfiguredSlackTools.runs
     finally:
         restore_tool_registry_snapshot(snapshot)
+
+
+@pytest.fixture
+def configured_slack_pair(configured_slack: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
+    """Also register a second toolkit whose function has the stored call's name; return each toolkit's runs."""
+    _register_toolkit(_MIRRORED_TOOLKIT, _MirroredSlackTools)
+    _MirroredSlackTools.runs.clear()
+    return {_TOOLKIT: configured_slack, _MIRRORED_TOOLKIT: _MirroredSlackTools.runs}
+
+
+def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
+    """Build the configured agent as a turn does, on a model that is never called."""
+    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
+    return create_agent(agent_name, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
+
+
+async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
+    """Run the scheduler's runner as the build's run calls it, in the scheduling agent's own turn."""
+    with (
+        patch("mindroom.approval.manager.get_approval_store", return_value=manager),
+        tool_runtime_context(_turn_context(config)),
+    ):
+        return await run_tool_call(
+            prepare_run_tools(build.spec).functions["run_scheduled_call"],
+            {"task_id": _TASK},
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            middleware=build.tool_middleware,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2049,27 +2089,109 @@ async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_po
     manager = _manager(journal, tmp_path, [])
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
-    monkeypatch.setattr(agents, "_build_agent_model_provider", lambda *_args, **_kwargs: ScriptedModel([]))
-    build = create_agent(_AGENT, config, runtime_paths_for(config), None, supports_native_tool_approval=True)
-    functions = prepare_run_tools(build.spec).functions
-    assert functions["post_slack_message"].requires_confirmation is True
+    build = _agent_build(config, monkeypatch)
+    assert prepare_run_tools(build.spec).functions["post_slack_message"].requires_confirmation is True
     try:
         await _armed(manager)
 
-        with (
-            patch("mindroom.approval.manager.get_approval_store", return_value=manager),
-            tool_runtime_context(_turn_context(config)),
-        ):
-            result = await run_tool_call(
-                functions["run_scheduled_call"],
-                {"task_id": _TASK},
-                ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
-                middleware=build.tool_middleware,
-            )
+        result = await _run_in_build(manager, build, config)
 
         assert result == "sent"
         assert configured_slack == [_ARGUMENTS]
         assert await _binding_column(journal, "outcome") == "completed"
+    finally:
+        await manager.shutdown()
+
+
+_SHARED_NAME_ORDERS = pytest.mark.parametrize(
+    "configured",
+    [(_TOOLKIT, _MIRRORED_TOOLKIT), (_MIRRORED_TOOLKIT, _TOOLKIT)],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
+
+
+@pytest.mark.asyncio
+@_SHARED_NAME_ORDERS
+async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_offers(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+) -> None:
+    """The build offers one function per name, the first configured toolkit's, and the stored call names that toolkit."""
+    config = _gated_config()
+    config.agents["general"].tools = list(configured)
+    build = _agent_build(config, monkeypatch, "general")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(config, "general"),
+    ):
+        await run_tool_call(
+            prepare_run_tools(build.spec).functions["schedule_tool_call"],
+            {
+                "tool_name": "post_slack_message",
+                "arguments_json": canonical_arguments(_ARGUMENTS),
+                "execute_at": "2030-01-02T09:00:00-05:00",
+                "description": "Morning DM",
+            },
+            ToolCallContext(run_id="run", session_id="session", call_id="call-1"),
+            middleware=build.tool_middleware,
+        )
+
+    [binding] = request.await_args.args
+    assert binding.toolkit_name == configured[0]
+    assert configured_slack_pair == {_TOOLKIT: [], _MIRRORED_TOOLKIT: []}
+
+
+@pytest.mark.asyncio
+@_SHARED_NAME_ORDERS
+async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_name(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+) -> None:
+    """A stored call runs the function the model's own call of its name runs, and only when its toolkit offers it.
+
+    When another toolkit configured earlier shadows the stored toolkit's function, the call is refused unspent.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    config = _code_config()
+    config.agents[_AGENT].tools = list(configured)
+    build = _agent_build(config, monkeypatch)
+    stored_toolkit_offered = configured[0] == _TOOLKIT
+    try:
+        await _armed(manager)
+
+        result = await _run_in_build(manager, build, config)
+
+        if stored_toolkit_offered:
+            assert result == "sent"
+            assert configured_slack_pair == {_TOOLKIT: [_ARGUMENTS], _MIRRORED_TOOLKIT: []}
+            assert await _binding_column(journal, "outcome") == "completed"
+        else:
+            assert isinstance(result, str)
+            assert "not one of this agent's tools" in result
+            assert configured_slack_pair == {_TOOLKIT: [], _MIRRORED_TOOLKIT: []}
+            assert await _binding_column(journal, "consumed_at_ns") is None
+
+        # The model's own call of the name runs the first configured toolkit's function.
+        with tool_runtime_context(_turn_context(config)):
+            await run_tool_call(
+                prepare_run_tools(build.spec).functions["post_slack_message"],
+                _OTHER_ARGUMENTS,
+                ToolCallContext(run_id="run", session_id="session", call_id="call-2"),
+                middleware=build.tool_middleware,
+            )
+
+        assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS
+        assert _OTHER_ARGUMENTS not in configured_slack_pair[configured[1]]
     finally:
         await manager.shutdown()
 
@@ -2384,7 +2506,9 @@ async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsin
     context.client.room_put_state.assert_not_awaited()
 
 
-class _StreamingTools(Toolkit):
+class _StreamingSlackTools(Toolkit):
+    """A configured Slack toolkit whose function streams its result in two parts."""
+
     def __init__(self) -> None:
         super().__init__(name="slack", tools=[self.post_slack_message])
 
@@ -2396,24 +2520,62 @@ class _StreamingTools(Toolkit):
             text: Message text.
 
         """
-        yield f"{channel}: {text}"
+        yield f"{channel}: "
+        yield text
+
+
+class _AsyncStreamingSlackTools(Toolkit):
+    """The streaming Slack toolkit with an asynchronous generator for its function."""
+
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    async def post_slack_message(self, channel: str, text: str = "") -> AsyncIterator[str]:
+        """Stream a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        yield f"{channel}: "
+        await asyncio.sleep(0)
+        yield text
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("configured_slack")
+@pytest.mark.parametrize(
+    "toolkit_class",
+    [_StreamingSlackTools, _AsyncStreamingSlackTools],
+    ids=["generator", "async-generator"],
+)
+@pytest.mark.parametrize("workspace", [False, True], ids=["no-workspace", "workspace"])
 async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    toolkit_class: type[Toolkit],
+    workspace: bool,
 ) -> None:
-    """A tool that streams its result runs as a scheduled call, which returns the whole stream."""
+    """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
+
+    An agent with a workspace runs it behind the output-file wrapper, which hands the stream on undrained.
+    """
+    _register_toolkit(_TOOLKIT, toolkit_class)
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
-    toolkit = _StreamingTools()
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
+    config = _code_config()
+    config.agents[_AGENT].tools = [_TOOLKIT]
+    if workspace:
+        config.agents[_AGENT].memory_backend = "file"
+    build = _agent_build(config, monkeypatch)
+    parameters = prepare_run_tools(build.spec).functions["post_slack_message"].parameters
+    assert ("mindroom_output_path" in parameters["properties"]) is workspace
     try:
         await _armed(manager)
 
-        result = await _run(manager, _LiveRun((toolkit,)))
+        result = await _run_in_build(manager, build, config)
 
         assert result == "U123: Good morning!"
         assert await _binding_column(journal, "outcome") == "completed"
