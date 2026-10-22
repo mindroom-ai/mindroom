@@ -362,6 +362,8 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
     """The leader loop gets mid-turn compaction then the receipt before each request, and the notices around tools."""
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
+    # Every member's hooks come from the same builder; the leader's compaction is the one built for the team.
+    compactions: list[dict[str, Any]] = []
     real_run_team = envelope.run_team
     real_compaction_hook = loop_hooks.mid_turn_compaction_hook
 
@@ -370,7 +372,7 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
         return real_run_team(*args, **kwargs)
 
     def capture_compaction_hook(**kwargs: Any) -> Any:  # noqa: ANN401
-        captured["compaction"] = kwargs
+        compactions.append(kwargs)
         return real_compaction_hook(**kwargs)
 
     monkeypatch.setattr(envelope, "run_team", capture_run_team)
@@ -383,8 +385,8 @@ async def test_the_leader_runs_with_compaction_and_receipt_hooks_bound_to_the_te
     assert len(hooks.before_request) == 2
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
-    compaction = captured["compaction"]
-    assert (compaction["is_team"], compaction["scope_id"], compaction["entity_name"]) == (True, "squad", "squad")
+    [compaction] = [kwargs for kwargs in compactions if kwargs["is_team"]]
+    assert (compaction["scope_id"], compaction["entity_name"]) == ("squad", "squad")
     assert compaction["scope"] == TEAM_SCOPE
     assert compaction["model"] is team.models["default"]
     assert compaction["prompt_id"] is not None
