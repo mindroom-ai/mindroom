@@ -22,12 +22,10 @@ from mindroom.tool_system.toolkit_connections import shielded_lifecycle
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
-    from agno.tools import Toolkit
-    from agno.tools.function import ToolResult
-
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
+    from mindroom.tool_system.agno_toolkits import Toolkit, ToolResult
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
 # Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of

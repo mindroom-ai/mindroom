@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
     from contextlib import AbstractAsyncContextManager
 
-    from agno.tools.function import Function
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.agent_loop.build import AgentBuild
@@ -74,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
+    from mindroom.tool_system.agno_toolkits import Function
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
