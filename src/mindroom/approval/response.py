@@ -171,15 +171,20 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
         anchor_id = call_id
         if member_id is None and (card := member_delegation_call(call_id, config_names_by_provider_id.values())):
             member_id, anchor_id = card
+        matches = [
+            entry
+            for entry in paused.tool_trace
+            if entry.type == "tool_call_started" and entry.tool_call_id == anchor_id
+        ]
+        # An unanchored call is refused as such, before its member identity is resolved.
+        if not matches:
+            msg = "Approval suspension requires an ordered presentation for every pending tool"
+            raise RuntimeError(msg)
         if member_id is not None:
             member_id, _ = _resolve_team_member_identity(member_id, config_names_by_provider_id)
         expected_scope = f"agent:{member_id}" if member_id is not None else ("team" if is_team_presentation else None)
         # Call ids are unique only within one member's run, so another member's call may share the anchor's id.
-        anchors = sum(
-            entry.type == "tool_call_started" and entry.tool_call_id == anchor_id and entry.scope_key == expected_scope
-            for entry in paused.tool_trace
-        )
-        if anchors != 1:
+        if sum(entry.scope_key == expected_scope for entry in matches) != 1:
             msg = "Approval suspension requires an ordered presentation for every pending tool"
             raise RuntimeError(msg)
 
