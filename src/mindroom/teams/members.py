@@ -7,7 +7,6 @@ job controls, and call budget, and each member's system message, roster role, an
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import prompt_for_turn
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
@@ -331,32 +331,38 @@ def _team_member(
     """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
-    mid-turn compaction, and approval receipt, and its tools run under its own identity. It replays no history, so
-    its compaction stays within the run, and the leader owns the queued-message notices of the turn. ``model_name``
-    is the member's configured model for this turn, whose window its compaction sizes against. The compaction and
-    receipt hooks hold the state of the run they serve, so each run or resume builds its own.
+    and mid-turn compaction, and a resume adds the approval receipt; its tools run under its own identity. It
+    replays no history, so its compaction stays within the run, and the leader owns the queued-message notices of
+    the turn. ``model_name`` is the member's configured model for this turn, whose window its compaction sizes
+    against. The compaction and receipt hooks hold the state of the run they serve, so each run or resume builds
+    its own.
     """
     as_member = replace(build, tool_middleware=(*build.tool_middleware, _as_member(build.spec.id, model_name)))
+    turn = HookTurn(
+        config=config,
+        runtime_paths=runtime_paths,
+        model_name=model_name,
+        store=None,
+        session=None,
+        scope=None,
+        scoped=False,
+        native_compaction=None,
+        prompt_id=None,
+    )
+
+    def hooks(resumed: bool) -> LoopHooks:
+        return agent_loop_hooks(
+            as_member,
+            turn,
+            agent_name=build.spec.id,
+            queued_notices=False,
+            approval_receipt=resumed,
+        )
+
     return TeamMember(
         spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role or "",
-        hooks=partial(
-            agent_loop_hooks,
-            as_member,
-            HookTurn(
-                config=config,
-                runtime_paths=runtime_paths,
-                model_name=model_name,
-                store=None,
-                session=None,
-                scope=None,
-                scoped=False,
-                native_compaction=None,
-                prompt_id=None,
-            ),
-            agent_name=build.spec.id,
-            queued_notices=False,
-        ),
+        hooks=hooks,
         request_template=build.request_template,
     )
 

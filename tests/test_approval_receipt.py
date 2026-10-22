@@ -242,7 +242,10 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The receipt goes with the resumed parent's first request only, not with each continuation after a delegation."""
+    """The receipt goes with the resumed parent's first request only.
+
+    No continuation after a delegation repeats it, and the fresh children the resumed parent starts never get it.
+    """
     paths = _runtime_paths(tmp_path)
     requester = "@alice:example.org"
     config = with_responder_access(
@@ -301,6 +304,10 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
         any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
         for request in leader.requests
     ] == [False, True, False, False]
+    assert [
+        any((message.provider_data or {}).get("mindroom_approval_receipt") for message in request.messages)
+        for request in code.requests
+    ] == [False, False]
 
 
 @pytest.mark.asyncio

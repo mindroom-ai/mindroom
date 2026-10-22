@@ -208,6 +208,7 @@ class ResumeRunner:
                     prompt_id=None,
                 ),
                 agent_name=self.agent_name,
+                approval_receipt=True,
             )
         events = resume_from_session(
             build.spec,

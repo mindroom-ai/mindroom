@@ -24,7 +24,6 @@ from mindroom import agents, ai, ai_runtime, loop_hooks, response_runner
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval.receipt import approval_receipt_context
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -851,32 +850,12 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
 
 @pytest.mark.asyncio
-async def test_an_approval_receipt_is_projected_into_the_first_request_only(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    probe: type[_ProbeToolkit],
-) -> None:
-    """The trusted receipt reaches the model once, on the system message, and never enters the stored run."""
-    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("ok")])
-
-    with approval_receipt_context("Trusted approval receipt."):
-        await _stream(reply)
-
-    assert probe.calls == ["a"]
-    first, second = reply.model.requests
-    assert str(first.messages[0].content).endswith("Trusted approval receipt.")
-    assert first.messages[0].provider_data == {"mindroom_approval_receipt": True}
-    assert "Trusted approval receipt." not in str(second.messages[0].content)
-    assert all("Trusted approval receipt." not in str(message.content) for message in _stored(reply).messages)
-
-
-@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Participation decides first, compaction rewrites next, the receipt projects last; the other stages are wired."""
+    """Participation decides first and compaction rewrites next; a fresh reply has no receipt; the rest is wired."""
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
     original = ai.run_agent
@@ -893,7 +872,6 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
         "participation_hook",
         "mid_turn_compaction_hook",
-        "approval_receipt_hook",
     ]
     assert hooks.answer_tool_calls is None
     assert hooks.rewrite_tool_calls is None

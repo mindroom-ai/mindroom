@@ -5,7 +5,9 @@ turn or resume install the hooks ``_loop_hooks`` composes once: the participatio
 approval receipt, the wait budget of managed tool-job calls, the output-limit answer, portable tool search, the
 tool-call middleware, the queued-message and tool-job notices, and the skill-review capture. Which of those a run
 has is an input: ``agent_loop_hooks`` and ``leader_loop_hooks`` name what an agent's and a leader's run differ by,
-and ``HookTurn`` holds what every run takes from its turn.
+and ``HookTurn`` holds what every run takes from its turn. Only a run an approval continuation resumes carries the
+approval receipt, so a fresh run the continuation starts, such as a delegated child or a member's new task, never
+reads it.
 
 The loop lets a hook's exception fail the run, so a mistake in a hook the run depends on surfaces. A hook whose
 work a reply can do without catches and logs that work's failures itself: mid-turn compaction sends the request
@@ -78,12 +80,14 @@ def agent_loop_hooks(
     skill_review_capture: SkillReviewCapture | None = None,
     run_id: str | None = None,
     queued_notices: bool = True,
+    approval_receipt: bool = False,
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
 
     The run compacts as ``agent_name``, in the turn's scope when one is given and under its own name otherwise, and
     a top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
-    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``.
+    turn's notices; ``skill_review_capture`` records the final request of run ``run_id``; ``approval_receipt`` is
+    on for a run an approval continuation resumes, whose first request carries the receipt the continuation binds.
     """
     jobs = build.tool_jobs
     return _loop_hooks(
@@ -103,6 +107,7 @@ def agent_loop_hooks(
         queued_notices=queued_notices,
         skill_review_capture=skill_review_capture,
         run_id=run_id,
+        approval_receipt=approval_receipt,
     )
 
 
@@ -115,13 +120,14 @@ def leader_loop_hooks(
     history_settings: ResolvedHistorySettings,
     tool_middleware: tuple[ToolMiddleware, ...],
     jobs: JobActor | None,
+    approval_receipt: bool = False,
 ) -> LoopHooks:
     """Return the hooks of one team leader's turn or resume.
 
     The leader compacts as the team: as the configured team ``entity_name`` names, or as no entity when it is None
     for an ad hoc team, under the team's ``history_settings``. It has no participation gate, deferred tools, job
     definitions, or skill-review capture; it owns the turn's queued-message notices and hears of its team's ended
-    ``jobs``.
+    ``jobs``. ``approval_receipt`` is on when an approval continuation resumes the team, as for an agent.
     """
     return _loop_hooks(
         turn,
@@ -138,6 +144,7 @@ def leader_loop_hooks(
         queued_notices=True,
         skill_review_capture=None,
         run_id=None,
+        approval_receipt=approval_receipt,
     )
 
 
@@ -157,13 +164,14 @@ def _loop_hooks(
     queued_notices: bool,
     skill_review_capture: SkillReviewCapture | None,
     run_id: str | None,
+    approval_receipt: bool,
 ) -> LoopHooks:
     """Return the hooks of one run or resume, in the order the loop applies them before each request.
 
     The participation gate decides first, so a reply that stays silent never compacts or requests; the request
     cap is the loop's own and refuses a request before any hook runs; mid-turn compaction rewrites the live
-    messages, and folds into the scope only when the turn is ``scoped``; the approval receipt projects into the
-    first request of a resumed run only; the wait budget of ``job_definitions``' managed calls joins their
+    messages, and folds into the scope only when the turn is ``scoped``; with ``approval_receipt``, the receipt
+    projects into the run's first request; the wait budget of ``job_definitions``' managed calls joins their
     definitions last, as the request is formatted. Queued-message notices follow every tool batch and a resume's
     entry when ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
     ``skill_review_capture`` records the final request of run ``run_id``.
@@ -192,7 +200,8 @@ def _loop_hooks(
             turn_recorder=turn.turn_recorder,
         ),
     )
-    before_request.append(approval_receipt_hook(capabilities))
+    if approval_receipt:
+        before_request.append(approval_receipt_hook(capabilities))
     if job_definitions is not None:
         before_request.append(job_definitions_hook(job_definitions))
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
