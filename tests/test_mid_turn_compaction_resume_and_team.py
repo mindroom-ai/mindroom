@@ -227,12 +227,6 @@ async def _pause(agent: _Resumable) -> RunRecord:
     history, summary = (
         replayed_history(agent.session, _SCOPE, build.history_settings, plan) if agent.replays_history else ([], None)
     )
-    store_record = persist_to(agent.store, agent.session)
-
-    async def persist(record: RunRecord) -> None:
-        await store_record(record)
-        agent.session.runs = [*(run for run in agent.session.runs if run.run_id != record.run_id), record]
-
     events = run_agent(
         replace(build.spec, system_message=prompt_for_turn(build)),
         build_request(system=(), summary=summary, history=history, turn=turn),
@@ -250,7 +244,7 @@ async def _pause(agent: _Resumable) -> RunRecord:
             native_compaction=None,
             prompt_id=turn.prompt.id,
         ),
-        persist=persist,
+        persist=persist_to(agent.store, agent.session),
         request_template=replace(build.request_template, stream=False),
     )
     finished = [event async for event in events][-1]

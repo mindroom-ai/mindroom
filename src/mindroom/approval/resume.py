@@ -18,12 +18,13 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
 from mindroom.llm.events import RunFinished
+from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord
 from mindroom.loop_hooks import agent_loop_hooks
 from mindroom.response_turn import DENIED_WITHOUT_REASON
-from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -114,6 +115,32 @@ def resume_from_session(
     )
 
 
+def with_resumed_turn_log_context[EventT](events: AsyncIterator[EventT]) -> AsyncIterator[EventT]:
+    """Return ``events`` with the request-log attribution of the turn it resumes bound around every pull.
+
+    A resume runs under the tool runtime context of the turn it continues, which names the entity, session, room,
+    thread, source event, requester, and correlation id a fresh turn of it binds; without one ``events`` is returned
+    as is.
+    """
+    context = get_tool_runtime_context()
+    if context is None:
+        return events
+    target = context.target
+    attribution = {
+        "agent_id": context.agent_name,
+        "session_id": target.session_id,
+        "room_id": target.room_id,
+        "thread_id": target.resolved_thread_id,
+        "reply_to_event_id": target.reply_to_event_id,
+        "requester_id": context.requester_id,
+        "correlation_id": context.correlation_id,
+    }
+    return context_bound_async_stream(
+        context_factory=lambda: bind_llm_request_log_context(**attribution),
+        stream_factory=events.__aiter__,
+    )
+
+
 async def forward_resume[R: AnyRunRecord](
     events: AsyncIterator[RunEvent],
     on_event: ResumeEvents | None,
@@ -160,13 +187,7 @@ class ResumeRunner:
         plan = configured_replay_plan(history_settings=build.history_settings, estimated_tokens=0)
         native = restore_native_history(build.spec.model, persisted_run=paused, session=self.session)
         native_compaction = native.native_compaction if native is not None else None
-        store_record = persist_to(self.store, self.session)
-
-        async def persist(record: RunRecord) -> None:
-            await store_record(record)
-            self.session.runs = [*runs_without(self.session.runs, [record.run_id]), record]
-
-        return resume_from_session(
+        events = resume_from_session(
             build.spec,
             paused,
             decisions,
@@ -188,7 +209,7 @@ class ResumeRunner:
                 native_compaction=native_compaction,
                 prompt_id=None,
             ),
-            persist=persist,
+            persist=persist_to(self.store, self.session),
             request_template=replace(
                 build.request_template,
                 native_compaction=native_compaction,
@@ -196,6 +217,7 @@ class ResumeRunner:
                 stream=True,
             ),
         )
+        return with_resumed_turn_log_context(events)
 
     async def continue_run(
         self,
@@ -215,4 +237,5 @@ __all__ = [
     "approval_decisions",
     "forward_resume",
     "resume_from_session",
+    "with_resumed_turn_log_context",
 ]

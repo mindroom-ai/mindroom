@@ -720,7 +720,6 @@ class DelegatingLeader:
 
     async def _persist(self, record: RunRecord) -> None:
         await persist_to(self.store, self.session)(record)
-        self.session.runs = [*(run for run in self.session.runs if run.run_id != record.run_id), record]
 
     async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
         """Run the leader on ``turns`` until it completes or pauses on its delegations."""

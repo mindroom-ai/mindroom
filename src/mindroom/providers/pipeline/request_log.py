@@ -1,8 +1,9 @@
 """Token telemetry for every provider request, and the opt-in full request log.
 
-Each request emits one ``LLM usage`` log line once it ends, completed or not. With
-``debug.log_llm_requests`` the request (messages, tools, model settings) and its usage are appended
-to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by ``request_log_id``.
+Each request emits one ``LLM usage`` log line once it ends, completed or not, attributed to the turn
+its request context names. With ``debug.log_llm_requests`` the request (messages, tools, model
+settings) and its usage are appended to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by
+``request_log_id``.
 """
 
 from __future__ import annotations
@@ -42,6 +43,16 @@ _NON_API_MESSAGE_FIELDS = frozenset(
 # Settings that hold credentials or clients rather than request parameters.
 _SECRET_SETTINGS = frozenset(
     {"api_key", "azure_ad_token", "azure_ad_token_provider", "client_params", "default_headers", "default_query"},
+)
+# Request-context fields that attribute a request to its turn, which the usage line repeats; prompts stay out of it.
+_ATTRIBUTION_FIELDS = (
+    "agent_id",
+    "session_id",
+    "room_id",
+    "thread_id",
+    "reply_to_event_id",
+    "requester_id",
+    "correlation_id",
 )
 
 
@@ -151,8 +162,7 @@ def _log_usage(
     }
     if served_provider is not None:
         payload["served_provider"] = served_provider
-    if (correlation_id := context.get("correlation_id")) is not None:
-        payload["correlation_id"] = correlation_id
+    payload |= {field: context[field] for field in _ATTRIBUTION_FIELDS if field in context}
     if usage is not None:
         context_tokens = context_input_tokens_from_counts(
             input_tokens=usage.input_tokens,

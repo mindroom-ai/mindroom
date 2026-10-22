@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
@@ -211,6 +211,20 @@ class DelegationState:
         self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
+
+
+def delegation_card_id(member_id: str | None, call_id: str) -> str:
+    """Return the id of a delegation call's gate and approval card: ``member_id:call_id`` for a team member's call."""
+    return f"{member_id}:{call_id}" if member_id else call_id
+
+
+def member_delegation_call(card_id: str, member_ids: Collection[str]) -> tuple[str, str] | None:
+    """Return the member and its own call id when ``card_id`` is the card of a delegation call one of ``member_ids`` made.
+
+    A child's projected tool id, ``delegation_id:call_id``, names no member, so it is not such a card.
+    """
+    member_id, _, call_id = card_id.partition(":")
+    return (member_id, call_id) if call_id and member_id in member_ids else None
 
 
 class ChildResponseRunner(Protocol):

@@ -14,7 +14,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.summary_rows_schema import (
     NON_VISIBLE_RUN_STATUS_VALUES,
@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.schema import TableNames
     from mindroom.session_storage.types import SaveOutcome, SessionField, SessionKind
     from mindroom.usage.storage import IndependentUsageKind
+
+# Why a run save wrote no row: a cut removed the run, or it is folded behind its scope's latest summary row.
+type _Refusal = Literal["removed", "frozen"]
 
 _BUSY_TIMEOUT_SECONDS = 30.0
 _NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
@@ -182,6 +185,8 @@ class ConversationStore:
         summary row. With ``record_usage``, the run's usage replaces its earlier snapshot in the usage ledger,
         which outlives removed runs, and the session totals change by the difference, in the same transaction.
         A frozen run's usage is final and changes neither.
+
+        Once the save commits, ``session.runs`` holds the run as the store does (see ``_reconcile``).
         """
         return self._save_run_dict(session, run.to_dict(), row_type=run_type(run), record_usage=record_usage)
 
@@ -195,14 +200,17 @@ class ConversationStore:
     ) -> SaveOutcome:
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, self.names, session)
-            return self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+            saved = self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
+        _reconcile(session, [saved])
+        return saved.outcome
 
     def save_runs(self, session: ConversationSession, runs: Iterable[AnyRunRecord]) -> None:
-        """Write conversation-only changes to runs of ``session`` in one transaction and make them its copies.
+        """Write conversation-only changes to runs of ``session`` in one transaction, then reconcile its copies.
 
-        Conversation rewrites leave the usage ledger and session totals untouched. Only written runs replace the
-        session's copies; a removed run leaves the session and a frozen one stays as stored. So callers edit a
-        copy and hand the copy here: a refused save must leave the session's copy as stored.
+        Conversation rewrites leave the usage ledger and session totals untouched. Once the transaction commits,
+        ``session.runs`` holds each run as the store does (see ``_reconcile``), so a removed run leaves the session
+        and a frozen one keeps the session's copy. Callers therefore edit a copy and hand the copy here: a refused
+        save must leave the session's copy as stored.
         """
         runs = list(runs)
         if not runs:
@@ -213,8 +221,8 @@ class ConversationStore:
             raise ValueError(msg)
         with self.transaction(write=True) as connection:
             _ensure_session_row(connection, self.names, session)
-            outcomes = {
-                run.run_id: self._save_run(
+            saved = [
+                self._save_run(
                     connection,
                     session.session_id,
                     run.to_dict(),
@@ -222,17 +230,8 @@ class ConversationStore:
                     record_usage=False,
                 )
                 for run in runs
-            }
-        written = {run.run_id: run for run in runs if outcomes[run.run_id] == "written"}
-        loaded_ids = {existing.run_id for existing in session.runs}
-        session.runs = [
-            *(
-                written.get(existing.run_id, existing)
-                for existing in session.runs
-                if outcomes.get(existing.run_id) != "removed"
-            ),
-            *(run for run_id, run in written.items() if run_id not in loaded_ids),
-        ]
+            ]
+        _reconcile(session, saved)
 
     def save_session_fields(self, session: ConversationSession, *fields: SessionField) -> None:
         """Write the named fields of ``session`` to its row, creating the row if needed, and leave the rest alone."""
@@ -339,20 +338,90 @@ class ConversationStore:
         *,
         row_type: SessionKind,
         record_usage: bool,
-    ) -> SaveOutcome:
+    ) -> _SavedRun:
         """Save one run from its stored dict (``record.to_dict()``), under the insertion rules."""
         if data["status"] != RunStatus.paused.value and self.prompt_roles:
             # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
             data["messages"] = [message for message in data["messages"] if message["role"] not in self.prompt_roles]
-        stored = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
-        outcome: SaveOutcome = stored if isinstance(stored, str) else "written"
-        if not record_usage or outcome == "frozen":
-            return outcome
+        row = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
+        saved = _SavedRun(data["run_id"], row_type, row)
+        if not record_usage or row == "frozen":
+            return saved
         now = int(time())
-        created_at, updated_at = stored if not isinstance(stored, str) else (data.get("created_at") or now, now)
+        created_at, updated_at = (
+            (row.created_at, row.updated_at) if isinstance(row, _WrittenRow) else (data.get("created_at") or now, now)
+        )
         snapshot = project_usage({**data, "created_at": created_at, "updated_at": updated_at})
         _record_run_usage(connection, self.names, session_id, data["run_id"], snapshot)
-        return outcome
+        return saved
+
+
+@dataclass(frozen=True, slots=True)
+class _WrittenRow:
+    """One run row as an upsert left it: its timestamps, its ``run_data`` text, and whether it now ends the log."""
+
+    created_at: int
+    updated_at: int
+    run_data: str
+    ends_log: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _SavedRun:
+    """One run save: the run, its row type, and the row it wrote or why it wrote none."""
+
+    run_id: str
+    row_type: SessionKind
+    row: _WrittenRow | _Refusal
+
+    @property
+    def outcome(self) -> SaveOutcome:
+        return "written" if isinstance(self.row, _WrittenRow) else self.row
+
+
+def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
+    """Make ``session``'s copies of the saved runs what the store holds, in the order a load returns them.
+
+    A written run's copy is its row decoded afresh, never the record the caller handed over: it replaces the
+    session's copy in place, or goes last when the session holds none or the row took the log's next position (a
+    new run, or one saved visible over its paused, cancelled, or errored row). Member runs keep their own copies. A
+    removed run leaves the session with every run below it. A frozen run's row did not change, so neither does the
+    session's copy, nor its absence when the session holds none. ``session.runs`` becomes a new list, so a reader
+    of the old one is unaffected.
+    """
+    runs = list(session.runs)
+    for save in saved:
+        if save.row == "removed":
+            runs = runs_without(runs, [save.run_id])
+        elif isinstance(save.row, _WrittenRow):
+            stored = run_from_row(save.row_type, save.row.run_data)
+            assert stored is not None
+            place = next((index for index, run in enumerate(runs) if run.run_id == save.run_id), None)
+            if place is None or save.row.ends_log:
+                runs = [*(run for run in runs if run.run_id != save.run_id), stored]
+            else:
+                runs[place] = stored
+    session.runs = runs
+
+
+def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[AnyRunRecord]:
+    """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
+    run_list = list(runs)
+    removed = {run_id for run_id in run_ids if run_id}
+    if not removed:
+        return run_list
+    children_by_parent: dict[str, list[str]] = {}
+    for run in run_list:
+        if run.parent_run_id:
+            children_by_parent.setdefault(run.parent_run_id, []).append(run.run_id)
+    frontier = list(removed)
+    while frontier:
+        parent = frontier.pop()
+        for child in children_by_parent.get(parent, []):
+            if child not in removed:
+                removed.add(child)
+                frontier.append(child)
+    return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
 
 
 def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
@@ -360,7 +429,9 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
 
     The record is serialized on the caller's task before the lane is awaited, so what lands is the record as it was
     handed over. ``session.session_state``, which the run's tools change in place, is written back by field when it
-    differs from what the session held when this callback was made, after the record and in the same lane.
+    differs from what the session held when this callback was made, after the record and in the same lane. The
+    save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's saves
+    run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
     """
     loaded_state = copy.deepcopy(session.session_state)
 
@@ -429,23 +500,24 @@ def _write_run_row(
     *,
     row_type: str,
     session_id: str,
-) -> tuple[int, int] | SaveOutcome:
-    """Upsert one run row under the conversation log's rules; return its timestamps, or why no row was written."""
+) -> _WrittenRow | _Refusal:
+    """Upsert one run row under the conversation log's rules; return the row as written, or why none was."""
     run_id, parent_run_id = data["run_id"], data.get("parent_run_id")
     runs, summaries, removed = (quote_identifier(name) for name in (names.runs, names.summaries, names.removed_runs))
     if connection.execute(f"SELECT 1 FROM {removed} WHERE run_id IN (?, ?)", (run_id, parent_run_id)).fetchone():  # noqa: S608
         return "removed"
     if _is_folded(connection, runs, summaries, run_id, parent_run_id):
         return "frozen"
-    (run_index,) = connection.execute(
+    (next_index,) = connection.execute(
         f"SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {runs} WHERE session_id = ?), -1), "  # noqa: S608
         f"COALESCE((SELECT MAX(after_run_index) FROM {summaries} WHERE session_id = ?), -1)) + 1",
         (session_id, session_id),
     ).fetchone()
     now = int(time())
+    run_data = json.dumps(data)
     # A run saved visible over its stored paused, cancelled, or errored row was finished after the turns it waited
     # for, so it moves after them; any other update keeps the run's place.
-    return connection.execute(
+    created_at, updated_at, run_index = connection.execute(
         f"INSERT INTO {runs} AS run (run_id, session_id, run_type, agent_id, team_id, user_id, parent_run_id, "  # noqa: S608
         "status, run_index, run_data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(run_id) DO UPDATE SET status = excluded.status, run_data = excluded.run_data, "
@@ -453,7 +525,7 @@ def _write_run_row(
         f"run_index = CASE WHEN run.parent_run_id IS NULL AND run.status IN ({_NON_VISIBLE_STATUS_SQL}) "
         f"AND excluded.parent_run_id IS NULL AND excluded.status NOT IN ({_NON_VISIBLE_STATUS_SQL}) "
         "THEN excluded.run_index ELSE COALESCE(run.run_index, excluded.run_index) END "
-        "RETURNING created_at, updated_at",
+        "RETURNING created_at, updated_at, run_index",
         (
             run_id,
             session_id,
@@ -463,12 +535,13 @@ def _write_run_row(
             data.get("user_id"),
             parent_run_id,
             data["status"],
-            run_index,
-            json.dumps(data),
+            next_index,
+            run_data,
             data.get("created_at") or now,
             now,
         ),
     ).fetchone()
+    return _WrittenRow(created_at, updated_at, run_data, ends_log=run_index == next_index)
 
 
 def _is_folded(
@@ -682,4 +755,5 @@ __all__ = [
     "delete_run_subtrees_in_transaction",
     "open_conversation_store",
     "persist_to",
+    "runs_without",
 ]

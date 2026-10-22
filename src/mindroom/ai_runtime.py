@@ -21,7 +21,7 @@ from mindroom.history.run_visibility import (
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.agent_storage import runs_without
+from mindroom.session_storage.store import runs_without
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import AfterToolBatchHook, ResumeEntryHook

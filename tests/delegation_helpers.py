@@ -89,6 +89,7 @@ def _delegate_runtime_context(
     execution_identity: ToolExecutionIdentity | None = None,
     agent_name: str = "leader",
     hook_registry: HookRegistry | None = None,
+    correlation_id: str | None = None,
 ) -> ToolRuntimeContext:
     """Build the requester context every successful delegation requires; ``hook_registry`` holds its plugin hooks."""
     room_id = execution_identity.room_id if execution_identity is not None else "!room:example.org"
@@ -111,6 +112,7 @@ def _delegate_runtime_context(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
+        correlation_id=correlation_id,
     )
     return context if hook_registry is None else replace(context, hook_registry=hook_registry)
 
@@ -139,9 +141,9 @@ class ScriptedAgents:
     ``team`` is the leader of every team reply; ``built_models`` names the model each agent build asked for.
     """
 
-    models: dict[str, ScriptedModel]
-    by_session: dict[str, ScriptedModel] = field(default_factory=dict)
-    team: ScriptedModel | None = None
+    models: Mapping[str, ModelProvider]
+    by_session: Mapping[str, ModelProvider] = field(default_factory=dict)
+    team: ModelProvider | None = None
     built_models: list[str] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,13 +261,17 @@ async def respond(
     run_id: str | None = None,
     stream: bool = False,
     hook_registry: HookRegistry | None = None,
+    correlation_id: str | None = None,
 ) -> str | PausedAttempt:
-    """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on."""
+    """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on.
+
+    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
+    """
     ctx = make_turn_context(
         agent_name,
         session_id=identity.session_id,
         run_id=run_id,
-        correlation_id=f"corr-{run_id or 'turn'}",
+        correlation_id=correlation_id or f"corr-{run_id or 'turn'}",
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
@@ -276,6 +282,7 @@ async def respond(
         execution_identity=identity,
         agent_name=agent_name,
         hook_registry=hook_registry,
+        correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
         try:
@@ -330,8 +337,13 @@ async def resume(
     approval_id: str = "approval",
     request_body: str = "",
     hook_registry: HookRegistry | None = None,
+    correlation_id: str | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Continue ``paused`` with ``decisions`` on ``calls`` through the production approval execution."""
+    """Continue ``paused`` with ``decisions`` on ``calls`` through the production approval execution.
+
+    A ``correlation_id`` is the continued turn's, which its continuation and tool context carry as a production
+    approval's do.
+    """
     continuation = approval_continuation(
         approval_id=approval_id,
         run_id=paused.run_id,
@@ -346,6 +358,7 @@ async def resume(
         runtime_model_name=paused.runtime_model_name,
         continuation_count=paused.continuation_count,
         delegation_storage_bindings=paused.delegation_storage_bindings,
+        correlation_id=correlation_id,
     )
     runtime = _delegate_runtime_context(
         config,
@@ -353,6 +366,7 @@ async def resume(
         execution_identity=identity,
         agent_name=agent_name,
         hook_registry=hook_registry,
+        correlation_id=correlation_id,
     )
     return await execution.continue_run(
         continuation,
@@ -448,9 +462,16 @@ def _team_runtime(
     config: Config,
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
+    correlation_id: str | None = None,
 ) -> tuple[ToolExecutionIdentity, ToolRuntimeContext]:
     team_identity = replace(identity, agent_name=team_name)
-    runtime = _delegate_runtime_context(config, runtime_paths, execution_identity=team_identity, agent_name=team_name)
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=team_identity,
+        agent_name=team_name,
+        correlation_id=correlation_id,
+    )
     return team_identity, runtime
 
 
@@ -462,17 +483,27 @@ async def respond_team(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     run_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> str | PausedAttempt:
-    """Run one blocking reply of the configured team ``team_name``: its text, or the pause it suspended on."""
+    """Run one blocking reply of the configured team ``team_name``: its text, or the pause it suspended on.
+
+    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
+    """
     members = config.teams[team_name].agents
-    team_identity, runtime = _team_runtime(team_name, config=config, runtime_paths=runtime_paths, identity=identity)
+    team_identity, runtime = _team_runtime(
+        team_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        identity=identity,
+        correlation_id=correlation_id,
+    )
     orchestrator = _team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
     ctx = make_turn_context(
         team_name,
         session_id=identity.session_id,
         run_id=run_id,
-        correlation_id=f"corr-{run_id or 'team'}",
+        correlation_id=correlation_id or f"corr-{run_id or 'team'}",
         room_id=identity.room_id,
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
@@ -503,9 +534,19 @@ async def resume_team(
     runtime_paths: RuntimePaths,
     identity: ToolExecutionIdentity,
     decisions: Mapping[str, bool],
+    correlation_id: str | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Continue the team's ``paused`` run with ``decisions`` on ``calls`` through the production team resume."""
-    team_identity, runtime = _team_runtime(team_name, config=config, runtime_paths=runtime_paths, identity=identity)
+    """Continue the team's ``paused`` run with ``decisions`` on ``calls`` through the production team resume.
+
+    A ``correlation_id`` is the continued turn's, which its tool context carries as a production approval's does.
+    """
+    team_identity, runtime = _team_runtime(
+        team_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        identity=identity,
+        correlation_id=correlation_id,
+    )
     with tool_runtime_context(runtime):
         return await continue_paused_team_run(
             member_names=tuple(config.teams[team_name].agents),

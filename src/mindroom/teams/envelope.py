@@ -28,10 +28,11 @@ from mindroom.agents import team_background_jobs
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.approval.receipt import approval_receipt_hook
-from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume
+from mindroom.approval.resume import ResumeDecisions, approval_decisions, forward_resume, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.delegation.execution import DELEGATION_TOOL_NAMES, drive_delegation_stream, has_delegation_state
+from mindroom.delegation.state import member_delegation_call
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -89,7 +90,6 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
-from mindroom.session_storage.agent_storage import runs_without
 from mindroom.session_storage.store import persist_to
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.members import (
@@ -584,17 +584,17 @@ def _team_storage(run: TurnRunState, *, session_id: str) -> _TeamStorage | None:
 
 
 def _persist_into(records: TeamRunRecords | None, storage: _TeamStorage | None) -> Persist[AnyRunRecord]:
-    """Return the persist callback of one team run: keep the team's terminal record, store every record, show it to the session."""
+    """Return the persist callback of one team run: keep the team's terminal record and store every record.
+
+    Storing a record updates the session the run loaded, member rows included.
+    """
     store_persist = persist_to(storage.store, storage.session) if storage is not None else None
 
     async def persist(record: AnyRunRecord) -> None:
         if records is not None and isinstance(record, TeamRunRecord):
             records.record = record
-        if store_persist is None or storage is None:
-            return
-        await store_persist(record)
-        session = storage.session
-        session.runs = [*runs_without(session.runs, [record.run_id]), record]
+        if store_persist is not None:
+            await store_persist(record)
 
     return persist
 
@@ -1424,11 +1424,13 @@ def _resolved_team_session_id(scope_context: ScopeSessionContext | None, session
 def _continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
-    A delegation call adds no marker: the member whose run issued it already shows it pending, and the driver's
-    approval card only asks about that call under the card's own id, so the resume completes the member's marker.
+    The approval card of a member's own delegation call adds no marker: the member's slot already shows that call
+    pending under its own id, and the resume finishes it there.
     """
+    member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
-        if requirement.tool_execution.tool_name in DELEGATION_TOOL_NAMES:
+        call_id = requirement.tool_execution.tool_call_id
+        if requirement.member_agent_id is None and call_id and member_delegation_call(call_id, member_names):
             continue
         scope = (
             f"agent:{presentation.resolve_member_id(requirement.member_agent_id, requirement.member_agent_name)}"
@@ -2141,6 +2143,7 @@ async def continue_paused_team_run(
                 denial_reasons=denial_reasons if delegated else None,
                 approval_calls=approval_calls if delegated else (),
             )
+            events = with_resumed_turn_log_context(events)
             with helper_usage_context(scope):
                 await _publish_team_presentation(progress, presentation)
                 async with closing_async_stream(events):
