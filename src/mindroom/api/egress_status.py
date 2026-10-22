@@ -74,12 +74,6 @@ def _status_load_limit() -> asyncio.Semaphore:
     return limit
 
 
-def _first_error(errors: BaseExceptionGroup) -> BaseException:
-    """Return the first failure in a task group's exception group, nested groups included."""
-    first = errors.exceptions[0]
-    return _first_error(first) if isinstance(first, BaseExceptionGroup) else first
-
-
 async def load_concurrently[Result](
     loads: Iterable[Callable[[], Awaitable[Result]]],
     *,
@@ -104,8 +98,11 @@ async def load_concurrently[Result](
         async with asyncio.TaskGroup() as group:
             tasks = [group.create_task(run(load)) for load in loads]
     except BaseExceptionGroup as errors:
-        raise _first_error(errors) from None
-    return [task.result() for task in tasks]
+        first = errors.exceptions[0]
+    else:
+        return [task.result() for task in tasks]
+    # Raised outside the handler, so its cause and context stay the load's own.
+    raise first
 
 
 async def require_egress_broker_enabled(request: Request) -> None:

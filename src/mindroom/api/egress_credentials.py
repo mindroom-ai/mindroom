@@ -381,14 +381,11 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
         if eligibility is None or scope is None:
             return None
         is_shared, can_manage = eligibility
-        target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
-        async with asyncio.TaskGroup() as group:
-            inactive = group.create_task(
-                asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target),
-            )
-            services = await egress_services_for_agent(request, agent_name, human_requester, eligibility=eligibility)
+        services = await egress_services_for_agent(request, agent_name, human_requester, eligibility=eligibility)
         if services is None:
             return None
+        target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
+        inactive = await asyncio.to_thread(inactive_user_services, config.egress_broker, manager, target)
         return EgressCredentialAgent(
             agent_name=agent_name,
             agent_display_name=agent.display_name,
@@ -398,7 +395,7 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             scope_agents=list(user_store_agents) if scope == "user" else [],
             managers=list(agent.credential_managers) if is_shared else [],
             services=services,
-            inactive_services=inactive.result(),
+            inactive_services=inactive,
         )
 
     # Agents load concurrently, like their rows, so the page waits for the slowest agent instead of all of them.

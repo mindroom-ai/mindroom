@@ -1774,11 +1774,12 @@ async def test_load_concurrently_keeps_order_and_raises_the_first_failure() -> N
     async def failing() -> int:
         await asyncio.sleep(0)
         msg = "boom"
-        raise ValueError(msg)
+        raise ValueError(msg) from OSError("disk")
 
-    with pytest.raises(ValueError, match="boom"):
+    with pytest.raises(ValueError, match="boom") as raised:
         await egress_status.load_concurrently([stuck, failing])
     assert cancelled == ["stuck"]
+    assert isinstance(raised.value.__cause__, OSError)
 
 
 def test_disconnecting_a_requester_scoped_account_leaves_other_users_connected(
