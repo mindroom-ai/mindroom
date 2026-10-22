@@ -1347,7 +1347,6 @@ class TestUserIdPassthrough:
         assert "team/ultimate" in str(error)
 
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.usefixtures("probe")
     async def test_a_reply_passes_every_file_to_the_model(
