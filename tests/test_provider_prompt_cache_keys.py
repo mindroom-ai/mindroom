@@ -18,10 +18,10 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import chat_request_kwargs
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import responses_request_kwargs
-from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -19,7 +19,6 @@ from mindroom.history.runtime import resolve_agent_preparation_inputs
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.teams.envelope import BuiltTeam, build_team_spec
 from mindroom.teams.members import materialize_exact_team_members
@@ -28,6 +27,7 @@ from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml
 from tests.identity_helpers import entity_ids
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

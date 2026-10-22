@@ -492,7 +492,6 @@ def _build_responses(
             model_id,
             base_url=base_url if route_key == "openai" else None,
         ),
-        prompt_cache_breakpoints=route_key == "openai",
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         approval_receipt_after_response_id=True,
         provider_default_sampling=_provider_default_sampling(model_id),

@@ -244,9 +244,9 @@ Matrix sync callback
 | `providers/gemini/` | Owned Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, schema conversion, Google Search grounding, decision-request config, and reply parsing |
 | `providers/ollama_adapter.py` | Owned Ollama adapter over the native chat API |
 | `providers/synthetic_adapter.py` | Owned synthetic provider streaming seeded Lorem Ipsum and shell calls |
-| `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys |
+| `providers/extra_kwargs.py` | Parses a model's `extra_kwargs` into its adapter's settings, rejecting unknown keys, and reports the non-secret settings that run metadata and request logs record as model params |
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
-| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp, timings, `<think>` splitting, one message per tool result |
+| `providers/assistant_turn.py` | What every adapter does to finish a turn: the `mindroom_model` provenance stamp, timings, `<think>` splitting |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
 | `providers/remote_media.py` | Downloads URL media for the adapters that send media only inline |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |

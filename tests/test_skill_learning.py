@@ -100,6 +100,9 @@ class _ScriptedModel:
     script: list[_Call | list[_Call]] = field(default_factory=list)
     identity: ModelIdentity = _SCRIPTED
     capabilities: Capabilities = field(default_factory=Capabilities)
+    native_history_route: None = None
+    replay_estimator: None = None
+    model_params: dict[str, Any] = field(default_factory=dict)
     received: list[ModelRequest] = field(default_factory=list)
     requests: list[list[str]] = field(default_factory=list)
     input_tokens: list[int] = field(default_factory=list)
@@ -145,11 +148,6 @@ class _ScriptedModel:
         message = Message(role="assistant", content="", tool_calls=calls, metrics=usage)
         cut_off = len(self.requests) in self.cut_off_requests
         yield TurnCompleted(message=message, stop_reason="output_limit" if cut_off else "tool_use")
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message."""
-        del messages
-        return list(results)
 
     @property
     def offered_tools(self) -> list[set[str]]:

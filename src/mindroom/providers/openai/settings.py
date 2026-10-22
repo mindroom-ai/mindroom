@@ -6,8 +6,10 @@ the wire or the SDK client is a field here. Keys a route does not accept fail wi
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from mindroom.providers.extra_kwargs import SECRET
 
 __all__ = [
     "CEREBRAS_FIELDS",
@@ -140,20 +142,20 @@ class ChatSettings:
     top_p: float | None = None
     service_tier: str | None = None
     strict_output: bool = True
-    extra_headers: dict[str, Any] | None = None
-    extra_query: dict[str, Any] | None = None
+    extra_headers: dict[str, Any] | None = field(default=None, metadata=SECRET)
+    extra_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     extra_body: dict[str, Any] | None = None
     request_params: dict[str, Any] | None = None
     role_map: dict[str, str] | None = None
     # Client parameters.
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     organization: str | None = None
     base_url: str | None = None
     timeout: float | None = None
     max_retries: int | None = None
-    default_headers: dict[str, str] | None = None
-    default_query: dict[str, Any] | None = None
-    client_params: dict[str, Any] | None = None
+    default_headers: dict[str, str] | None = field(default=None, metadata=SECRET)
+    default_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
+    client_params: dict[str, Any] | None = field(default=None, metadata=SECRET)
     # Cerebras.
     top_k: int | None = None
     repetition_penalty: float | None = None
@@ -162,8 +164,8 @@ class ChatSettings:
     api_version: str | None = None
     azure_endpoint: str | None = None
     azure_deployment: str | None = None
-    azure_ad_token: str | None = None
-    azure_ad_token_provider: Any = None
+    azure_ad_token: str | None = field(default=None, metadata=SECRET)
+    azure_ad_token_provider: Any = field(default=None, metadata=SECRET)
     # OpenRouter: model routing and the Claude prompt-cache ladder for Anthropic-routed ids.
     models: list[str] | None = None
     cache_system_prompt: bool = True
@@ -195,21 +197,21 @@ class ResponsesSettings:
     user: str | None = None
     service_tier: str | None = None
     strict_output: bool = True
-    extra_headers: dict[str, Any] | None = None
-    extra_query: dict[str, Any] | None = None
+    extra_headers: dict[str, Any] | None = field(default=None, metadata=SECRET)
+    extra_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     extra_body: dict[str, Any] | None = None
     request_params: dict[str, Any] | None = None
     # Split the shared system prefix from session context so the prefix caches across threads.
     cache_system_prompt: bool = True
     # Client parameters.
-    api_key: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
     organization: str | None = None
     base_url: str | None = None
     timeout: float | None = None
     max_retries: int | None = None
-    default_headers: dict[str, str] | None = None
-    default_query: dict[str, Any] | None = None
-    client_params: dict[str, Any] | None = None
+    default_headers: dict[str, str] | None = field(default=None, metadata=SECRET)
+    default_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
+    client_params: dict[str, Any] | None = field(default=None, metadata=SECRET)
     # Codex CLI login.
     codex_home: str | None = None
     prompt_cache_key: str | None = None

@@ -6,10 +6,10 @@ names; a key the route does not accept fails at model construction with the acce
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -73,22 +73,22 @@ class ClaudeSettings:
     context_management: Mapping[str, Any] | None = None
     request_params: Mapping[str, Any] | None = None
     timeout: float | None = DEFAULT_TIMEOUT_SECONDS
-    default_headers: Mapping[str, str] | None = None
-    client_params: Mapping[str, Any] | None = None
+    default_headers: Mapping[str, str] | None = field(default=None, metadata=SECRET)
+    client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     # Direct API credentials; Vertex and Bedrock authenticate with Google and AWS credentials and ignore a key.
-    api_key: str | None = None
-    auth_token: str | None = None
+    api_key: str | None = field(default=None, metadata=SECRET)
+    auth_token: str | None = field(default=None, metadata=SECRET)
     # Vertex AI.
     project_id: str | None = None
     region: str | None = None
     base_url: str | None = None
     # Bedrock; ``session`` resolves rotating credentials before every request.
-    aws_access_key: str | None = None
-    aws_secret_key: str | None = None
-    aws_session_token: str | None = None
+    aws_access_key: str | None = field(default=None, metadata=SECRET)
+    aws_secret_key: str | None = field(default=None, metadata=SECRET)
+    aws_session_token: str | None = field(default=None, metadata=SECRET)
     aws_region: str | None = None
     aws_profile: str | None = None
-    session: Session | None = None
+    session: Session | None = field(default=None, metadata=SECRET)
 
     def effective_thinking(self) -> Mapping[str, Any] | None:
         """Return the thinking setting after the raw request overrides, as the SDK merges the body."""

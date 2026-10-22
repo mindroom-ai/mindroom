@@ -60,11 +60,10 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.replay import PortableReplayEstimator
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.history.summary_rows import Segment
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore

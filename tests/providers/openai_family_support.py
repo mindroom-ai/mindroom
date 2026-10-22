@@ -20,10 +20,9 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from tests.providers.golden_support import Replay, encoded_response, pipeline_provider, replay_through_pipeline
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider, NativeCompactionReplay
+    from mindroom.llm.provider import ModelProvider
 
 OPENAI_FAMILIES = (
     "openai_chat",
@@ -140,17 +139,7 @@ def responses_adapter(root: Path, model_id: str = "gpt-6-astra", **extra_kwargs:
     return adapter
 
 
-def _native_compaction_settings(adapter: ModelProvider) -> Callable[..., NativeCompactionReplay | None] | None:
-    """Return the adapter's replay-settings method where the route has one (Responses and Codex)."""
-    return adapter.native_compaction_settings if isinstance(adapter, ResponsesAdapter) else None
-
-
 async def replay_golden(golden: dict[str, Any], root: Path) -> Replay:
     """Send a golden's request through the owned provider pipeline and return what it sent and produced."""
     built = golden_provider(golden, root)
-    return await replay_through_pipeline(
-        built.adapter,
-        golden["input"],
-        built.requests,
-        native_compaction_settings=_native_compaction_settings(built.adapter),
-    )
+    return await replay_through_pipeline(built.adapter, golden["input"], built.requests)

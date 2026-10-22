@@ -33,23 +33,32 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
-@dataclass
-class _CompactingModel(ScriptedModel):
-    """A scripted provider whose route compacts natively; ``route`` is what the rebuilt model would replay."""
+@dataclass(frozen=True)
+class _Compaction:
+    """A route that compacts natively; ``route`` is what the rebuilt model would replay."""
 
-    route: str = "route-a"
+    route: str
 
     def native_compaction_settings(
         self,
         *,
         threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
+        history_generation: str,
+        allow_authored: bool,
     ) -> NativeCompactionReplay | None:
         del history_generation, allow_authored
         if threshold is None:
             return None
         return NativeCompactionReplay(route=self.route, threshold=threshold)
+
+
+def _compacting_model(route: str = "route-a") -> ScriptedModel:
+    """Return a scripted provider whose route compacts natively."""
+    return ScriptedModel(
+        [answer("Ready")],
+        capabilities=Capabilities(native_compaction=True),
+        native_history_route=_Compaction(route),
+    )
 
 
 def _paused_record(*, saved: dict[str, object] | None, portable: object = None) -> RunRecord:
@@ -81,7 +90,7 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
 async def _resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    model: _CompactingModel,
+    model: ScriptedModel,
     paused: RunRecord,
 ) -> AgentBuild:
     paths = test_runtime_paths(tmp_path)
@@ -135,7 +144,7 @@ async def test_a_rebuilt_approval_resumes_the_paused_requests_native_policy(
 ) -> None:
     """The resume compacts at the paused request's threshold; a request that ran without compaction stays without."""
     saved = {"route": "route-a", "threshold": None if disable_before_pause else 1024}
-    model = _CompactingModel([answer("Ready")], capabilities=Capabilities(native_compaction=True))
+    model = _compacting_model()
 
     await _resume(tmp_path, monkeypatch, model, _paused_record(saved=saved))
 
@@ -149,7 +158,7 @@ async def test_a_route_change_on_rebuild_replays_without_the_stored_checkpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rebuilt model on another route cannot replay the paused route's checkpoints, so the resume sends none."""
-    model = _CompactingModel([answer("Ready")], capabilities=Capabilities(native_compaction=True), route="route-b")
+    model = _compacting_model("route-b")
 
     await _resume(tmp_path, monkeypatch, model, _paused_record(saved={"route": "route-a", "threshold": 1024}))
 
@@ -170,7 +179,7 @@ async def test_a_rebuilt_approval_keeps_the_paused_requests_replay_policy(
     expected: bool,
 ) -> None:
     """Portable replay follows the provenance the paused response recorded; without it, stored continuation holds."""
-    model = _CompactingModel([answer("Ready")], capabilities=Capabilities(native_compaction=True))
+    model = _compacting_model()
 
     await _resume(tmp_path, monkeypatch, model, _paused_record(saved=None, portable=portable))
 

@@ -82,13 +82,13 @@ from mindroom.matrix_rtc.voice_agent import (
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
+from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

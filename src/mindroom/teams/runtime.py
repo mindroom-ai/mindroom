@@ -194,7 +194,7 @@ def continue_team(
                     results.append(MEMBER_RESULT_LINE.format(name=plan.member.spec.name, content=content))
             if plans and not any(not r.is_resolved() for r in record.requirements or ()):
                 _answer_delegations(record, messages, results)
-            async for event in resume_entry(leader, messages, prepared, ctx, hooks, decided):
+            async for event in resume_entry(messages, prepared, ctx, hooks, decided):
                 yield event
 
         await _forward(

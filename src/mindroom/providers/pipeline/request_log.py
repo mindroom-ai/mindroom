@@ -10,17 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.llm.provider import TurnCompleted, UsageReported
 from mindroom.llm.request_context import current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
-from mindroom.providers.pipeline.wrapped import bare_adapter
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -32,17 +31,13 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["RequestLog", "logged_stream", "model_params", "provider_model_params"]
+__all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
 
 # Message fields that never reach a provider, left out of the request record.
 _NON_API_MESSAGE_FIELDS = frozenset(
     {"id", "reasoning_content", "tool_name", "tool_args", "tool_call_error", "stop_after_tool_call", "from_history"},
-)
-# Settings that hold credentials or clients rather than request parameters.
-_SECRET_SETTINGS = frozenset(
-    {"api_key", "azure_ad_token", "azure_ad_token_provider", "client_params", "default_headers", "default_query"},
 )
 # Request-context fields that attribute a request to its turn, which the usage line repeats; prompts stay out of it.
 _ATTRIBUTION_FIELDS = (
@@ -60,45 +55,13 @@ _ATTRIBUTION_FIELDS = (
 class RequestLog:
     """Where and how one model's requests are logged.
 
-    ``model_name`` is the config key, ``configured_provider`` the authored ``provider`` value, and
-    ``settings`` the route's parsed ``extra_kwargs`` dataclass, recorded as the request's model params.
+    ``model_name`` is the config key and ``configured_provider`` the authored ``provider`` value.
     """
 
     model_name: str
     configured_provider: str
     debug: DebugConfig
     default_log_dir: Path
-    settings: object | None = None
-
-
-@runtime_checkable
-class _RouteSettings(Protocol):
-    """An adapter that carries its route's parsed ``extra_kwargs`` settings."""
-
-    @property
-    def settings(self) -> object: ...
-
-
-def provider_model_params(provider: ModelProvider) -> dict[str, Any]:
-    """Return the JSON-safe route settings of ``provider``'s adapter, as run metadata records them."""
-    adapter = bare_adapter(provider)
-    return model_params(adapter.settings) if isinstance(adapter, _RouteSettings) else {}
-
-
-def model_params(settings: object) -> dict[str, Any]:
-    """Return the JSON-safe, non-secret fields of a route's settings dataclass; anything else gives ``{}``."""
-    if settings is None or isinstance(settings, type) or not is_dataclass(settings):
-        return {}
-    params: dict[str, Any] = {}
-    for name, value in asdict(settings).items():
-        if name in _SECRET_SETTINGS or value is None:
-            continue
-        try:
-            json.dumps(value)
-        except TypeError:
-            continue
-        params[name] = value
-    return params
 
 
 def _system_prompt(messages: Sequence[Message]) -> str:
@@ -110,6 +73,7 @@ def _request_record(
     log: RequestLog,
     *,
     model_id: str,
+    model_params: dict[str, Any],
     request_log_id: str,
     context: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -129,7 +93,7 @@ def _request_record(
         "message_count": len(messages),
         "tools": tools,
         "tool_count": len(tools),
-        "model_params": model_params(log.settings),
+        "model_params": model_params,
     }
 
 
@@ -204,6 +168,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 request,
                 log,
                 model_id=inner.identity.id,
+                model_params=inner.model_params,
                 request_log_id=request_log_id,
                 context=context,
             )

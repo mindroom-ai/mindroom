@@ -13,7 +13,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import anthropic
 import httpx
@@ -82,8 +82,9 @@ from mindroom.providers.anthropic.wire import (
     supports_structured_outputs,
     tool_call_from_block,
 )
-from mindroom.providers.assistant_turn import one_message_per_result, stamp_finished_turn
+from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.errors import classify_provider_error, transport_error
+from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import canonical_provider
@@ -91,7 +92,7 @@ from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping
 
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
@@ -101,7 +102,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import StopReason
+    from mindroom.llm.provider import NativeHistoryRoute, StopReason
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -191,10 +192,18 @@ class ClaudeProvider:
     settings: ClaudeSettings
     http_client: httpx.AsyncClient = MODEL_HTTP_CLIENT
     google_credentials: _AmbientGoogleCredentials = field(default_factory=_AmbientGoogleCredentials, compare=False)
+    # Claude sizes replayed history canonically.
+    replay_estimator: ClassVar[None] = None
 
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message; the wire formatter merges them into one user turn."""
-        return one_message_per_result(messages, results)
+    @property
+    def native_history_route(self) -> NativeHistoryRoute:
+        """Claude compacts history on the provider side where the route supports it or the model config authored it."""
+        return self
+
+    @property
+    def model_params(self) -> dict[str, Any]:
+        """The route's JSON-safe, non-secret settings."""
+        return settings_params(self.settings)
 
     def native_compaction_settings(
         self,
@@ -591,7 +600,6 @@ def claude_capabilities(route: ClaudeRouteKind, model_id: str, settings: ClaudeS
         structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
-        prompt_cache_breakpoints=settings.cache_system_prompt,
         native_compaction=native_compaction_supported(
             provider=provider,
             model_id=model_id,

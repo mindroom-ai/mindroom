@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.llm.provider import ModelIdentity, StreamEvent
+    from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, PortableReplayEstimator, StreamEvent
 
 
 def cli_window() -> str | None:
@@ -193,6 +193,10 @@ class ScriptedProvider:
     requests: list[ModelRequest] = field(default_factory=list)
     identity: ModelIdentity = SYNTHETIC
     capabilities: Capabilities = field(default_factory=Capabilities)
+    # A scripted route keeps no provider-side history, sizes replayed history canonically, and records no settings.
+    native_history_route: NativeHistoryRoute | None = None
+    replay_estimator: PortableReplayEstimator | None = None
+    model_params: dict[str, Any] = field(default_factory=dict)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Yield the next step as a streamed turn."""
@@ -210,11 +214,6 @@ class ScriptedProvider:
         )
         async for event in ScriptedModel(turns=[turn]).stream(request):
             yield event
-
-    def format_tool_results(self, messages: Sequence[Message], results: Sequence[Message]) -> list[Message]:
-        """Append each result as its own tool message, as OpenAI-style wires do."""
-        del messages
-        return list(results)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Serve this model to every agent ``create_agent`` builds."""

@@ -17,7 +17,7 @@ from mindroom.history.compaction import (
     scope_usage_recorder,
     summarize_runs,
 )
-from mindroom.history.native import configure_native_history, native_history_route, portable_replay_estimator
+from mindroom.history.native import configure_native_history, native_history_route
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
@@ -69,12 +69,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.replay import PortableReplayEstimator
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -285,7 +284,7 @@ async def prepare_scope_history(
     ``model`` is the provider the run's requests go to; None sizes history by estimate alone and sends no native
     settings.
     """
-    replay_estimator = portable_replay_estimator(model)
+    replay_estimator = model.replay_estimator if model is not None else None
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=scope,
