@@ -235,7 +235,7 @@ Updating a task's notes replaces them completely.
 | `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
 | `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
 | `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
-| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names, most recent message first. |
+| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
 | `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
 | `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
 | `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
@@ -246,6 +246,8 @@ Deleted messages and system events, such as members joining, come back labeled, 
 Channel, chat, and message listings return a `next_page_token` while more results exist; passing it back continues the same listing.
 Sent messages appear under the requester's name and keep their line breaks, and HTML in the text shows literally instead of as formatting.
 A sent message holds up to 28,000 bytes once its text is HTML-escaped.
+A chat message takes the email address of every chat member, the requester's own included, as `recipients`, and a channel post or reply takes the team and channel names as `expected_team` and `expected_channel`, so an approval card shows who reads the message.
+When a member's email address is missing or not listed, or a name differs, nothing is sent and the call fails with `recipients_mismatch`, listing every member, or `target_mismatch`, naming the real team and channel.
 The tool cannot start a new chat, and it sees private and shared channels only when the requester is a member.
 Shared channels from a team the requester is not a member of are not reachable.
 
